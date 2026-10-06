@@ -56,7 +56,7 @@ def test_load_seek_overlay(view):
     t = view.test
     assert t.id == 1 and view.player.source is not None
     assert len(view.tracks) == 1
-    assert view.main.stack.currentWidget() is view
+    assert view.main.current_page() is view
     view.player.seek_time(4.0)
     raw = view.player.current_frame
     shown = view._overlay(view.player.index, raw)

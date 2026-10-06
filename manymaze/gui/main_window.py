@@ -1,9 +1,11 @@
-"""Main window: navigation sidebar, pages, project file handling."""
+"""Main window in the layout of ANY-maze: a ribbon (File · Protocol · Experiment · Test · Results · Help) over a
+work area where each tab has an explorer list on the left and the selected page on the right."""
 
 from __future__ import annotations
 
 import importlib
 import os
+import sys
 import traceback
 from pathlib import Path
 
@@ -11,14 +13,18 @@ from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+                               QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QToolButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..core.project import PROJECT_FILE, Project
 from ..core.templates import TEMPLATES
+from . import theme
+from .icons import icon
+from .ribbon import Ribbon
 from .widgets import error_box, run_with_progress
 
-# (module, class) of every page, in sidebar order
+# (module, class) of every page
 PAGES = [
     ("experiment", "ExperimentPage"),
     ("animals", "AnimalsPage"),
@@ -28,6 +34,15 @@ PAGES = [
     ("live", "LivePage"),
     ("results", "ResultsPage"),
     ("statistics", "StatisticsPage"),
+]
+
+# ribbon tabs and the explorer entries of each: (label, icon, page class)
+SECTIONS = [
+    ("Protocol", [("Protocol", "protocol", "ExperimentPage"), ("Apparatus", "zone", "ApparatusPage")]),
+    ("Experiment", [("Animals", "animal", "AnimalsPage")]),
+    ("Test", [("Test schedule", "schedule", "TestsPage"), ("Run tests", "play", "LivePage"),
+              ("Review and score", "video", "TestViewPage")]),
+    ("Results", [("Data", "table", "ResultsPage"), ("Statistics", "bars", "StatisticsPage")]),
 ]
 
 
@@ -75,48 +90,192 @@ class NewProjectDialog(QDialog):
 
 
 class WelcomePage(QWidget):
+    """The File tab ("backstage"): experiment commands on a blue strip, recent experiments on the right."""
+
     def __init__(self, main: "MainWindow"):
         super().__init__()
-        lay = QVBoxLayout(self)
-        lay.addStretch()
-        icon = QLabel()
-        icon.setPixmap(QIcon(str(Path(__file__).resolve().parent.parent / "resources" / "icon.svg")).pixmap(96, 96))
-        icon.setAlignment(Qt.AlignCenter)
-        lay.addWidget(icon)
-        title = QLabel(f"<h1 style='color:#e11d48'>{APP_NAME}</h1>"
-                       f"<p>Libre video tracking and behavioural analysis · version {__version__}</p>")
-        title.setAlignment(Qt.AlignCenter)
-        lay.addWidget(title)
-        row = QHBoxLayout()
-        row.addStretch()
-        for text, fn in (("New experiment…", main.new_project), ("Open experiment…", main.open_project_dialog),
-                         ("Open demo experiment", main.create_demo)):
-            b = QPushButton(text)
-            b.setMinimumSize(QSize(190, 44))
-            b.clicked.connect(fn)
-            row.addWidget(b)
-        row.addStretch()
-        lay.addLayout(row)
-        self.recent = QListWidget()
-        self.recent.setMaximumWidth(600)
-        self.recent.itemActivated.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
-        rl = QHBoxLayout()
-        rl.addStretch()
-        box = QVBoxLayout()
-        box.addWidget(QLabel("Recent experiments"))
-        box.addWidget(self.recent)
-        rl.addLayout(box)
-        rl.addStretch()
-        lay.addLayout(rl)
-        lay.addStretch()
         self.main = main
+        self.setObjectName("Backstage")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        side = QWidget()
+        side.setObjectName("BackstageSide")
+        side.setFixedWidth(230)
+        side.setStyleSheet(f"QWidget#BackstageSide{{background:{theme.ACCENT};}}"
+                           "QToolButton{color:white;background:transparent;border:none;text-align:left;"
+                           "padding:10px 26px;font-size:15px;}"
+                           "QToolButton:hover{background:rgba(255,255,255,0.18);}"
+                           "QToolButton:disabled{color:rgba(255,255,255,0.45);}")
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 18, 0, 12)
+        sl.setSpacing(0)
+        self.side_buttons = {}
+        for key, text, fn in (("new", "New experiment", main.new_project),
+                              ("open", "Open experiment", main.open_project_dialog),
+                              ("demo", "Open demo experiment", main.create_demo),
+                              ("save", "Save", main.save), ("save_as", "Save as", main.save_as),
+                              ("close", "Close experiment", main.close_project),
+                              ("folder", "Show in folder", main.reveal_folder),
+                              ("help", "User guide", main._open_guide), ("info", "About", main.about)):
+            b = QToolButton()
+            b.setText(text)
+            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(fn)
+            sl.addWidget(b)
+            self.side_buttons[key] = b
+            if key in ("demo", "close"):
+                sl.addSpacing(14)
+        sl.addStretch()
+        lay.addWidget(side)
+
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(40, 26, 40, 26)
+        head = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QIcon(str(Path(__file__).resolve().parent.parent / "resources" / "icon.svg")).pixmap(56, 56))
+        head.addWidget(logo)
+        title = QLabel(f"<span style='font-size:26px;color:{theme.HEADING};font-weight:300'>{APP_NAME}</span><br>"
+                       f"<span style='color:{theme.MUTED}'>Libre video tracking and behavioural analysis · "
+                       f"version {__version__}</span>")
+        head.addWidget(title, 1)
+        bl.addLayout(head)
+        bl.addSpacing(18)
+        cap = QLabel("Recent experiments")
+        cap.setObjectName("SectionTitle")
+        bl.addWidget(cap)
+        self.recent = QListWidget()
+        self.recent.setStyleSheet("QListWidget{border:none;background:transparent;font-size:14px;}"
+                                  "QListWidget::item{padding:8px 6px;}")
+        self.recent.itemActivated.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
+        self.recent.itemClicked.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
+        bl.addWidget(self.recent, 1)
+        lay.addWidget(body, 1)
 
     def refresh(self):
         self.recent.clear()
         for p in self.main.recent_projects():
-            it = QListWidgetItem(f"{Path(p).stem}    —    {p}")
+            it = QListWidgetItem(icon("folder"), f"{Path(p).stem}\n{p}")
             it.setData(Qt.UserRole, p)
             self.recent.addItem(it)
+        if not self.recent.count():
+            it = QListWidgetItem("No recent experiments — create a new one or open the demo experiment.")
+            it.setFlags(Qt.NoItemFlags)
+            self.recent.addItem(it)
+        has = self.main.project is not None
+        for k in ("save", "save_as", "close", "folder"):
+            self.side_buttons[k].setEnabled(has)
+
+
+class SectionView(QWidget):
+    """A ribbon tab's work area: an explorer list on the left and the selected page on the right.
+
+    A page can list sub-items under its explorer entry (protocol elements, each apparatus, result views…) by
+    implementing ``explorer_items() -> [(label, icon name, key), ...]`` and ``show_item(key)``; it calls
+    ``main.refresh_explorer(page)`` when the list changes and ``main.select_explorer(page, key)`` to follow."""
+
+    page_changed = Signal(object)
+
+    def __init__(self, title: str):
+        super().__init__()
+        self.title = title
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        left = QVBoxLayout()
+        left.setSpacing(0)
+        cap = QLabel(title)
+        cap.setObjectName("ExplorerTitle")
+        left.addWidget(cap)
+        self.explorer = QTreeWidget()
+        self.explorer.setObjectName("Explorer")
+        self.explorer.setHeaderHidden(True)
+        self.explorer.setRootIsDecorated(False)
+        self.explorer.setItemsExpandable(False)
+        self.explorer.setIndentation(14)
+        self.explorer.setIconSize(QSize(20, 20))
+        self.explorer.setFixedWidth(200)
+        self.explorer.currentItemChanged.connect(self._item_changed)
+        left.addWidget(self.explorer, 1)
+        lay.addLayout(left)
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("SectionStack")
+        lay.addWidget(self.stack, 1)
+        self.pages: list = []
+
+    def add_page(self, label: str, icon_name: str, page):
+        it = QTreeWidgetItem([label])
+        it.setIcon(0, icon(icon_name))
+        it.setData(0, Qt.UserRole, len(self.pages))
+        self.explorer.addTopLevelItem(it)
+        self.pages.append(page)
+        self.stack.addWidget(page)
+
+    def item_for(self, page, key=None):
+        for i in range(self.explorer.topLevelItemCount()):
+            it = self.explorer.topLevelItem(i)
+            if self.pages[it.data(0, Qt.UserRole)] is page:
+                if key is None:
+                    return it
+                for j in range(it.childCount()):
+                    if it.child(j).data(0, Qt.UserRole + 1) == key:
+                        return it.child(j)
+                return None
+        return None
+
+    def refresh_children(self, page):
+        """Rebuild the sub-items a page lists under its explorer entry."""
+        it = self.item_for(page)
+        if it is None:
+            return
+        cur = self.explorer.currentItem()
+        cur_key = cur.data(0, Qt.UserRole + 1) if cur is not None and cur.parent() is it else None
+        self.explorer.blockSignals(True)
+        it.takeChildren()
+        items = []
+        if hasattr(page, "explorer_items"):
+            try:
+                items = page.explorer_items() or []
+            except Exception:
+                traceback.print_exc()
+        for label, icon_name, key in items:
+            c = QTreeWidgetItem([label])
+            c.setIcon(0, icon(icon_name))
+            c.setData(0, Qt.UserRole, it.data(0, Qt.UserRole))
+            c.setData(0, Qt.UserRole + 1, key)
+            it.addChild(c)
+        it.setExpanded(True)
+        if cur_key is not None:
+            again = self.item_for(page, cur_key)
+            if again is not None:
+                self.explorer.setCurrentItem(again)
+        self.explorer.blockSignals(False)
+
+    def select(self, page):
+        it = self.item_for(page)
+        if it is not None:
+            if self.explorer.currentItem() is it:
+                self._item_changed(it)
+            else:
+                self.explorer.setCurrentItem(it)
+
+    def current_page(self):
+        return self.stack.currentWidget()
+
+    def _item_changed(self, it, _prev=None):
+        if it is None:
+            return
+        page = self.pages[it.data(0, Qt.UserRole)]
+        self.stack.setCurrentWidget(page)
+        self.page_changed.emit(page)
+        key = it.data(0, Qt.UserRole + 1)
+        if key is not None and hasattr(page, "show_item"):
+            try:
+                page.show_item(key)
+            except Exception:
+                traceback.print_exc()
 
 
 class MainWindow(QMainWindow):
@@ -129,20 +288,12 @@ class MainWindow(QMainWindow):
         ini = os.environ.get("MANYMAZE_SETTINGS")  # e.g. tests: keep the user's preferences untouched
         self.settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings("manymaze", "mANY-MAZE")
         self.resize(1400, 880)
-        icon = Path(__file__).resolve().parent.parent / "resources" / "icon.svg"
-        if icon.exists():
-            self.setWindowIcon(QIcon(str(icon)))
+        app_icon = Path(__file__).resolve().parent.parent / "resources" / "icon.svg"
+        if app_icon.exists():
+            self.setWindowIcon(QIcon(str(app_icon)))
 
-        self.nav = QListWidget()
-        self.nav.setFixedWidth(170)
-        self.nav.setIconSize(QSize(18, 18))
-        self.nav.setStyleSheet("QListWidget{font-size:14px;border:none;background:palette(window);}"
-                               "QListWidget::item{padding:9px 10px;border-radius:6px;}"
-                               "QListWidget::item:selected{background:#e11d48;color:white;}")
-        self.stack = QStackedWidget()
-        self.welcome = WelcomePage(self)
-        self.stack.addWidget(self.welcome)
         self.pages = []
+        self._page_section: dict[int, int] = {}
         for mod, cls in PAGES:
             try:
                 m = importlib.import_module(f".pages.{mod}", __package__)
@@ -152,21 +303,66 @@ class MainWindow(QMainWindow):
                 page = QLabel(f"Page {cls} failed to load — see console.")
                 page.title = cls
             self.pages.append(page)
-            self.stack.addWidget(page)
-            self.nav.addItem(QListWidgetItem(getattr(page, "title", cls)))
-        self.nav.currentRowChanged.connect(self._nav_changed)
+
+        self.ribbon = Ribbon()
+        self.ribbon.tabs.addTab("File")
+        self.ribbon.panels.addWidget(QWidget())
+        self.sections: list[SectionView] = []
+        self._section_tabs: list[int] = []
+        by_name = {type(p).__name__: p for p in self.pages}
+        self.workspace = QStackedWidget()
+        self.workspace.setObjectName("Workspace")
+        self.welcome = WelcomePage(self)
+        self.workspace.addWidget(self.welcome)
+        for title, entries in SECTIONS:
+            sec = SectionView(title)
+            panel = self.ribbon.add_tab(title)
+            nav = panel.add_group(title)
+            sec.nav_actions = []
+            for label, icon_name, cls in entries:
+                page = by_name.get(cls)
+                if page is None:
+                    continue
+                sec.add_page(label, icon_name, page)
+                self._page_section[id(page)] = len(self.sections)
+                a = QAction(icon(icon_name), label, self)
+                a.setCheckable(True)
+                a.triggered.connect(lambda _=False, p=page: self.show_page(p))
+                a.page = page
+                nav.add_large(a)
+                sec.nav_actions.append(a)
+            sec.panel = panel
+            sec.page_changed.connect(self._page_changed)
+            self.sections.append(sec)
+            self.workspace.addWidget(sec)
+        help_panel = self.ribbon.add_tab("Help")
+        hg = help_panel.add_group("Help")
+        for text, ic, fn in (("User guide", "help", self._open_guide), (f"About {APP_NAME}", "info", self.about)):
+            a = QAction(icon(ic), text, self)
+            a.triggered.connect(fn)
+            hg.add_large(a)
+        self._help_tab = self.ribbon.tabs.count() - 1
+        self.save_quick = QToolButton()
+        self.save_quick.setIcon(icon("save"))
+        self.save_quick.setToolTip("Save the experiment (Ctrl+S)")
+        self.save_quick.setAutoRaise(True)
+        self.save_quick.clicked.connect(self.save)
+        self.ribbon.corner.addWidget(self.save_quick)
+        self.ribbon.tab_changed.connect(self._tab_changed)
+
         central = QWidget()
-        lay = QHBoxLayout(central)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.addWidget(self.nav)
-        lay.addWidget(self.stack, 1)
+        lay = QVBoxLayout(central)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.ribbon)
+        lay.addWidget(self.workspace, 1)
         self.setCentralWidget(central)
         self._build_menus()
         self._current_page = None
         self.set_project(None)
         self.statusBar().showMessage("Ready")
 
-    # ------------------------------------------------------------------ menus
+    # ------------------------------------------------------------------ menus / shortcuts
     def _build_menus(self):
         mb = self.menuBar()
         fm = mb.addMenu("&File")
@@ -177,6 +373,7 @@ class MainWindow(QMainWindow):
                 a.setShortcut(QKeySequence(shortcut))
             a.triggered.connect(fn)
             menu.addAction(a)
+            self.addAction(a)  # shortcuts work even where the menu bar is hidden
             return a
 
         act(fm, "New experiment…", self.new_project, QKeySequence.New)
@@ -194,13 +391,14 @@ class MainWindow(QMainWindow):
         act(fm, "Quit", self.close, QKeySequence.Quit)
         gm = mb.addMenu("&Go")
         for i, page in enumerate(self.pages):
-            a = act(gm, getattr(page, "title", f"Page {i}"), lambda _=False, i=i: self.nav.setCurrentRow(i),
+            a = act(gm, getattr(page, "title", f"Page {i}"), lambda _=False, p=page: self.show_page(p),
                     f"Ctrl+{i + 1}")
             a.setShortcutContext(Qt.ApplicationShortcut)
         hm = mb.addMenu("&Help")
         act(hm, "User guide", self._open_guide)
         act(hm, f"About {APP_NAME}", self.about)
-
+        # the ribbon replaces the menu bar, except on macOS where the menu bar lives at the top of the screen
+        mb.setVisible(sys.platform == "darwin")
     def _open_guide(self):
         from .help import show_user_guide
 
@@ -235,31 +433,88 @@ class MainWindow(QMainWindow):
         self.project = project
         self.dirty = False
         has = project is not None
-        self.nav.setEnabled(has)
+        for i in range(1, self._help_tab):
+            self.ribbon.tabs.setTabEnabled(i, has)
+        self.save_quick.setEnabled(has)
         for page in self.pages:
             if hasattr(page, "set_project"):
                 try:
                     page.set_project(project)
                 except Exception:
                     traceback.print_exc()
+        for page in self.pages:
+            self.refresh_explorer(page)
         if has:
-            self.nav.setCurrentRow(0)
-            self._nav_changed(0)
+            self.show_page(self.pages[0])
         else:
-            self.welcome.refresh()
-            self.stack.setCurrentWidget(self.welcome)
-            self.nav.clearSelection()
+            self._show_backstage()
         self.update_title()
         self.project_loaded.emit(project)
 
-    def _nav_changed(self, row: int):
-        if row < 0 or self.project is None:
+    # ------------------------------------------------------------------ navigation
+    def _show_backstage(self):
+        self.welcome.refresh()
+        self.workspace.setCurrentWidget(self.welcome)
+        if self.ribbon.tabs.currentIndex() != 0:
+            self.ribbon.tabs.blockSignals(True)
+            self.ribbon.tabs.setCurrentIndex(0)
+            self.ribbon.tabs.blockSignals(False)
+            self.ribbon._changed(0)
+
+    def _tab_changed(self, i: int):
+        if i == 0:
+            self._hide_current()
+            self._current_page = None
+            self.welcome.refresh()
+            self.workspace.setCurrentWidget(self.welcome)
+        elif i == self._help_tab:
+            pass  # the Help tab only offers its ribbon commands; the work area stays as it is
+        elif self.project is None:
+            self._show_backstage()
+        else:
+            sec = self.sections[i - 1]
+            self.workspace.setCurrentWidget(sec)
+            page = sec.current_page()
+            if page is not None and page is not self._current_page:
+                self._page_changed(page)
+            elif sec.explorer.currentItem() is None and sec.pages:
+                sec.select(sec.pages[0])
+
+    def _hide_current(self):
+        cur = self._current_page
+        if cur is not None and hasattr(cur, "on_hide"):
+            try:
+                cur.on_hide()
+            except Exception:
+                traceback.print_exc()
+
+    def _page_changed(self, page):
+        """A section switched to `page` (explorer or ribbon): run hide/show hooks and refresh the ribbon."""
+        if self.project is None:
             return
-        page = self.pages[row]
-        if self._current_page is not None and self._current_page is not page and hasattr(self._current_page, "on_hide"):
-            self._current_page.on_hide()
-        self.stack.setCurrentWidget(page)
+        idx = self._page_section.get(id(page))
+        if idx is None:
+            return
+        sec = self.sections[idx]
+        if self.workspace.currentWidget() is not sec:
+            self.workspace.setCurrentWidget(sec)
+        if self.ribbon.tabs.currentIndex() != idx + 1:
+            self.ribbon.tabs.blockSignals(True)
+            self.ribbon.tabs.setCurrentIndex(idx + 1)
+            self.ribbon.tabs.blockSignals(False)
+            self.ribbon._changed(idx + 1)
+        if page is not self._current_page:
+            self._hide_current()
         self._current_page = page
+        for a in sec.nav_actions:
+            a.setChecked(a.page is page)
+        groups = []
+        if hasattr(page, "ribbon_groups"):
+            try:
+                groups = page.ribbon_groups() or []
+            except Exception:
+                traceback.print_exc()
+        sec.panel.set_context(groups)
         if hasattr(page, "on_show"):
             try:
                 page.on_show()
@@ -267,15 +522,50 @@ class MainWindow(QMainWindow):
                 traceback.print_exc()
                 self.status(f"Error: {e}")
 
+    def show_page(self, page):
+        idx = self._page_section.get(id(page))
+        if idx is None or self.project is None:
+            return None
+        sec = self.sections[idx]
+        self.workspace.setCurrentWidget(sec)
+        cur = sec.explorer.currentItem()
+        if sec.current_page() is page and cur is not None:
+            self._page_changed(page)
+        else:
+            sec.select(page)
+        return page
+
+    def refresh_ribbon(self):
+        """Pages call this when their ribbon groups change (e.g. enabled commands depend on a selection)."""
+        if self._current_page is not None:
+            self._page_changed(self._current_page)
+
+    def current_page(self):
+        return self._current_page if self.project is not None else None
+
+    def refresh_explorer(self, page):
+        idx = self._page_section.get(id(page))
+        if idx is not None:
+            self.sections[idx].refresh_children(page)
+
+    def select_explorer(self, page, key):
+        """Highlight a page's explorer sub-item without triggering show_item again."""
+        idx = self._page_section.get(id(page))
+        if idx is None:
+            return
+        sec = self.sections[idx]
+        it = sec.item_for(page, key)
+        if it is not None and sec.explorer.currentItem() is not it:
+            sec.explorer.blockSignals(True)
+            sec.explorer.setCurrentItem(it)
+            sec.explorer.blockSignals(False)
+
     def page(self, cls_name: str):
         return next((p for p in self.pages if type(p).__name__ == cls_name), None)
 
     def goto(self, cls_name: str):
-        for i, p in enumerate(self.pages):
-            if type(p).__name__ == cls_name:
-                self.nav.setCurrentRow(i)
-                return p
-        return None
+        page = self.page(cls_name)
+        return self.show_page(page) if page is not None else None
 
     def open_test(self, test_id: int):
         page = self.page("TestViewPage")

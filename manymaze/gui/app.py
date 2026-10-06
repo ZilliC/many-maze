@@ -12,10 +12,11 @@ from PySide6.QtCore import QEvent, QObject, Qt
 def main(project: str | None = None) -> int:
     # Qt on macOS: keep the app native and crisp on Retina displays
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    from PySide6.QtGui import QColor, QIcon, QPalette
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from .. import APP_NAME
+    from . import theme
     from .main_window import MainWindow
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -24,16 +25,11 @@ def main(project: str | None = None) -> int:
     icon = Path(__file__).resolve().parent.parent / "resources" / "icon.svg"
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
-    if sys.platform != "darwin":
-        app.setStyle("Fusion")
     try:  # colours, overlays and plots are designed for a light theme (Qt >= 6.8)
         app.styleHints().setColorScheme(Qt.ColorScheme.Light)
     except AttributeError:
         pass
-    pal = app.palette()
-    pal.setColor(QPalette.Highlight, QColor("#e11d48"))
-    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    app.setPalette(pal)
+    theme.apply(app)
     w = MainWindow()
     w.show()
     app.installEventFilter(_FileOpenFilter(w))
@@ -96,11 +92,12 @@ def _smoke_test(app, window) -> int:
         print(f"smoke test: {res['workers']} parallel workers, decoder {decoder}, hardware decoder "
               f"{hw_decoder_name()}, recorder {rec.backend}, inference providers {pose.available_providers()}")
         window.set_project(proj)
-        for i in range(window.nav.count()):
-            window.nav.setCurrentRow(i)
+        for page in window.pages:
+            window.show_page(page)
             app.processEvents()
+            assert window.current_page() is page, page
         window.dirty = False
-        print(f"smoke test ok: {len(rows)} result rows, {window.nav.count()} pages")
+        print(f"smoke test ok: {len(rows)} result rows, {len(window.pages)} pages")
     window.close()
     return 0
 

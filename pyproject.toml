@@ -45,7 +45,7 @@ manymaze-gui = "manymaze.gui.app:main"
 include = ["manymaze*"]
 
 [tool.setuptools.package-data]
-manymaze = ["resources/*"]
+manymaze = ["resources/*", "resources/icons/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

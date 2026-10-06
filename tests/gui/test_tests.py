@@ -133,7 +133,7 @@ def test_open_on_double_click(page):
     idx = page.proxy.mapFromSource(source_index(page, 3, 0))
     page.table.doubleClicked.emit(idx)
     tv = page.main.page("TestViewPage")
-    assert page.main.stack.currentWidget() is tv and tv.test.id == 3
+    assert page.main.current_page() is tv and tv.test.id == 3
 
 
 def test_batches_and_tracking(page):
