@@ -9,7 +9,7 @@ the user can then tweak in the apparatus editor.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
@@ -200,8 +200,8 @@ def morris_water_maze(x, y, w, h, pool_diameter_cm=150.0, platform_diameter_cm=1
     px, py = cx + pr * math.cos(am), cy + pr * math.sin(am)
     s = 2 * r / pool_diameter_cm
     prad = platform_diameter_cm / 2 * s
-    app.zones.append(Zone("Platform", circle(px, py, prad), "#f43f5e"))
-    app.zones.append(Zone("Platform annulus", circle(px, py, prad * 2), "#fb7185"))
+    app.zones.append(Zone("Platform", circle(px, py, prad), "#f43f5e", moveable=True))
+    app.zones.append(Zone("Platform annulus", circle(px, py, prad * 2), "#fb7185", moveable=True))
     app.points.append(PointOfInterest("Platform centre", px, py, radius_cm=platform_diameter_cm / 2))
     app.points.append(PointOfInterest("Pool centre", cx, cy, radius_cm=0))
     app.zones.append(Zone("Thigmotaxis zone", _sector(cx, cy, r * 0.9, r, 0, 360, 72), "#94a3b8"))
@@ -317,6 +317,138 @@ def custom(x, y, w, h, width_cm=0.0) -> Apparatus:
     return app
 
 
+def novel_tank(x, y, w, h, width_cm=20.0, n_layers=3) -> Apparatus:
+    """Novel tank diving test (side view): horizontal layers Top / Middle / Bottom (or n equal layers)."""
+    app = Apparatus(name="Novel tank diving test", template="novel_tank")
+    app.arena = rect(x, y, w, h)
+    n = max(2, int(n_layers))
+    names = ["Top", "Middle", "Bottom"] if n == 3 else ["Top", "Bottom"] if n == 2 else \
+        ["Top"] + [f"Layer {i + 1}" for i in range(1, n - 1)] + ["Bottom"]
+    lh = h / n
+    for i, nm in enumerate(names):
+        app.zones.append(Zone(nm, rect(x, y + i * lh, w, lh), ["#38bdf8", "#0ea5e9", "#0369a1"][min(i, 2)]
+                              if n == 3 else PALETTE[i % len(PALETTE)]))
+    app.groups.append(ZoneGroup("Upper half", [nm for i, nm in enumerate(names) if (i + 0.5) * lh <= h / 2]))
+    app.groups.append(ZoneGroup("Lower half", [nm for i, nm in enumerate(names) if (i + 0.5) * lh > h / 2]))
+    _calibrate_width(app, w, width_cm)
+    return app
+
+
+WELL_LAYOUTS = {6: (2, 3, 0.89), 12: (3, 4, 0.85), 24: (4, 6, 0.81), 48: (6, 8, 0.83), 96: (8, 12, 0.71)}
+# rows, columns, well diameter / pitch for standard SBS plates
+
+
+def multi_well_plate(x, y, w, h, n_wells=24, plate_width_cm=12.78, centre_fraction=0.5) -> Apparatus:
+    """Multi-well plate (e.g. larval zebrafish): every well is a zone "Well A1" …; see split_wells()."""
+    rows, cols, frac = WELL_LAYOUTS.get(int(n_wells), WELL_LAYOUTS[24])
+    app = Apparatus(name=f"{int(n_wells)}-well plate", template="multi_well")
+    app.arena = rect(x, y, w, h)
+    pitch = min(w / cols, h / rows)
+    ox, oy = x + (w - cols * pitch) / 2, y + (h - rows * pitch) / 2
+    r = pitch * frac / 2
+    names = []
+    for i in range(rows):
+        for j in range(cols):
+            n = f"Well {'ABCDEFGH'[i]}{j + 1}"
+            app.zones.append(Zone(n, circle(ox + (j + 0.5) * pitch, oy + (i + 0.5) * pitch, r), "#38bdf8"))
+            names.append(n)
+    app.groups.append(ZoneGroup("All wells", names))
+    _calibrate_width(app, w, plate_width_cm)
+    app.calibration_length_cm = plate_width_cm
+    return app
+
+
+def split_wells(plate: Apparatus, centre_fraction: float = 0.5) -> list[Apparatus]:
+    """One apparatus per well (arena = the well; zones Well, Centre and the Edge group) for multi-arena tracking."""
+    out = []
+    for z in plate.zones:
+        if not z.name.startswith("Well"):
+            continue
+        cx, cy = z.shape.centroid()
+        x0, y0, x1, y1 = z.shape.bounds()
+        r = (x1 - x0) / 2
+        a = Apparatus(name=z.name, template="multi_well", px_per_cm=plate.px_per_cm,
+                      calibration_length_cm=plate.calibration_length_cm, frame_size=plate.frame_size)
+        a.arena = circle(cx, cy, r)
+        a.zones.append(Zone("Well", circle(cx, cy, r), "#64748b"))
+        a.zones.append(Zone("Centre", circle(cx, cy, r * centre_fraction), PALETTE[0]))
+        a.groups.append(ZoneGroup("Edge", ["Well"], ["Centre"]))
+        out.append(a)
+    return out
+
+
+def conditioned_place_preference(x, y, w, h, width_cm=60.0, n_chambers=2, centre_fraction=0.2) -> Apparatus:
+    """Conditioned place preference box: 2 chambers, or 3 with a neutral centre compartment."""
+    app = Apparatus(name="Conditioned place preference", template="cpp")
+    app.arena = rect(x, y, w, h)
+    if int(n_chambers) >= 3:
+        cw = w * centre_fraction
+        sw = (w - cw) / 2
+        parts = [("Chamber A", x, sw, PALETTE[0]), ("Centre", x + sw, cw, "#64748b"), ("Chamber B", x + sw + cw, sw,
+                                                                                         PALETTE[1])]
+    else:
+        parts = [("Chamber A", x, w / 2, PALETTE[0]), ("Chamber B", x + w / 2, w / 2, PALETTE[1])]
+    for n, zx, zw, c in parts:
+        app.zones.append(Zone(n, rect(zx, y, zw, h), c))
+    for i in range(len(parts) - 1):
+        lx = parts[i + 1][1]
+        app.lines.append(Line(f"Doorway {i + 1}" if len(parts) > 2 else "Doorway", lx, y, lx, y + h))
+    _calibrate_width(app, w, width_cm)
+    return app
+
+
+def hole_board(x, y, w, h, size_cm=40.0, holes_per_side=4, hole_diameter_cm=3.0, dip_margin_cm=1.0) -> Apparatus:
+    """Hole board: holes on a regular grid as points; a head dip is the head within the hole radius + margin."""
+    app = open_field(x, y, w, h, size_cm, corners=False)
+    app.name, app.template = "Hole board", "hole_board"
+    n = max(1, int(holes_per_side))
+    for i in range(n):
+        for j in range(n):
+            px, py = x + w * (j + 1) / (n + 1), y + h * (i + 1) / (n + 1)
+            app.points.append(PointOfInterest(f"Hole {i * n + j + 1}", px, py,
+                                              radius_cm=hole_diameter_cm / 2 + dip_margin_cm, color="#f43f5e"))
+    return app
+
+
+def thermal_gradient_ring(x, y, w, h, outer_diameter_cm=60.0, track_width_cm=8.0, n_sectors=12) -> Apparatus:
+    """Thermal gradient ring: annular track divided into equal sectors (Sector 1 at the top, clockwise)."""
+    app = Apparatus(name="Thermal gradient ring", template="thermal_gradient")
+    cx, cy = x + w / 2, y + h / 2
+    r1 = min(w, h) / 2
+    r0 = r1 * max(0.0, 1 - 2 * track_width_cm / outer_diameter_cm)
+    n = max(2, int(n_sectors))
+    step = 360.0 / n
+    for i in range(n):
+        app.zones.append(Zone(f"Sector {i + 1}", _sector(cx, cy, r0, r1, -90 + i * step, -90 + (i + 1) * step),
+                              PALETTE[i % len(PALETTE)]))
+    app.arena = circle(cx, cy, r1)
+    _calibrate_width(app, 2 * r1, outer_diameter_cm)
+    return app
+
+
+def home_cage(x, y, w, h, width_cm=30.0, nest_fraction=0.3, food_fraction=0.25) -> Apparatus:
+    """Home cage: whole cage, food hopper area and a hidden nest (time in the nest counts when not visible)."""
+    app = Apparatus(name="Home cage", template="home_cage")
+    app.arena = rect(x, y, w, h)
+    app.zones.append(Zone("Cage", rect(x, y, w, h), "#64748b"))
+    fw, fh = w * food_fraction, h * food_fraction
+    app.zones.append(Zone("Food", rect(x + w - fw, y, fw, fh), PALETTE[3]))
+    nw, nh = w * nest_fraction, h * nest_fraction
+    app.zones.append(Zone("Nest", rect(x, y + h - nh, nw, nh), "#8b5cf6", hidden=True))
+    _calibrate_width(app, w, width_cm)
+    return app
+
+
+def activity_wheel(x, y, w, h, diameter_cm=12.0) -> Apparatus:
+    """Running wheel seen side-on (or a circular runway): revolutions of the animal around the centre."""
+    app = Apparatus(name="Activity wheel", template="activity_wheel")
+    cx, cy, r = x + w / 2, y + h / 2, min(w, h) / 2
+    app.arena = circle(cx, cy, r)
+    app.zones.append(Zone("Wheel", circle(cx, cy, r), "#64748b"))
+    _calibrate_width(app, 2 * r, diameter_cm)
+    return app
+
+
 @dataclass
 class TemplateInfo:
     key: str
@@ -325,6 +457,8 @@ class TemplateInfo:
     description: str
     params: dict  # parameter name -> default (for UI forms)
     default_duration_s: float = 300.0
+    choices: dict = field(default_factory=dict)  # parameter name -> allowed values (combo box in the UI)
+    multi: bool = False  # build_many() gives one apparatus per arena (e.g. one per well)
 
 
 TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
@@ -348,7 +482,7 @@ TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
     TemplateInfo("water_maze", "Morris water maze", morris_water_maze,
                  "Circular pool with quadrants, hidden platform and annulus zones.",
                  {"pool_diameter_cm": 150.0, "platform_diameter_cm": 10.0, "platform_quadrant": "NE",
-                  "platform_distance_fraction": 0.5}, 60),
+                  "platform_distance_fraction": 0.5}, 60, choices={"platform_quadrant": ["NE", "NW", "SE", "SW"]}),
     TemplateInfo("barnes_maze", "Barnes maze", barnes_maze,
                  "Circular platform with holes around the edge and an escape hole.",
                  {"diameter_cm": 122.0, "n_holes": 20, "hole_diameter_cm": 5.0, "escape_hole": 1}, 180),
@@ -365,6 +499,27 @@ TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
                  "Single chamber; freezing analysis based on pixel change.", {"width_cm": 30.0}, 300),
     TemplateInfo("forced_swim", "Forced swim / tail suspension", forced_swim,
                  "Immobility analysis (Porsolt / tail suspension).", {"diameter_cm": 20.0}, 360),
+    TemplateInfo("novel_tank", "Novel tank diving test (fish)", novel_tank,
+                 "Side view of a tank divided into top, middle and bottom layers; latency to top, bottom "
+                 "dwelling, erratic movements.", {"width_cm": 20.0, "n_layers": 3}, 360),
+    TemplateInfo("multi_well", "Multi-well plate (larvae)", multi_well_plate,
+                 "6–96 well plate; one apparatus (arena) per well so every well is tracked and analysed "
+                 "separately.", {"n_wells": 24, "plate_width_cm": 12.78, "centre_fraction": 0.5}, 600,
+                 choices={"n_wells": [6, 12, 24, 48, 96]}, multi=True),
+    TemplateInfo("cpp", "Conditioned place preference", conditioned_place_preference,
+                 "Two chambers (or three with a neutral centre); preference score for the paired chamber.",
+                 {"width_cm": 60.0, "n_chambers": 2, "centre_fraction": 0.2}, 900, choices={"n_chambers": [2, 3]}),
+    TemplateInfo("hole_board", "Hole board", hole_board,
+                 "Floor with a grid of holes (points); counts head dips per hole.",
+                 {"size_cm": 40.0, "holes_per_side": 4, "hole_diameter_cm": 3.0, "dip_margin_cm": 1.0}, 300),
+    TemplateInfo("thermal_gradient", "Thermal gradient ring", thermal_gradient_ring,
+                 "Annular runway divided into sectors along a temperature gradient; preferred sector.",
+                 {"outer_diameter_cm": 60.0, "track_width_cm": 8.0, "n_sectors": 12}, 3600),
+    TemplateInfo("home_cage", "Home cage", home_cage,
+                 "Cage with a food area and a hidden nest zone.", {"width_cm": 30.0, "nest_fraction": 0.3,
+                                                                   "food_fraction": 0.25}, 3600),
+    TemplateInfo("activity_wheel", "Activity wheel / circular runway", activity_wheel,
+                 "Circular arena; counts revolutions of the animal around the centre.", {"diameter_cm": 12.0}, 3600),
     TemplateInfo("custom", "Custom", custom, "Empty rectangular arena; draw your own zones.", {"width_cm": 0.0}, 300),
 ]}
 
@@ -374,3 +529,11 @@ def build(key: str, x, y, w, h, **params) -> Apparatus:
     kw = dict(info.params)
     kw.update({k: v for k, v in params.items() if k in info.params})
     return info.builder(x, y, w, h, **kw)
+
+
+def build_many(key: str, x, y, w, h, **params) -> list[Apparatus]:
+    """Like build(), but templates with several arenas (multi-well plates) give one apparatus per arena."""
+    app = build(key, x, y, w, h, **params)
+    if key == "multi_well":
+        return split_wells(app, float(params.get("centre_fraction", 0.5)))
+    return [app]

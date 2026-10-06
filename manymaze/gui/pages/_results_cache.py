@@ -31,7 +31,15 @@ def has_periods(project) -> bool:
     if project is None:
         return False
     s = project.analysis
-    return bool(s.custom_periods) or (s.bin_length_s or 0) > 0
+    return bool(s.custom_periods) or (s.bin_length_s or 0) > 0 or bool(getattr(s, "event_periods", None))
+
+
+# test variables that only affect figures (not results) and must not invalidate cached rows
+DISPLAY_VARIABLES = ("heatmap_transform",)
+
+
+def _result_variables(v: dict | None) -> dict:
+    return {k: x for k, x in (v or {}).items() if k not in DISPLAY_VARIABLES}
 
 
 def fingerprint(project) -> tuple:
@@ -43,8 +51,10 @@ def fingerprint(project) -> tuple:
         except (ValueError, OSError):
             mtime = 0
         tests.append((t.id, t.status, mtime, len(t.events), t.animal_id, t.stage, t.trial, t.apparatus,
-                      tuple(t.extra_animals), json.dumps(t.variables, sort_keys=True, default=str),
-                      json.dumps(t.events, sort_keys=True, default=str), t.duration_s))
+                      tuple(t.extra_animals), json.dumps(_result_variables(t.variables), sort_keys=True, default=str),
+                      json.dumps(t.events, sort_keys=True, default=str), t.duration_s,
+                      json.dumps(getattr(t, "zone_overrides", None) or {}, sort_keys=True, default=str),
+                      json.dumps(getattr(t, "pauses", None) or [], default=str)))
     return (str(project.path), tuple(tests), project.test_duration_s,
             json.dumps(project.analysis.to_dict(), sort_keys=True, default=str),
             json.dumps([a.to_dict() for a in project.apparatus], sort_keys=True, default=str),

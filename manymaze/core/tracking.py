@@ -36,6 +36,7 @@ class DetectionSettings:
     blur: int = 5
     morph_open: int = 3
     morph_close: int = 7
+    erase_thin_px: int = 0  # erase thin structures (wires, tubes, cage bars) up to this width before detection
     background: str = "median"  # "median" | "frame" | "adaptive"
     background_frame: int = 0  # frame index used when background == "frame"
     background_samples: int = 31
@@ -183,6 +184,7 @@ class ArenaTracker:
         g = gray
         if s.blur and s.blur > 1:
             g = cv2.GaussianBlur(g, (_odd(s.blur), _odd(s.blur)), 0)
+        g = self._erase_thin(g)
         if s.method == "threshold" or self.background is None:
             if s.method == "background" and self.background is None:
                 # bootstrap adaptive background from first frame
@@ -197,6 +199,7 @@ class ArenaTracker:
         bg = self.background
         if s.blur and s.blur > 1:
             bg = cv2.GaussianBlur(bg, (_odd(s.blur), _odd(s.blur)), 0)
+        bg = self._erase_thin(bg)
         g16 = g.astype(np.int16)
         b16 = bg.astype(np.int16)
         if s.contrast == "dark":
@@ -208,6 +211,16 @@ class ArenaTracker:
         thr = s.threshold if s.threshold > 0 else self._otsu(diff)
         fg = (diff > thr).astype(np.uint8) * 255
         return self._clean(fg)
+
+    def _erase_thin(self, g: np.ndarray) -> np.ndarray:
+        """Grey-level closing then opening that removes dark and light structures thinner than erase_thin_px
+        (wires, tubes, cage bars — dark against the floor, light against a dark animal), applied alike to frame and
+        background so they neither split nor mimic the animal."""
+        n = int(self.s.erase_thin_px or 0)
+        if n <= 0:
+            return g
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd(n + 2),) * 2)
+        return cv2.morphologyEx(cv2.morphologyEx(g, cv2.MORPH_CLOSE, k), cv2.MORPH_OPEN, k)
 
     def _otsu(self, img: np.ndarray) -> float:
         vals = img[self.mask > 0] if self.mask is not None else img.ravel()

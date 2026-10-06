@@ -174,8 +174,9 @@ def test_figures_and_report(page, tmp_path):
     page.save_figure(str(tmp_path / "groups.png"))
     assert (tmp_path / "groups.png").stat().st_size > 1000
     rep = tmp_path / "report.html"
-    page.html_report(str(rep), stats_measures=["Centre: time (%)"], include_plots=False)
-    wait_workers(page)
+    w = page.html_report(str(rep), stats_measures=["Centre: time (%)"], include_plots=False)
+    assert w.wait(120000)
+    app.processEvents()
     text = rep.read_text()
     assert "Statistics" in text and "Centre: time (%)" in text
 

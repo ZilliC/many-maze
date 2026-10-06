@@ -8,8 +8,9 @@ an open alternative to ANY-maze that runs natively on Apple Silicon Macs.**
 mANY-MAZE follows the familiar workflow — *experiment → animals → apparatus → tests → tracking & scoring →
 results → statistics* — and covers the standard behavioural tests out of the box: open field, elevated plus and
 zero mazes, Y / T / radial arm mazes, Morris water maze, Barnes maze, novel object recognition, light/dark box,
-three-chamber sociability, fear conditioning (freezing), forced swim / tail suspension and fully custom
-apparatus.
+three-chamber sociability, fear conditioning (freezing), forced swim / tail suspension, conditioned place
+preference, hole board, operant and touch-screen tasks, zebrafish novel tank and multi-well plates, and fully
+custom apparatus.
 
 License: **GPL-3.0-or-later** (the optional, separately downloaded pose-model weights are licensed by their authors
 for academic, non-commercial use). Written in Python with OpenCV, NumPy/SciPy, matplotlib and Qt 6 (PySide6) — all
@@ -25,19 +26,21 @@ More screenshots: [experiment](docs/screenshots/experiment.png) · [apparatus de
 
 | Area | What you get |
 | --- | --- |
-| **Experiments** | Protocol templates, stages (days/sessions), test duration, automatic start when the animal is detected, per-experiment detection & analysis defaults, portable experiment folders |
-| **Animals** | Groups/treatments with colours, sex, unlimited custom fields, CSV import/export |
-| **Apparatus designer** | Draw arenas, rectangle/ellipse/polygon zones, points of interest, crossing lines, zone groups (union − exclusion), calibration in cm; one-click templates fitted to your video; several apparatus per video |
-| **Video tracking** | Background subtraction (median / empty-arena frame / adaptive) or thresholding; dark, light or auto contrast; body centre, **head and tail** detection; multiple animals per arena with identity maintenance; multiple arenas per video in a single pass; gap interpolation & smoothing; pixel-change motion index for freezing |
+| **Experiments** | Protocol templates, up to 50 stages × 99 trials, schedules (by animal / trial / randomised / Latin square, counterbalancing), test duration, automatic start, training criteria with automatic retirement, blind testing, animal ID / barcode confirmation, skip / re-perform, per-experiment detection & analysis defaults, portable experiment folders |
+| **Animals** | Groups/treatments with colours, sex, unlimited custom fields, retirement, dose calculator, CSV import/export |
+| **Apparatus designer** | Arenas, rectangle/ellipse/polygon zones, points, lines, zone groups (union − exclusion), square / concentric / radial grids in real-world units, sequences, hidden / investigation / moveable zones, entry by centre, head, tail or % of body, copy/paste, calibration; 20+ templates fitted to your video (incl. novel tank, multi-well plates, place preference, hole board, thermal gradient, home cage); several apparatus per video |
+| **Video tracking** | Background subtraction (median / empty-arena frame / adaptive) or thresholding; dark, light or auto contrast; body centre, **head and tail**; multiple animals per arena with identity maintenance; multiple arenas per video in one pass; erasing of thin wires / cage bars; gap interpolation & smoothing; motion index for freezing |
 | **AI body parts** | Optional deep-learning pose model (DeepLabCut SuperAnimal-TopViewMouse, 27 keypoints) for nose / centre / tail base, robust to shadows and reflections; runs on the **Neural Engine / GPU via Core ML**; bring-your-own ONNX models |
-| **Apple Silicon speed** | Parallel tracking of many videos across all cores, **VideoToolbox** hardware decoding (greyscale straight from the luma plane) and hardware H.264 recording |
-| **Live testing** | Cameras via AVFoundation, simultaneous recording, start on detection, procedures (zone/time/freezing triggers → serial/TTL commands, beeps, event marks, end test) for Arduino-driven stimuli |
-| **Manual scoring** | Keyboard-scored state and point behaviours during playback or live |
-| **Track tools** | Review with overlays, detection preview while tuning, track corrections, DeepLabCut CSV import |
-| **Measures** | 100+ measures: distance, speeds, mobility, freezing, rotations, path efficiency, thigmotaxis, grid crossings; per-zone time/entries/latency/distance/head entries; per-point exploration; line crossings; EPM open-arm %, Y-maze spontaneous alternation, radial-arm errors, water-maze latency/platform crossings/Gallagher proximity/heading error/search strategy, Barnes primary latency/errors/strategy, NOR discrimination index, sociability index, light/dark transitions, social contact |
-| **Time segmentation** | Regular time bins or custom named periods (e.g. CS/tone periods) |
-| **Results & reports** | Results table with measure chooser, CSV/Excel export, clipboard copy, self-contained HTML reports with track plots, heat maps and statistics |
-| **Statistics** | Descriptives, Welch t / Mann-Whitney, ANOVA + Tukey / Kruskal-Wallis, paired tests & Friedman, two-way ANOVA (group × stage), correlations, effect sizes, publication-style plots |
+| **Live testing** | Up to dozens of **simultaneous tests** from several cameras and/or several apparatus per camera, collective start / pause / stop, start on detection / when the experimenter leaves the view / on a key or remote / at a clock time, real-time zone statistics, live charts, I/O status and warnings, camera region / zoom / rotate / two-camera merge, recording with optional burned-in labels, observation-only (TakeNote) mode |
+| **Procedures & hardware** | Visual procedure editor (when / wait / if / repeat / set / do), 48 events, 51 actions, safe expressions with maths and random functions, variables and arrays kept between tests or saved as results, reinforcement schedules (FR, VR, FI, VI, PR…); open **Arduino firmware** for TTL inputs/outputs, levers, nose pokes, pellet dispensers, shockers, optogenetic pulse trains, running-wheel encoders, analogue inputs, sync pulses; serial devices; audio tones / noise; touch-screen stimuli |
+| **Manual scoring** | Keys (toggle, hold or point, up to 46), exclusive sets, on-screen / touch buttons, scoring during playback, live or by direct observation |
+| **Track tools** | Review with overlays, detection preview while tuning, track corrections, per-test moveable-zone positions, DeepLabCut CSV import |
+| **Measures** | Hundreds of measures: ~40 whole-apparatus, ~20 per zone, ~17 per point, per line, ~13 per sequence, per grid, social (contacts, nose-to-nose, following, approaches), per key (also per zone), I/O inputs/outputs/encoders, result variables; test-specific results for EPM/EZM, Y/T/radial mazes, water maze (incl. Whishaw corridor, strategies), Barnes, NOR, light/dark, three-chamber, CPP, novel tank, hole board… |
+| **Time segmentation** | Regular time bins, custom periods and **event-anchored periods** (e.g. the 30 s after first leaving a zone); pauses excluded |
+| **Visualisation** | Track plots coloured by speed / time / any parameter with behaviour markers and per-period panels; heat maps (normalised, per behaviour, group-averaged with alignment); charts of 40+ parameters over time with zone bands; **tracked-video export with overlays** |
+| **Statistics** | 42 procedures: t / Welch / Mann-Whitney, one-way / Welch ANOVA, Kruskal-Wallis, repeated-measures and mixed ANOVA, two-way (incl. Scheirer–Ray–Hare and ART), post-hoc (Tukey, Bonferroni, Holm, Šidák, FDR, Dunnett, Games–Howell, Dunn), Friedman, chi-square / G / Fisher, correlations & regression, assumption checks, effect sizes; grouping at up to 3 levels; column / line / scatter / box / violin graphs |
+| **Data transfer** | CSV, tab-separated, Excel, clipboard (any cell range), **XML of the whole experiment incl. raw tracks**, raw per-frame CSV with derived parameters, self-contained HTML reports |
+| **Apple Silicon speed** | Parallel tracking across all cores, **VideoToolbox** hardware decoding / recording, Core ML inference |
 | **Automation** | `manymaze` command line for batch tracking, export and reports |
 
 See the full [user guide](manymaze/resources/USER_GUIDE.md) (also available in the app under *Help*).

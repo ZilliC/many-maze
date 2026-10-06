@@ -27,16 +27,26 @@ PROJECT_FILE = "project.json"
 FORMAT_VERSION = 1
 
 
+# test status values: "pending" (to do), "tracked" (has a track), "scored" (manually scored, no track),
+# "skipped" (not performed for now, can be resumed), "superseded" (replaced by a re-performed attempt),
+# "excluded" (left out of results)
+STATUSES = ("pending", "tracked", "scored", "skipped", "superseded", "excluded")
+INACTIVE_STATUSES = frozenset({"skipped", "superseded", "excluded"})  # left out of results and statistics
+
+
 @dataclass
 class Animal:
     id: str
     group: str = ""
     sex: str = ""
     fields: dict = field(default_factory=dict)
+    retired: bool = False  # withdrawn from the experiment (e.g. failed a training criterion)
+    retired_reason: str = ""
 
     @classmethod
     def from_dict(cls, d):
-        return cls(str(d["id"]), d.get("group", ""), d.get("sex", ""), dict(d.get("fields", {})))
+        return cls(str(d["id"]), d.get("group", ""), d.get("sex", ""), dict(d.get("fields", {})),
+                   bool(d.get("retired", False)), d.get("retired_reason", ""))
 
 
 @dataclass
@@ -47,11 +57,26 @@ class Group:
 
 @dataclass
 class Behaviour:
-    """A manually scored behaviour. kind = "state" (has duration) or "point" (instantaneous)."""
+    """A manually scored behaviour.
+
+    kind = "state" (key toggles it on/off), "hold" (scored while the key is held down) or "point" (instantaneous).
+    Behaviours sharing a non-empty ``group`` are mutually exclusive: starting one stops the others.
+    """
 
     name: str
     key: str = ""
     kind: str = "state"
+    group: str = ""
+    color: str = ""
+
+    @classmethod
+    def from_dict(cls, d):
+        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        return cls(**known)
+
+    @property
+    def has_duration(self) -> bool:
+        return self.kind != "point"
 
 
 @dataclass
@@ -68,13 +93,15 @@ class Test:
     detection: dict = field(default_factory=dict)  # overrides of project detection settings
     variables: dict = field(default_factory=dict)  # per-test variables (e.g. novel object, social side)
     events: list = field(default_factory=list)  # manual scoring [{"behaviour", "t", "t_end"}]
-    status: str = "pending"  # pending | tracked | excluded
+    status: str = "pending"  # see STATUSES
     notes: str = ""
     recorded_at: str = ""
     io_events: list = field(default_factory=list)  # live I/O log [{"t", "device", "channel", "kind": "input"|"output", "value"}]
     result_variables: dict = field(default_factory=dict)  # numeric procedure variables saved as results
     zone_overrides: dict = field(default_factory=dict)  # moveable zones: {zone name: shape dict} for this test
     pauses: list = field(default_factory=list)  # [[t_start, t_end], ...] test-time intervals the test was paused
+    attempt: int = 1  # re-performed tests get attempt 2, 3, ...
+    replaces: int = 0  # id of the test this attempt re-performs (0 = none)
 
     @classmethod
     def from_dict(cls, d):
@@ -176,7 +203,7 @@ class Project:
             apparatus=[Apparatus.from_dict(a) for a in d.get("apparatus", [])],
             animals=[Animal.from_dict(a) for a in d.get("animals", [])],
             groups=[Group(**g) for g in d.get("groups", [])],
-            behaviours=[Behaviour(**b) for b in d.get("behaviours", [])],
+            behaviours=[Behaviour.from_dict(b) for b in d.get("behaviours", [])],
             tests=[Test.from_dict(t) for t in d.get("tests", [])],
             animal_fields=d.get("animal_fields", []),
             stages=d.get("stages", []),
@@ -272,6 +299,8 @@ class Project:
 
     def load_tracks(self, test: Test) -> list[Track]:
         out = []
+        if self.path is None:
+            return out
         for i in range(test.n_animals):
             p = self.track_path(test, i)
             if p.exists():
@@ -324,6 +353,8 @@ class Project:
             s.novel_object = v["novel_object"]
         if "social_side" in v:
             s.social_side = v["social_side"]
+        if "paired_chamber" in v:
+            s.paired_chamber = v["paired_chamber"]
         return s
 
     def test_info(self, test: Test, animal_id: str | None = None) -> dict:
@@ -345,8 +376,10 @@ class Project:
         behaviours = [asdict(b) for b in self.behaviours]
         ids = [test.animal_id] + list(test.extra_animals)
         if not tracks and test.events and behaviours:
-            # manual scoring only
+            # manual scoring only (TakeNote / observation, or a video scored without tracking)
             dur = test.duration_s or self.test_duration_s
+            if not dur or dur <= 0:
+                dur = max((e["t_end"] if e.get("t_end") is not None else e["t"] for e in test.events), default=0.0)
             row = self.test_info(test)
             row["Period"] = "Whole test"
             row.update(behaviour_measures(test.events, behaviours, 0.0, dur))
@@ -354,7 +387,10 @@ class Project:
         for i, tr in enumerate(tracks):
             others = [o for j, o in enumerate(tracks) if j != i]
             kw = dict(events=test.events if i == 0 else [], behaviours=behaviours if i == 0 else None,
-                      other_tracks=others or None)
+                      other_tracks=others or None, zone_overrides=test.zone_overrides or None,
+                      io_events=test.io_events or None, pauses=test.pauses or None,
+                      io_devices=self.io_devices or None,
+                      result_variables=test.result_variables if i == 0 else None)
             if segmented:
                 parts = analyse_segmented(tr, app, s, **kw)
             else:
@@ -366,12 +402,16 @@ class Project:
                 rows.append(row)
         return rows
 
+    def has_results(self, test: Test) -> bool:
+        """The test has data to analyse: a track, or manually scored events."""
+        return self.has_track(test) or bool(test.events and self.behaviours)
+
     def results(self, tests: list[Test] | None = None, segmented: bool = False,
                 progress: Callable[[float], None] | None = None) -> list[dict]:
-        tests = [t for t in (tests if tests is not None else self.tests) if t.status != "excluded"]
+        tests = [t for t in (tests if tests is not None else self.tests) if t.status not in INACTIVE_STATUSES]
         rows = []
         for i, t in enumerate(tests):
-            if self.has_track(t) or (t.events and self.behaviours):
+            if self.has_results(t):
                 rows.extend(self.analyse_test(t, segmented))
             if progress:
                 progress((i + 1) / max(1, len(tests)))

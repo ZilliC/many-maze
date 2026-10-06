@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColo
                                QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from ...core import templates
-from ...core.apparatus import Apparatus, Line, PointOfInterest, Zone, ZoneGroup
+from ...core.apparatus import (ENTRY_RULES, GRID_KINDS, Apparatus, Line, PointOfInterest, Sequence, Zone,
+                               ZoneGroup, make_grid, remove_grid)
 from ...core.geometry import Ellipse, Polygon, Shape
 from ...core.templates import PALETTE, TEMPLATES
 from ...core.video import VIDEO_EXTENSIONS, VideoSource
@@ -31,7 +32,8 @@ ACCENT = "#e11d48"
 # key, label, shortcut, tooltip
 TOOLS = [
     ("select", "Select", "V", "Select, move and reshape items. Drag the white handles to edit vertices; "
-                              "double-click a polygon edge to add a vertex, right-click a vertex to remove it."),
+                              "double-click a polygon edge to add a vertex, right-click a vertex to remove it. "
+                              "Ctrl+C / Ctrl+V copy and paste the selection (also into another apparatus)."),
     ("rect", "Rectangle", "R", "Draw a rectangular zone (Shift: square)"),
     ("ellipse", "Ellipse", "E", "Draw an elliptical zone (Shift: circle)"),
     ("polygon", "Polygon", "P", "Click the vertices of a zone; double-click, right-click or Enter closes it"),
@@ -54,6 +56,8 @@ HINTS = {
     "calibrate": "Drag along an object of known length (e.g. the arena wall)",
     "template": "Drag a rectangle around the whole apparatus · Esc cancels",
 }
+
+SEQ_END = {"entry": "On entering the last step", "exit": "On leaving the last step"}
 
 
 # ------------------------------------------------------------------ helpers
@@ -143,6 +147,25 @@ def tool_icon(kind: str) -> QIcon:
         p.setPen(QPen(acc, 1.4))
         for i, x in enumerate(range(6, 28, 3)):
             p.drawLine(pt(x, 12), pt(x, 15.5 if i % 2 else 17.5))
+    elif kind == "grid":
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QRectF(4, 4, 24, 24))
+        p.setPen(QPen(acc, 1.4))
+        p.drawEllipse(QRectF(10, 10, 12, 12))
+        for a in range(0, 360, 60):
+            r = math.radians(a)
+            p.drawLine(pt(16 + 6 * math.cos(r), 16 + 6 * math.sin(r)), pt(16 + 12 * math.cos(r), 16 + 12 * math.sin(r)))
+    elif kind in ("copy", "paste"):
+        p.setBrush(QColor(225, 29, 72, 40))
+        p.drawRoundedRect(QRectF(5, 9, 15, 18), 2, 2)
+        if kind == "copy":
+            p.drawRoundedRect(QRectF(12, 4, 15, 18), 2, 2)
+        else:
+            p.setBrush(acc)
+            p.drawRect(QRectF(9, 6, 7, 5))
+            p.setBrush(Qt.NoBrush)
+            p.drawLine(pt(14, 21), pt(27, 21))
+            p.drawPolyline(QPolygonF([pt(23, 17), pt(27, 21), pt(23, 25)]))
     elif kind in ("undo", "redo"):
         p.setBrush(Qt.NoBrush)
         path = QPainterPath(pt(9, 13))
@@ -297,6 +320,7 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
         self.handles = []
         self.label = Label("", self) if kind == "zone" else None
         self.label_at_top = False
+        self.halo: QGraphicsPathItem | None = None  # investigation distance outline
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
         self.sync()
 
@@ -332,14 +356,22 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
             pen.setWidthF(2.6 if sel else 1.6)
             fc = QColor(c)
             fc.setAlpha(95 if sel else 45)
-            self.setBrush(QBrush(fc))
+            z = self.model
+            if z.hidden:
+                fc.setAlpha(150 if sel else 110)
+                self.setBrush(QBrush(fc, Qt.BDiagPattern))
+                pen.setStyle(Qt.DashLine)
+            else:
+                self.setBrush(QBrush(fc))
+            self._sync_halo(s, c)
             if self.label_at_top:
                 x0, y0, x1, _ = s.bounds()
                 self.label.setPos((x0 + x1) / 2, y0)
             else:
                 self.label.setPos(*s.centroid())
             self.label.set_anchor("top" if self.label_at_top else "center")
-            self.label.set_text(self.model.name, self.model.color)
+            tags = [t for t, on in (("hidden", z.hidden), ("moveable", z.moveable)) if on]
+            self.label.set_text(z.name + (f" ({', '.join(tags)})" if tags else ""), self.model.color)
             self.label.setVisible(self.page.show_labels)
         else:
             pen = QPen(QColor(ACCENT if sel else "#f8fafc"))
@@ -349,6 +381,28 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
             self.setBrush(Qt.NoBrush)
         self.setPen(pen)
         self._sync_handles(self.handle_points())
+
+    def _sync_halo(self, s: Shape, c: QColor):
+        """Dotted outline at the investigation distance around the zone."""
+        app = self.page.app
+        d = self.model.investigation_distance_cm * (app.px_per_cm or 1.0)
+        if d <= 0:
+            if self.halo is not None:
+                self.halo.setVisible(False)
+            return
+        if self.halo is None:
+            self.halo = QGraphicsPathItem(self)
+            self.halo.setAcceptedMouseButtons(Qt.NoButton)
+        st = QPainterPathStroker()
+        st.setWidth(2 * d)
+        st.setJoinStyle(Qt.RoundJoin)
+        base = shape_path(s)
+        self.halo.setPath(st.createStroke(base).united(base).simplified())
+        pen = QPen(c, 1.3, Qt.DotLine)
+        pen.setCosmetic(True)
+        self.halo.setPen(pen)
+        self.halo.setBrush(Qt.NoBrush)
+        self.halo.setVisible(True)
 
     def paint(self, p, opt, widget=None):
         p.setPen(self.pen())
@@ -880,7 +934,8 @@ def _param_label(key: str) -> str:
 class TemplateDialog(QDialog):
     """Choose a built-in template, edit its parameters and how it is placed."""
 
-    NON_SQUARE = {"light_dark", "three_chamber", "t_maze", "fear_conditioning", "custom"}
+    NON_SQUARE = {"light_dark", "three_chamber", "t_maze", "fear_conditioning", "custom", "novel_tank", "multi_well",
+                  "cpp", "home_cage"}
 
     def __init__(self, parent=None, key: str = "open_field", current_name: str | None = None,
                  taken_names=(), has_background: bool = False):
@@ -990,7 +1045,7 @@ class TemplateDialog(QDialog):
             elif typ is float:
                 out[k] = float(w.value())
             elif isinstance(w, QComboBox):
-                out[k] = w.currentText()
+                out[k] = w.currentData() if w.currentData() is not None else w.currentText()
             else:
                 out[k] = w.text()
         return out
@@ -1002,7 +1057,11 @@ class TemplateDialog(QDialog):
         elif typ in (int, float):
             w.setValue(v)
         elif isinstance(w, QComboBox):
-            w.setCurrentText(str(v))
+            i = w.findData(v)
+            if i >= 0:
+                w.setCurrentIndex(i)
+            else:
+                w.setCurrentText(str(v))
         else:
             w.setText(str(v))
 
@@ -1024,7 +1083,15 @@ class TemplateDialog(QDialog):
             self.params_form.removeRow(0)
         self._editors = {}
         for k, v in info.params.items():
-            if isinstance(v, bool):
+            if k in info.choices:
+                w = QComboBox()
+                for c in info.choices[k]:
+                    w.addItem(str(c), c)
+                i = w.findData(v)
+                w.setCurrentIndex(max(0, i))
+                w.currentIndexChanged.connect(self._update_preview)
+                typ = object
+            elif isinstance(v, bool):
                 w = QCheckBox()
                 w.setChecked(v)
                 w.toggled.connect(self._update_preview)
@@ -1050,12 +1117,6 @@ class TemplateDialog(QDialog):
                 w.setValue(v)
                 w.valueChanged.connect(self._update_preview)
                 typ = float
-            elif k == "platform_quadrant":
-                w = QComboBox()
-                w.addItems(["NE", "NW", "SE", "SW"])
-                w.setCurrentText(str(v))
-                w.currentIndexChanged.connect(self._update_preview)
-                typ = str
             else:
                 w = QLineEdit(str(v))
                 w.editingFinished.connect(self._update_preview)
@@ -1088,6 +1149,85 @@ class TemplateDialog(QDialog):
 
 
 # ---------------------------------------------------------------------- page
+class GridDialog(QDialog):
+    """Regularly spaced grid of zones: square cells, concentric rings, radial sectors or rings × sectors."""
+
+    def __init__(self, parent=None, app: Apparatus | None = None, has_selection: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle("Add grid")
+        self.app = app
+        f = QFormLayout(self)
+        self.kind = QComboBox()
+        for k, lbl in GRID_KINDS.items():
+            self.kind.addItem(lbl, k)
+        self.region = QComboBox()
+        self.region.addItem("Arena boundary", "arena")
+        if has_selection:
+            self.region.addItem("Selected zone", "zone")
+        self.region.addItem("Whole image", "frame")
+        self.name = QLineEdit(unique_name("Grid", (app.names() + [g.name for g in app.grids]) if app else []))
+        self.nx, self.ny, self.rings, self.sectors = QSpinBox(), QSpinBox(), QSpinBox(), QSpinBox()
+        for w, v in ((self.nx, 4), (self.ny, 4), (self.rings, 3), (self.sectors, 8)):
+            w.setRange(1, 60)
+            w.setValue(v)
+        self.cell = QDoubleSpinBox()
+        self.cell.setRange(0, 10000)
+        self.cell.setDecimals(1)
+        self.cell.setSuffix(" cm")
+        self.cell.setSpecialValueText("Use column / row counts")
+        self.cell.setToolTip("Real-world cell size (needs a calibration); overrides the counts")
+        self.cell.setEnabled(bool(app and app.px_per_cm))
+        self.start = QDoubleSpinBox()
+        self.start.setRange(-360, 360)
+        self.start.setValue(-90)
+        self.start.setSuffix("°")
+        self.start.setToolTip("Angle of the first sector edge: -90 = top, 0 = right; sectors run clockwise")
+        self.clip = QCheckBox("Clip square cells to the region")
+        self.clip.setChecked(True)
+        self.group = QCheckBox("Add a zone group containing all cells")
+        self.group.setChecked(True)
+        f.addRow("Grid type", self.kind)
+        f.addRow("Cover", self.region)
+        f.addRow("Name", self.name)
+        f.addRow("Columns", self.nx)
+        f.addRow("Rows", self.ny)
+        f.addRow("Cell size", self.cell)
+        f.addRow("Rings", self.rings)
+        f.addRow("Sectors", self.sectors)
+        f.addRow("First sector at", self.start)
+        f.addRow(self.clip)
+        f.addRow(self.group)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Add grid")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+        self._form = f
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self._kind_changed()
+
+    def _kind_changed(self, *_):
+        k = self.kind.currentData()
+        for w, on in ((self.nx, k == "square"), (self.ny, k == "square"), (self.cell, k == "square"),
+                      (self.clip, k == "square"), (self.rings, k in ("rings", "polar")),
+                      (self.sectors, k in ("sectors", "polar")), (self.start, k in ("sectors", "polar"))):
+            self._form.setRowVisible(w, on)
+
+    def spec(self) -> dict:
+        k = self.kind.currentData()
+        params = {}
+        if k == "square":
+            params.update(nx=self.nx.value(), ny=self.ny.value(), clip=self.clip.isChecked())
+            if self.cell.value() > 0:
+                params["cell_cm"] = self.cell.value()
+        if k in ("rings", "polar"):
+            params["rings"] = self.rings.value()
+        if k in ("sectors", "polar"):
+            params.update(sectors=self.sectors.value(), start_deg=self.start.value())
+        return {"kind": k, "region": self.region.currentData(), "name": self.name.text().strip() or "Grid",
+                "group": self.group.isChecked(), "params": params}
+
+
 class ApparatusPage(Page):
     title = "Apparatus"
 
@@ -1107,6 +1247,7 @@ class ApparatusPage(Page):
         self._bg_real = False
         self._pending_template: dict | None = None
         self._prev_tool = "select"
+        self._seq_overlay: QGraphicsPathItem | None = None
 
         self.view = EditorView(self)
         self.view.scene().selectionChanged.connect(self._on_scene_selection)
@@ -1120,7 +1261,7 @@ class ApparatusPage(Page):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
         splitter.setCollapsible(1, False)
-        splitter.setSizes([265, 760, 300])
+        splitter.setSizes([240, 760, 320])
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(splitter)
@@ -1243,6 +1384,7 @@ class ApparatusPage(Page):
         tb = QToolBar()
         tb.setIconSize(QSize(24, 24))
         tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        tb.setStyleSheet("QToolBar{spacing:0px;}")
         self.toolbar = tb
         self.tool_actions: dict[str, QAction] = {}
         grp = QActionGroup(self)
@@ -1274,7 +1416,26 @@ class ApparatusPage(Page):
         if isinstance(btn, QToolButton):
             btn.setMenu(menu)
             btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.grid_act = QAction(tool_icon("grid"), "Grid…", self)
+        self.grid_act.setShortcut(QKeySequence("G"))
+        self.grid_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.grid_act.setToolTip("Add a regular grid of zones: square cells (in real-world units), concentric rings "
+                                 "or radial sectors  [G]")
+        self.grid_act.triggered.connect(lambda: self.add_grid_dialog())
+        tb.addAction(self.grid_act)
+        self.addAction(self.grid_act)
+        b = tb.widgetForAction(self.grid_act)
+        if isinstance(b, QToolButton):
+            b.setToolButtonStyle(Qt.ToolButtonIconOnly)
         tb.addSeparator()
+        self.copy_act = QAction(tool_icon("copy"), "Copy", self)
+        self.copy_act.setShortcut(QKeySequence.Copy)
+        self.copy_act.setToolTip("Copy the selected zones, points and lines (Ctrl+C)")
+        self.copy_act.triggered.connect(lambda: self.copy_selected())
+        self.paste_act = QAction(tool_icon("paste"), "Paste", self)
+        self.paste_act.setShortcut(QKeySequence.Paste)
+        self.paste_act.setToolTip("Paste copied items into this apparatus (Ctrl+V)")
+        self.paste_act.triggered.connect(lambda: self.paste())
         self.undo_act = QAction(tool_icon("undo"), "Undo", self)
         self.undo_act.setShortcut(QKeySequence.Undo)
         self.undo_act.setToolTip("Undo (Ctrl+Z)")
@@ -1293,6 +1454,9 @@ class ApparatusPage(Page):
         self.labels_act.setToolTip("Show zone / point / line names on the image")
         self.labels_act.toggled.connect(self._toggle_labels)
         self.labels_act.setIcon(self._labels_icon())
+        for a in (self.copy_act, self.paste_act):
+            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            self.addAction(a)
         for a in (self.undo_act, self.redo_act, self.fit_act, self.labels_act):
             a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
             tb.addAction(a)
@@ -1335,11 +1499,11 @@ class ApparatusPage(Page):
 
     def _build_right(self) -> QWidget:
         self.tabs = QTabWidget()
-        self.tabs.setMinimumWidth(300)
+        self.tabs.setMinimumWidth(318)
         self.tabs.setMaximumWidth(400)
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setExpanding(False)
-        self.tabs.setStyleSheet("QTabBar::tab{padding:4px 7px;}")
+        self.tabs.setStyleSheet("QTabBar::tab{padding:4px 5px;}")
         self.tabs.currentChanged.connect(self._tab_changed)
 
         # ---- zones
@@ -1359,6 +1523,44 @@ class ApparatusPage(Page):
         f.addRow("Name", self.zone_name)
         f.addRow("Colour", self.zone_color)
         f.addRow("Shape", self.zone_info)
+        self.zone_rule = QComboBox()
+        for k, lbl in ENTRY_RULES.items():
+            self.zone_rule.addItem(lbl, k)
+        self.zone_rule.setToolTip("When is the animal in this zone: by its centre, head or tail base, when a "
+                                  "proportion of its body is inside, or when it is in no other zone")
+        self.zone_rule.currentIndexChanged.connect(
+            lambda _: self.set_zone_property(self.zone_list.currentRow(), "entry_rule", self.zone_rule.currentData()))
+        self.zone_frac = QSpinBox()
+        self.zone_frac.setRange(1, 100)
+        self.zone_frac.setSuffix(" % of body")
+        self.zone_frac.valueChanged.connect(
+            lambda v: self.set_zone_property(self.zone_list.currentRow(), "body_fraction", v / 100.0))
+        self.zone_inv = QDoubleSpinBox()
+        self.zone_inv.setRange(0, 10000)
+        self.zone_inv.setDecimals(1)
+        self.zone_inv.setSpecialValueText("Off")
+        self.zone_inv.setToolTip("Investigation zone: the animal is in the zone while its head is within this "
+                                 "distance of it (e.g. sniffing an object)")
+        self.zone_inv.valueChanged.connect(
+            lambda v: self.set_zone_property(self.zone_list.currentRow(), "investigation_distance_cm", float(v)))
+        self.zone_hidden = QCheckBox("Hidden zone")
+        self.zone_hidden.setToolTip("The animal cannot be seen in it (nest box, tunnel): when it disappears in or "
+                                    "near this zone it is counted as in the zone rather than lost")
+        self.zone_hidden.toggled.connect(
+            lambda on: self.set_zone_property(self.zone_list.currentRow(), "hidden", bool(on)))
+        self.zone_moveable = QCheckBox("Moveable")
+        self.zone_moveable.setToolTip("The position can differ in each test (e.g. a water-maze platform); set it "
+                                      "per test in the test view")
+        self.zone_moveable.toggled.connect(
+            lambda on: self.set_zone_property(self.zone_list.currentRow(), "moveable", bool(on)))
+        flags = QHBoxLayout()
+        flags.addWidget(self.zone_hidden)
+        flags.addWidget(self.zone_moveable)
+        flags.addStretch()
+        f.addRow("Entry", self.zone_rule)
+        f.addRow("", self.zone_frac)
+        f.addRow("Investigate", self.zone_inv)
+        f.addRow("", flags)
         zl.addLayout(f)
         zr = QHBoxLayout()
         self.btn_zone_dup = QPushButton("Duplicate")
@@ -1368,7 +1570,10 @@ class ApparatusPage(Page):
         self.btn_zone_arena.clicked.connect(lambda: self.zone_to_arena(self.zone_list.currentRow()))
         self.btn_zone_del = QPushButton("Delete")
         self.btn_zone_del.clicked.connect(lambda: self.delete_item("zone", self.zone_list.currentRow()))
-        for b in (self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del):
+        self.btn_grid_del = QPushButton("Delete grid")
+        self.btn_grid_del.setToolTip("Delete the whole grid this zone belongs to")
+        self.btn_grid_del.clicked.connect(lambda: self.delete_grid_of(self.zone_list.currentRow()))
+        for b in (self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del, self.btn_grid_del):
             zr.addWidget(b)
         zl.addLayout(zr)
         arena_box = QGroupBox("Arena boundary")
@@ -1477,6 +1682,81 @@ class ApparatusPage(Page):
         self.group_exc.itemChanged.connect(self._group_members_changed)
         gl.addWidget(self.group_exc, 1)
         self.tabs.addTab(gw, "Groups")
+
+        # ---- sequences
+        sw = QWidget()
+        sl = QVBoxLayout(sw)
+        self.seq_list = QListWidget()
+        self.seq_list.setMaximumHeight(110)
+        self.seq_list.currentRowChanged.connect(self._seq_row_changed)
+        sl.addWidget(self.seq_list)
+        sr = QHBoxLayout()
+        self.btn_seq_add = QPushButton("Add sequence")
+        self.btn_seq_add.clicked.connect(lambda: self.add_sequence())
+        self.btn_seq_del = QPushButton("Delete")
+        self.btn_seq_del.clicked.connect(lambda: self.delete_sequence(self.seq_list.currentRow()))
+        sr.addWidget(self.btn_seq_add)
+        sr.addWidget(self.btn_seq_del)
+        sl.addLayout(sr)
+        f = compact_form()
+        self.seq_name = QLineEdit()
+        self.seq_name.editingFinished.connect(lambda: self.rename_sequence(self.seq_list.currentRow(),
+                                                                          self.seq_name.text()))
+        f.addRow("Name", self.seq_name)
+        sl.addLayout(f)
+        sl.addWidget(QLabel("Steps (zones in order):"))
+        self.seq_steps = QListWidget()
+        sl.addWidget(self.seq_steps, 1)
+        st = QHBoxLayout()
+        self.seq_zone = QComboBox()
+        self.seq_zone.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.seq_zone.setMinimumContentsLength(8)
+        self.btn_step_add = QPushButton("Add")
+        self.btn_step_add.clicked.connect(lambda: self.add_sequence_step(self.seq_list.currentRow(),
+                                                                         self.seq_zone.currentText()))
+        st.addWidget(self.seq_zone, 1)
+        st.addWidget(self.btn_step_add)
+        sl.addLayout(st)
+        st2 = QHBoxLayout()
+        self.btn_step_up = QPushButton("Up")
+        self.btn_step_up.clicked.connect(lambda: self.move_sequence_step(self.seq_list.currentRow(),
+                                                                         self.seq_steps.currentRow(), -1))
+        self.btn_step_down = QPushButton("Down")
+        self.btn_step_down.clicked.connect(lambda: self.move_sequence_step(self.seq_list.currentRow(),
+                                                                           self.seq_steps.currentRow(), 1))
+        self.btn_step_del = QPushButton("Remove")
+        self.btn_step_del.clicked.connect(lambda: self.remove_sequence_step(self.seq_list.currentRow(),
+                                                                            self.seq_steps.currentRow()))
+        for b in (self.btn_step_up, self.btn_step_down, self.btn_step_del):
+            st2.addWidget(b)
+        sl.addLayout(st2)
+        self.seq_from_start = QCheckBox("Must begin at the first step")
+        self.seq_from_start.setToolTip("Unchecked: any rotation of the steps counts (e.g. ABC, BCA, CAB)")
+        self.seq_allow_other = QCheckBox("Other zones allowed between steps")
+        self.seq_bidir = QCheckBox("Both directions")
+        self.seq_overlap = QCheckBox("Sequences may overlap")
+        self.seq_overlap.setToolTip("Sliding window: A B C A contains A B C and B C A")
+        for w, attr in ((self.seq_from_start, "from_start"), (self.seq_allow_other, "allow_other"),
+                        (self.seq_bidir, "bidirectional"), (self.seq_overlap, "overlap")):
+            w.toggled.connect(lambda on, a=attr: self.set_sequence_option(self.seq_list.currentRow(), a, bool(on)))
+            sl.addWidget(w)
+        f = compact_form()
+        self.seq_end = QComboBox()
+        for k, lbl in SEQ_END.items():
+            self.seq_end.addItem(lbl, k)
+        self.seq_end.currentIndexChanged.connect(
+            lambda _: self.set_sequence_option(self.seq_list.currentRow(), "end", self.seq_end.currentData()))
+        self.seq_max = QDoubleSpinBox()
+        self.seq_max.setRange(0, 1e6)
+        self.seq_max.setDecimals(1)
+        self.seq_max.setSuffix(" s")
+        self.seq_max.setSpecialValueText("No limit")
+        self.seq_max.valueChanged.connect(
+            lambda v: self.set_sequence_option(self.seq_list.currentRow(), "max_duration_s", float(v)))
+        f.addRow("Complete", self.seq_end)
+        f.addRow("Time limit", self.seq_max)
+        sl.addLayout(f)
+        self.tabs.addTab(sw, "Sequences")
         return self.tabs
 
     # ============================================================ page API
@@ -1518,7 +1798,8 @@ class ApparatusPage(Page):
         for lst, edit, fn in ((self.zone_list, self.zone_name, self.rename_zone),
                               (self.point_list, self.point_name, self.rename_point),
                               (self.line_list, self.line_name, self.rename_line),
-                              (self.group_list, self.group_name, self.rename_group)):
+                              (self.group_list, self.group_name, self.rename_group),
+                              (self.seq_list, self.seq_name, self.rename_sequence)):
             r = lst.currentRow()
             it = lst.item(r) if r >= 0 else None
             if it is not None and edit.text().strip() and edit.text().strip() != it.text():
@@ -1562,7 +1843,8 @@ class ApparatusPage(Page):
         self._refresh_info()
 
     def _set_enabled(self, on: bool):
-        for a in list(self.tool_actions.values()) + [self.undo_act, self.redo_act]:
+        for a in list(self.tool_actions.values()) + [self.undo_act, self.redo_act, self.grid_act, self.copy_act,
+                                                     self.paste_act]:
             a.setEnabled(on)
         for w in (self.tabs, self.btn_dup, self.btn_ren, self.btn_del, self.btn_bg, self.test_combo,
                   self.time_slider, self.time_spin, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
@@ -1695,7 +1977,7 @@ class ApparatusPage(Page):
     def _update_tab_titles(self):
         app = self.app
         for i, (lbl, lst) in enumerate((("Zones", "zones"), ("Points", "points"), ("Lines", "lines"),
-                                        ("Groups", "groups"))):
+                                        ("Groups", "groups"), ("Sequences", "sequences"))):
             n = len(getattr(app, lst)) if app else 0
             self.tabs.setTabText(i, f"{lbl} {n}" if n else lbl)
 
@@ -1883,6 +2165,62 @@ class ApparatusPage(Page):
         if sel is not None and sel in self._items:
             self._items[sel].setSelected(True)
         self._syncing = False
+        self._seq_overlay = None
+        self._draw_sequence_overlay()
+
+    def _step_centre(self, name: str):
+        app = self.app
+        z = app.zone(name)
+        if z is not None:
+            return z.shape.centroid()
+        g = app.group(name)
+        pts = [app.zone(n).shape.centroid() for n in (g.zones if g else []) if app.zone(n) is not None]
+        if not pts:
+            return None
+        return float(np.mean([p[0] for p in pts])), float(np.mean([p[1] for p in pts]))
+
+    def _draw_sequence_overlay(self):
+        """Numbered arrows between the steps of the selected sequence (while the Sequences tab is shown)."""
+        if self._seq_overlay is not None and self._seq_overlay.scene() is not None:
+            self.view.scene().removeItem(self._seq_overlay)
+        self._seq_overlay = None
+        app = self.app
+        r = self.seq_list.currentRow()
+        if app is None or self._root is None or self.tabs.currentIndex() != 4 or not (0 <= r < len(app.sequences)):
+            return
+        q = app.sequences[r]
+        cents = [c for c in (self._step_centre(n) for n in q.steps) if c is not None]
+        root = QGraphicsPathItem(self._root)
+        root.setZValue(60)
+        root.setAcceptedMouseButtons(Qt.NoButton)
+        self._seq_overlay = root
+        col = QColor("#facc15")
+        path = QPainterPath()
+        L = max(8.0, 0.025 * max(self.view.frame_size or (640, 480)))
+        for (x0, y0), (x1, y1) in zip(cents, cents[1:]):
+            d = math.hypot(x1 - x0, y1 - y0)
+            if d < 1e-6:
+                continue
+            ux, uy = (x1 - x0) / d, (y1 - y0) / d
+            sh = min(0.18 * d, 2.2 * L)
+            a, b = QPointF(x0 + ux * sh, y0 + uy * sh), QPointF(x1 - ux * sh, y1 - uy * sh)
+            path.moveTo(a)
+            path.lineTo(b)
+            for sgn in (1, -1):
+                path.moveTo(b)
+                path.lineTo(b.x() - L * ux + sgn * 0.5 * L * uy, b.y() - L * uy - sgn * 0.5 * L * ux)
+        root.setPath(path)
+        pen = QPen(col, 3)
+        pen.setCosmetic(True)
+        pen.setCapStyle(Qt.RoundCap)
+        root.setPen(pen)
+        for i, (x, y) in enumerate(cents):
+            lb = Label(f"{i + 1}", root, "#facc15")
+            lb.setPos(x, y)
+            lb.setZValue(61)
+        if q.bidirectional and len(cents) > 1:
+            lb = Label("both directions", root, "#facc15", anchor="right")
+            lb.setPos(*cents[0])
 
     def _declutter_labels(self, order):
         """Zones sharing a centre (e.g. Arena around Centre) get their label at the top edge instead."""
@@ -2131,6 +2469,11 @@ class ApparatusPage(Page):
             for g in app.groups:
                 g.zones = [z for z in g.zones if z != name]
                 g.exclude = [z for z in g.exclude if z != name]
+            for q in app.sequences:
+                q.steps = [z for z in q.steps if z != name]
+            for gr in app.grids:
+                gr.zones = [z for z in gr.zones if z != name]
+            app.grids = [gr for gr in app.grids if gr.zones]
         elif kind == "point":
             app.points.pop(idx)
         elif kind == "line":
@@ -2170,6 +2513,7 @@ class ApparatusPage(Page):
         for g in app.groups:
             g.zones = [new if z == old else z for z in g.zones]
             g.exclude = [new if z == old else z for z in g.exclude]
+        self._rename_refs(old, new)
         self._model_changed(select=("zone", index))
         return True
 
@@ -2250,7 +2594,9 @@ class ApparatusPage(Page):
         if app is None or not (0 <= index < len(app.groups)):
             return False
         self.push_undo()
-        app.groups.pop(index)
+        name = app.groups.pop(index).name
+        for q in app.sequences:
+            q.steps = [z for z in q.steps if z != name]
         self.main.mark_dirty()
         self._refresh_side_lists()
         self.group_list.setCurrentRow(min(index, len(app.groups) - 1))
@@ -2265,7 +2611,9 @@ class ApparatusPage(Page):
             return False
         self.push_undo()
         taken = [z.name for z in app.zones] + [g.name for i, g in enumerate(app.groups) if i != index]
+        old = app.groups[index].name
         app.groups[index].name = unique_name(name, taken)
+        self._rename_refs(old, app.groups[index].name)
         self.main.mark_dirty()
         self._refresh_side_lists()
         self.group_list.setCurrentRow(index)
@@ -2326,6 +2674,259 @@ class ApparatusPage(Page):
             s += " − " + " − ".join(g.exclude)
         return s
 
+    def _rename_refs(self, old: str, new: str):
+        app = self.app
+        for q in app.sequences:
+            q.steps = [new if z == old else z for z in q.steps]
+        for gr in app.grids:
+            gr.zones = [new if z == old else z for z in gr.zones]
+
+    # ---- zone properties -------------------------------------------------------------
+    def set_zone_property(self, index: int, attr: str, value) -> bool:
+        """Set a zone flag: hidden, moveable, investigation_distance_cm, entry_rule or body_fraction."""
+        app = self.app
+        if self._loading or app is None or not (0 <= index < len(app.zones)):
+            return False
+        z = app.zones[index]
+        if getattr(z, attr) == value:
+            return False
+        self.push_undo()
+        setattr(z, attr, value)
+        self.main.mark_dirty()
+        it = self._items.get(("zone", index))
+        if it is not None:
+            it.sync()
+        self._load_editor()
+        return True
+
+    # ---- grids ---------------------------------------------------------------------------
+    def add_grid_dialog(self):
+        app = self.app
+        if app is None:
+            return None
+        key = self.selected_key()
+        dlg = GridDialog(self, app, has_selection=key is not None and key[0] == "zone")
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        spec = dlg.spec()
+        return self.add_grid(spec["kind"], spec["region"], spec["name"], spec["group"], **spec["params"])
+
+    def add_grid(self, kind: str = "square", region="arena", name: str = "Grid", group: bool = True, **params):
+        """Add a grid of zones covering the arena ("arena"), the selected zone ("zone"), the whole image
+        ("frame") or a given shape."""
+        app = self.app
+        if app is None:
+            return None
+        if isinstance(region, Shape):
+            shp = region
+        elif region == "zone" and self.selected_key() and self.selected_key()[0] == "zone":
+            shp = app.zones[self.selected_key()[1]].shape
+        elif region == "frame" or (region == "arena" and app.arena is None and not app.zones):
+            w, h = self.view.frame_size or app.frame_size or (640, 480)
+            shp = Polygon([(0, 0), (w, 0), (w, h), (0, h)])
+        else:
+            shp = app.arena_or_bounds()
+        self.push_undo()
+        try:
+            g = make_grid(app, kind, shp, name or "Grid", group=group, **params)
+        except ValueError as e:
+            QMessageBox.warning(self, "Add grid", str(e))
+            return None
+        self._model_changed()
+        self.main.status(f"Added grid “{g.name}” with {len(g.zones)} zones")
+        return g
+
+    def delete_grid_of(self, index: int) -> bool:
+        app = self.app
+        if app is None or not (0 <= index < len(app.zones)):
+            return False
+        g = next((g for g in app.grids if app.zones[index].name in g.zones), None)
+        if g is None:
+            return False
+        self.push_undo()
+        remove_grid(app, g.name)
+        for q in app.sequences:
+            q.steps = [z for z in q.steps if app.zone(z) is not None or app.group(z) is not None]
+        self._model_changed()
+        return True
+
+    # ---- copy / paste --------------------------------------------------------------------
+    _clipboard: dict | None = None  # shared by all apparatus (class attribute)
+
+    def copy_selected(self) -> int:
+        app = self.app
+        keys = [k for k, it in self._items.items() if it.isSelected() and k[0] in ("zone", "point", "line")]
+        if app is None or not keys:
+            return 0
+        clip = {"zones": [], "points": [], "lines": [], "source": id(app)}
+        for kind, i in sorted(keys):
+            clip[kind + "s"].append(getattr(app, kind + "s")[i].to_dict())
+        ApparatusPage._clipboard = clip
+        n = len(keys)
+        self.main.status(f"Copied {n} item(s)")
+        return n
+
+    def paste(self) -> int:
+        """Paste copied zones / points / lines (offset when pasted into the apparatus they came from)."""
+        app = self.app
+        clip = ApparatusPage._clipboard
+        if app is None or not clip:
+            return 0
+        k = clip.setdefault("pasted", {}).get(id(app), 0) + (1 if clip.get("source") == id(app) else 0)
+        off = 12.0 * k
+        self.push_undo()
+        new_keys = []
+        for d in clip["zones"]:
+            z = Zone.from_dict(d)
+            z.shape = z.shape.translated(off, off)
+            z.name = unique_name(z.name if z.name not in app.names() else f"{z.name} copy", app.names())
+            app.zones.append(z)
+            new_keys.append(("zone", len(app.zones) - 1))
+        for d in clip["points"]:
+            p = PointOfInterest.from_dict(d)
+            p.x, p.y = p.x + off, p.y + off
+            p.name = unique_name(p.name, [q.name for q in app.points])
+            app.points.append(p)
+            new_keys.append(("point", len(app.points) - 1))
+        for d in clip["lines"]:
+            ln = Line.from_dict(d)
+            ln.x1, ln.y1, ln.x2, ln.y2 = ln.x1 + off, ln.y1 + off, ln.x2 + off, ln.y2 + off
+            ln.name = unique_name(ln.name, [q.name for q in app.lines])
+            app.lines.append(ln)
+            new_keys.append(("line", len(app.lines) - 1))
+        self._model_changed(select=new_keys[0] if new_keys else None)
+        self._syncing = True
+        for k in new_keys:
+            if k in self._items:
+                self._items[k].setSelected(True)
+        self._syncing = False
+        clip["pasted"][id(app)] = clip["pasted"].get(id(app), 0) + 1  # pasting again offsets further
+        self.main.status(f"Pasted {len(new_keys)} item(s)")
+        return len(new_keys)
+
+    # ---- sequences -----------------------------------------------------------------------
+    def add_sequence(self, name: str | None = None, steps=()) -> Sequence | None:
+        app = self.app
+        if app is None:
+            return None
+        self.push_undo()
+        q = Sequence(unique_name(name or f"Sequence {len(app.sequences) + 1}", [x.name for x in app.sequences]),
+                     [s for s in steps if s in app.names()])
+        app.sequences.append(q)
+        self.main.mark_dirty()
+        self.tabs.setCurrentIndex(4)
+        self._refresh_side_lists()
+        self.seq_list.setCurrentRow(len(app.sequences) - 1)
+        return q
+
+    def delete_sequence(self, index: int) -> bool:
+        app = self.app
+        if app is None or not (0 <= index < len(app.sequences)):
+            return False
+        self.push_undo()
+        app.sequences.pop(index)
+        self.main.mark_dirty()
+        self._refresh_side_lists()
+        self.seq_list.setCurrentRow(min(index, len(app.sequences) - 1))
+        return True
+
+    def rename_sequence(self, index: int, name: str) -> bool:
+        app = self.app
+        if app is None or not (0 <= index < len(app.sequences)) or not name.strip():
+            return False
+        if name.strip() == app.sequences[index].name:
+            return False
+        self.push_undo()
+        app.sequences[index].name = unique_name(name, [q.name for i, q in enumerate(app.sequences) if i != index])
+        self.main.mark_dirty()
+        self._refresh_side_lists()
+        self.seq_list.setCurrentRow(index)
+        return True
+
+    def _edit_steps(self, index: int, fn, select: int | None = None) -> bool:
+        app = self.app
+        if app is None or not (0 <= index < len(app.sequences)):
+            return False
+        steps = list(app.sequences[index].steps)
+        new = fn(steps)
+        if new is None or new == app.sequences[index].steps:
+            return False
+        self.push_undo()
+        app.sequences[index].steps = new
+        self.main.mark_dirty()
+        it = self.seq_list.item(index)
+        if it is not None:
+            it.setToolTip(" → ".join(new))
+        self._load_seq_editor()
+        if select is not None:
+            self.seq_steps.setCurrentRow(select)
+        self._draw_sequence_overlay()
+        return True
+
+    def add_sequence_step(self, index: int, zone: str) -> bool:
+        app = self.app
+        if app is None or zone not in app.names():
+            return False
+        n = len(app.sequences[index].steps) if 0 <= index < len(app.sequences) else 0
+        return self._edit_steps(index, lambda st: st + [zone], n)
+
+    def remove_sequence_step(self, index: int, step: int) -> bool:
+        return self._edit_steps(index, lambda st: st[:step] + st[step + 1:] if 0 <= step < len(st) else None,
+                                max(0, step - 1))
+
+    def move_sequence_step(self, index: int, step: int, delta: int) -> bool:
+        def mv(st):
+            j = step + delta
+            if not (0 <= step < len(st) and 0 <= j < len(st)):
+                return None
+            st[step], st[j] = st[j], st[step]
+            return st
+        return self._edit_steps(index, mv, step + delta)
+
+    def set_sequence_option(self, index: int, attr: str, value) -> bool:
+        app = self.app
+        if self._loading or app is None or not (0 <= index < len(app.sequences)):
+            return False
+        q = app.sequences[index]
+        if getattr(q, attr) == value:
+            return False
+        self.push_undo()
+        setattr(q, attr, value)
+        self.main.mark_dirty()
+        self._draw_sequence_overlay()
+        return True
+
+    def _seq_row_changed(self, _r):
+        if not self._loading:
+            self._load_seq_editor()
+            self._draw_sequence_overlay()
+
+    def _load_seq_editor(self):
+        app = self.app
+        r = self.seq_list.currentRow()
+        q = app.sequences[r] if app is not None and 0 <= r < len(app.sequences) else None
+        self._loading, was = True, self._loading
+        self.seq_name.setText(q.name if q else "")
+        cur = self.seq_steps.currentRow()
+        self.seq_steps.clear()
+        for i, st in enumerate(q.steps if q else []):
+            z = app.zone(st)
+            it = QListWidgetItem(color_icon(z.color) if z else color_icon("#94a3b8"), f"{i + 1}. {st}")
+            self.seq_steps.addItem(it)
+        if q and q.steps:
+            self.seq_steps.setCurrentRow(min(max(cur, 0), len(q.steps) - 1))
+        self.seq_from_start.setChecked(q.from_start if q else True)
+        self.seq_allow_other.setChecked(q.allow_other if q else True)
+        self.seq_bidir.setChecked(q.bidirectional if q else False)
+        self.seq_overlap.setChecked(q.overlap if q else False)
+        self.seq_end.setCurrentIndex(max(0, self.seq_end.findData(q.end if q else "entry")))
+        self.seq_max.setValue(q.max_duration_s if q else 0.0)
+        for w in (self.seq_name, self.seq_steps, self.seq_zone, self.btn_step_add, self.btn_step_up,
+                  self.btn_step_down, self.btn_step_del, self.seq_from_start, self.seq_allow_other, self.seq_bidir,
+                  self.seq_overlap, self.seq_end, self.seq_max, self.btn_seq_del):
+            w.setEnabled(q is not None)
+        self._loading = was
+
     # ---- side lists ------------------------------------------------------------------
     def _refresh_side_lists(self):
         app = self.app
@@ -2345,9 +2946,20 @@ class ApparatusPage(Page):
             self.group_list.addItem(it)
         if app and app.groups:
             self.group_list.setCurrentRow(min(max(gr, 0), len(app.groups) - 1))
+        sr = self.seq_list.currentRow()
+        self.seq_list.clear()
+        for q in (app.sequences if app else []):
+            it = QListWidgetItem(q.name)
+            it.setToolTip(" → ".join(q.steps) or "(no steps)")
+            self.seq_list.addItem(it)
+        if app and app.sequences:
+            self.seq_list.setCurrentRow(min(max(sr, 0), len(app.sequences) - 1))
+        self.seq_zone.clear()
+        self.seq_zone.addItems(app.names() if app else [])
         self._loading = was
         self._sync_lists_from_canvas()
         self._load_group_editor()
+        self._load_seq_editor()
         self._update_tab_titles()
 
     def _sync_lists_from_canvas(self):
@@ -2380,7 +2992,8 @@ class ApparatusPage(Page):
         self._load_editor()
 
     def _tab_changed(self, _i):
-        pass
+        if self.app is not None:
+            self._draw_sequence_overlay()
 
     def _load_editor(self):
         app = self.app
@@ -2389,9 +3002,18 @@ class ApparatusPage(Page):
         z = app.zones[r] if app is not None and 0 <= r < len(app.zones) else None
         self.zone_name.setText(z.name if z else "")
         self.zone_color.set_color(z.color if z else "#94a3b8")
-        for w in (self.zone_name, self.zone_color, self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del):
+        for w in (self.zone_name, self.zone_color, self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del,
+                  self.zone_rule, self.zone_inv, self.zone_hidden, self.zone_moveable):
             w.setEnabled(z is not None)
         self.zone_info.setText(describe_shape(z.shape, app) if z else "—")
+        self.zone_rule.setCurrentIndex(max(0, self.zone_rule.findData(z.entry_rule if z else "")))
+        self.zone_frac.setValue(int(round((z.body_fraction if z else 0.8) * 100)))
+        self.zone_frac.setEnabled(z is not None and z.entry_rule == "body")
+        self.zone_inv.setValue(z.investigation_distance_cm if z else 0.0)
+        self.zone_inv.setSuffix(f" {app.unit}" if app is not None else " cm")
+        self.zone_hidden.setChecked(bool(z and z.hidden))
+        self.zone_moveable.setChecked(bool(z and z.moveable))
+        self.btn_grid_del.setVisible(z is not None and any(z.name in g.zones for g in app.grids))
 
         r = self.point_list.currentRow()
         p = app.points[r] if app is not None and 0 <= r < len(app.points) else None
@@ -2512,11 +3134,41 @@ class ApparatusPage(Page):
         self.set_tool("template")
         self.main.status("Drag a rectangle around the apparatus on the image (Esc cancels)", 15000)
 
+    def _apply_multi(self, key: str, built: list, name: str | None, replace: bool) -> Apparatus:
+        """One apparatus per arena (e.g. per well); the first replaces the current apparatus if asked."""
+        cur = self.app
+        fs = (cur.frame_size if cur else None) or self._real_frame_size()
+        prefix = (name + " ") if name and name != TEMPLATES[key].title and not replace else ""
+        first = None
+        if replace and cur is not None:
+            self.push_undo()
+        for i, a in enumerate(built):
+            a.frame_size = fs
+            a.name = prefix + a.name
+            if i == 0 and replace and cur is not None:
+                old = cur.name
+                cur.__dict__.update(a.__dict__)
+                cur.name = old
+                first = cur
+                continue
+            a.name = unique_name(a.name, self._names())
+            self._inherit_background(cur, a)
+            self.project.apparatus.append(a)
+            first = first or a
+        self.main.mark_dirty()
+        self._refresh_app_list(select=first)
+        self.main.status(f"Created {len(built)} apparatus from the {TEMPLATES[key].title} template "
+                         "(one per arena; tests on the same video are tracked together)")
+        return first
+
     def apply_template(self, key: str, x, y, w, h, params: dict | None = None, name: str | None = None,
                        replace: bool = False) -> Apparatus:
         """Build a template into the bounding box (x, y, w, h); replace the current apparatus or add a new one."""
-        new = templates.build(key, float(x), float(y), float(w), float(h), **(params or {}))
+        built = templates.build_many(key, float(x), float(y), float(w), float(h), **(params or {}))
         cur = self.app
+        if len(built) > 1:
+            return self._apply_multi(key, built, name, replace)
+        new = built[0]
         new.frame_size = (cur.frame_size if cur else None) or self._real_frame_size()
         if replace and cur is not None:
             self.push_undo()

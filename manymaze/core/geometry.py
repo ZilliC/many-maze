@@ -193,6 +193,16 @@ def shape_from_dict(d: dict) -> Shape:
 
 
 def _distance_to_polyline(x: np.ndarray, y: np.ndarray, poly: np.ndarray, closed: bool) -> np.ndarray:
+    x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))
+    if x.size > 4096:  # bound the (points × edges) temporaries
+        fx, fy = x.ravel(), y.ravel()
+        out = np.concatenate([_distance_to_polyline_chunk(fx[i:i + 4096], fy[i:i + 4096], poly, closed)
+                              for i in range(0, fx.size, 4096)])
+        return out.reshape(x.shape)
+    return _distance_to_polyline_chunk(x, y, poly, closed)
+
+
+def _distance_to_polyline_chunk(x: np.ndarray, y: np.ndarray, poly: np.ndarray, closed: bool) -> np.ndarray:
     pts = np.asarray(poly, float)
     if closed:
         a = pts
@@ -236,3 +246,104 @@ def segments_intersect(p1, p2, q1, q2) -> np.ndarray:
     hit = (s1 * s2 < 0) & (t1 * t2 <= 0)
     hit &= np.isfinite(p1).all(axis=1) & np.isfinite(p2).all(axis=1)
     return hit, np.where(hit, s2.astype(int), 0)
+
+
+# --------------------------------------------------------------------------- grids
+def annular_sector(cx: float, cy: float, r0: float, r1: float, a0: float, a1: float, n: int | None = None,
+                   ry_ratio: float = 1.0) -> Polygon:
+    """Sector of an annulus between radii r0..r1 and angles a0..a1 (degrees, 0 = +x, clockwise since y is down).
+
+    A full ring (a1 - a0 >= 360 and r0 > 0) is a 'keyhole' polygon whose two seam edges coincide, which the
+    even-odd point-in-polygon test and polygon filling treat as a ring with a hole.
+    """
+    span = a1 - a0
+    if n is None:
+        n = max(4, int(math.ceil(abs(span) / 5)) + 1)
+    ts = np.linspace(math.radians(a0), math.radians(a1), n)
+    outer = [(cx + r1 * math.cos(t), cy + r1 * ry_ratio * math.sin(t)) for t in ts]
+    if r0 <= 0:
+        if abs(span) >= 360 - 1e-9:
+            return Polygon(outer[:-1])
+        return Polygon([(cx, cy)] + outer)
+    inner = [(cx + r0 * math.cos(t), cy + r0 * ry_ratio * math.sin(t)) for t in ts[::-1]]
+    return Polygon(outer + inner)
+
+
+def clip_convex(shape: Shape, clip: Shape) -> Polygon | None:
+    """Intersection of a convex shape with a convex clip shape (None if empty or the clip is not convex)."""
+    a = np.asarray(shape.polygon(96), np.float32).reshape(-1, 1, 2)
+    b = np.asarray(clip.polygon(96), np.float32).reshape(-1, 1, 2)
+    if not cv2.isContourConvex(b.astype(np.float32)):
+        hull = cv2.convexHull(b)
+        if abs(cv2.contourArea(hull) - cv2.contourArea(b)) > 1e-3 * max(cv2.contourArea(hull), 1.0):
+            return None
+        b = hull
+    area, inter = cv2.intersectConvexConvex(a, b)
+    if inter is None or area <= 1e-6:
+        return None
+    return Polygon([(float(x), float(y)) for x, y in inter.reshape(-1, 2)])
+
+
+def square_grid(x: float, y: float, w: float, h: float, nx: int, ny: int) -> list[list[Polygon]]:
+    """nx × ny rectangular cells covering the box; returned as rows (top to bottom) of cells (left to right)."""
+    nx, ny = max(1, int(nx)), max(1, int(ny))
+    cw, ch = w / nx, h / ny
+    return [[rect(x + i * cw, y + j * ch, cw, ch) for i in range(nx)] for j in range(ny)]
+
+
+def concentric_rings(cx: float, cy: float, r: float, n: int, ry: float | None = None,
+                     radii: list[float] | None = None) -> list[Polygon]:
+    """n rings of equal width from the centre outwards (the first is a disc); optional explicit outer radii."""
+    ratio = (ry / r) if ry and r else 1.0
+    edges = [0.0] + (sorted(radii) if radii else [r * (i + 1) / max(1, int(n)) for i in range(max(1, int(n)))])
+    return [annular_sector(cx, cy, edges[i], edges[i + 1], 0, 360, 73, ratio) for i in range(len(edges) - 1)]
+
+
+def radial_sectors(cx: float, cy: float, r: float, n: int, start_deg: float = -90.0, r_inner: float = 0.0,
+                   ry: float | None = None) -> list[Polygon]:
+    """n equal pie sectors starting at start_deg (default: top, going clockwise)."""
+    n = max(1, int(n))
+    ratio = (ry / r) if ry and r else 1.0
+    step = 360.0 / n
+    return [annular_sector(cx, cy, r_inner * 1.0, r, start_deg + i * step, start_deg + (i + 1) * step,
+                           ry_ratio=ratio) for i in range(n)]
+
+
+# --------------------------------------------------------------------------- body ellipse
+_UNIT_DISC = None
+
+
+def _unit_disc_samples() -> np.ndarray:
+    """Fixed sample points (≈ 37) evenly covering the unit disc."""
+    global _UNIT_DISC
+    if _UNIT_DISC is None:
+        pts = [(0.0, 0.0)]
+        for ring, k in ((1 / 3, 6), (2 / 3, 12), (0.95, 18)):
+            for i in range(k):
+                a = 2 * math.pi * (i + 0.5 * (ring > 0.5)) / k
+                pts.append((ring * math.cos(a), ring * math.sin(a)))
+        _UNIT_DISC = np.asarray(pts)
+    return _UNIT_DISC
+
+
+def body_fraction_inside(shape: Shape, x, y, angle_deg, a, b) -> np.ndarray:
+    """Fraction of an elliptical body (centre x, y; semi-axes a along angle_deg, b across) inside the shape.
+
+    All arguments are per-frame arrays (pixels); frames with missing values give NaN.
+    """
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    ang = np.radians(np.nan_to_num(np.asarray(angle_deg, float) * np.ones_like(x)))
+    a = np.asarray(a, float) * np.ones_like(x)
+    b = np.asarray(b, float) * np.ones_like(x)
+    s = _unit_disc_samples()
+    ca, sa = np.cos(ang)[:, None], np.sin(ang)[:, None]
+    u = s[None, :, 0] * a[:, None]
+    v = s[None, :, 1] * b[:, None]
+    px = x[:, None] + u * ca - v * sa
+    py = y[:, None] + u * sa + v * ca
+    inside = shape.contains(px, py)
+    frac = inside.mean(axis=1)
+    bad = ~(np.isfinite(x) & np.isfinite(y) & np.isfinite(a) & np.isfinite(b))
+    frac = frac.astype(float)
+    frac[bad] = np.nan
+    return frac

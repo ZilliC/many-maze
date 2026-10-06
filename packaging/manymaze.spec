@@ -17,7 +17,10 @@ a = Analysis(
                    ("experiment", "animals", "apparatus", "tests", "testview", "live", "results", "statistics",
                     "_results_cache")] + ["matplotlib.backends.backend_qtagg", "manymaze.core.batch",
                                           "manymaze.core.pose", "manymaze.gui.pose_model", "onnx", "onnx.helper",
-                                          "onnx.numpy_helper"],
+                                          "onnx.numpy_helper"] +
+                  ["manymaze.core." + m for m in ("iodevices", "operant", "periods", "sequences", "charts",
+                                                  "videoexport", "workflow", "camera", "livegroup")] +
+                  ["manymaze.gui." + m for m in ("procedure_editor", "touchscreen", "live_widgets", "confirm_id")],
     excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "IPython"],
     noarchive=False,
 )

@@ -8,11 +8,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-                               QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
-                               QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                               QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+                               QPushButton, QSpinBox, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget)
 
+from ...core import workflow as wf
 from ...core.project import Animal, Group
 from ..widgets import error_box
 from .base import Page
@@ -111,6 +113,85 @@ class _AddSeveralDialog(QDialog):
         self.preview.setText(f"{ids[0]} … {ids[-1]}" if len(ids) > 1 else ids[0])
 
 
+class DoseDialog(QDialog):
+    """Injection volume = weight × dose / concentration, written to the animals' "Volume (mL)" field."""
+
+    def __init__(self, project, n_selected: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Dose calculator")
+        ds = wf.dose_settings(project)
+        f = QFormLayout(self)
+        f.addRow(QLabel("Volume (mL) = weight (g) / 1000 × dose (mg/kg) / concentration (mg/mL).<br>"
+                        f"Animals with their own “{wf.DOSE_FIELD}” field use that dose instead of the default."))
+        self.weight = QComboBox()
+        self.weight.setEditable(True)
+        fields = [x for x in project.animal_fields if x not in (wf.VOLUME_FIELD, wf.DOSE_FIELD)]
+        self.weight.addItems(fields or [wf.WEIGHT_FIELD])
+        self.weight.setCurrentText(ds["weight_field"] if ds["weight_field"] in fields or not fields
+                                   else next((x for x in fields if "weight" in x.lower()), fields[0]))
+        self.dose = QDoubleSpinBox()
+        self.dose.setRange(0, 1e6)
+        self.dose.setDecimals(3)
+        self.dose.setSuffix(" mg/kg")
+        self.dose.setValue(float(ds["dose_mg_kg"]))
+        self.conc = QDoubleSpinBox()
+        self.conc.setRange(0.0001, 1e6)
+        self.conc.setDecimals(4)
+        self.conc.setSuffix(" mg/mL")
+        self.conc.setValue(float(ds["conc_mg_ml"]))
+        self.only_sel = QCheckBox(f"Only the {n_selected} selected animal{'s' if n_selected != 1 else ''}")
+        self.only_sel.setEnabled(n_selected > 0)
+        self.only_sel.setChecked(n_selected > 0)
+        f.addRow("Weight column", self.weight)
+        f.addRow("Default dose", self.dose)
+        f.addRow("Concentration", self.conc)
+        f.addRow("", self.only_sel)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Calculate volumes")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def settings(self) -> dict:
+        return {"weight_field": self.weight.currentText().strip() or wf.WEIGHT_FIELD,
+                "dose_mg_kg": self.dose.value(), "conc_mg_ml": self.conc.value()}
+
+
+class CriteriaDialog(QDialog):
+    """Result of evaluating the training criteria; Apply retires animals / completes stages."""
+
+    def __init__(self, report: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Training criteria")
+        lay = QVBoxLayout(self)
+        rows = report["rows"]
+        lay.addWidget(QLabel(f"{len(rows)} animal × criterion evaluation{'s' if len(rows) != 1 else ''}. "
+                             f"<b>{sum(len(v) for v in report['completed'].values())}</b> stage(s) completed, "
+                             f"<b>{len(report['retire'])}</b> animal(s) to retire."))
+        t = QTableWidget(len(rows), 5)
+        t.setHorizontalHeaderLabels(["Animal", "Criterion", "Trials", "Met at trial", "Outcome"])
+        t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        t.verticalHeader().hide()
+        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        for r, row in enumerate(rows):
+            outcome = ("criterion met" if row["met"] else "failed → retire" if row["failed"] and row["action"] == "retire"
+                       else "failed" if row["failed"] else "in progress")
+            for c, v in enumerate((row["animal"], row["criterion"], str(row["trials"]),
+                                   str(row["met_at_trial"] or "–"), outcome)):
+                it = QTableWidgetItem(v)
+                if c == 4:
+                    it.setForeground(QColor("#16a34a" if row["met"] else "#dc2626" if row["failed"] else "#475569"))
+                t.setItem(r, c, it)
+        lay.addWidget(t, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Apply).setToolTip("Retire failing animals (their pending tests are skipped) and "
+                                                     "skip the remaining trials of completed stages")
+        bb.button(QDialogButtonBox.Apply).clicked.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(760, 420)
+
+
 class AnimalsPage(Page):
     title = "Animals"
 
@@ -121,12 +202,14 @@ class AnimalsPage(Page):
         # ---- left: animals table ------------------------------------------------
         bar = QHBoxLayout()
 
-        def button(text, fn, tip=""):
+        bar2 = QHBoxLayout()
+
+        def button(text, fn, tip="", row=bar):
             b = QPushButton(text)
             b.clicked.connect(fn)
             if tip:
                 b.setToolTip(tip)
-            bar.addWidget(b)
+            row.addWidget(b)
             return b
 
         button("Add animal", self.add_animal_interactive)
@@ -136,6 +219,15 @@ class AnimalsPage(Page):
         bar.addSpacing(16)
         button("Import CSV…", self._import_dialog, "Columns: ID, Group, Sex; any other column becomes a field")
         button("Export CSV…", self._export_dialog)
+        self.retire_btn = button("Retire", lambda: self.toggle_retire_selected(),
+                                 "Withdraw the selected animals from the experiment (their pending tests are skipped "
+                                 "and new schedules leave them out), or reinstate retired animals", bar2)
+        button("Training criteria…", self.criteria_dialog,
+               "Evaluate the training criteria (Experiment page) against the results: complete stages and retire "
+               "animals that failed", bar2)
+        button("Dose calculator…", self.dose_dialog, "Injection volume from body weight, dose and concentration",
+               bar2)
+        bar2.addStretch()
         bar.addStretch()
         self.summary = QLabel()
         self.summary.setStyleSheet("color:palette(mid)")
@@ -152,6 +244,7 @@ class AnimalsPage(Page):
         self.table.horizontalHeader().setHighlightSections(False)
         self.table.setSortingEnabled(True)
         self.table.itemChanged.connect(self._cell_changed)
+        self.table.itemSelectionChanged.connect(self._update_retire_btn)
         self.table.setItemDelegateForColumn(1, _ComboDelegate(self._group_names, self.table))
         self.table.setItemDelegateForColumn(2, _ComboDelegate(lambda: SEXES, self.table))
         QShortcut(QKeySequence.Delete, self.table, self.delete_selected_interactive)
@@ -159,6 +252,7 @@ class AnimalsPage(Page):
         left = QVBoxLayout()
         left.addLayout(bar)
         left.addWidget(self.table, 1)
+        left.addLayout(bar2)
         hint = QLabel("Double-click a cell to edit. Typing a new group name in the Group column creates the group. "
                       "Renaming an animal updates its tests.")
         hint.setWordWrap(True)
@@ -173,12 +267,20 @@ class AnimalsPage(Page):
         self.groups_list.itemDoubleClicked.connect(lambda _it: self._rename_group_dialog())
         gl.addWidget(self.groups_list)
         gbar = QHBoxLayout()
+        self._group_btns = []
         for text, fn in (("Add", self._add_group_dialog), ("Rename…", self._rename_group_dialog),
                          ("Colour…", self._color_group_dialog), ("Delete", self._delete_group_dialog)):
             b = QPushButton(text)
             b.clicked.connect(fn)
             gbar.addWidget(b)
+            self._group_btns.append(b)
         gl.addLayout(gbar)
+        self.blind_lbl = QLabel("Blind testing is on: groups are shown as codes and cannot be edited. Turn it off "
+                                "on the Experiment page.")
+        self.blind_lbl.setWordWrap(True)
+        self.blind_lbl.setStyleSheet("color:#9333ea")
+        self.blind_lbl.hide()
+        gl.addWidget(self.blind_lbl)
 
         fb = QGroupBox("Custom fields (extra columns)")
         fl = QVBoxLayout(fb)
@@ -229,7 +331,7 @@ class AnimalsPage(Page):
         return out
 
     def _columns(self) -> list[str]:
-        return ["ID", "Group", "Sex"] + list(self.project.animal_fields) + ["Tests"]
+        return ["ID", "Group", "Sex"] + list(self.project.animal_fields) + ["Tests", "Status"]
 
     def refresh(self):
         self._loading = True
@@ -254,12 +356,10 @@ class AnimalsPage(Page):
         for c in range(len(cols)):
             hh.setSectionResizeMode(c, QHeaderView.Interactive)
             self.table.setColumnWidth(c, 130 if c < 3 else 120)
-        self.table.setColumnWidth(len(cols) - 1, 70)
+        self.table.setColumnWidth(len(cols) - 2, 70)
+        self.table.setColumnWidth(len(cols) - 1, 90)
         hh.setStretchLastSection(False)
-        if len(cols) > 4:
-            hh.setSectionResizeMode(len(cols) - 2, QHeaderView.Stretch)
-        else:
-            hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        hh.setSectionResizeMode(len(cols) - 3, QHeaderView.Stretch)
         self.table.setSortingEnabled(True)
         self._loading = False
         self._refresh_side(counts)
@@ -269,9 +369,11 @@ class AnimalsPage(Page):
         it = QTableWidgetItem(a.id)
         it.setData(Qt.UserRole, a)
         self.table.setItem(r, 0, it)
-        g = QTableWidgetItem(a.group)
+        g = QTableWidgetItem(wf.display_group(p, a.group))
         if a.group:
-            g.setIcon(swatch(p.group_color(a.group)))
+            g.setIcon(swatch(wf.display_color(p, a.group)))
+        if p.blind:
+            g.setFlags(g.flags() & ~Qt.ItemIsEditable)
         self.table.setItem(r, 1, g)
         self.table.setItem(r, 2, QTableWidgetItem(a.sex))
         for i, f in enumerate(p.animal_fields):
@@ -284,6 +386,12 @@ class AnimalsPage(Page):
         if ids:
             n.setToolTip("Tests: " + ", ".join(str(i) for i in ids))
         self.table.setItem(r, 3 + len(p.animal_fields), n)
+        st = QTableWidgetItem("retired" if a.retired else "active")
+        st.setFlags(st.flags() & ~Qt.ItemIsEditable)
+        st.setForeground(QColor("#dc2626" if a.retired else "#16a34a"))
+        if a.retired and a.retired_reason:
+            st.setToolTip(a.retired_reason)
+        self.table.setItem(r, 4 + len(p.animal_fields), st)
 
     def _refresh_side(self, counts=None):
         p = self.project
@@ -292,7 +400,8 @@ class AnimalsPage(Page):
         self.groups_list.clear()
         for g in p.groups:
             n = sum(1 for a in p.animals if a.group == g.name)
-            it = QListWidgetItem(swatch(g.color, 14), f"{g.name}    ({n} animal{'s' if n != 1 else ''})")
+            it = QListWidgetItem(swatch(wf.display_color(p, g.name), 14),
+                                 f"{wf.display_group(p, g.name)}    ({n} animal{'s' if n != 1 else ''})")
             it.setData(Qt.UserRole, g.name)
             self.groups_list.addItem(it)
             if g.name == cur_g:
@@ -305,7 +414,13 @@ class AnimalsPage(Page):
             if f == cur_f:
                 self.fields_list.setCurrentItem(it)
         n_tests = sum(len(v) for k, v in counts.items() if p.get_animal(k))
-        self.summary.setText(f"{len(p.animals)} animals · {len(p.groups)} groups · {n_tests} tests")
+        n_ret = sum(1 for a in p.animals if a.retired)
+        self.summary.setText(f"{len(p.animals)} animals · {len(p.groups)} groups · {n_tests} tests"
+                             + (f" · {n_ret} retired" if n_ret else ""))
+        for b in self._group_btns:
+            b.setEnabled(not p.blind)
+        self.blind_lbl.setVisible(p.blind)
+        self._update_retire_btn()
 
     def _changed(self):
         self.main.mark_dirty()
@@ -459,6 +574,9 @@ class AnimalsPage(Page):
                     else:
                         self.rename_animal(a, text)
             elif c == 1:
+                if p.blind:
+                    item.setText(wf.display_group(p, a.group))
+                    return
                 if text and text not in self._group_names():
                     self.ensure_group(text)
                 a.group = text
@@ -473,6 +591,88 @@ class AnimalsPage(Page):
                 self._changed()
         finally:
             self._loading = False
+
+    # ------------------------------------------------------------------ retirement, criteria, doses
+    def _update_retire_btn(self):
+        sel = self.selected_animals() if self.project is not None else []
+        self.retire_btn.setEnabled(bool(sel))
+        self.retire_btn.setText("Reinstate" if sel and all(a.retired for a in sel) else "Retire")
+
+    def toggle_retire_selected(self, reason: str | None = None):
+        sel = self.selected_animals()
+        if not sel:
+            return
+        if all(a.retired for a in sel):
+            n = sum(wf.reinstate_animal(self.project, a) for a in sel)
+            msg = f"Reinstated {len(sel)} animal{'s' if len(sel) != 1 else ''} ({n} skipped tests resumed)."
+        else:
+            if reason is None:
+                reason, ok = QInputDialog.getText(self, "Retire animals", "Reason (optional):")
+                if not ok:
+                    return
+            n = sum(wf.retire_animal(self.project, a, reason.strip()) for a in sel if not a.retired)
+            msg = f"Retired {len(sel)} animal{'s' if len(sel) != 1 else ''} ({n} pending tests skipped)."
+        self._changed()
+        self.refresh()
+        self.main.status(msg)
+
+    def evaluate_criteria(self) -> dict:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return wf.evaluate_criteria(self.project)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def criteria_dialog(self):
+        p = self.project
+        if p is None:
+            return None
+        if not p.training_criteria:
+            QMessageBox.information(self, "Training criteria", "No training criteria are defined. Add them on the "
+                                    "Experiment page (Training criteria).")
+            return None
+        try:
+            rep = self.evaluate_criteria()
+        except Exception as e:
+            error_box(self, "Training criteria", e)
+            return None
+        if CriteriaDialog(rep, self).exec() != QDialog.Accepted:
+            return None
+        return self.apply_criteria(rep)
+
+    def apply_criteria(self, report: dict | None = None) -> dict:
+        res = wf.apply_criteria(self.project, report)
+        self._changed()
+        self.refresh()
+        self.main.status(f"Training criteria: {res['completed']} stage(s) completed, {len(res['retired'])} animal(s) "
+                         f"retired, {res['skipped']} test(s) skipped.")
+        return res
+
+    def dose_dialog(self):
+        p = self.project
+        if p is None:
+            return None
+        sel = self.selected_animals()
+        dlg = DoseDialog(p, len(sel), self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return self.calculate_doses(dlg.settings(), sel if dlg.only_sel.isChecked() else None)
+
+    def calculate_doses(self, settings: dict | None = None, animals: list[Animal] | None = None) -> dict:
+        p = self.project
+        ds = wf.dose_settings(p)
+        if settings:
+            ds.update(settings)
+        if ds["weight_field"] not in p.animal_fields:
+            p.animal_fields.append(ds["weight_field"])
+        vols = wf.compute_doses(p, animals)
+        self._changed()
+        self.refresh()
+        missing = [k for k, v in vols.items() if v is None]
+        self.main.status(f"Injection volumes calculated for {len(vols) - len(missing)} animal(s)"
+                         + (f"; no valid weight for {', '.join(missing[:6])}{'…' if len(missing) > 6 else ''}"
+                            if missing else "") + ".")
+        return vols
 
     # ------------------------------------------------------------------ groups
     def _current_group(self) -> str | None:

@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import html
 import math
+import time
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QBrush, QColor, QGuiApplication
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QGraphicsItem,
                                QGraphicsTextItem, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
-                               QStyle, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QLayout, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+                               QScrollArea, QSpinBox, QSplitter, QStyle, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QVBoxLayout, QWidget)
 
+from ...core import workflow as wf
 from ...core.plots import heatmap, speed_trace, track_plot
 from ...core.track import Track
 from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_overlay
+from ..confirm_id import confirm_animal_id
 from ..widgets import PlotCanvas, VideoPlayer, Worker, error_box, fmt_time, run_with_progress
 from .base import DETECTION_SPEC, Page, SettingsForm
 from .tests import track_tests_job
@@ -25,6 +30,11 @@ from .tests import track_tests_job
 SPEC_ATTRS = [a for a, *_ in DETECTION_SPEC]
 ANIMAL_BGR = [(0, 200, 255), (255, 0, 200), (0, 230, 0), (255, 200, 0), (0, 128, 255), (200, 120, 255)]
 INFO_KEYS = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"}
+BEHAVIOUR_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", "#ef4444", "#84cc16",
+                    "#f97316", "#06b6d4"]
+KIND_TEXT = {"state": "toggle", "hold": "hold", "point": "point"}
+STATUS_COLORS = {"tracked": "#16a34a", "scored": "#0891b2", "pending": "#d97706", "skipped": "#9333ea",
+                 "superseded": "#94a3b8", "excluded": "#94a3b8"}
 
 
 def fmt_value(v) -> str:
@@ -64,6 +74,152 @@ def _ro_item(text, data=None) -> QTableWidgetItem:
     return it
 
 
+def behaviour_color(b, index: int) -> str:
+    return b.color or BEHAVIOUR_COLORS[index % len(BEHAVIOUR_COLORS)]
+
+
+class FlowLayout(QLayout):
+    """Lays out widgets left to right, wrapping to new lines as needed."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._do_layout(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h, sp = r.x(), r.y(), 0, self.spacing()
+        for it in self._items:
+            hint = it.sizeHint()
+            if x + hint.width() > r.right() + 1 and line_h > 0:
+                x, y, line_h = r.x(), y + line_h + sp, 0
+            if not test_only:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + sp
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
+
+
+class ScoringPad(QWidget):
+    """On-screen scoring buttons (mouse / touch screen), one per behaviour.
+
+    Emits pressed(name) / released(name); hold behaviours are scored between the two."""
+
+    pressed = Signal(str)
+    released = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.flow = FlowLayout(self, 6)
+        self.buttons: dict[str, QPushButton] = {}
+        self._colors: dict[str, str] = {}
+        self._active: set[str] = set()
+
+    def set_behaviours(self, behaviours):
+        while self.flow.count():
+            it = self.flow.takeAt(0)
+            if it.widget() is not None:
+                it.widget().deleteLater()
+        self.buttons.clear()
+        self._colors.clear()
+        for i, b in enumerate(behaviours):
+            key = b.key.upper() if b.key else "–"
+            btn = QPushButton(f"{b.name}\n[{key}]  {KIND_TEXT.get(b.kind, b.kind)}")
+            btn.setFocusPolicy(Qt.NoFocus)  # the keyboard stays with the video
+            btn.setMinimumSize(124, 58)
+            btn.setToolTip({"hold": "Press and hold while the behaviour lasts",
+                            "state": "Press to start, press again to stop",
+                            "point": "Press when the event occurs"}.get(b.kind, "")
+                           + (f" · exclusive set “{b.group}”" if b.group else ""))
+            btn.pressed.connect(lambda n=b.name: self.pressed.emit(n))
+            btn.released.connect(lambda n=b.name: self.released.emit(n))
+            self.flow.addWidget(btn)
+            btn.show()
+            self.buttons[b.name] = btn
+            self._colors[b.name] = behaviour_color(b, i)
+        self.set_active(self._active)
+        self.updateGeometry()
+
+    def set_active(self, names):
+        self._active = set(names)
+        for name, btn in self.buttons.items():
+            c = QColor(self._colors[name])
+            if name in self._active:
+                css = (f"background:{c.name()};color:white;border:2px solid {c.darker(130).name()};"
+                       "border-radius:8px;font-weight:bold;padding:4px 10px;")
+            else:
+                css = (f"background:rgba({c.red()},{c.green()},{c.blue()},38);color:#0f172a;"
+                       f"border:2px solid {c.name()};border-radius:8px;padding:4px 10px;")
+            btn.setStyleSheet(f"QPushButton{{{css}}}QPushButton:pressed{{background:{c.name()};color:white;}}")
+
+
+class ObservationClock:
+    """Start / pause / stop clock for scoring by direct observation (no video)."""
+
+    def __init__(self, time_fn=time.monotonic):
+        self.time_fn = time_fn
+        self.state = "stopped"  # stopped | running | paused
+        self._acc = 0.0
+        self._t0 = 0.0
+
+    def elapsed(self) -> float:
+        return self._acc + (self.time_fn() - self._t0 if self.state == "running" else 0.0)
+
+    def start(self):
+        if self.state == "stopped":
+            self._acc = 0.0
+        if self.state != "running":
+            self._t0 = self.time_fn()
+            self.state = "running"
+
+    def pause(self):
+        if self.state == "running":
+            self._acc = self.elapsed()
+            self.state = "paused"
+
+    def stop(self) -> float:
+        self._acc = self.elapsed()
+        self.state = "stopped"
+        return self._acc
+
+    def reset(self):
+        self.state, self._acc = "stopped", 0.0
+
+
 class TestViewPage(Page):
     title = "Test view"
 
@@ -77,6 +233,11 @@ class TestViewPage(Page):
         self._bg_key: tuple | None = None
         self._bg_error: str = ""
         self._open_states: dict[str, float] = {}
+        self._confirmed: set[int] = set()  # tests whose animal ID was confirmed this session
+        self.clock = ObservationClock()
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(100)
+        self._clock_timer.timeout.connect(self._clock_tick)
         self._event_rows: list[tuple[dict, bool]] = []
         self._undo: list[tuple[int, Track | None]] = []
         self._range: list[float | None] = [None, None]
@@ -220,7 +381,7 @@ class TestViewPage(Page):
         lay.addLayout(top)
         lay.addWidget(split, 1)
 
-        for w in (self.player, self.player.view, self.player.slider, self.events_table, self.beh_table):
+        for w in (self.player, self.player.view, self.player.slider, self.events_table):
             w.installEventFilter(self)
         self._enable(False)
 
@@ -276,26 +437,47 @@ class TestViewPage(Page):
     def _build_scoring_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
-        hint = QLabel("Click on the video, then press a behaviour's key while it plays or is paused. State "
-                      "behaviours toggle on/off; point behaviours are logged at the current time. "
-                      "Space = play/pause, ←/→ = step (Shift: 1 s).")
+        hint = QLabel("Score with the keys (click on the video first) or the buttons. Toggle behaviours switch on/off, "
+                      "hold behaviours last while the key or button is held, point behaviours are logged at the "
+                      "current time. Space = play/pause, ←/→ = step (Shift: 1 s).")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#475569;")
         lay.addWidget(hint)
-        self.beh_table = QTableWidget(0, 4)
-        self.beh_table.setHorizontalHeaderLabels(["Key", "Behaviour", "Type", "Now"])
-        self.beh_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.beh_table.verticalHeader().hide()
-        self.beh_table.setMaximumHeight(140)
-        self.beh_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.beh_table.setFocusPolicy(Qt.NoFocus)
-        lay.addWidget(self.beh_table)
+
+        self.clock_box = QGroupBox("Observation clock (no video: score by direct observation)")
+        cl = QHBoxLayout(self.clock_box)
+        self.clock_lbl = QLabel("00:00.0")
+        self.clock_lbl.setStyleSheet("font-size:22px;font-weight:bold;font-family:monospace;")
+        st = self.style()
+        self.clock_start_btn = QPushButton("Start")
+        self.clock_start_btn.setIcon(st.standardIcon(QStyle.SP_MediaPlay))
+        self.clock_start_btn.clicked.connect(lambda: self.clock_start())
+        self.clock_pause_btn = QPushButton("Pause")
+        self.clock_pause_btn.setIcon(st.standardIcon(QStyle.SP_MediaPause))
+        self.clock_pause_btn.clicked.connect(self.clock_pause)
+        self.clock_stop_btn = QPushButton("Stop")
+        self.clock_stop_btn.setIcon(st.standardIcon(QStyle.SP_MediaStop))
+        self.clock_stop_btn.clicked.connect(self.clock_stop)
+        cl.addWidget(self.clock_lbl)
+        cl.addStretch()
+        for b in (self.clock_start_btn, self.clock_pause_btn, self.clock_stop_btn):
+            b.setFocusPolicy(Qt.NoFocus)
+            cl.addWidget(b)
+        self.clock_box.hide()
+        lay.addWidget(self.clock_box)
+
+        self.pad = ScoringPad()
+        self.pad.pressed.connect(self._pad_pressed)
+        self.pad.released.connect(self._pad_released)
+        lay.addWidget(self.pad)
         self.active_lbl = QLabel()
+        self.active_lbl.setWordWrap(True)
         lay.addWidget(self.active_lbl)
         self.events_table = QTableWidget(0, 4)
         self.events_table.setHorizontalHeaderLabels(["Behaviour", "Start (s)", "End (s)", "Duration (s)"])
         self.events_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.events_table.verticalHeader().hide()
+        self.events_table.verticalHeader().setDefaultSectionSize(22)
         self.events_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.events_table.cellClicked.connect(self._event_clicked)
         lay.addWidget(self.events_table, 1)
@@ -309,6 +491,12 @@ class TestViewPage(Page):
         row.addWidget(dele)
         row.addWidget(clr)
         lay.addLayout(row)
+        lay.addWidget(QLabel("Notes"))
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setPlaceholderText("Notes about this test (exported with the results)")
+        self.notes_edit.setMaximumHeight(60)
+        self.notes_edit.textChanged.connect(self._notes_changed)
+        lay.addWidget(self.notes_edit)
         return w
 
     def _build_detection_tab(self):
@@ -393,6 +581,20 @@ class TestViewPage(Page):
         rl.addWidget(self.range_lbl)
         rl.addLayout(r2)
         lay.addWidget(rg)
+        mv = QGroupBox("Moveable zones in this test (e.g. the platform position)")
+        mvl = QHBoxLayout(mv)
+        self.move_zone = QComboBox()
+        self.move_btn = QPushButton("Place (click on video)")
+        self.move_btn.setCheckable(True)
+        self.move_btn.toggled.connect(self._mark_toggled)
+        self.move_reset = QPushButton("Reset")
+        self.move_reset.setToolTip("Use the apparatus position for this test")
+        self.move_reset.clicked.connect(self.reset_moveable_zone)
+        mvl.addWidget(self.move_zone, 1)
+        mvl.addWidget(self.move_btn)
+        mvl.addWidget(self.move_reset)
+        self.move_box = mv
+        lay.addWidget(mv)
         r3 = QHBoxLayout()
         self.undo_btn = QPushButton("Undo last edit")
         self.undo_btn.clicked.connect(self.undo_edit)
@@ -406,6 +608,8 @@ class TestViewPage(Page):
     # ================================================================== page API
     def set_project(self, project):
         self._close_open_states()
+        self._reset_clock()
+        self._confirmed.clear()
         self.player.close_video()
         self.test = None
         self.tracks = []
@@ -442,13 +646,17 @@ class TestViewPage(Page):
         self._load_detection_form()
         self._fill_behaviours()
         self._fill_events()
+        self._load_notes()
         self._update_info()
+        self._update_clock_ui()
         self._enable(True)
         self._mark_stale("results", "plots")
         self._refresh_frame()
 
     def on_hide(self):
         self.player.pause()
+        if self.clock.state == "running":
+            self.clock_pause()
         self._close_open_states()
 
     def commit(self):
@@ -493,7 +701,13 @@ class TestViewPage(Page):
         t = p.get_test(test_id)
         if t is None:
             return
+        if self.clock.state != "stopped":
+            if t is self.test:  # an observation of this test is in progress: keep it going
+                self.reload_current()
+                return
+            self.clock_stop()
         self._close_open_states()
+        self._reset_clock()
         self.player.pause()
         self.test = t
         self._undo.clear()
@@ -508,6 +722,7 @@ class TestViewPage(Page):
         self._load_detection_form()
         self._fill_behaviours()
         self._fill_events()
+        self._load_notes()
         self._update_range_lbl()
         self._enable(True)
         path = p.abs_path(t.video) if t.video else ""
@@ -516,12 +731,49 @@ class TestViewPage(Page):
         else:
             self.player.close_video()
             self.player.current_frame = None
+            self.pos_lbl.setText("")
             self._placeholder("No video for this test" if not path else f"Video not found:\n{path}")
         self._update_info()
+        self._update_clock_ui()
         self._mark_stale("results", "plots")
         self.player.view.setFocus()
 
+    def _fill_moveable(self):
+        base = self.project.get_apparatus(self.test.apparatus) if self.test is not None else None
+        names = [z.name for z in base.zones if z.moveable] if base is not None else []
+        self.move_zone.clear()
+        for n in names:
+            moved = self.test is not None and n in self.test.zone_overrides
+            self.move_zone.addItem(f"{n}{'  (moved)' if moved else ''}", n)
+        self.move_box.setVisible(bool(names))
+
+    def place_moveable_zone(self, x: float, y: float):
+        """Centre the selected moveable zone on (x, y) for this test only."""
+        name = self.move_zone.currentData()
+        base = self.project.get_apparatus(self.test.apparatus) if self.test is not None else None
+        z = base.zone(name) if base is not None and name else None
+        if z is None:
+            return
+        cx, cy = z.shape.centroid()
+        self.test.zone_overrides[name] = z.shape.translated(x - cx, y - cy).to_dict()
+        self._moveable_changed(f"{name} placed at ({x:.0f}, {y:.0f}) px for this test.")
+
+    def reset_moveable_zone(self):
+        name = self.move_zone.currentData()
+        if self.test is not None and name and self.test.zone_overrides.pop(name, None) is not None:
+            self._moveable_changed(f"{name} reset to the apparatus position.")
+
+    def _moveable_changed(self, msg):
+        i = self.move_zone.currentIndex()
+        self._fill_moveable()
+        self.move_zone.setCurrentIndex(i)
+        self.main.mark_dirty()
+        self._mark_stale("results", "plots")
+        self._refresh_frame()
+        self.edit_lbl.setText(msg)
+
     def _load_tracks(self):
+        self._fill_moveable()
         self.tracks = self.project.load_tracks(self.test) if self.test is not None else []
         ids = [self.test.animal_id] + list(self.test.extra_animals) if self.test else []
         for cb in (self.plot_animal, self.edit_animal):
@@ -547,7 +799,9 @@ class TestViewPage(Page):
         self.results_table.setRowCount(0)
         self.results_lbl.setText("")
         self.events_table.setRowCount(0)
-        self.beh_table.setRowCount(0)
+        self.pad.set_behaviours([])
+        self._load_notes()
+        self.clock_box.hide()
         self._placeholder("No test selected")
 
     def _placeholder(self, text: str):
@@ -570,17 +824,24 @@ class TestViewPage(Page):
             self.info_lbl.setText("")
             return
         a = p.get_animal(t.animal_id)
-        grp = f" <span style='color:{p.group_color(a.group)}'>({a.group})</span>" if a and a.group else ""
+        grp = (f" <span style='color:{wf.display_color(p, a.group)}'>({html.escape(wf.display_group(p, a.group))})"
+               "</span>" if a and a.group else "")
+        if a is not None and a.retired:
+            grp += " <span style='color:#dc2626'>retired</span>"
         dur = t.duration_s or p.test_duration_s
-        status_col = {"tracked": "#16a34a", "pending": "#d97706", "excluded": "#94a3b8"}.get(t.status, "#334155")
-        parts = [f"<b>{t.animal_id or '—'}</b>{grp}", t.stage or "", f"trial {t.trial}", t.apparatus,
+        status_col = STATUS_COLORS.get(t.status, "#334155")
+        parts = [f"<b>{t.animal_id or '—'}</b>{grp}", t.stage or "",
+                 f"trial {t.trial}" + (f" (attempt {t.attempt})" if t.attempt > 1 else ""), t.apparatus,
                  Path(t.video).name if t.video else "no video", f"{t.start_s:g}–{t.start_s + dur:g} s" if dur else "",
                  f"<b style='color:{status_col}'>{t.status}</b>"]
         self.info_lbl.setText(" · ".join(x for x in parts if x))
 
     # ================================================================== overlay
     def _app(self):
-        return self.project.get_apparatus(self.test.apparatus) if self.test is not None else None
+        if self.test is None:
+            return None
+        app = self.project.get_apparatus(self.test.apparatus)
+        return app.with_overrides(self.test.zone_overrides) if app is not None else None
 
     def video_start(self, tr: Track | None = None) -> float:
         """Video time (s) at which track time 0 occurs."""
@@ -594,7 +855,11 @@ class TestViewPage(Page):
         return self.test.start_s if self.test is not None else 0.0
 
     def test_time(self) -> float:
-        """Current time relative to the test start (the time base of the track and of scored events)."""
+        """Current time relative to the test start (the time base of the track and of scored events).
+
+        Without a video this is the observation clock."""
+        if self.player.source is None:
+            return self.clock.elapsed()
         return self.player.time - self.video_start()
 
     @staticmethod
@@ -962,23 +1227,7 @@ class TestViewPage(Page):
     # ================================================================== manual scoring
     def _fill_behaviours(self):
         p = self.project
-        tbl = self.beh_table
-        tbl.setRowCount(0)
-        if p is None:
-            return
-        for b in p.behaviours:
-            r = tbl.rowCount()
-            tbl.insertRow(r)
-            k = _ro_item(b.key.upper() if b.key else "—")
-            k.setTextAlignment(Qt.AlignCenter)
-            f = k.font()
-            f.setBold(True)
-            k.setFont(f)
-            tbl.setItem(r, 0, k)
-            tbl.setItem(r, 1, _ro_item(b.name))
-            tbl.setItem(r, 2, _ro_item("state" if b.kind == "state" else "point"))
-            tbl.setItem(r, 3, _ro_item(""))
-        tbl.resizeColumnToContents(0)
+        self.pad.set_behaviours(p.behaviours if p is not None else [])
         self._update_active()
 
     def behaviour_for_key(self, text: str):
@@ -987,26 +1236,101 @@ class TestViewPage(Page):
             return None
         return next((b for b in self.project.behaviours if b.key and b.key.lower() == text), None)
 
+    def behaviour_named(self, name: str):
+        return next((b for b in self.project.behaviours if b.name == name), None) if self.project else None
+
+    def scoring_ready(self) -> bool:
+        """Whether key / button scoring may happen now (asks for the animal ID first when the experiment requires
+        it; without a video the observation clock must be running)."""
+        t, p = self.test, self.project
+        if t is None or p is None:
+            return False
+        if self.player.source is None and self.clock.state != "running":
+            self.main.status("No video: start the observation clock (Scoring tab) to score by direct observation.")
+            return False
+        return self.confirm_animal()
+
+    def confirm_animal(self) -> bool:
+        t = self.test
+        if t is None or t.id in self._confirmed or not wf.confirm_id_enabled(self.project):
+            return True
+        self.player.pause()
+        if not confirm_animal_id(self, t, self.project):
+            self.main.status("Animal not confirmed — scoring blocked.")
+            return False
+        self._confirmed.add(t.id)
+        return True
+
     def score(self, b, t: float | None = None):
-        """Toggle a state behaviour or log a point behaviour at test time t (default: now)."""
+        """Toggle a state / hold behaviour or log a point behaviour at test time t (default: now)."""
         if self.test is None:
             return
         t = round(self.test_time() if t is None else t, 3)
         if b.kind == "point":
             self.test.events.append({"behaviour": b.name, "t": t, "t_end": None})
             self.main.status(f"{b.name} at {t:.2f} s")
+            self._scoring_changed()
         elif b.name in self._open_states:
-            t0 = self._open_states.pop(b.name)
-            a, z = sorted((t0, t))
-            if z > a:
-                self.test.events.append({"behaviour": b.name, "t": a, "t_end": z})
-            self.main.status(f"{b.name} off at {t:.2f} s")
+            self.stop_behaviour(b, t)
         else:
-            self._open_states[b.name] = t
-            self.main.status(f"{b.name} on at {t:.2f} s")
+            self.start_behaviour(b, t)
+
+    def start_behaviour(self, b, t: float | None = None):
+        """Start a state / hold behaviour (stopping the others of its exclusive set)."""
+        if self.test is None or b.name in self._open_states:
+            return
+        t = round(self.test_time() if t is None else t, 3)
+        for o in wf.exclusive_partners(self.project.behaviours, b):
+            if o.name in self._open_states:
+                self._end_state(o.name, t)
+        self._open_states[b.name] = t
+        self.main.status(f"{b.name} on at {t:.2f} s")
+        self._scoring_changed()
+
+    def stop_behaviour(self, b, t: float | None = None):
+        if self.test is None or b.name not in self._open_states:
+            return
+        t = round(self.test_time() if t is None else t, 3)
+        self._end_state(b.name, t)
+        self.main.status(f"{b.name} off at {t:.2f} s")
+        self._scoring_changed()
+
+    def _end_state(self, name, t):
+        t0 = self._open_states.pop(name)
+        a, z = sorted((t0, t))
+        if z > a:
+            self.test.events.append({"behaviour": name, "t": a, "t_end": z})
+
+    def _scoring_changed(self):
         self.test.events.sort(key=lambda e: e["t"])
         self.main.mark_dirty()
         self._events_changed()
+
+    def press_behaviour(self, b) -> bool:
+        """Key / button pressed: start (hold), toggle (state) or log (point)."""
+        if not self.scoring_ready():
+            return False
+        if b.kind == "hold":
+            self.start_behaviour(b)
+        else:
+            self.score(b)
+        return True
+
+    def release_behaviour(self, b) -> bool:
+        if b.kind != "hold" or b.name not in self._open_states:
+            return False
+        self.stop_behaviour(b)
+        return True
+
+    def _pad_pressed(self, name):
+        b = self.behaviour_named(name)
+        if b is not None:
+            self.press_behaviour(b)
+
+    def _pad_released(self, name):
+        b = self.behaviour_named(name)
+        if b is not None:
+            self.release_behaviour(b)
 
     def _close_open_states(self):
         if not self._open_states or self.test is None:
@@ -1023,25 +1347,136 @@ class TestViewPage(Page):
         self._events_changed()
 
     def _events_changed(self):
+        if self.test is not None and self.project is not None:
+            old = self.test.status
+            if wf.refresh_status(self.project, self.test) != old:
+                self._fill_combo()
+                self._update_info()
         self._fill_events()
         self._update_active()
         self._mark_stale("results")
         self._refresh_frame()
+        self._update_observation_hud()
 
     def _update_active(self):
-        now = self.test_time() if self.test is not None and self.player.source is not None else None
+        now = self.test_time() if self.test is not None and (self.player.source is not None
+                                                             or self.clock.state != "stopped") else None
         if self._open_states:
-            parts = [f"<b style='color:#16a34a'>{n}</b> since {t0:.2f} s" +
+            parts = [f"<b style='color:#16a34a'>{html.escape(n)}</b> since {t0:.2f} s" +
                      (f" ({now - t0:.1f} s)" if now is not None else "") for n, t0 in self._open_states.items()]
             self.active_lbl.setText("Active: " + ", ".join(parts))
         else:
             self.active_lbl.setText("<span style='color:#94a3b8'>No state behaviour active.</span>")
-        for r in range(self.beh_table.rowCount()):
-            name = self.beh_table.item(r, 1).text()
-            it = self.beh_table.item(r, 3)
-            on = name in self._open_states
-            it.setText("● on" if on else "")
-            it.setForeground(QBrush(QColor("#16a34a")))
+        self.pad.set_active(self._open_states)
+
+    # ---- observation clock (TakeNote mode) ------------------------------------
+    def _update_clock_ui(self):
+        no_video = self.test is not None and self.player.source is None
+        self.clock_box.setVisible(no_video)
+        st = self.clock.state
+        self.clock_start_btn.setText("Resume" if st == "paused" else "Start")
+        self.clock_start_btn.setEnabled(no_video and st != "running")
+        self.clock_pause_btn.setEnabled(st == "running")
+        self.clock_stop_btn.setEnabled(st != "stopped")
+        e = self.clock.elapsed()
+        self.clock_lbl.setText(f"{int(e // 60):02d}:{e % 60:04.1f}")
+        self.clock_lbl.setStyleSheet("font-size:22px;font-weight:bold;font-family:monospace;color:"
+                                     + {"running": "#16a34a", "paused": "#d97706"}.get(st, "#334155") + ";")
+        self._update_observation_hud()
+
+    def _update_observation_hud(self):
+        if self.test is None or self.player.source is not None:
+            return
+        e = self.clock.elapsed()
+        lines = [("No video — scoring by direct observation", "#e2e8f0"),
+                 (f"observation clock {fmt_time(e)}  ({self.clock.state})",
+                  {"running": "#4ade80", "paused": "#fbbf24"}.get(self.clock.state, "#e2e8f0"))]
+        if self.clock.state == "stopped" and not self.test.events:
+            lines.append(("Start the clock on the Scoring tab", "#94a3b8"))
+        lines += [(f"● {n}", "#4ade80") for n in self._open_states]
+        self._set_hud(lines)
+
+    def _clock_tick(self):
+        if self.clock.state != "running" or self.test is None:
+            self._clock_timer.stop()
+            return
+        dur = self.test.duration_s or self.project.test_duration_s
+        if dur and self.clock.elapsed() >= dur:
+            self.clock_stop(at=dur)
+            self.main.status(f"Observation finished ({dur:g} s).")
+            return
+        self._update_clock_ui()
+        if self._open_states:
+            self._update_active()
+
+    def clock_start(self, confirm: bool = True) -> bool:
+        t = self.test
+        if t is None or self.player.source is not None or self.clock.state == "running":
+            return False
+        if self.clock.state == "stopped":
+            if t.events and confirm and QMessageBox.question(
+                    self, "Observation", f"Test {t.id} already has {len(t.events)} scored events. Delete them and "
+                    "score the test again?") != QMessageBox.Yes:
+                return False
+            if not self.confirm_animal():
+                return False
+            if t.events:
+                t.events = []
+                self.main.mark_dirty()
+                self._events_changed()
+        self.clock.start()
+        self._clock_timer.start()
+        self._update_clock_ui()
+        self.main.status("Observation clock running — score with the keys or the buttons.")
+        return True
+
+    def clock_pause(self):
+        if self.clock.state != "running":
+            return
+        self.clock.pause()
+        self._clock_timer.stop()
+        self._update_clock_ui()
+
+    def clock_stop(self, at: float | None = None):
+        """Stop the observation: close running behaviours, store the duration and mark the test scored."""
+        t, p = self.test, self.project
+        if self.clock.state == "stopped" or t is None:
+            return
+        if at is not None:
+            self.clock._acc, self.clock.state = float(at), "paused"
+        e = round(self.clock.stop(), 3)
+        self._clock_timer.stop()
+        for name in list(self._open_states):
+            self._end_state(name, e)
+        dur = t.duration_s or p.test_duration_s
+        if not dur or e < dur - 1e-6:
+            t.duration_s = round(e, 2)
+            self._loading = True
+            self.dur_spin.setValue(t.duration_s)
+            self._loading = False
+        if not t.recorded_at:
+            t.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
+        self._scoring_changed()
+        self._update_info()
+        self._update_clock_ui()
+        self.main.status(f"Observation of test {t.id} stopped at {e:.1f} s — {len(t.events)} events.")
+
+    def _reset_clock(self):
+        self._clock_timer.stop()
+        self.clock.reset()
+
+    # ---- notes ----------------------------------------------------------------------
+    def _load_notes(self):
+        self._loading = True
+        self.notes_edit.setPlainText(self.test.notes if self.test is not None else "")
+        self.notes_edit.setEnabled(self.test is not None)
+        self._loading = False
+
+    def _notes_changed(self):
+        if self._loading or self.test is None:
+            return
+        self.test.notes = self.notes_edit.toPlainText()
+        self.main.mark_dirty()
 
     def _fill_events(self):
         tbl = self.events_table
@@ -1098,12 +1533,26 @@ class TestViewPage(Page):
         if self.test is None or e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
             return False
         b = self.behaviour_for_key(e.text().strip())
-        if b is not None and not e.isAutoRepeat():
-            self.score(b)
-            return True
-        return False
+        if b is None:
+            return False
+        if not e.isAutoRepeat():
+            self.press_behaviour(b)
+        return True
+
+    def _handle_key_release(self, e) -> bool:
+        if self.test is None or e.isAutoRepeat():
+            return False
+        b = self.behaviour_for_key(e.text().strip())
+        return b is not None and self.release_behaviour(b)
+
+    def keyReleaseEvent(self, e):
+        if self._handle_key_release(e):
+            return
+        super().keyReleaseEvent(e)
 
     def eventFilter(self, obj, e):
+        if e.type() == QEvent.KeyRelease and self._handle_key_release(e):
+            return True
         if e.type() == QEvent.KeyPress:
             if self._handle_key(e):
                 return True
@@ -1211,7 +1660,10 @@ class TestViewPage(Page):
         self._refresh_frame()
 
     def _view_clicked(self, x, y):
-        if self.mark_btn.isChecked():
+        if self.move_btn.isChecked():
+            self.place_moveable_zone(x, y)
+            self.move_btn.setChecked(False)
+        elif self.mark_btn.isChecked():
             self.mark_position(x, y)
 
     def _new_track(self) -> Track:

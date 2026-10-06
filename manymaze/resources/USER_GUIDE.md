@@ -40,6 +40,8 @@ Add animals one by one or in bulk, assign **groups** (treatments/genotypes, each
 graphs), sex and any number of custom columns (age, weight, litter…). Animals can be imported from / exported
 to CSV (`ID, Group, Sex, …`).
 
+Retirement, the dose calculator and blind testing are described in §6.
+
 ## 3. Apparatus
 
 Load a frame from a video (or a test's video) as background, then either **create from template** — drag a
@@ -57,6 +59,41 @@ from the real size you enter — or draw your own:
 
 Several apparatus can share one video (e.g. four open fields filmed together) — tests that share a video and
 start time are tracked in a single pass.
+
+### Zones and areas
+
+Each drawn zone is an *area*. **Zone groups** combine any number of areas (they need not touch) and can subtract
+areas (*Periphery = Arena − Centre*); an area can be in several groups. Every zone and group gets results.
+
+**Zone properties** (Apparatus ▸ Zones):
+* **Entry rule** – *Default* (analysis setting), *Centre*, *Head*, *Tail base*, **Proportion of the body** (≥ N %
+  of the body ellipse inside to enter; leave when < min(N, 100−N) %), or **Not in any other zone**.
+* **Investigate** – the animal counts as in the zone while its head is within this distance of the zone's edge
+  (object investigation).
+* **Hidden zone** – nests, tunnels, shelters: if the animal disappears in or near it (*Hidden zone distance*; 0 =
+  half the zone size) the time until it reappears counts as time in that zone, not "not detected", and no movement
+  is interpolated.
+* **Moveable** – each test can override the zone's shape/position (e.g. the water-maze platform; moveable by
+  default); points and moveable zones centred inside it move along.
+
+**Copy / paste** shapes with ⌘C / ⌘V (in the same apparatus the copy is offset; into another apparatus it keeps its
+position).
+
+### Grids (Grid tool, G)
+
+Cover the arena, the selected zone or the whole image with: **square** cells (N×M, or a real cell size in cm when
+calibrated; named `A1…`; clipped to round arenas), **concentric rings** (`Ring 1` = centre…), **radial sectors**
+(`Sector 1…`, clockwise from the start angle) or **rings × sectors**. Each grid also creates a zone group. Measures:
+crossings, cells visited (n, %), latency to visit all cells, inner-cell / outer-ring time %. *Delete grid* removes
+all cells.
+
+### Sequences
+
+Ordered steps of zones/groups. Options: must begin at the first step (off = rotations such as ABC/BCA/CAB count —
+spontaneous alternation), other zones allowed between steps, both directions, overlapping, complete on entering or
+leaving the last step, time limit. Entering a step zone out of order is an error and ends the attempt. Measures:
+completed, attempts, incomplete, errors, completion %, latency to first, first/mean/min/max duration, mean time
+between, rate, total time in sequences, completed reversed.
 
 ## 4. Tests
 
@@ -124,18 +161,498 @@ confidence* fall back to the shape estimate.
 * **Hardware recording** – live tests are recorded with VideoToolbox's H.264 encoder (MP4), leaving the CPU for
   tracking.
 
-## 6. Live testing
+### Moveable zones
 
-Pick a camera (AVFoundation on macOS — grant camera permission when asked) or simulate with a video file,
-choose the test, capture an empty-arena background (or use the adaptive model), and start. Tests can start
-immediately or when the animal is placed in the apparatus. The video is recorded alongside tracking.
+For zones marked *Moveable* (e.g. the water-maze platform) the **Track editing** tab sets their position for the open test: choose the zone, press *Place* and click its new centre on the video; *Reset* returns to the apparatus position. Results use the per-test position.
 
-**Procedures** react to the animal in real time: *when <trigger> [after delay] do <action>*.
-Triggers: start, end, time, zone enter/exit, freezing start/end, immobility start/end, animal lost. Actions:
-serial command (e.g. to an Arduino driving LEDs, tones, shockers, feeders — `pip install pyserial`), TTL alias,
-beep, mark an event, end the test.
+## 6. Experiment workflow and behaviour scoring
 
-## 7. Results
+### Manually scored behaviours
+
+Define behaviours on the **Experiment** page (*Manually scored behaviours*):
+
+| Column | Meaning |
+|---|---|
+| Behaviour | Name used in the results (e.g. `Rearing: duration (s)`). |
+| Key | One letter, digit or punctuation key (`- = [ ] ; ' , . / \``). Up to **46** keys; each key can be used once. Space and the arrow keys stay reserved for the video. |
+| Type | **State** — the key toggles the behaviour on/off. **Hold** — the behaviour is scored while the key (or button) is held down. **Point** — an instantaneous event. |
+| Exclusive set | Behaviours with the same set name cannot overlap: starting one stops the others (e.g. *posture*: Freezing, Grooming, Rearing). |
+| Colour | Colour of the on-screen scoring button. |
+
+Problems (duplicate keys, unusable keys, more than 46 keys) are listed in red under the table.
+
+#### Scoring in the Test view
+
+Open a test and choose the **Scoring** tab.
+
+- **Keys**: click on the video, then press the behaviour keys while the video plays or is paused. Hold behaviours
+  start when the key goes down and stop when it is released (keyboard auto-repeat is ignored).
+- **On-screen buttons**: one large button per behaviour, usable with the mouse or a touch screen. Press-and-hold a
+  *hold* button for the duration of the behaviour; tap a *state* button to switch it on and again to switch it off;
+  tap a *point* button when the event occurs. Running behaviours are shown filled.
+- Scored events are listed with their start, end and duration; click one to jump to it, delete selected events, or
+  clear them all. Behaviours still running when you leave the test are closed at the current time.
+- To score several behaviours in repeated viewings, simply replay the video and score other keys: events accumulate.
+- **Notes** for the test can be read and edited under the event list (also editable on the Tests page).
+
+Scoring a video that has not been tracked gives the test the status **scored**; its results then contain the
+behaviour measures only (count, duration, % of test, latency, mean bout, rate). A tracked test keeps the status
+*tracked* and gets the behaviour measures together with the tracking measures.
+
+#### TakeNote mode: scoring by direct observation
+
+A test without a video (e.g. created with **Add test** or **Schedule…**) can be scored live, with just a timer:
+
+1. Open it in the Test view; the Scoring tab shows the **Observation clock**.
+2. Press **Start**, then score with the keys or buttons as you watch the animal. **Pause** freezes the test time;
+   **Resume** continues it.
+3. Press **Stop** (or let the clock reach the test duration). Running behaviours are closed, the observed duration is
+   stored as the test duration and the test becomes **scored**.
+
+Starting the clock again on a scored test asks whether to delete the previous events and score it again.
+
+### Stages, trials and schedules
+
+- Up to **50 stages** (Experiment page, one per line) and **1–99 trials** per stage.
+- **Tests → Schedule…** creates tests without video for the chosen animals × stages × trials, in running order:
+  - *By animal* — all trials of an animal, then the next animal;
+  - *By trial* — trial 1 of every animal, then trial 2, …;
+  - *Randomised* — trial by trial, animals in random order (enter a seed to reproduce an order);
+  - *Latin square* — trial by trial, each animal runs in every position equally often.
+- **Counterbalance** apparatus or a test variable (e.g. `novel_object` = *Object A, Object B*): the levels are
+  assigned to each animal's successive tests from the rows of a balanced Latin square (Williams design), so every
+  level occurs equally often at every position and after every other level.
+- Combinations that already have a test, retired animals and stages an animal has completed (training criteria) are
+  skipped. Animal, stage, trial and apparatus of each test can still be edited by hand afterwards.
+
+### Test status actions (Tests page)
+
+| Status | Meaning |
+|---|---|
+| pending | Not done yet. |
+| tracked | Has a track. |
+| scored | Manually scored, no track. |
+| skipped | Not performed for now — select it and press **Resume** later. |
+| superseded | Replaced by a re-performed attempt. |
+| excluded | Kept but left out of results. |
+
+- **Skip / Resume**: skip the selected tests (left out of results and of *Track all untracked*); resume them later.
+- **Re-perform**: adds a new attempt of the test (same animal, stage, trial, apparatus and variables, *attempt 2*…);
+  the previous attempt is kept, marked *superseded* and left out of results and statistics.
+- **Clear tracks**: deletes the tracks of the selected tests (scored events and videos are kept).
+
+### Training criteria
+
+On the Experiment page (*Training criteria*) add, per stage, a condition on a result measure, e.g.
+*Training: Escape latency (s) < 10 on 3 consecutive trials; retire after 10 trials*:
+
+- **Measure** — any column of the results (or a procedure result variable), whole-test value.
+- **Op / Value / Consecutive** — the condition and the number of consecutive trials on which it must hold.
+- **When met** — *Stage completed*: the animal's remaining trials of the stage are skipped and new schedules do not
+  include the stage again for it; *Report only*.
+- **Retire after** — animals that have not met the criterion after this many trials are retired.
+
+On the Animals page press **Training criteria…** to see, for every animal, the trials done, the trial at which the
+criterion was met and the outcome; **Apply** completes stages and retires failing animals (their pending tests are
+skipped).
+
+### Animals: retirement and dose calculation
+
+- The **Status** column shows *active* or *retired* (hover for the reason). **Retire** withdraws the selected animals
+  (pending tests skipped, left out of new schedules); **Reinstate** brings them back and resumes the tests that were
+  skipped because of the retirement.
+- **Dose calculator…**: injection volume (mL) = weight (g) / 1000 × dose (mg/kg) / concentration (mg/mL). Choose the
+  weight column, the default dose and the concentration (remembered for the experiment). An animal with its own
+  *Dose (mg/kg)* field uses that dose. The volume is written to the *Volume (mL)* column of each (selected) animal.
+
+### Blind testing
+
+Tick **Blind testing** on the Experiment page: on the Animals, Tests and Test view pages the treatment groups are
+replaced by stable random codes (e.g. *Group NJ55*) with a neutral colour, and groups cannot be renamed or
+re-coloured. Results, statistics and exports keep the real groups. Unticking the box (unblinding) asks for
+confirmation.
+
+### Animal identification
+
+Tick **Confirm the animal's ID** on the Experiment page to have the experimenter scan the animal's barcode or
+microchip (a USB scanner types like a keyboard) or type its ID before scoring a test (first key/button press, or
+starting the observation clock). The input must match the animal ID or one of its fields whose name contains
+*barcode*, *microchip*, *RFID*, *chip*, *tag* or *transponder*; a mismatch blocks scoring.
+
+## 7. Live testing
+
+The **Live testing** page tracks animals in real time from cameras — or from video files that simulate cameras, so
+everything can be tried without hardware. Choose a mode with the buttons at the top of the page:
+
+| Mode | Use it for |
+|---|---|
+| **One test** | a single apparatus filmed by one camera |
+| **Several tests at once** | several apparatus in one camera image and/or several cameras, run together |
+| **Observation only (no camera)** | scoring behaviour by direct observation (a clock and scoring keys) |
+
+### Starting and ending a test
+
+Set these in **Setup ▸ Start and end** (they apply to every mode):
+
+- **Duration** — the test ends automatically after this time; *Until stopped* runs until you stop it (or a
+  procedure ends it).
+- **Test starts**
+  - *Immediately when armed*.
+  - *When the animal is detected* — the animal must be seen inside the arena for a short hold time.
+  - *When the experimenter leaves the view* — waits for a large object (your hand / arm: bigger than the maximum
+    animal area, or touching the arena edge) to appear and leave again, then for the animal to be detected. The
+    image shows *WAITING FOR EXPERIMENTER*, *WAITING FOR HAND TO LEAVE*, then *WAITING FOR ANIMAL*.
+  - *On a start key (keyboard / remote)* — armed tests wait until a start key is pressed.
+  - *At a clock time* — the test starts at the **Start time** (HH:MM). With **every day** (several-tests mode)
+    the tests start every day at that time; finished rows are re-armed automatically as new tests (trial + 1).
+- **Start keys / Stop keys** — default *Space, PageDown, F5* to start (or resume) and *B, PageUp* to stop and save.
+  USB presentation remotes act as keyboards, so their buttons work as remote controls. Keys used for scoring
+  behaviours are never used as start / stop keys.
+- **Arm / Start test** arms the test; while it waits the button becomes **Start now**.
+- **Pause** stops the test clock: no tracking data, no recording and no procedure timing while paused. **Resume**
+  (or a start key) continues where it stopped. Pauses are saved with the test (`pauses`; the length of each pause
+  is noted in the test notes).
+- **Stop** ends the test early (Save keeps the data, Discard deletes the test).
+
+If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
+test starts.
+
+### Several tests at once
+
+1. **Add source ▾** — add cameras (by number) or video files (simulated cameras). Each source is read in its own
+   thread.
+2. **Add session** — one row per test: *source × apparatus × animal / stage / trial*. One camera can feed several
+   apparatus (each apparatus' arena is tracked independently), and several cameras can run at the same time.
+3. **Start cameras**, then **Capture backgrounds** with the arenas empty (video files use their median image).
+4. **Arm all** arms every row; **Start all now**, **Pause all**, **Resume all** and **Stop all** act on every test;
+   the ▶ ❚❚ ■ buttons of a row act on that test only (▶ arms, starts now or resumes).
+
+The mosaic shows every camera image with the zones, the animal, its recent path and a state label per test.
+Each test is saved independently as soon as it finishes (track, recording, events, I/O events, procedure result
+variables, pauses). The source / session layout is saved with the experiment.
+
+### Real-time monitoring
+
+The **Monitor** tab shows the selected test (click a row or a camera image): distance, speed, whether the animal
+is moving / immobile / freezing, the current zone, a live table of **time, entries and latency per zone** (zone
+entry rules, investigation distances, hidden zones and the test's moveable-zone positions are applied as in the
+results), a **live chart** of speed, distance, motion, detection or freezing over the last 30 s – 5 min, the
+**status of I/O devices**, and **warnings**: animal lost for longer than *Warn if lost for*, dropped camera
+frames, recording errors and procedure errors.
+
+### Camera options
+
+**Camera options…** (Setup ▸ Video source, or under the session table for the selected row's source):
+
+- **Region** — drag a rectangle on the camera image to capture only that part of it (or type x, y, w, h).
+- **Digital zoom** with **pan** left–right / up–down.
+- **Rotate** 90 / 180 / 270° and **flip** (mirror / upside down).
+- **Merge with** a second camera, side by side or one above the other, to film one apparatus with two cameras.
+
+The options are saved per camera with the experiment. Draw the apparatus on the transformed image (the apparatus
+page shows what the camera delivers); changing the options later moves the image under the apparatus.
+
+### Recording
+
+**Record video of the test** saves one file per test in the experiment's `recordings` folder and links it to the
+test, so it can be re-analysed or reviewed. **Burn time and events into the video** writes the test time, the clock
+time and the latest event labels on the recording; leave it off for a clean video.
+
+### Erasing thin wires and cage bars
+
+**Detection settings ▸ Erase thin wires / bars (px)** removes thin structures up to that width — tethers, tubes,
+wire lids, cage bars — from the image before detection, so they neither split the animal in two nor are mistaken
+for it. It also removes thin parts of the animal (the tail), so keep it at 0 when nothing crosses the arena. It
+works with infrared cameras like any other camera.
+
+### Observation only
+
+With no camera, press **Start observation** and score with the behaviour keys or the on-screen buttons (*point*
+events; *state* behaviours toggle; *hold* behaviours last while the key or button is held; behaviours of an
+exclusive set stop each other). Pause / resume stops the clock. **Stop and save** stores the events in the test,
+which gets the status *scored*.
+
+### Procedures
+
+Procedures (§8) run in every live test, including each test of a several-tests session; their variables are shared between tests and saved with the experiment. A *Pause the test* action pauses the test like the Pause button; resume it with *Resume* or a start key.
+
+## 8. Procedures and hardware I/O
+
+Procedures automate live tests: they switch lights, dispense pellets, deliver tones and shocks, drive
+optogenetic lasers, count lever presses, run reinforcement schedules, end the test when a criterion is met, and
+much more, reacting to the animal's position and behaviour, to keys, to hardware inputs and to the touch screen.
+Any number of procedures run at the same time. They are saved with the experiment (`Project.procedures`) and
+work with real hardware (an Arduino running the bundled firmware, any text-command serial device, the computer's
+speakers) or with simulated devices.
+
+### The procedure editor
+
+The editor has three panes:
+
+* **Procedures** (left) — every ticked procedure runs during each live test. *Add* creates an empty procedure
+  or one of the examples (fear conditioning, FR 5 lever pressing, optogenetic stimulation in a zone,
+  spontaneous-alternation counter). Double-click a procedure to rename it.
+* **Statements** (middle) — the procedure as a tree of blocks. *Add* inserts a statement after the selected
+  one, *Add inside* puts it in the selected When / If / Else / Repeat block. Drag & drop statements to move or
+  nest them, or use ▲ ▼ (move), → (indent: into the block above) and ← (outdent). *On/off* disables a statement
+  without deleting it; *JSON* shows the procedure as text for copying between experiments.
+* **Parameters** (right) — the selected statement's settings. Fields accept numbers or expressions
+  (e.g. `randint(60, 120)`); *Functions…* lists everything that can be used in expressions.
+
+Procedures are checked as you type: problems (unknown zones, devices or variables, syntax errors, statements in
+the wrong place, missing values…) are listed under the tree and highlighted in red on the statement; click a
+problem to jump to it. Problems that can only appear while a test runs (division by zero, an array index out of
+range…) are reported in the live-test log without stopping the test.
+
+### Statements
+
+| Statement | What it does |
+|---|---|
+| **When** *event* | Runs its block every time the event happens (top level only). *If it recurs while running*: ignore it (default), restart the block, or run another copy in parallel. *Only the first time* runs it once. |
+| **Wait** | Pauses this block: for a time (`30`, `randint(20, 40)`), until a condition is true, or for an event; optionally with a timeout (afterwards `timed_out` is 1 if it timed out). Other procedures and blocks keep running. |
+| **If** / **Else** | Runs the block when the condition is true, otherwise the optional Else block. |
+| **Repeat** | A number of times, while a condition is true, or forever. An optional loop variable counts 0, 1, 2… |
+| **Set** | Gives a variable a value (an expression); with an index, sets one element of an array. |
+| **Do** *action* | Performs an action (see below). |
+| **Stop** | Exits this block, exits the loop, stops this procedure, stops all procedures, or ends the test. |
+| **Comment** | A note; does nothing. |
+| **Variable** | Declares a variable and its initial value (top level). *Keep the value between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list); *Save as a test result* stores its final value with the test, where it appears as a result measure. |
+
+Statements written at the top level of a procedure (outside any When) run in order from the start of the test,
+so a timed protocol is simply: *Wait 120 → Do tone 30 s → Wait 28 → Do shock 2 s → …*.
+
+**Timing.** Procedures are evaluated on every video frame. A wait ends on the first frame at or after its due
+time, and the next wait counts from the due time, so long sequences never drift. Pulses, pulse trains and pellet
+pulses on the Arduino are timed by the board itself (microsecond resolution), independently of the frame rate;
+the I/O log records their exact times. "Repeat N times" and "Repeat while" loops run instantly; a
+"Repeat forever" loop whose block does not wait runs once per frame (a polling loop).
+
+**Several procedures at once.** Every When block that is running is independent: a procedure can wait for 30 s
+while another one counts lever presses and a third one turns a light on whenever the animal enters a zone.
+Procedures communicate through variables, *Send signal* / *Signal received*, virtual switches and
+*Enable/Disable procedure*.
+
+### Events
+
+Events marked *(optional)* match anything when the parameter is left empty (e.g. *Animal enters zone* with no
+zone fires for every zone; the zone's name is then in `event_name`). Inside a When block, `event_time`,
+`event_name` (zone, input, key, area…) and `event_value` (input value, speed…) describe the event.
+
+| Group | Event | Parameters |
+|---|---|---|
+| Test | Test starts (`test_start`) | — |
+| Test | Test ends (`test_end`) | — |
+| Test | Time reached (`time_reached`) — once, when the test time reaches the given time | Time (s) |
+| Test | Every N seconds (`every`) | Interval (s), First at (s) *(optional)* |
+| Test | Test paused (`test_paused`) | — |
+| Test | Test resumed (`test_resumed`) | — |
+| Zones | Animal enters zone (`zone_enter`) | Zone *(optional)* |
+| Zones | Animal leaves zone (`zone_exit`) | Zone *(optional)* |
+| Zones | Head enters zone (`head_zone_enter`) | Zone *(optional)* |
+| Zones | Head leaves zone (`head_zone_exit`) | Zone *(optional)* |
+| Zones | Total time in zone reaches (`zone_time_reaches`) | Zone, Time (s) |
+| Zones | Time in zone (one visit) reaches (`zone_dwell`) — fires once per visit that lasts at least this long | Zone, Time (s) |
+| Zones | Zone entries reach (`zone_entries_reach`) | Zone, Entries |
+| Zones | Zone sequence completed (`zone_sequence`) | Zones (in order) |
+| Animal | Freezing starts (`freezing_start`) | — |
+| Animal | Freezing ends (`freezing_end`) | — |
+| Animal | Immobility starts (`immobile_start`) | — |
+| Animal | Immobility ends (`immobile_end`) | — |
+| Animal | Animal not detected (`animal_lost`) | — |
+| Animal | Animal detected again (`animal_found`) | — |
+| Animal | Speed rises above (`speed_above`) | Speed |
+| Animal | Speed falls below (`speed_below`) | Speed |
+| Animal | Distance travelled reaches (`distance_reaches`) | Distance |
+| Animal | Total freezing time reaches (`freezing_time_reaches`) | Time (s) |
+| Animal | Total immobile time reaches (`immobile_time_reaches`) | Time (s) |
+| Keyboard | Key pressed (`key_down`) | Key *(optional)* |
+| Keyboard | Key released (`key_up`) | Key *(optional)* |
+| Inputs | Input switches on (`input_on`) | Device *(optional)*, Input |
+| Inputs | Input switches off (`input_off`) | Device *(optional)*, Input |
+| Inputs | Input changes (`input_changed`) | Device *(optional)*, Input |
+| Inputs | Input activations reach (`input_count_reaches`) | Device *(optional)*, Input, Count |
+| Inputs | Analogue input rises above (`analog_above`) | Device *(optional)*, Input, Level |
+| Inputs | Analogue input falls below (`analog_below`) | Device *(optional)*, Input, Level |
+| Inputs | Encoder count reaches (`encoder_reaches`) | Device *(optional)*, Input, Counts |
+| Inputs | Every N encoder counts (`encoder_every`) — e.g. once per wheel revolution | Device *(optional)*, Input, Counts |
+| Outputs | Output switched on (`output_on`) | Device *(optional)*, Output *(optional)* |
+| Outputs | Output switched off (`output_off`) | Device *(optional)*, Output *(optional)* |
+| Logic | Variable changes (`variable_changed`) | Variable |
+| Logic | Condition becomes true (`condition_true`) | Condition |
+| Logic | Condition becomes false (`condition_false`) | Condition |
+| Logic | Timer elapses (`timer_elapsed`) | Timer |
+| Logic | Signal received (`signal`) — sent by the “Send signal” action of any procedure | Signal |
+| Logic | Virtual switch on (`virtual_switch_on`) | Switch |
+| Logic | Virtual switch off (`virtual_switch_off`) | Switch |
+| Logic | Event marked (`event_marked`) | Event *(optional)* |
+| Logic | Reinforcer earned (`reinforcer_earned`) | Schedule |
+| Touch screen | Touch in area (`touch`) | Area *(optional)* |
+| Touch screen | Touch outside all areas (`touch_outside`) | — |
+
+### Actions
+
+Output actions name a device and a channel; leave the device empty to use whichever device has a channel of that
+name. Outputs used by procedures but not configured are simulated (and reported). All outputs, pulse trains,
+sounds and virtual switches are switched off when the test ends.
+
+| Group | Action | Parameters |
+|---|---|---|
+| Outputs | Switch output on (`output_on`) | Device *(optional)*, Output |
+| Outputs | Switch output off (`output_off`) | Device *(optional)*, Output |
+| Outputs | Toggle output (`output_toggle`) | Device *(optional)*, Output |
+| Outputs | Pulse output (`output_pulse`) | Device *(optional)*, Output, Duration (s) |
+| Outputs | Set output level (`output_set`) | Device *(optional)*, Output, Level (0–1) |
+| Outputs | Switch all outputs off (`all_outputs_off`) | Device *(optional)* |
+| Outputs | Pulse train (optogenetics) (`pulse_train`) | Device *(optional)*, Output, Frequency (Hz), Pulse width (ms), Duration (s) |
+| Outputs | Stop pulse train (`pulse_train_stop`) | Device *(optional)*, Output |
+| Outputs | Sync pulse (e-phys / imaging) (`sync_pulse`) | Device *(optional)*, Output, Width (ms) |
+| Operant | Dispense pellet(s) (`pellet`) | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)* |
+| Operant | Light on (`light_on`) | Device *(optional)*, Output |
+| Operant | Light off (`light_off`) | Device *(optional)*, Output |
+| Operant | Open door (`door_open`) | Device *(optional)*, Output |
+| Operant | Close door (`door_close`) | Device *(optional)*, Output |
+| Operant | Extend lever (`lever_extend`) | Device *(optional)*, Output |
+| Operant | Retract lever (`lever_retract`) | Device *(optional)*, Output |
+| Operant | Start reinforcement schedule (`schedule_start`) | Schedule name, Schedule |
+| Operant | Register response (`schedule_response`) | Schedule name, Schedule *(optional)*, Store 1/0 (reinforced) in *(optional)* |
+| Shock | Shock on (`shock_on`) | Device *(optional)*, Output, Safety cut-off (s) |
+| Shock | Shock off (`shock_off`) | Device *(optional)*, Output |
+| Shock | Shock for a duration (`shock_pulse`) | Device *(optional)*, Output, Duration (s) |
+| Audio | Play tone (`tone`) | Audio device *(optional)*, Frequency (Hz), Duration (s), Volume (0–1) *(optional)* |
+| Audio | Play white noise (`white_noise`) | Audio device *(optional)*, Duration (s), Volume (0–1) *(optional)* |
+| Audio | Play sound file (`play_sound`) | Audio device *(optional)*, File (WAV), Duration (s) *(optional)*, Volume (0–1) *(optional)* |
+| Audio | Stop sounds (`stop_sound`) | Audio device *(optional)* |
+| Audio | Beep (`beep`) | — |
+| Communication | Send serial command (`serial_send`) | Device *(optional)*, Command |
+| Communication | Send signal (`signal`) | Signal |
+| Communication | Virtual switch on (`virtual_switch_on`) | Switch |
+| Communication | Virtual switch off (`virtual_switch_off`) | Switch |
+| Communication | Toggle virtual switch (`virtual_switch_toggle`) | Switch |
+| Communication | Simulate input (`simulate_input`) | Device *(optional)*, Input, Value |
+| Variables | Set variable (`set_variable`) | Variable, Value |
+| Variables | Increment variable (`increment`) | Variable, By *(optional)* |
+| Variables | Decrement variable (`decrement`) | Variable, By *(optional)* |
+| Variables | Append to array (`array_append`) | Array, Value |
+| Variables | Start timer (`start_timer`) | Timer, Elapses after (s) *(optional)* |
+| Variables | Stop timer (`stop_timer`) | Timer |
+| Variables | Reset timer (`reset_timer`) | Timer |
+| Test | Mark event (`mark`) | Event |
+| Test | Start state event (`mark_start`) | Event |
+| Test | End state event (`mark_end`) | Event |
+| Test | Write to log (`log`) | Message |
+| Test | End the test (`end_test`) | — |
+| Test | Pause the test (`pause_test`) | — |
+| Test | Resume the test (`resume_test`) | — |
+| Test | Enable procedure (`enable_procedure`) | Procedure |
+| Test | Disable procedure (`disable_procedure`) | Procedure |
+| Touch screen | Show stimulus (`show_stimulus`) | Area, Image *(optional)*, Shape *(optional)*, Colour *(optional)* |
+| Touch screen | Hide stimulus (`hide_stimulus`) | Area |
+| Touch screen | Clear screen (`clear_screen`) | — |
+
+Safety: *Shock on* always has a cut-off (default 2 s, at most 60 s), enforced by mANY-MAZE and, on the Arduino,
+by the board itself; *Shock for a duration* is limited to 60 s.
+
+Reinforcement schedules (*Start reinforcement schedule*, *Register response*): `CRF`, `FR n`, `VR n`
+(requirements 1…2n−1), `FI s`, `VI s` (Fleshler–Hoffman intervals), `PR` (Richardson–Roberts progressive ratio:
+1, 2, 4, 6, 9, 12…; the breakpoint is the last ratio completed), `PR n` (linear: n, 2n, 3n…), `FT s`, `VT s`
+(response-independent) and `EXT`. *Register response* stores 1/0 in a variable and fires *Reinforcer earned*.
+
+### Expressions and variables
+
+Expressions use numbers, `'text'`, arrays `[1, 2, 3]`, variables, `+ - * / // % **`, comparisons
+(`== != < <= > >=`, also chained: `10 < x <= 20`), `and or not`, `a if condition else b`, indexing `arr[i]`,
+`arr[-1]`, slices `arr[1:3]` and `x in arr`. Text parameters can embed expressions in braces:
+`Trial {trial}: {round(zone_time('Centre'), 1)} s`.
+
+Functions:
+
+* maths — `abs min max round floor ceil sqrt exp log log10 sin cos tan asin acos atan atan2 hypot degrees
+  radians sign clamp int float bool str`
+* arrays — `len sum mean sorted reversed index count array(n, fill) range`
+* random — `random() uniform(a, b) randint(a, b) gauss(mean, sd) choice(array) shuffle(array)`
+* the test — `time()`, `zone('A')`, `head_zone('A')`, `zone_time('A')`, `zone_entries('A')`, `detected()`,
+  `freezing()`, `immobile()`, `speed()`, `distance()`, `x()`, `y()`, `key('s')`
+* I/O — `input([device,] channel)`, `analog(...)`, `encoder(...)`, `activations(...)`, `output(...)`,
+  `pellets([[device,] channel])`, `switch('name')`, `timer('name')`, `responses('schedule')`,
+  `reinforcers('schedule')`, `requirement('schedule')`
+
+Expressions are evaluated by a restricted interpreter: they cannot call anything else, read files or access
+Python objects, and huge numbers or arrays are refused.
+
+Variables are shared by all procedures. Numeric variables declared with *Save as a test result* are saved with
+the test (`Test.result_variables`) and analysed like any other measure ("Result variable" measures).
+Variables declared with *Keep the value between tests* are stored in the experiment (`Project.variables`).
+
+### I/O devices
+
+**Experiment ▸ Hardware ▸ I/O devices…** configures the hardware (`Project.io_devices`):
+
+| Type | Use |
+|---|---|
+| **Arduino** | Any Arduino running `firmware/manymaze_io` (see `firmware/README.md` for wiring and the protocol): debounced digital inputs (levers, nose pokes, beams, TTL), digital outputs (lights, pellet dispensers, doors, shocker triggers, laser TTL, sync pulses) with optional maximum on-time, PWM outputs, analogue inputs, quadrature rotary encoders (running wheels) and a heartbeat watchdog. Pulses and pulse trains are generated on the board. |
+| **Serial port (text commands)** | Any device driven by text lines: each output channel has an *On* and an *Off* command; each input channel the lines the device sends when it switches on / off. *Send serial command* sends any text. |
+| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files. |
+| **Simulated device** | For designing and testing procedures without hardware: outputs are shown, inputs are switched by hand (*Simulate*). |
+
+Channels have a name (used by procedures), a kind (digital input, digital output, PWM output, analogue input,
+rotary encoder), a pin, *Invert* for active-low hardware, and options such as `pullup=0`, `debounce_ms=20`,
+`counts_per_rev=1024`, `cm_per_rev=50`, `scale=0.0049`, `period_ms=50`, `deadband=2`.
+
+*Connect* opens the devices and shows every input and output live; *Toggle* switches an output, *Simulate*
+switches a simulated input, *Test* pulses the selected output for 0.5 s or plays a 1 kHz tone. pyserial
+(`pip install pyserial`) is needed for Arduino and serial devices.
+
+Every input and output change during a test is recorded in the test's I/O log (`Test.io_events`).
+
+### Touch screen
+
+A full-screen stimulus window on a second display (the ANY-maze Touch equivalent) divided into response areas
+(by default the windows of a chamber mask: left / centre / right). *Show stimulus* draws an image or a shape
+(circle, square, triangle, star, cross, bars) in an area, *Hide stimulus* / *Clear screen* remove them, and
+*Touch in area* / *Touch outside all areas* react to the animal's touches (mouse clicks work too, for testing).
+Enable it in **Experiment ▸ Hardware ▸ Touch screen…** (display, number of response windows; used in one-test live mode). Areas are rectangles given as fractions of the screen, stored with the experiment
+(`settings_extra["touchscreen"]`: `areas`, `screen`, `background`, `outline`); by default three windows.
+
+### I/O results
+
+The I/O log is analysed into measures for each test (and for each time period):
+
+* **digital inputs** — activations, time on, latency to first activation, mean activation (duration),
+  activations per minute (e.g. lever presses, nose pokes, beam breaks, licks);
+* **analogue inputs** — mean (time-weighted), minimum, maximum;
+* **rotary encoders** — counts, revolutions, distance, maximum rate (counts/s), mean rate (rev/min);
+* **outputs, virtual switches, sounds and touch-screen stimuli** — times on, time on, latency to first on, plus
+  pellets dispensed for pellet dispensers and pulse trains / pulses for optogenetic outputs;
+* **touches** — activations per area (channel `touch <area>`);
+* **result variables** — the final value of each *Save as a test result* variable.
+
+### Projects from older versions
+
+Rules created with earlier versions ("when *trigger*, after *delay*, do *action*") are converted automatically
+into equivalent procedures (one per rule) the first time the procedure editor opens.
+
+### For developers
+
+```python
+from manymaze.core.iodevices import DeviceManager, io_measures
+from manymaze.core.procedures import ProcedureEngine, validate
+
+devices = DeviceManager(project.io_devices)            # opens the hardware
+engine = ProcedureEngine(project.procedures, devices, on_mark=..., on_end=..., on_log=...,
+                         variables=project.variables, context={"zones": [...]},
+                         on_pause=..., on_resume=..., on_stimulus=touch_window.handle)
+engine.start(0.0)
+engine.update_state(t, {"zones": {...}, "head_zones": {...}, "detected": True, "freezing": False,
+                        "immobile": False, "x": x, "y": y, "speed": v, "distance": d})   # every frame
+engine.key(t, "s", down=True); engine.touch(t, "left", fx, fy); engine.mark_event(t, "Rearing")
+engine.stop(t_end)
+test.io_events = engine.io_events; test.result_variables = engine.result_variables
+test.pauses = engine.pauses; test.events += engine.state_events   # point marks go through on_mark
+io_measures(test.io_events, duration, t_range=None, devices=project.io_devices)  # -> {measure: value}
+validate(project.procedures, context) # -> [(procedure index, statement path, message)]
+```
+
+## 9. Results, plots and data transfer
 
 The results table has one row per test (and per time bin / period when enabled). Choose which measures to
 show, filter by group or stage, export **CSV**, **Excel** (with Animals, Tests and Settings sheets) or copy to
@@ -144,18 +661,22 @@ maps, group heat maps, results and statistics.
 
 ### Measures
 
-**General**: test duration, detection %, total distance, mean / max speed, mean speed while mobile, time
-mobile/immobile, immobile episodes, latency to immobility, time freezing, freezing %, freezing episodes,
-latency to freezing, mean motion, path efficiency, absolute turn angle, meander, clockwise / anticlockwise
-rotations, mean distance from wall, thigmotaxis %, time outside the arena.
-
-**Per zone / zone group**: time, time %, entries, latency to first entry, distance, mean speed, mean visit
-duration, time immobile, time freezing, head entries, head time, latency to head entry.
-
-**Per point**: mean / minimum distance, time near, approaches, latency to approach, time exploring (head within
-radius *and* pointing at the point), exploration bouts, latency to explore.
-
-**Per line**: crossings, crossings in each direction, latency to first crossing.
+* **Whole apparatus** (~40): duration, detection %, time not detected, time hidden, distance, mean / max / mobile
+  speed, mobile & immobile time / episodes / mean & longest episode, latency to immobility, freezing (time, %,
+  episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity, meander,
+  body and path rotations, thigmotaxis, distance from wall and centre, time outside the arena, arena quadrants,
+  zone transitions, grid crossings.
+* **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
+  visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
+  time / latency, time facing the zone.
+* **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
+  and distance moving towards / away, head oriented towards / away, mean head angle, head turns towards.
+* **Lines**: crossings in each direction, latency.
+* **Per other animal**: mean / min / max distance, contact time and count, nose-to-nose and nose-to-body contacts,
+  time and episodes following, approaches / approached by.
+* **Keys** (scored behaviours): point – count, latency, rate; state and hold – count, duration, %, latency, mean &
+  longest bout, rate; optionally per zone.
+* **I/O** measures (inputs, outputs, encoders) and **result variables** (`Variable: name`) from procedures.
 
 **Test-specific**
 
@@ -176,7 +697,165 @@ radius *and* pointing at the point), exploration bouts, latency to explore.
 
 The novel object and the social side can be set per test (test variables) or as experiment defaults.
 
-## 8. Statistics
+#### More test-specific measures
+
+* **Water maze**: Whishaw corridor time and path % (release point → platform, 20 cm wide) and *Left Whishaw
+  corridor*.
+* **Novel tank diving test**: latency to top, top entries, top/bottom time %, top/bottom ratio, mean depth, erratic
+  movements.
+* **Multi-well plate** (6/12/24/48/96): one apparatus per well (Well, Centre, Edge) — larval zebrafish.
+* **Conditioned place preference** (2 or 3 chambers): paired/unpaired time, CPP score, preference index,
+  transitions (paired chamber per test or experiment default).
+* **Hole board**: head dips per hole and total, head-dip time, latency, holes explored, repeated dips, dips/min.
+* **Thermal gradient ring**: preferred sector, time-weighted mean sector, sector entries.
+* **Home cage** (food zone, hidden nest) and **activity wheel** (revolutions clockwise / anticlockwise, per minute).
+
+### Time periods
+
+Besides regular time bins and custom periods, **event-anchored periods**: anchored on test start, first entry to /
+exit from a zone, a manual mark, or an input switching on; with offset, duration (0 = to the end) and occurrence
+(1 = first, 0 = every occurrence). Example: *the 30 s after the animal first left the start box*. Paused time is
+excluded from all times and distances.
+
+### Track plots (Results page → Track tab)
+
+Select a row of the results table to see the test's track on its first video frame. The options under the plot apply
+to the selected test:
+
+- **Body part**: the centre or the head.
+- **Colour**: by time, by speed, in a single colour, or by any per-frame parameter (distance from the wall, head
+  angle, distance to a point, and so on). A colour bar gives the scale.
+- **Markers**: freezing episodes and manually scored state behaviours are drawn as thick translucent stretches of the
+  path. Point events (for example defecation) are drawn as diamonds where the animal was at that moment.
+- **Split by period**: shows one small track plot per time period (time bins, custom periods or event-anchored
+  periods), all on the same colour scale. If the experiment has no periods, the test is split into quarters.
+
+Selecting a time-period row (with **Show time periods** ticked) limits the track plot and heat map to that period.
+
+### Heat maps (Heat map and Groups tabs)
+
+- **Heat map of**: where the animal spent its time, or only the frames where a behaviour happened: freezing, immobile,
+  mobile, any scored behaviour (`<behaviour>: active`), near the wall, and so on.
+- **Scale**: *Automatic* scales each map to its own maximum. *% of time* shows each bin's share of the mapped time.
+  *Relative* sets the maximum to 1. *Fixed max* uses the value you type, so you can compare tests on the same scale.
+- **Align**: sets the orientation of a test (rotate 90°/180°/270°, mirror, or a combination) so that the same parts
+  of the apparatus line up between tests in group heat maps. For example, the target quadrant of a water maze or the
+  novel object's side. The setting is saved with the test as `variables["heatmap_transform"]` and does not change any
+  results.
+- **Group heat maps**: averages the heat maps of each group's tests shown in the table. Each test's alignment is
+  applied, the maps are drawn on a common apparatus frame and colour scale, and the chosen behaviour, scale and time
+  period are used.
+
+### Charts of parameters over time (Results page → Charts tab)
+
+Choose a test (and an animal if several were tracked together), then tick up to 10 parameters. They are drawn on a
+shared time axis:
+
+- on/off states as filled bands;
+- counts as steps;
+- everything else as lines.
+
+Tick zones under **Zone occupancy bands** to shade the times the animal was in them. Scored behaviours appear in an
+event strip under the charts.
+
+Available parameters:
+
+- **Position**: X/Y of the centre, head and tail; distance from the start, the arena centre and the wall; in arena;
+  near the wall; detected.
+- **Locomotion**: speed, smoothed speed (1 s), acceleration, distance travelled, distance in the last second, path
+  efficiency, mobile / immobile, time mobile / immobile, immobile episodes.
+- **Freezing**: motion (% of the body), freezing, time freezing, freezing episodes.
+- **Direction**: movement direction, turn rate, absolute turn angle, head angle, angular velocity, cumulative
+  rotation.
+- **Body**: head speed, body length, body area, elongation.
+- **Each zone and zone group**: in zone, head in zone, distance to zone, time in zone, entries.
+- **Each point**: distance, head distance, near, head-to-point angle.
+- **Each line**: distance, crossings.
+- **Each scored behaviour**: active, or count for point behaviours.
+- **Each other animal**: distance.
+
+That is 37 general parameters plus 5 per zone, 4 per point, 2 per line and 1 per behaviour and per other animal.
+
+Chart tools:
+
+- Use the matplotlib toolbar to zoom, pan and go back.
+- **Period** zooms to a time period.
+- **Measure interval**: drag across a chart to get the mean, SD, minimum, maximum (with its time) and change of every
+  charted parameter over that interval.
+- **Find peaks** marks and counts the peaks of the continuous parameters.
+- **Save image…** saves PNG/PDF/SVG, **Copy image** copies the chart, and **Export data…** saves the charted series
+  frame by frame as CSV or tab-separated text.
+- In the results table, right-click a row and choose **Show in charts** to open that test's charts.
+
+### Video export with overlays
+
+Select a test in the results table and click **Export video…**. You can choose:
+
+- zones, points and lines;
+- the track trail: none, the last 2/5/15 s, or the whole track so far, coloured by speed, by time or in the animal's
+  colour;
+- the centre, head and tail;
+- labels for scored behaviours and freezing;
+- a time stamp and a test caption;
+- playback speed (0.5× to 8×) and output size (100 %, 75 % or 50 %).
+
+The video is written in the background with a progress bar and can be cancelled. It is encoded as H.264 where
+available (VideoToolbox on Apple Silicon). Frames are streamed, so memory use does not depend on the video's length.
+From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", OverlayOptions(...))`.
+
+### Data transfer (Results page)
+
+- **Copy**: copies the selected cells as tab-separated text, ready to paste into Excel or Prism. Select any rectangular
+  range with the mouse, or click the row numbers. With nothing (or one row) selected, it copies the whole shown table.
+  Right-clicking the table also offers *Copy without headers* and *Save selected cells…*.
+- **Export → CSV file / Tab-separated text / Excel workbook**: the shown rows and columns. The Excel workbook has extra
+  sheets for time periods, animals, tests and settings.
+- **Export → Selected cells…**: the selected range as CSV, TSV or xlsx (chosen by the file extension).
+- **Export → Experiment as XML (with raw tracks)…**: the whole experiment in one file, described below.
+- **Export → Raw data per test (CSV)…**: one file per test and animal, with time, the raw track columns (pixels) and
+  every per-frame parameter from the Charts tab in calibrated units.
+- **HTML report…**: you can also set the heat-map scale (including one scale for all tests) and add charts of the
+  parameters ticked in the Charts tab.
+
+#### XML format (`format-version="1"`)
+
+Root element: `<manymaze-experiment format-version software exported>`. It contains, in order:
+
+| Element | Content |
+|---|---|
+| `experiment` | `name`, `protocol`, `test-duration-s`, `start-mode`, `created`, `blind`; `<description>`; `<detection-settings>` and `<analysis-settings>` with `<setting name value type>` entries; `<variables>` |
+| `groups/group` | `name`, `color` |
+| `stages/stage` | `name` |
+| `behaviours/behaviour` | `name`, `key`, `kind` |
+| `apparatus-list/apparatus` | `name`, `template`, `unit`, `px-per-cm`, frame size; `<arena type …>`, `<zone name color><shape type …>`, `<zone-group><member zone/><exclude zone/>`, `<point name x y radius-cm>`, `<line name x1 y1 x2 y2>`. Polygons list `<vertex x y/>` elements; ellipses have `cx cy rx ry` attributes. |
+| `animals/animal` | `id`, `group`, `sex`; `<field name value type>` |
+| `tests/test` | One element per test (details below) |
+
+Each `tests/test` element has the attributes `id animal stage trial apparatus video start-s duration-s status
+recorded-at` and these children:
+
+- `<extra-animal>`, `<notes>`, `<variables>`, `<zone-overrides>`, `<pauses><pause start end>`;
+- `<events><event behaviour t t-end>` and `<io-events><io t device channel kind value>`;
+- `<result-variables>`;
+- `<results animal period>` with one `<result name value type>` per measure;
+- one `<track animal index fps samples video-start-s units="px">` per animal, with `<column name>` elements for `t x y
+  hx hy tx ty area motion angle detected`.
+
+Values in a `<column>` are separated by spaces, with `NaN` for missing values. `type` is `number`, `integer`, `text`,
+`bool` or `json`.
+
+To read the file in MATLAB:
+
+```matlab
+doc = xmlread('experiment.xml');
+cols = doc.getElementsByTagName('column');
+x = sscanf(char(cols.item(1).getTextContent()), '%f');
+```
+
+You can also use `readstruct('experiment.xml')` (R2020b+). In Python, use
+`manymaze.core.export.read_experiment_xml(path)`.
+
+## 10. Statistics
 
 Compare any measure between groups (or sex, stage, period, custom fields): descriptive statistics, assumption
 checks (Shapiro–Wilk, Levene), Welch's t-test / Mann–Whitney U (2 groups), one-way ANOVA + Tukey HSD /
@@ -185,7 +864,61 @@ measures, effect sizes (Cohen's d, η²), bar + SEM or box plots with individual
 Learning curves across stages or time bins with two-way ANOVA (Group × Stage), and correlations
 (Pearson / Spearman) between measures.
 
-## 9. Command line
+### Statistics in detail
+
+The left panel chooses the measure, the factor to compare, the time period, a filter (**Only**) and the graph. The
+**Graph** options are column, points, box or violin; error bars show the SEM, the SD or the 95 % CI; individual
+values can be shown or hidden.
+
+- **Compare groups**:
+  - *Automatic* uses Welch t / Mann-Whitney for two levels and ANOVA + Tukey / Kruskal-Wallis + Bonferroni for more.
+    With **Repeated measures** it uses paired t / Wilcoxon / repeated-measures ANOVA / Friedman.
+  - You can also pick a test yourself. One-sample tests compare every group with a **Test value**, for example 50 %
+    alternation or a discrimination index of 0.
+  - **Post-hoc** offers Tukey, Bonferroni, Holm, Šidák, FDR, Dunnett (against the chosen **Control**), Games-Howell
+    or Dunn.
+  - Results include the effect sizes (Cohen's d, Hedges' g, rank-biserial r, eta², omega², epsilon², Kendall's W,
+    partial eta²), the descriptive statistics (n, mean, SD, SEM, 95 % CI, median, range) and assumption checks
+    (Shapiro-Wilk, D'Agostino-Pearson, Levene, Brown-Forsythe, Bartlett, Fligner-Killeen).
+- **Two factors / time course**: learning curves and two-factor designs, with the stage, trial or period on the X axis
+  and lines per group. **Design** can be:
+  - between subjects (two-way ANOVA, type II);
+  - *Repeated on X axis* (a mixed ANOVA, or a one-way repeated-measures ANOVA when there are no lines);
+  - Scheirer-Ray-Hare;
+  - aligned rank transform ANOVA.
+
+  Repeated-measures effects also get Greenhouse-Geisser corrected p-values. The graph can be a line, column, points,
+  box or violin plot.
+- **Correlation**: Pearson, Spearman or Kendall, with a least-squares line and its 95 % confidence band. It also
+  reports the regression slope (with its CI), intercept and R². Points can be coloured by any factor.
+- **Grouped (3 levels)**: descriptive statistics for every combination of up to three factors (for example group ×
+  stage × period) and a clustered graph:
+  - factor 1 on the X axis;
+  - factor 2 as colours;
+  - factor 3 as separate panels.
+
+  **Copy table** and **Save table…** export it as CSV, TSV or xlsx.
+- **Categorical**: a contingency table of a text result (search strategy, first choice, found platform…) or a factor,
+  by group. It reports a chi-square test of independence with Cramér's V, the G-test and, for 2 × 2 tables, Fisher's
+  exact test. It warns when expected counts are below 5. The graph shows stacked percentages.
+
+**Copy summary**, **Save figure…** and **Copy figure** work on every tab.
+
+#### Supported procedures (42)
+
+| Category | Procedures |
+|---|---|
+| Two groups (7) | Student's t, Welch's t, paired t, Mann-Whitney U, Wilcoxon signed-rank, Kolmogorov-Smirnov, Brunner-Munzel |
+| One sample (2) | One-sample t-test, Wilcoxon signed-rank against a value |
+| Several groups (5) | One-way ANOVA, Welch's ANOVA, Alexander-Govern, Kruskal-Wallis, Mood's median test |
+| Repeated measures (2) | Repeated-measures ANOVA (+ Greenhouse-Geisser), Friedman |
+| Two factors (4) | Two-way ANOVA, mixed two-way ANOVA, Scheirer-Ray-Hare, aligned rank transform ANOVA |
+| Post-hoc (8) | Tukey HSD, Bonferroni, Holm, Šidák, Benjamini-Hochberg FDR, Dunnett, Games-Howell, Dunn |
+| Categorical (4) | Chi-square independence, Fisher's exact, G-test, chi-square goodness of fit |
+| Correlation (4) | Pearson, Spearman, Kendall's tau, linear regression with confidence intervals |
+| Assumptions (6) | Shapiro-Wilk, D'Agostino-Pearson, Levene, Brown-Forsythe, Bartlett, Fligner-Killeen |
+
+## 11. Command line
 
 ```
 manymaze                                  # GUI
@@ -197,7 +930,7 @@ manymaze project ~/exp.mmaze report -o report.html
 manymaze templates                        # list apparatus templates
 ```
 
-## 10. Tips for good tracking
+## 12. Tips for good tracking
 
 * Even, diffuse lighting; avoid reflections (water maze: add non-toxic white paint or milk for dark animals).
 * Maximise contrast between animal and floor (dark animals on white floor or vice versa).

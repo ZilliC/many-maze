@@ -81,8 +81,9 @@ def cmd_project(a):
     p = Project.load(a.dir)
     if a.action == "track":
         from .core.batch import track_tests
+        from .core.project import INACTIVE_STATUSES
 
-        todo = [t for t in p.tests if t.video and (a.all or not p.has_track(t)) and t.status != "excluded"]
+        todo = [t for t in p.tests if t.video and (a.all or not p.has_track(t)) and t.status not in INACTIVE_STATUSES]
         res = track_tests(p, todo, progress=_progress("tracking"), workers=a.workers)
         p.save()
         for e in res["errors"]:

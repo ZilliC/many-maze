@@ -9,10 +9,11 @@ from pathlib import Path
 from PySide6.QtCore import QAbstractTableModel, QItemSelectionModel, QModelIndex, QSortFilterProxyModel, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QFont
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QListWidget,
+                               QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QSpinBox, QStyle, QStyledItemDelegate,
                                QTableView, QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout)
 
+from ...core import workflow as wf
 from ...core.batch import TrackingCancelled, track_tests, tracking_batches  # noqa: F401 (re-exported)
 from ...core.track import Track, import_deeplabcut_csv
 from ...core.video import VIDEO_EXTENSIONS, VideoSource
@@ -24,7 +25,8 @@ COLUMNS = ["ID", "Animal", "Group", "Stage", "Trial", "Apparatus", "Video", "Sta
 C_ID, C_ANIMAL, C_GROUP, C_STAGE, C_TRIAL, C_APP, C_VIDEO, C_START, C_DUR, C_STATUS, C_NOTES = range(len(COLUMNS))
 EDITABLE = {C_ANIMAL, C_STAGE, C_TRIAL, C_APP, C_START, C_DUR, C_NOTES}
 SORT_ROLE = Qt.UserRole + 1
-STATUS_COLORS = {"pending": "#d97706", "tracked": "#16a34a", "excluded": "#94a3b8"}
+STATUS_COLORS = {"pending": "#d97706", "tracked": "#16a34a", "scored": "#0891b2", "skipped": "#9333ea",
+                 "superseded": "#94a3b8", "excluded": "#94a3b8"}
 
 
 # ------------------------------------------------------------------ tracking jobs
@@ -85,7 +87,7 @@ class TestsModel(QAbstractTableModel):
                                       else "")
             if c == C_GROUP:
                 a = p.get_animal(t.animal_id)
-                return a.group if a else ""
+                return wf.display_group(p, a.group) if a else ""
             if c == C_STAGE:
                 return t.stage
             if c == C_TRIAL:
@@ -101,7 +103,7 @@ class TestsModel(QAbstractTableModel):
                     return f"{t.duration_s:g}" if t.duration_s else f"default ({p.test_duration_s:g})"
                 return t.duration_s
             if c == C_STATUS:
-                return t.status
+                return t.status + (f" (attempt {t.attempt})" if t.attempt > 1 and role == Qt.DisplayRole else "")
             if c == C_NOTES:
                 return t.notes
         elif role == Qt.ToolTipRole:
@@ -110,10 +112,15 @@ class TestsModel(QAbstractTableModel):
                 return full if Path(full).exists() else f"{full}\n(file not found)"
             if c == C_DUR:
                 return "Test duration in seconds. 0 = experiment default."
-            if c == C_ANIMAL and t.extra_animals:
-                return "Also in this test: " + ", ".join(t.extra_animals)
+            if c == C_ANIMAL:
+                a = p.get_animal(t.animal_id)
+                tips = (["Also in this test: " + ", ".join(t.extra_animals)] if t.extra_animals else []) + \
+                    ([f"Retired: {a.retired_reason or 'withdrawn from the experiment'}"] if a and a.retired else [])
+                return "\n".join(tips) or None
+            if c == C_STATUS and t.replaces:
+                return f"Re-performs test {t.replaces}"
         elif role == Qt.ForegroundRole:
-            if t.status == "excluded":
+            if t.status in ("excluded", "superseded"):
                 return QBrush(QColor(STATUS_COLORS["excluded"]))
             if c == C_STATUS:
                 return QBrush(QColor(STATUS_COLORS.get(t.status, "#334155")))
@@ -124,15 +131,21 @@ class TestsModel(QAbstractTableModel):
             if c == C_GROUP:
                 a = p.get_animal(t.animal_id)
                 if a and a.group:
-                    return QBrush(QColor(p.group_color(a.group)))
+                    return QBrush(QColor(wf.display_color(p, a.group)))
+            if c == C_ANIMAL:
+                a = p.get_animal(t.animal_id)
+                if a and a.retired:
+                    return QBrush(QColor("#dc2626"))
         elif role == Qt.FontRole:
             if c == C_STATUS:
                 f = QFont()
                 f.setBold(True)
                 return f
-            if t.status == "excluded":
+            if t.status in ("excluded", "superseded"):
                 f = QFont()
                 f.setItalic(True)
+                if t.status == "superseded":
+                    f.setStrikeOut(True)
                 return f
         elif role == Qt.TextAlignmentRole:
             if c in (C_ID, C_TRIAL, C_START, C_DUR):
@@ -193,7 +206,7 @@ class TestsDelegate(QStyledItemDelegate):
             return w
         if c == C_TRIAL:
             w = QSpinBox(parent)
-            w.setRange(0, 100000)
+            w.setRange(1, wf.MAX_TRIALS)
             return w
         if c in (C_START, C_DUR):
             w = QDoubleSpinBox(parent)
@@ -241,7 +254,7 @@ class AddVideosDialog(QDialog):
         self.stage.setEditable(True)
         self.stage.addItems(project.stages)
         self.trial = QSpinBox()
-        self.trial.setRange(0, 100000)
+        self.trial.setRange(1, wf.MAX_TRIALS)
         self.trial.setValue(1)
         self.app = QComboBox()
         self.app.addItems([a.name for a in project.apparatus])
@@ -297,18 +310,26 @@ class AddVideosDialog(QDialog):
 
 
 class ScheduleDialog(QDialog):
-    """Create tests (without video) for animals × stages × trials."""
+    """Create tests (without video) for animals × stages × trials, in a chosen running order."""
+
+    ORDERS = [("animal", "By animal: all trials of an animal, then the next animal"),
+              ("trial", "By trial: trial 1 of every animal, then trial 2, …"),
+              ("random", "Randomised: animals in random order within each trial"),
+              ("latin", "Latin square: each animal runs in every position equally often")]
 
     def __init__(self, project, parent=None):
         super().__init__(parent)
+        self.project = project
         self.setWindowTitle("Create test schedule")
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Creates one test without video for every animal × stage × trial. Videos can be "
-                             "assigned later, or the tests recorded live."))
+        lay.addWidget(QLabel("Creates one test without video for every animal × stage × trial, in running order. "
+                             "Videos can be assigned later, or the tests recorded live."))
         row = QHBoxLayout()
-        self.animals = self._checklist([(a.id, f"{a.id}  ({a.group})" if a.group else a.id) for a in project.animals])
+        self.animals = self._checklist([(a.id, a.id + (f"  ({wf.display_group(project, a.group)})" if a.group else "")
+                                         + ("  — retired" if a.retired else ""), not a.retired)
+                                        for a in project.animals])
         stages = project.stages or [""]
-        self.stages = self._checklist([(s, s or "(no stage)") for s in stages])
+        self.stages = self._checklist([(s, s or "(no stage)", True) for s in stages])
         for title, w in (("Animals", self.animals), ("Stages", self.stages)):
             col = QVBoxLayout()
             col.addWidget(QLabel(f"<b>{title}</b>"))
@@ -317,29 +338,74 @@ class ScheduleDialog(QDialog):
         lay.addLayout(row, 1)
         f = QFormLayout()
         self.trials = QSpinBox()
-        self.trials.setRange(1, 1000)
+        self.trials.setRange(1, wf.MAX_TRIALS)
         self.app = QComboBox()
         self.app.addItems([a.name for a in project.apparatus])
+        self.order = QComboBox()
+        for v, label in self.ORDERS:
+            self.order.addItem(label, v)
+        self.seed = QSpinBox()
+        self.seed.setRange(0, 999999)
+        self.seed.setSpecialValueText("new random order")
+        self.seed.setToolTip("Random seed: the same number gives the same order again")
+        self.cb = QComboBox()
+        self.cb.addItem("No counterbalancing", "")
+        self.cb.addItem("Apparatus (Latin square across each animal's tests)", "apparatus")
+        self.cb.addItem("Test variable (Latin square across each animal's tests)", "variable")
+        self.cb.currentIndexChanged.connect(self._cb_changed)
+        self.var_name = QComboBox()
+        self.var_name.setEditable(True)
+        self.var_name.addItems(["novel_object", "social_side", "condition"])
+        self.levels = QLineEdit()
+        self.levels.setPlaceholderText("Levels, comma separated (e.g. Object A, Object B)")
         self.skip = QCheckBox("Skip combinations that already have a test")
         self.skip.setChecked(True)
+        self.skip_done = QCheckBox("Skip stages already completed (training criteria) and retired animals")
+        self.skip_done.setChecked(True)
         f.addRow("Trials per stage", self.trials)
         f.addRow("Apparatus", self.app)
+        f.addRow("Running order", self.order)
+        f.addRow("Random seed", self.seed)
+        f.addRow("Counterbalance", self.cb)
+        f.addRow("Variable", self.var_name)
+        f.addRow("Levels", self.levels)
         f.addRow("", self.skip)
+        f.addRow("", self.skip_done)
         lay.addLayout(f)
+        self.preview = QLabel()
+        self.preview.setStyleSheet("color:#475569;")
+        self.preview.setWordWrap(True)
+        lay.addWidget(self.preview)
+        for w in (self.trials, self.seed):
+            w.valueChanged.connect(self._update_preview)
+        for w in (self.order, self.cb, self.app):
+            w.currentIndexChanged.connect(self._update_preview)
+        self.levels.textChanged.connect(self._update_preview)
+        self.animals.itemChanged.connect(self._update_preview)
+        self.stages.itemChanged.connect(self._update_preview)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
-        self.resize(520, 420)
+        self._cb_changed()
+        self.resize(620, 620)
+
+    def _cb_changed(self, *_):
+        cb = self.cb.currentData()
+        self.var_name.setEnabled(cb == "variable")
+        self.levels.setEnabled(bool(cb))
+        if cb == "apparatus" and not self.levels.text().strip():
+            self.levels.setText(", ".join(a.name for a in self.project.apparatus))
+        self._update_preview()
 
     @staticmethod
     def _checklist(items):
         w = QListWidget()
-        for v, label in items:
+        for v, label, on in items:
             it = QListWidgetItem(label)
             it.setData(Qt.UserRole, v)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Checked)
+            it.setCheckState(Qt.Checked if on else Qt.Unchecked)
             w.addItem(it)
         return w
 
@@ -348,8 +414,22 @@ class ScheduleDialog(QDialog):
         return [w.item(i).data(Qt.UserRole) for i in range(w.count()) if w.item(i).checkState() == Qt.Checked]
 
     def combos(self):
-        return [(a, s, k + 1) for a in self._checked(self.animals) for s in self._checked(self.stages)
-                for k in range(self.trials.value())]
+        return [(r["animal_id"], r["stage"], r["trial"]) for r in self.rows()]
+
+    def rows(self) -> list[dict]:
+        levels = [x.strip() for x in self.levels.text().split(",") if x.strip()]
+        return wf.generate_schedule(
+            self.project, animals=self._checked(self.animals), stages=self._checked(self.stages),
+            trials=self.trials.value(), order=self.order.currentData(), apparatus=self.app.currentText(),
+            seed=self.seed.value() or None, counterbalance=self.cb.currentData() if levels else "", levels=levels,
+            variable=self.var_name.currentText().strip(), skip_existing=self.skip.isChecked(),
+            skip_retired=self.skip_done.isChecked(), skip_completed=self.skip_done.isChecked())
+
+    def _update_preview(self, *_):
+        rows = self.rows()
+        head = ", ".join(f"{r['animal_id']}/{r['stage'] or '–'}/{r['trial']}" for r in rows[:6])
+        self.preview.setText(f"<b>{len(rows)}</b> test{'s' if len(rows) != 1 else ''} will be created"
+                             + (f" — first: {head}{' …' if len(rows) > 6 else ''}" if rows else "."))
 
 
 def dlc_bodyparts(path) -> list[str]:
@@ -531,6 +611,13 @@ class TestsPage(Page):
                           "Per-test variables: novel object (NOR), social stimulus side (three-chamber)")
         self.a_excl = act("Exclude", self.toggle_exclude, None,
                           "Exclude / include the selected tests. Excluded tests are left out of results and statistics")
+        self.a_skip = act("Skip", self.toggle_skip, None,
+                          "Skip the selected tests for now (they can be resumed later), or resume skipped tests")
+        self.a_redo = act("Re-perform", self.reperform_selected, None,
+                          "Run the selected tests again: a new attempt is added and the old one is kept as "
+                          "“superseded” (left out of the results)")
+        self.a_clear = act("Clear tracks", self.clear_selected_tracks, None,
+                           "Delete the tracks of the selected tests (scored events are kept)")
         self.a_del = act("Delete", self.delete_selected, None)
         tb.addSeparator()
         self.a_import = act("Import track…", self.import_track, None,
@@ -585,13 +672,14 @@ class TestsPage(Page):
             self.summary.setText("")
             return
         n = len(p.tests)
-        counts = {k: sum(1 for t in p.tests if t.status == k) for k in ("tracked", "pending", "excluded")}
+        counts = {k: sum(1 for t in p.tests if t.status == k) for k in STATUS_COLORS}
         no_vid = sum(1 for t in p.tests if not t.video)
         txt = (f"<b>{n}</b> test{'s' if n != 1 else ''} · "
                f"<span style='color:{STATUS_COLORS['tracked']}'>{counts['tracked']} tracked</span> · "
                f"<span style='color:{STATUS_COLORS['pending']}'>{counts['pending']} pending</span>")
-        if counts["excluded"]:
-            txt += f" · {counts['excluded']} excluded"
+        for k in ("scored", "skipped", "superseded", "excluded"):
+            if counts[k]:
+                txt += f" · <span style='color:{STATUS_COLORS[k]}'>{counts[k]} {k}</span>"
         if no_vid:
             txt += f" · {no_vid} without video"
         self.summary.setText(txt)
@@ -623,12 +711,14 @@ class TestsPage(Page):
         n = len(self.selected_ids()) if has else 0
         for a in (self.a_add, self.a_add_blank, self.a_schedule, self.a_track_all):
             a.setEnabled(has)
-        for a in (self.a_dup, self.a_del, self.a_excl, self.a_track, self.a_vars):
+        for a in (self.a_dup, self.a_del, self.a_excl, self.a_track, self.a_vars, self.a_skip, self.a_redo,
+                  self.a_clear):
             a.setEnabled(n > 0)
         self.a_open.setEnabled(n == 1)
         self.a_import.setEnabled(n == 1)
         sel = self.selected_tests() if n else []
         self.a_excl.setText("Include" if sel and all(t.status == "excluded" for t in sel) else "Exclude")
+        self.a_skip.setText("Resume" if sel and all(t.status == "skipped" for t in sel) else "Skip")
 
     def _double_clicked(self, index):
         r = self.proxy.mapToSource(index).row()
@@ -645,7 +735,7 @@ class TestsPage(Page):
         m.addSeparator()
         sv = m.addAction("Set video file…", self.set_video)
         sv.setEnabled(len(self.selected_ids()) >= 1)
-        for a in (self.a_vars, self.a_dup, self.a_excl, self.a_del):
+        for a in (self.a_vars, self.a_dup, self.a_skip, self.a_redo, self.a_clear, self.a_excl, self.a_del):
             m.addAction(a)
         m.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -687,7 +777,7 @@ class TestsPage(Page):
             if st and st not in p.stages:
                 p.stages.append(st)
             new.append(p.add_test(r.get("video", ""), aid, r.get("apparatus", ""), stage=st,
-                                  trial=int(r.get("trial", 1))))
+                                  trial=int(r.get("trial", 1)), variables=dict(r.get("variables") or {})))
         self.main.mark_dirty()
         self.refresh()
         self.select_ids({t.id for t in new})
@@ -719,7 +809,11 @@ class TestsPage(Page):
         dlg = ScheduleDialog(p, self)
         if dlg.exec() != QDialog.Accepted:
             return
-        self.create_tests_for(dlg.combos(), dlg.app.currentText(), dlg.skip.isChecked())
+        rows = dlg.rows()
+        if not rows:
+            self.main.status("No new tests to create.")
+            return
+        self.add_tests(rows)
 
     def create_tests_for(self, combos, apparatus="", skip_existing=True) -> list:
         p = self.project
@@ -779,9 +873,51 @@ class TestsPage(Page):
             return
         include = all(t.status == "excluded" for t in tests)
         for t in tests:
-            t.status = ("tracked" if p.has_track(t) else "pending") if include else "excluded"
+            t.status = wf.data_status(p, t) if include else "excluded"
         self.main.mark_dirty()
         self.refresh()
+
+    def toggle_skip(self):
+        p = self.project
+        tests = self.selected_tests()
+        if not tests:
+            return
+        resume = all(t.status == "skipped" for t in tests)
+        for t in tests:
+            if resume:
+                wf.resume_test(p, t)
+            elif t.status not in ("excluded", "superseded"):
+                wf.skip_test(t)
+        self.main.mark_dirty()
+        self.refresh()
+        self.main.status(f"{'Resumed' if resume else 'Skipped'} {len(tests)} test{'s' if len(tests) != 1 else ''}.")
+
+    def reperform_selected(self) -> list:
+        p = self.project
+        tests = [t for t in self.selected_tests() if t.status != "superseded"]
+        if not tests:
+            return []
+        new = [wf.reperform_test(p, t) for t in tests]
+        self.main.mark_dirty()
+        self.refresh()
+        self.select_ids({t.id for t in new})
+        self.main.status(f"Added {len(new)} new attempt{'s' if len(new) != 1 else ''}; the previous "
+                         f"attempt{'s are' if len(new) != 1 else ' is'} kept as superseded.")
+        return new
+
+    def clear_selected_tracks(self, confirm: bool = True) -> int:
+        p = self.project
+        tests = [t for t in self.selected_tests() if p.has_track(t)]
+        if not tests:
+            return 0
+        if confirm and QMessageBox.question(
+                self, "Clear tracks", f"Delete the tracks of {len(tests)} test{'s' if len(tests) != 1 else ''}? "
+                "Videos and scored events are kept.") != QMessageBox.Yes:
+            return 0
+        n = sum(wf.clear_tracks(p, t) for t in tests)
+        self.main.mark_dirty()
+        self.refresh()
+        return n
 
     def open_selected(self):
         ids = self.selected_ids()
@@ -810,14 +946,15 @@ class TestsPage(Page):
         p = self.project
         if p is None:
             return None
-        return self.track_tests([t for t in p.tests if t.status == "pending" and t.video])
+        return self.track_tests([t for t in p.tests if t.status in ("pending", "scored") and t.video
+                                 and not p.has_track(t)])
 
     def track_tests(self, tests):
         p = self.project
         if p is None:
             return None
         missing = [t for t in tests if t.video and not Path(p.abs_path(t.video)).exists()]
-        tests = [t for t in tests if t.video and t not in missing and t.status != "excluded"]
+        tests = [t for t in tests if t.video and t not in missing and t.status not in ("excluded", "superseded")]
         if missing:
             self.main.status(f"Skipping {len(missing)} test(s) whose video file is missing.")
         if not tests:
