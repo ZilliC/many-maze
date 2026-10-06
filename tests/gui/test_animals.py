@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import Project
 from manymaze.gui.main_window import MainWindow
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -159,4 +160,4 @@ def test_screenshot(page):
     w.resize(1400, 880)
     w.show()
     app.processEvents()
-    w.grab().save("/tmp/shot_animals.png")
+    w.grab().save(shot_path("shot_animals.png"))

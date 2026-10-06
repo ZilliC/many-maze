@@ -17,6 +17,7 @@ from manymaze.gui.pages import tests as tests_mod
 from manymaze.gui.pages.tests import (C_ANIMAL, C_DUR, C_STAGE, C_START, C_TRIAL, AddVideosDialog, DlcImportDialog,
                                       VariablesDialog,
                                       track_tests_job, tracking_batches)
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -238,4 +239,4 @@ def test_variables(page, monkeypatch):
 def test_screenshot(page):
     page.select_ids({2})
     QTest.qWait(100)
-    page.main.grab().save("/tmp/shot_tests.png")
+    page.main.grab().save(shot_path("shot_tests.png"))

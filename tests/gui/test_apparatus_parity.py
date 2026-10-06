@@ -12,9 +12,10 @@ from manymaze.core.project import Project
 from manymaze.core.templates import TEMPLATES
 from manymaze.gui.main_window import MainWindow
 from manymaze.gui.pages.apparatus import ApparatusPage, GridDialog, TemplateDialog
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
-SHOT = "/home/t3/scratch/shot_apparatus_parity.png"
+SHOT = shot_path("shot_apparatus_parity.png")
 
 
 @pytest.fixture(scope="module")

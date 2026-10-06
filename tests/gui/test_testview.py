@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import Project
 from manymaze.gui.main_window import MainWindow
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -241,4 +242,4 @@ def test_screenshot(view):
     view.trail_spin.setValue(4)
     view.tabs.setCurrentIndex(0)
     QTest.qWait(150)
-    view.main.grab().save("/tmp/shot_testview.png")
+    view.main.grab().save(shot_path("shot_testview.png"))

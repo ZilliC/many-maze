@@ -12,6 +12,7 @@ from manymaze.core.project import Project
 from manymaze.core.tracking import DetectionSettings, compute_background
 from manymaze.core.video import VideoSource
 from manymaze.gui.main_window import MainWindow
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -100,7 +101,7 @@ def test_simulated_live_test_synchronous(win, monkeypatch):
             assert page.score_key("d")  # Defecation (point)
         if i == 45:
             app.processEvents()
-            win.grab().save("/tmp/shot_live.png")
+            win.grab().save(shot_path("shot_live.png"))
         i += 1
     src.release()
     assert page.session is None

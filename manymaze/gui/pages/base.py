@@ -49,7 +49,7 @@ DETECTION_SPEC = [
     ("contrast", "Animal is", "choice", [("auto", "Darker or lighter"), ("dark", "Darker"), ("light", "Lighter")],
      "Contrast of the animal against the background (e.g. dark mouse on white floor = Darker)."),
     ("threshold", "Threshold", "int", (0, 255, 1), "Grey-level difference that counts as animal. 0 = automatic (Otsu)."),
-    ("background", "Background model", "choice", [("median", "Median of frames"),
+    ("background", "Background model", "choice", [("median", "Median"),
                                                    ("frame", "Empty-arena frame"),
                                                    ("adaptive", "Adaptive")],
      "Median of frames sampled through the test (animal must move); a chosen frame showing the empty arena; "
@@ -73,7 +73,7 @@ DETECTION_SPEC = [
      "contrast; runs on the Neural Engine / GPU on Apple Silicon). Install the model below first."),
     ("pose_min_conf", "Min keypoint confidence", "float", (0.0, 1.0, 0.05, 2),
      "Pose keypoints below this confidence fall back to the animal-shape estimate."),
-    ("pose_device", "Run pose model on", "choice", [("auto", "Auto (ANE / GPU)"), ("cpu", "CPU")],
+    ("pose_device", "Run pose model on", "choice", [("auto", "Auto"), ("cpu", "CPU")],
      "Neural Engine / GPU uses Core ML on macOS (CUDA on NVIDIA PCs); falls back to the CPU automatically."),
     ("motion_threshold", "Motion threshold (grey)", "int", (1, 255, 1),
      "Pixel change counted as movement for freezing / immobility."),

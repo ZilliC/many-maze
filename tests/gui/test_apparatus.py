@@ -15,6 +15,7 @@ from manymaze.core.project import Project
 from manymaze.core.templates import TEMPLATES
 from manymaze.gui.main_window import MainWindow
 from manymaze.gui.pages.apparatus import TemplateDialog
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -377,4 +378,4 @@ def test_screenshot(page):
     page.set_tool("select")
     for _ in range(5):
         app.processEvents()
-    page.main.grab().save("/tmp/shot_apparatus.png")
+    page.main.grab().save(shot_path("shot_apparatus.png"))

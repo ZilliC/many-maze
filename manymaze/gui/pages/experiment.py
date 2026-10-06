@@ -17,7 +17,7 @@ from ..pose_model import PoseModelBox
 from .base import ANALYSIS_SPEC, DETECTION_SPEC, Page, SettingsForm
 
 
-KIND_LABELS = [("state", "State (key toggles on/off)"), ("hold", "Hold (while key is down)"),
+KIND_LABELS = [("state", "State (toggle)"), ("hold", "Hold (while pressed)"),
                ("point", "Point (instant)")]
 BEH_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", "#ef4444", "#84cc16", "#f97316",
               "#06b6d4"]
@@ -81,8 +81,8 @@ class ExperimentPage(Page):
         self.beh.setHorizontalHeaderLabels(["Behaviour", "Key", "Type", "Exclusive set", "Colour"])
         self.beh.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.beh.setColumnWidth(1, 40)
-        self.beh.setColumnWidth(2, 190)
-        self.beh.setColumnWidth(3, 95)
+        self.beh.setColumnWidth(2, 150)
+        self.beh.setColumnWidth(3, 85)
         self.beh.setColumnWidth(4, 52)
         self.beh.verticalHeader().hide()
         self.beh.setToolTip("Key: a letter, digit or punctuation key (up to 46 keys). Exclusive set: behaviours with "
@@ -107,9 +107,11 @@ class ExperimentPage(Page):
 
         wfb = QGroupBox("Testing workflow")
         wl = QVBoxLayout(wfb)
-        self.blind = QCheckBox("Blind testing — hide treatment groups (shown as codes) while testing and scoring")
+        self.blind = QCheckBox("Blind testing")
+        self.blind.setToolTip("Hide treatment groups (shown as codes) while testing and scoring")
         self.blind.toggled.connect(self._blind_toggled)
-        self.confirm_id = QCheckBox("Confirm the animal's ID (barcode / microchip scan or typed) before each test")
+        self.confirm_id = QCheckBox("Confirm the animal's ID before each test")
+        self.confirm_id.setToolTip("Scan the barcode / microchip or type the ID; a mismatch blocks the test")
         self.confirm_id.toggled.connect(self._store_workflow)
         wl.addWidget(self.blind)
         wl.addWidget(self.confirm_id)

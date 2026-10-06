@@ -15,6 +15,7 @@ from manymaze.gui.confirm_id import confirm_animal_id
 from manymaze.gui.main_window import MainWindow
 from manymaze.gui.pages.animals import CriteriaDialog, DoseDialog
 from manymaze.gui.pages.tests import C_GROUP, C_STATUS, ScheduleDialog
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -380,4 +381,4 @@ def test_screenshot(win):
     v.start_behaviour(win.project.behaviours[1], 3.0)
     v.player.seek_time(3.6)
     QTest.qWait(150)
-    win.grab().save("/home/t3/scratch/shot_workflow.png")
+    win.grab().save(shot_path("shot_workflow.png"))

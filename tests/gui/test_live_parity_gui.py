@@ -20,9 +20,10 @@ from manymaze.core.tracking import DetectionSettings, compute_background
 from manymaze.core.video import VideoSource
 from manymaze.gui.live_widgets import CameraOptionsDialog
 from manymaze.gui.main_window import MainWindow
+from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
-SHOT = "/home/t3/scratch/shot_live_parity.png"
+SHOT = shot_path("shot_live_parity.png")
 
 
 def pump(cond, timeout=20.0):
