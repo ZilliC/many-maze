@@ -71,6 +71,10 @@ class Test:
     status: str = "pending"  # pending | tracked | excluded
     notes: str = ""
     recorded_at: str = ""
+    io_events: list = field(default_factory=list)  # live I/O log [{"t", "device", "channel", "kind": "input"|"output", "value"}]
+    result_variables: dict = field(default_factory=dict)  # numeric procedure variables saved as results
+    zone_overrides: dict = field(default_factory=dict)  # moveable zones: {zone name: shape dict} for this test
+    pauses: list = field(default_factory=list)  # [[t_start, t_end], ...] test-time intervals the test was paused
 
     @classmethod
     def from_dict(cls, d):
@@ -98,7 +102,12 @@ class Project:
     tests: list = field(default_factory=list)  # list[Test]
     animal_fields: list = field(default_factory=list)  # extra animal column names
     stages: list = field(default_factory=list)
-    procedures: list = field(default_factory=list)  # live I/O rules (see procedures.py)
+    procedures: list = field(default_factory=list)  # live procedures (see procedures.py)
+    io_devices: list = field(default_factory=list)  # I/O device configurations (see iodevices.py)
+    variables: dict = field(default_factory=dict)  # procedure variables kept between tests
+    training_criteria: list = field(default_factory=list)  # per-stage criteria (see project workflow)
+    blind: bool = False  # hide group / treatment while testing and scoring
+    settings_extra: dict = field(default_factory=dict)  # misc. UI / workflow settings
     created: str = field(default_factory=lambda: _dt.datetime.now().isoformat(timespec="seconds"))
     path: Path | None = None
 
@@ -140,6 +149,11 @@ class Project:
             "animal_fields": self.animal_fields,
             "stages": self.stages,
             "procedures": self.procedures,
+            "io_devices": self.io_devices,
+            "variables": self.variables,
+            "training_criteria": self.training_criteria,
+            "blind": self.blind,
+            "settings_extra": self.settings_extra,
             "created": self.created,
         }
 
@@ -167,6 +181,11 @@ class Project:
             animal_fields=d.get("animal_fields", []),
             stages=d.get("stages", []),
             procedures=d.get("procedures", []),
+            io_devices=d.get("io_devices", []),
+            variables=d.get("variables", {}),
+            training_criteria=d.get("training_criteria", []),
+            blind=d.get("blind", False),
+            settings_extra=d.get("settings_extra", {}),
             created=d.get("created", ""),
         )
         p.path = pdir
