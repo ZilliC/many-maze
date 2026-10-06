@@ -11,19 +11,21 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QGraphicsItem,
-                               QGraphicsTextItem, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout,
-                               QHeaderView, QLabel, QLayout, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSpinBox, QSplitter, QStyle, QTableWidget, QTableWidgetItem, QTabWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QActionGroup, QColor, QGuiApplication
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFrame, QGraphicsItem, QGraphicsTextItem,
+                               QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLayout,
+                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+                               QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout,
+                               QWidget)
 
 from ...core import workflow as wf
 from ...core.plots import heatmap, speed_trace, track_plot
 from ...core.track import Track
 from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_overlay
+from .. import theme
 from ..confirm_id import confirm_animal_id
 from ..widgets import PlotCanvas, VideoPlayer, Worker, error_box, fmt_time, run_with_progress
+from .animals import ribbon_action, treatment_text
 from .base import DETECTION_SPEC, Page, SettingsForm
 from .tests import track_tests_job
 
@@ -33,6 +35,7 @@ INFO_KEYS = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "P
 BEHAVIOUR_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", "#ef4444", "#84cc16",
                     "#f97316", "#06b6d4"]
 KIND_TEXT = {"state": "toggle", "hold": "hold", "point": "point"}
+SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
 STATUS_COLORS = {"tracked": "#16a34a", "scored": "#0891b2", "pending": "#d97706", "skipped": "#9333ea",
                  "superseded": "#94a3b8", "excluded": "#94a3b8"}
 
@@ -153,6 +156,7 @@ class ScoringPad(QWidget):
         while self.flow.count():
             it = self.flow.takeAt(0)
             if it.widget() is not None:
+                it.widget().hide()  # until deleted (deferred), it would still be painted
                 it.widget().deleteLater()
         self.buttons.clear()
         self._colors.clear()
@@ -221,6 +225,10 @@ class ObservationClock:
 
 
 class TestViewPage(Page):
+    """Review and score one test, laid out like an ANY-maze test panel: a small toolbar, the title line
+    ("Open field: Animal C1, Day 1 trial 1 - 0:09"), the video on a light background and the time slider, with
+    Results / Plots / Scoring / Detection / Track editing tabs on the right."""
+
     title = "Test view"
 
     def __init__(self, main):
@@ -246,44 +254,116 @@ class TestViewPage(Page):
         self._tracking = False
         self.preview_info = ""
 
-        st = self.style()
-        # ---- top bar -----------------------------------------------------------
-        self.test_combo = QComboBox()
-        self.test_combo.setMinimumWidth(300)
-        self.test_combo.currentIndexChanged.connect(self._combo_changed)
-        self.prev_btn = QPushButton()
-        self.prev_btn.setIcon(st.standardIcon(QStyle.SP_ArrowBack))
-        self.prev_btn.setToolTip("Previous test")
-        self.prev_btn.clicked.connect(lambda: self.step_test(-1))
-        self.next_btn = QPushButton()
-        self.next_btn.setIcon(st.standardIcon(QStyle.SP_ArrowForward))
-        self.next_btn.setToolTip("Next test")
-        self.next_btn.clicked.connect(lambda: self.step_test(1))
-        self.info_lbl = QLabel()
-        self.info_lbl.setStyleSheet("color:#475569;")
-        self.track_btn = QPushButton("Track this test")
-        self.track_btn.setIcon(st.standardIcon(QStyle.SP_MediaPlay))
-        self.track_btn.setStyleSheet("font-weight:bold;padding:4px 12px;")
-        self.track_btn.clicked.connect(self.track_this_test)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Test"))
-        top.addWidget(self.test_combo)
-        top.addWidget(self.prev_btn)
-        top.addWidget(self.next_btn)
-        top.addSpacing(10)
-        top.addWidget(self.info_lbl, 1)
-        top.addWidget(self.track_btn)
+        # ---- commands (ribbon groups Test, Playback, Scoring, View, Track editing) -------------------
+        def act(text, ic, fn=None, tip="", checkable=False, large=False):
+            return ribbon_action(self, text, ic, fn, tip, checkable, large)
 
-        # ---- video + timing + display options ------------------------------------
+        self.prev_btn = act("Previous test", "back", lambda: self.step_test(-1), "Previous test of the schedule")
+        self.next_btn = act("Next test", "forward", lambda: self.step_test(1), "Next test of the schedule")
+        self.track_btn = act("Track this test", "tracking", lambda: self.track_this_test(),
+                             "Track the animal in this test's video", large=True)
+        self.a_play = act("Play", "play", self.play, "Play the video (Space)")
+        self.a_pause = act("Pause", "pause", self.pause, "Pause the video (Space)")
+        self.a_stop = act("Stop", "stop", self.stop, "Stop and go back to the start of the test")
+        self.a_back = act("Step back", "previous", lambda: self.player.step(-1), "Back one frame (←; Shift: 1 s)")
+        self.a_fwd = act("Step forward", "next", lambda: self.player.step(1), "Forward one frame (→; Shift: 1 s)")
+        self.a_speed = act("Speed 1×", "speed", None, "Playback speed")
+        speed_menu = QMenu(self)
+        self._speed_group = QActionGroup(self)
+        for v in SPEEDS:
+            a = speed_menu.addAction(f"{v:g}×")
+            a.setCheckable(True)
+            a.setChecked(v == 1.0)
+            a.triggered.connect(lambda _=False, v=v: self.set_speed(v))
+            self._speed_group.addAction(a)
+        self.a_speed.setMenu(speed_menu)
+        self.a_keys = act("On-screen keys", "keyboard", self._keys_toggled,
+                          "Show the scoring keys as on-screen buttons (mouse / touch screen)", True, True)
+        self.a_keys.blockSignals(True)
+        self.a_keys.setChecked(True)
+        self.a_keys.blockSignals(False)
+        self.clock_start_btn = act("Start", "timer", lambda: self.clock_start(),
+                                   "TakeNote: start the observation clock (tests without video)")
+        self.clock_pause_btn = act("Pause", "pause", self.clock_pause, "TakeNote: pause the observation clock")
+        self.clock_stop_btn = act("Stop", "stop", lambda: self.clock_stop(),
+                                  "TakeNote: stop the observation — the test is scored")
+        self.chk_zones = act("Zones", "zone", self._refresh_frame, "Show the apparatus zones", True)
+        self.chk_animal = act("Animal", "animal", self._refresh_frame, "Show the tracked animal", True)
+        self.chk_trail = act("Trail", "trail", self._refresh_frame, "Show the trail behind the animal", True)
+        self.chk_preview = act("Detection preview", "detect", self._refresh_frame,
+                               "Run the detector on the displayed frame with this test's settings and tint the "
+                               "detected foreground", True)
+        for a in (self.chk_zones, self.chk_animal, self.chk_trail):
+            a.blockSignals(True)
+            a.setChecked(True)
+            a.blockSignals(False)
+        self.mark_btn = act("Mark position", "mark", self._mark_toggled,
+                            "Mark the animal's position by clicking on the video", True, True)
+        self.a_range_start = act("Range start", "range", lambda: self.set_range(0),
+                                 "Start the time range at the current time")
+        self.a_range_end = act("Range end", "range", lambda: self.set_range(1),
+                               "End the time range at the current time")
+        self.a_interp = act("Interpolate", "interpolate", lambda: self.interpolate_range(),
+                            "Interpolate the positions in the time range")
+        self.a_del_range = act("Delete range", "delete", lambda: self.delete_range(),
+                               "Delete the positions in the time range")
+        self.undo_btn = act("Undo", "undo", self.undo_edit, "Undo the last track edit")
+
+        # ---- test panel: toolbar, title, video, time slider ----------------------------------------
+        self.test_combo = QComboBox()
+        self.test_combo.setMinimumWidth(200)
+        self.test_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.test_combo.setMinimumContentsLength(24)
+        self.test_combo.setToolTip("Test shown")
+        self.test_combo.currentIndexChanged.connect(self._combo_changed)
+        tb = QHBoxLayout()
+        tb.setSpacing(2)
+        for i, a in enumerate((self.a_play, self.a_pause, self.a_stop, None, self.a_back, self.a_fwd, self.a_speed,
+                               None, self.undo_btn, self.mark_btn, None, self.chk_preview)):
+            if a is None:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.VLine)
+                sep.setStyleSheet(f"color:{theme.BORDER};")
+                sep.setFixedHeight(22)
+                tb.addSpacing(4)
+                tb.addWidget(sep)
+                tb.addSpacing(4)
+                continue
+            tb.addWidget(self._tool(a, icon_only=a is not self.a_speed))
+        tb.addStretch()
+        tb.addWidget(QLabel("Test"))
+        tb.addWidget(self.test_combo)
+        self.title_lbl = QLabel()
+        self.title_lbl.setObjectName("TestTitle")
+        self.title_lbl.setStyleSheet(f"font-size:17px;color:{theme.TEXT};padding:4px 2px 0 2px;")
+        self.info_lbl = QLabel()
+        self.info_lbl.setObjectName("Hint")
+        self.info_lbl.setStyleSheet("padding:0 2px 2px 2px;")
+        head = QWidget()
+        head.setObjectName("TestPanelHead")
+        head.setStyleSheet(f"QWidget#TestPanelHead{{background:{theme.RIBBON_BG};border-bottom:1px solid "
+                           f"{theme.BORDER};}}")
+        hl = QVBoxLayout(head)
+        hl.setContentsMargins(8, 4, 8, 6)
+        hl.setSpacing(2)
+        hl.addLayout(tb)
+        hl.addWidget(self.title_lbl)
+        hl.addWidget(self.info_lbl)
+
         self.player = VideoPlayer()
         self.player.overlay = self._overlay
         self.player.frame_changed.connect(self._frame_changed)
         self.player.view.clicked.connect(self._view_clicked)
+        for b in self.player.findChildren(QPushButton):  # the panel toolbar and the ribbon drive playback
+            b.hide()
         v = self.player.view
+        v.setBackgroundBrush(QColor(theme.WORK_BG))
+        v.setFrameShape(QFrame.NoFrame)
         v.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.setDragMode(QGraphicsView.ScrollHandDrag)
         v.setToolTip("Wheel: zoom · drag: pan · Alt+double-click: fit")
+        self.player.time_lbl.setStyleSheet(f"color:{theme.MUTED};")
         self.hud = QGraphicsTextItem()
         self.hud.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self.hud.setZValue(100)
@@ -309,59 +389,56 @@ class TestViewPage(Page):
         b_end = QPushButton("End = now")
         b_end.setToolTip("Set the duration so the test ends at the current video time")
         b_end.clicked.connect(self.set_end_now)
-        b_go = QPushButton()
-        b_go.setIcon(st.standardIcon(QStyle.SP_MediaSkipBackward))
-        b_go.setToolTip("Go to the test start")
-        b_go.clicked.connect(lambda: self.test and self.player.seek_time(self.test.start_s))
-        timing = QHBoxLayout()
-        timing.addWidget(QLabel("Test start"))
-        timing.addWidget(self.start_spin)
-        timing.addWidget(b_start)
-        timing.addSpacing(6)
-        timing.addWidget(QLabel("Duration"))
-        timing.addWidget(self.dur_spin)
-        timing.addWidget(b_end)
-        timing.addWidget(b_go)
-        timing.addStretch()
-
-        self.chk_zones = QCheckBox("Zones")
-        self.chk_zones.setChecked(True)
-        self.chk_animal = QCheckBox("Animal")
-        self.chk_animal.setChecked(True)
         self.trail_spin = QDoubleSpinBox()
         self.trail_spin.setRange(0, 3600)
         self.trail_spin.setDecimals(0)
         self.trail_spin.setValue(5)
         self.trail_spin.setSuffix(" s")
         self.trail_spin.setToolTip("Length of the trail drawn behind the animal")
-        self.chk_preview = QCheckBox("Detection preview")
-        self.chk_preview.setToolTip("Run the detector on the displayed frame with this test's settings and tint "
-                                    "the detected foreground")
-        for w in (self.chk_zones, self.chk_animal, self.chk_preview):
-            w.toggled.connect(self._refresh_frame)
         self.trail_spin.valueChanged.connect(self._refresh_frame)
+        for sp, wd in ((self.start_spin, 96), (self.dur_spin, 96), (self.trail_spin, 66)):
+            sp.setFixedWidth(wd)
+        timing = QHBoxLayout()
+        timing.setContentsMargins(8, 0, 8, 0)
+        timing.addWidget(QLabel("Test start"))
+        timing.addWidget(self.start_spin)
+        timing.addWidget(b_start)
+        timing.addSpacing(10)
+        timing.addWidget(QLabel("Duration"))
+        timing.addWidget(self.dur_spin)
+        timing.addWidget(b_end)
+        timing.addSpacing(10)
+        timing.addWidget(QLabel("Trail"))
+        timing.addWidget(self.trail_spin)
+        timing.addStretch()
         self.pos_lbl = QLabel()
-        self.pos_lbl.setStyleSheet("color:#475569;")
-        disp = QHBoxLayout()
-        disp.addWidget(QLabel("Show:"))
-        disp.addWidget(self.chk_zones)
-        disp.addWidget(self.chk_animal)
-        disp.addWidget(QLabel("trail"))
-        disp.addWidget(self.trail_spin)
-        disp.addSpacing(8)
-        disp.addWidget(self.chk_preview)
-        disp.addStretch()
-        disp.addWidget(self.pos_lbl)
+        self.pos_lbl.setObjectName("Hint")
+        pos_row = QHBoxLayout()
+        pos_row.setContentsMargins(8, 0, 8, 4)
+        pos_row.addStretch()
+        pos_row.addWidget(self.pos_lbl)
 
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(4)
+        ll.addWidget(head)
+        self.player.layout().setContentsMargins(8, 0, 8, 0)
         ll.addWidget(self.player, 1)
         ll.addLayout(timing)
-        ll.addLayout(disp)
+        ll.addLayout(pos_row)
 
         # ---- right: tabs -------------------------------------------------------------
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("SideTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet(
+            "QTabWidget#SideTabs::pane{border:none;border-top:1px solid #d6d6d6;}"
+            "QTabWidget#SideTabs > QTabBar::tab{background:transparent;border:none;"
+            f"border-bottom:2px solid transparent;padding:7px 12px;margin:0 2px;color:{theme.MUTED};font-size:13px;}}"
+            f"QTabWidget#SideTabs > QTabBar::tab:selected{{color:{theme.ACCENT};border-bottom:2px solid "
+            f"{theme.ACCENT};}}"
+            f"QTabWidget#SideTabs > QTabBar::tab:hover:!selected{{color:{theme.TEXT};background:{theme.HOVER};}}")
         self.tabs.addTab(self._build_results_tab(), "Results")
         self.tabs.addTab(self._build_plots_tab(), "Plots")
         self.tabs.addTab(self._build_scoring_tab(), "Scoring")
@@ -370,20 +447,67 @@ class TestViewPage(Page):
         self.tabs.currentChanged.connect(lambda _: self._ensure_tab())
 
         split = QSplitter(Qt.Horizontal)
+        split.setHandleWidth(1)
         split.addWidget(left)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
-        split.setSizes([760, 460])
+        split.setSizes([740, 440])
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.addLayout(top)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(split, 1)
 
         for w in (self.player, self.player.view, self.player.slider, self.events_table):
             w.installEventFilter(self)
         self._enable(False)
+
+    def _tool(self, action, icon_only=False) -> QToolButton:
+        """A flat button for an action (panel toolbar, tabs); keyboard focus stays with the video."""
+        b = QToolButton()
+        b.setDefaultAction(action)
+        b.setAutoRaise(True)
+        b.setFocusPolicy(Qt.NoFocus)
+        b.setIconSize(QSize(20, 20) if icon_only else QSize(16, 16))
+        b.setToolButtonStyle(Qt.ToolButtonIconOnly if icon_only else Qt.ToolButtonTextBesideIcon)
+        if action.menu() is not None:
+            b.setPopupMode(QToolButton.InstantPopup)
+        return b
+
+    # ================================================================== ribbon
+    def ribbon_groups(self):
+        return [("Test", [(self.prev_btn, "small"), (self.next_btn, "small"), self.track_btn]),
+                ("Playback", [(self.a_play, "small"), (self.a_pause, "small"), (self.a_stop, "small"),
+                              (self.a_back, "small"), (self.a_fwd, "small"), (self.a_speed, "small")]),
+                ("Scoring", [self.a_keys, (self.clock_start_btn, "small"), (self.clock_pause_btn, "small"),
+                             (self.clock_stop_btn, "small")]),
+                ("View", [(self.chk_zones, "small"), (self.chk_animal, "small"), (self.chk_trail, "small"),
+                          (self.chk_preview, "small")]),
+                ("Track editing", [self.mark_btn, (self.a_interp, "small"), (self.a_del_range, "small"),
+                                   (self.undo_btn, "small")])]
+
+    def play(self):
+        self.player.play()
+
+    def pause(self):
+        self.player.pause()
+
+    def stop(self):
+        self.player.pause()
+        if self.test is not None and self.player.source is not None:
+            self.player.seek_time(self.video_start())
+
+    def set_speed(self, v: float):
+        self.player.speed = float(v)
+        self.player.speed_btn.setText(f"{v:g}×")
+        self.a_speed.setText(f"Speed {v:g}×")
+        for a in self._speed_group.actions():
+            a.setChecked(a.text() == f"{v:g}×")
+        if self.player.playing:
+            self.player.play()
+
+    def _keys_toggled(self, on):
+        self.pad.setVisible(on)
 
     # ================================================================== UI building
     def _build_results_tab(self):
@@ -395,9 +519,10 @@ class TestViewPage(Page):
         self.results_table.setHorizontalHeaderLabels(["Measure", "Value"])
         self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.results_table.verticalHeader().hide()
-        self.results_table.setAlternatingRowColors(True)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.results_table.verticalHeader().setDefaultSectionSize(22)
+        self.results_table.verticalHeader().setDefaultSectionSize(26)
+        self.results_table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.results_table.setAlternatingRowColors(False)
         copy = QPushButton("Copy table")
         copy.clicked.connect(self.copy_results)
         self.results_filter = QLineEdit()
@@ -444,25 +569,14 @@ class TestViewPage(Page):
         hint.setStyleSheet("color:#475569;")
         lay.addWidget(hint)
 
-        self.clock_box = QGroupBox("Observation clock (no video: score by direct observation)")
+        self.clock_box = QGroupBox("TakeNote observation clock (no video: score by direct observation)")
         cl = QHBoxLayout(self.clock_box)
         self.clock_lbl = QLabel("00:00.0")
         self.clock_lbl.setStyleSheet("font-size:22px;font-weight:bold;font-family:monospace;")
-        st = self.style()
-        self.clock_start_btn = QPushButton("Start")
-        self.clock_start_btn.setIcon(st.standardIcon(QStyle.SP_MediaPlay))
-        self.clock_start_btn.clicked.connect(lambda: self.clock_start())
-        self.clock_pause_btn = QPushButton("Pause")
-        self.clock_pause_btn.setIcon(st.standardIcon(QStyle.SP_MediaPause))
-        self.clock_pause_btn.clicked.connect(self.clock_pause)
-        self.clock_stop_btn = QPushButton("Stop")
-        self.clock_stop_btn.setIcon(st.standardIcon(QStyle.SP_MediaStop))
-        self.clock_stop_btn.clicked.connect(self.clock_stop)
         cl.addWidget(self.clock_lbl)
         cl.addStretch()
-        for b in (self.clock_start_btn, self.clock_pause_btn, self.clock_stop_btn):
-            b.setFocusPolicy(Qt.NoFocus)
-            cl.addWidget(b)
+        for a in (self.clock_start_btn, self.clock_pause_btn, self.clock_stop_btn):
+            cl.addWidget(self._tool(a))
         self.clock_box.hide()
         lay.addWidget(self.clock_box)
 
@@ -477,7 +591,8 @@ class TestViewPage(Page):
         self.events_table.setHorizontalHeaderLabels(["Behaviour", "Start (s)", "End (s)", "Duration (s)"])
         self.events_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.events_table.verticalHeader().hide()
-        self.events_table.verticalHeader().setDefaultSectionSize(22)
+        self.events_table.verticalHeader().setDefaultSectionSize(26)
+        self.events_table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.events_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.events_table.cellClicked.connect(self._event_clicked)
         lay.addWidget(self.events_table, 1)
@@ -545,9 +660,6 @@ class TestViewPage(Page):
 
         mk = QGroupBox("Mark position")
         ml = QVBoxLayout(mk)
-        self.mark_btn = QPushButton("Mark animal position (click on the video)")
-        self.mark_btn.setCheckable(True)
-        self.mark_btn.toggled.connect(self._mark_toggled)
         adv = QHBoxLayout()
         adv.addWidget(QLabel("Then advance"))
         self.advance_spin = QSpinBox()
@@ -556,27 +668,24 @@ class TestViewPage(Page):
         self.advance_spin.setSuffix(" frame(s)")
         adv.addWidget(self.advance_spin)
         adv.addStretch()
-        ml.addWidget(self.mark_btn)
+        mrow = QHBoxLayout()
+        mrow.addWidget(self._tool(self.mark_btn))
+        mrow.addWidget(QLabel("then click on the animal in the video"), 1)
+        ml.addLayout(mrow)
         ml.addLayout(adv)
         lay.addWidget(mk)
 
         rg = QGroupBox("Time range")
         rl = QVBoxLayout(rg)
         r1 = QHBoxLayout()
-        b1 = QPushButton("Range start = now")
-        b1.clicked.connect(lambda: self.set_range(0))
-        b2 = QPushButton("Range end = now")
-        b2.clicked.connect(lambda: self.set_range(1))
-        r1.addWidget(b1)
-        r1.addWidget(b2)
+        r1.addWidget(self._tool(self.a_range_start))
+        r1.addWidget(self._tool(self.a_range_end))
+        r1.addStretch()
         self.range_lbl = QLabel()
         r2 = QHBoxLayout()
-        bi = QPushButton("Interpolate range")
-        bi.clicked.connect(lambda: self.interpolate_range())
-        bd = QPushButton("Delete positions in range")
-        bd.clicked.connect(lambda: self.delete_range())
-        r2.addWidget(bi)
-        r2.addWidget(bd)
+        r2.addWidget(self._tool(self.a_interp))
+        r2.addWidget(self._tool(self.a_del_range))
+        r2.addStretch()
         rl.addLayout(r1)
         rl.addWidget(self.range_lbl)
         rl.addLayout(r2)
@@ -596,10 +705,8 @@ class TestViewPage(Page):
         self.move_box = mv
         lay.addWidget(mv)
         r3 = QHBoxLayout()
-        self.undo_btn = QPushButton("Undo last edit")
-        self.undo_btn.clicked.connect(self.undo_edit)
         self.edit_lbl = QLabel()
-        r3.addWidget(self.undo_btn)
+        r3.addWidget(self._tool(self.undo_btn))
         r3.addWidget(self.edit_lbl, 1)
         lay.addLayout(r3)
         lay.addStretch()
@@ -733,6 +840,7 @@ class TestViewPage(Page):
             self.player.current_frame = None
             self.pos_lbl.setText("")
             self._placeholder("No video for this test" if not path else f"Video not found:\n{path}")
+        self._enable(True)
         self._update_info()
         self._update_clock_ui()
         self._mark_stale("results", "plots")
@@ -790,11 +898,18 @@ class TestViewPage(Page):
             w.setEnabled(on)
         has = on and self.test is not None and bool(self.test.video)
         self.track_btn.setEnabled(has)
+        video = on and self.player.source is not None
+        for a in (self.a_play, self.a_pause, self.a_stop, self.a_back, self.a_fwd, self.a_speed):
+            a.setEnabled(video)
+        for a in (self.mark_btn, self.a_range_start, self.a_range_end, self.a_interp, self.a_del_range,
+                  self.undo_btn, self.chk_preview):
+            a.setEnabled(on)
         self.prev_btn.setEnabled(self.test_combo.count() > 1)
         self.next_btn.setEnabled(self.test_combo.count() > 1)
 
     def _clear_views(self):
         self.info_lbl.setText("")
+        self.title_lbl.setText("No test selected")
         self.pos_lbl.setText("")
         self.results_table.setRowCount(0)
         self.results_lbl.setText("")
@@ -805,7 +920,7 @@ class TestViewPage(Page):
         self._placeholder("No test selected")
 
     def _placeholder(self, text: str):
-        self.player.view.set_frame(np.full((360, 480, 3), 40, np.uint8))
+        self.player.view.set_frame(np.full((360, 480, 3), 228, np.uint8))
         self.player.time_lbl.setText("--:--")
         self._set_hud([(line, "#e2e8f0") for line in text.splitlines()])
 
@@ -824,17 +939,32 @@ class TestViewPage(Page):
             self.info_lbl.setText("")
             return
         a = p.get_animal(t.animal_id)
-        grp = (f" <span style='color:{wf.display_color(p, a.group)}'>({html.escape(wf.display_group(p, a.group))})"
-               "</span>" if a and a.group else "")
+        grp = (f"Treatment <span style='color:{wf.display_color(p, a.group)}'>"
+               f"{html.escape(treatment_text(p, a.group))}</span>" if a and a.group else "")
         if a is not None and a.retired:
-            grp += " <span style='color:#dc2626'>retired</span>"
+            grp += " <span style='color:#dc2626'>(animal retired)</span>"
         dur = t.duration_s or p.test_duration_s
         status_col = STATUS_COLORS.get(t.status, "#334155")
-        parts = [f"<b>{t.animal_id or '—'}</b>{grp}", t.stage or "",
-                 f"trial {t.trial}" + (f" (attempt {t.attempt})" if t.attempt > 1 else ""), t.apparatus,
-                 Path(t.video).name if t.video else "no video", f"{t.start_s:g}–{t.start_s + dur:g} s" if dur else "",
-                 f"<b style='color:{status_col}'>{t.status}</b>"]
+        video = (f"<span title='{html.escape(p.abs_path(t.video))}'>{html.escape(Path(t.video).name)}</span>"
+                 if t.video else "no video")
+        parts = [f"Test {t.id}" + (f" (attempt {t.attempt})" if t.attempt > 1 else ""), grp, video,
+                 f"test period {t.start_s:g}–{t.start_s + dur:g} s" if dur else "",
+                 f"<span style='color:{status_col}'>{t.status}</span>"]
         self.info_lbl.setText(" · ".join(x for x in parts if x))
+        self._update_title()
+
+    def _update_title(self, tt: float | None = None):
+        """ANY-maze style title line: "Open field: Animal C1, Day 1 trial 1 - 0:09"."""
+        t = self.test
+        if t is None or self.project is None:
+            self.title_lbl.setText("No test selected")
+            return
+        if tt is None:
+            tt = self.test_time() if (self.player.source is not None or self.clock.state != "stopped") else 0.0
+        m, sec = divmod(int(max(0.0, tt)), 60)
+        who = f"Animal {t.animal_id}" if t.animal_id else "No animal"
+        trial = f"{t.stage} trial {t.trial}" if t.stage else f"Trial {t.trial}"
+        self.title_lbl.setText(f"{t.apparatus + ': ' if t.apparatus else ''}{who}, {trial} - {m}:{sec:02d}")
 
     # ================================================================== overlay
     def _app(self):
@@ -914,7 +1044,7 @@ class TestViewPage(Page):
         return img
 
     def _draw_tracks(self, img, vt, sc):
-        trail = self.trail_spin.value()
+        trail = self.trail_spin.value() if self.chk_trail.isChecked() else 0
         r = max(3, int(4 * sc))
         lw = max(1, int(sc))
         ids = [self.test.animal_id] + list(self.test.extra_animals)
@@ -1059,6 +1189,7 @@ class TestViewPage(Page):
             elif j is not None:
                 txt += " · not detected"
         self.pos_lbl.setText(txt)
+        self._update_title(tt)
         if self._open_states:
             self._update_active()
 
@@ -1375,11 +1506,14 @@ class TestViewPage(Page):
         self.clock_box.setVisible(no_video)
         st = self.clock.state
         self.clock_start_btn.setText("Resume" if st == "paused" else "Start")
+        self.clock_start_btn.setIconText(self.clock_start_btn.text())
         self.clock_start_btn.setEnabled(no_video and st != "running")
         self.clock_pause_btn.setEnabled(st == "running")
         self.clock_stop_btn.setEnabled(st != "stopped")
         e = self.clock.elapsed()
         self.clock_lbl.setText(f"{int(e // 60):02d}:{e % 60:04.1f}")
+        if no_video:
+            self._update_title(e)
         self.clock_lbl.setStyleSheet("font-size:22px;font-weight:bold;font-family:monospace;color:"
                                      + {"running": "#16a34a", "paused": "#d97706"}.get(st, "#334155") + ";")
         self._update_observation_hud()
@@ -1392,7 +1526,7 @@ class TestViewPage(Page):
                  (f"observation clock {fmt_time(e)}  ({self.clock.state})",
                   {"running": "#4ade80", "paused": "#fbbf24"}.get(self.clock.state, "#e2e8f0"))]
         if self.clock.state == "stopped" and not self.test.events:
-            lines.append(("Start the clock on the Scoring tab", "#94a3b8"))
+            lines.append(("Start the TakeNote clock (Scoring)", "#94a3b8"))
         lines += [(f"● {n}", "#4ade80") for n in self._open_states]
         self._set_hud(lines)
 

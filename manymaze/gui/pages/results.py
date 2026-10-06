@@ -9,13 +9,13 @@ from pathlib import Path
 
 import numpy as np
 from matplotlib.figure import Figure
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSortFilterProxyModel, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QImage
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QProgressBar, QPushButton,
-                               QSizePolicy, QSplitter, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QProgressBar,
+                               QPushButton, QSizePolicy, QStackedWidget, QTableView, QTableWidget, QTableWidgetItem,
+                               QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ...core import charts, plots
 from ...core.export import (export_raw_data, export_xml, html_report, write_csv, write_table,
@@ -23,6 +23,8 @@ from ...core.export import (export_raw_data, export_xml, html_report, write_csv,
 from ...core.measures import all_periods, kinematics
 from ...core.project import INACTIVE_STATUSES, result_columns
 from ...core.video import VideoSource
+from .. import theme
+from ..icons import icon
 from ..widgets import PlotCanvas, error_box, run_with_progress
 from ._results_cache import RowsLoader, info_columns
 from .base import Page
@@ -37,6 +39,12 @@ CATEGORY_ORDER = ["Information", "General", "Zones", "Points of interest", "Line
 FIG_FILTER = "PNG image (*.png);;PDF document (*.pdf);;SVG image (*.svg)"
 TABLE_FILTER = "CSV file (*.csv);;Tab-separated text (*.tsv *.txt);;Excel workbook (*.xlsx)"
 POSITION = "Position (all time)"
+COLUMN_LABELS = {"Group": "Treatment"}
+# views of the Data page (explorer sub-items): key, label, icon, page title
+VIEWS = [("spreadsheet", "Spreadsheet", "table", "Data"), ("track", "Track plots", "track", "Track plots"),
+         ("heat", "Heat maps", "heatmap", "Heat maps"), ("charts", "Charts", "chart", "Charts"),
+         ("video", "Video export", "video_file", "Video export")]
+PLOT_VIEWS = ("track", "heat", "video")
 
 
 def is_number(v) -> bool:
@@ -85,6 +93,20 @@ def measure_category(col: str, names: dict) -> tuple[str, str]:
     if col.startswith(GENERAL_PREFIXES):
         return "General", ""
     return "Test-specific", ""
+
+
+def ribbon_label(text: str) -> str:
+    """Two-line label of a large ribbon button (as the ribbon splits it), kept as the action's icon text."""
+    if " " not in text or len(text) <= 9:
+        return text
+    words = text.split(" ")
+    best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+    return " ".join(words[:best]) + "\n" + " ".join(words[best:])
+
+
+def column_label(col: str) -> str:
+    """Column heading as shown (ANY-maze terms; the data keep their names, e.g. "Group" holds the treatment)."""
+    return COLUMN_LABELS.get(col, col)
 
 
 def numeric_columns(rows: list[dict], cols: list[str]) -> list[str]:
@@ -154,11 +176,9 @@ class ResultsModel(QAbstractTableModel):
         if orientation == Qt.Horizontal and 0 <= section < len(self.columns):
             c = self.columns[section]
             if role == Qt.DisplayRole:
-                if ": " in c:
-                    return c.replace(": ", ":\n", 1)
-                return c.replace(" (", "\n(", 1) if len(c) > 12 else c
+                return column_label(c)
             if role == Qt.ToolTipRole:
-                return c
+                return "Treatment (the animal's group)" if c == "Group" else c
         elif orientation == Qt.Vertical and role == Qt.DisplayRole:
             return str(section + 1)
         return None
@@ -246,31 +266,42 @@ class VideoExportDialog(QDialog):
         self.setWindowTitle("Export video with overlays")
         o = OverlayOptions()
         f = QFormLayout(self)
-        self.zones = QCheckBox("Zones, points and lines")
+        self.zones = QCheckBox("Draw the zones, points and lines")
         self.zones.setChecked(o.zones)
-        self.trail = _combo(["None", "Last 2 s", "Last 5 s", "Last 15 s", "Whole track so far"], [0, 2, 5, 15, -1])
+        self.trail = _combo(["- No track -", "2 seconds", "5 seconds", "15 seconds", "Whole test so far"],
+                            [0, 2, 5, 15, -1])
         self.trail.setCurrentIndex(2)
         self.trail_color = _combo(["Speed", "Time", "Animal colour"], ["speed", "time", "fixed"])
-        self.body = QCheckBox("Centre, head and tail")
+        self.body = QCheckBox("Mark the centre, head and tail")
         self.body.setChecked(True)
-        self.beh = QCheckBox("Scored behaviours and freezing")
+        self.beh = QCheckBox("Show scored behaviours and freezing")
         self.beh.setChecked(True)
-        self.stamp = QCheckBox("Time stamp and test caption")
+        self.stamp = QCheckBox("Add a time stamp and the test caption")
         self.stamp.setChecked(True)
         self.speed = _combo(["0.5×", "1×", "2×", "4×", "8×"], [0.5, 1.0, 2.0, 4.0, 8.0])
         self.speed.setCurrentIndex(1)
         self.scale = _combo(["100 %", "75 %", "50 %"], [1.0, 0.75, 0.5])
         for w in (self.zones, self.body, self.beh, self.stamp):
-            f.addRow("", w)
-        f.addRow("Track trail", self.trail)
-        f.addRow("Trail colour", self.trail_color)
-        f.addRow("Playback speed", self.speed)
-        f.addRow("Size", self.scale)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText("Export…")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        f.addRow(bb)
+            f.addRow(w)
+        f.addRow("Draw the track of the last", self.trail)
+        f.addRow("Colour the track by", self.trail_color)
+        f.addRow("Playback speed of the video", self.speed)
+        f.addRow("Size of the video", self.scale)
+        f.setVerticalSpacing(10)
+        f.setHorizontalSpacing(16)
+        self.form = f
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Export…")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        f.addRow(self.buttons)
+
+    def embed(self):
+        """Use the options as a panel inside a page (no buttons, no window)."""
+        self.setWindowFlags(Qt.Widget)
+        self.buttons.hide()
+        self.setSizeGripEnabled(False)
+        return self
 
     def options(self):
         from ...core.videoexport import OverlayOptions
@@ -352,21 +383,11 @@ class ChartsPanel(QWidget):
         self.measure_check = QCheckBox("Measure interval")
         self.measure_check.setToolTip("Drag across a chart to measure the selected time interval")
         self.measure_check.toggled.connect(self._attach_spans)
-        peaks = QPushButton("Find peaks")
-        peaks.setToolTip("Mark peaks of the charted (non on/off) parameters")
-        peaks.clicked.connect(lambda: self.find_peaks())
-        save = QPushButton("Save image…")
-        save.clicked.connect(lambda: self.save_image())
-        copy = QPushButton("Copy image")
-        copy.clicked.connect(self.copy_image)
-        data = QPushButton("Export data…")
-        data.setToolTip("Save the charted series (one row per frame) as CSV / tab-separated text")
-        data.clicked.connect(lambda: self.export_data())
+        self.measure_check.hide()  # shown as “Measure interval” in the ribbon (Chart group)
         tb = QHBoxLayout()
         tb.addWidget(self.toolbar)
         tb.addStretch()
-        for w in (self.measure_check, peaks, save, copy, data):
-            tb.addWidget(w)
+        tb.addWidget(self.measure_check)
         self.meas_table = QTableWidget(0, 8)
         self.meas_table.setHorizontalHeaderLabels(["Parameter", "From (s)", "To (s)", "Mean", "SD", "Min", "Max",
                                                    "Change"])
@@ -376,8 +397,8 @@ class ChartsPanel(QWidget):
         self.meas_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.meas_table.verticalHeader().setDefaultSectionSize(22)
         self.meas_table.setMaximumHeight(130)
-        self.meas_lbl = QLabel("Tick “Measure interval” and drag across the chart to measure; use the toolbar "
-                               "to zoom and pan.")
+        self.meas_lbl = QLabel("Click “Measure interval” in the ribbon and drag across the chart to measure; use "
+                               "the toolbar to zoom and pan.")
         self.meas_lbl.setStyleSheet("color:palette(mid);")
         self.meas_lbl.setWordWrap(True)
         right = QWidget()
@@ -656,6 +677,79 @@ class ChartsPanel(QWidget):
         return path
 
 
+# ------------------------------------------------------------------ ribbon helper
+class RibbonHost(QWidget):
+    """Ribbon-group widget showing controls owned by the page (filters, plot options…).
+
+    The ribbon discards its contextual groups whenever the page or view changes; the host then gives the controls
+    back to `home` (a hidden holder of the page) so that they, their state and their connections survive."""
+
+    def __init__(self, home: QWidget):
+        super().__init__()
+        self._home = home
+        self._owned: list[QWidget] = []
+        self._group = None
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(4, 2, 4, 0)
+        self.grid.setHorizontalSpacing(6)
+        self.grid.setVerticalSpacing(5)
+
+    def add_row(self, *items):
+        r = self.grid.rowCount()
+        for c, x in enumerate(items):
+            if isinstance(x, str):
+                lbl = QLabel(x)
+                lbl.setObjectName("RibbonLabel")
+                self.grid.addWidget(lbl, r, c)
+            else:
+                self.grid.addWidget(x, r, c, 1, 2 if len(items) == 1 else 1)
+                self._owned.append(x)
+                x.show()
+        return self
+
+    def event(self, e):
+        if e.type() == QEvent.ParentChange:
+            g = self.parentWidget()
+            if g is not None and g is not self._group:
+                if self._group is not None:
+                    self._group.removeEventFilter(self)
+                self._group = g
+                g.installEventFilter(self)
+        return super().event(e)
+
+    def eventFilter(self, obj, e):
+        if obj is self._group and (e.type() == QEvent.DeferredDelete or
+                                   (e.type() == QEvent.ParentChange and obj.parentWidget() is None)):
+            self.release()
+        return False
+
+    def release(self):
+        for w in self._owned:
+            try:
+                if w.parentWidget() is not None and self.isAncestorOf(w):
+                    w.hide()
+                    w.setParent(self._home)
+            except RuntimeError:  # pragma: no cover - already deleted
+                pass
+
+
+TABLE_STYLE = f"""
+QTableView#ResultsTable {{ border: none; border-top: 1px solid {theme.BORDER}; background: white; font-size: 13px;
+    gridline-color: #e6e6e6; }}
+QTableView#ResultsTable::item {{ padding: 0 8px; }}
+QTableView#ResultsTable QHeaderView::section {{ background: #fbfbfb; font-size: 13px; font-weight: normal;
+    padding: 7px 8px; border: none; border-right: 1px solid #e6e6e6; border-bottom: 1px solid {theme.BORDER}; }}
+QListWidget#TestList {{ border: none; border-right: 1px solid {theme.BORDER}; background: white; font-size: 13px; }}
+QListWidget#TestList::item {{ padding: 5px 8px; border-bottom: 1px solid #f0f0f0; }}
+QListWidget#TestList::item:selected {{ background: {theme.SELECTION}; color: {theme.TEXT}; }}
+QToolButton#ModeButton {{ border: 1px solid #c8c8c8; background: white; padding: 3px 12px; }}
+QToolButton#ModeButton:checked {{ background: {theme.SELECTION}; border-color: #8fb0de; }}
+QLabel#PlotCaption {{ font-size: 14px; color: {theme.TEXT}; }}
+QTreeWidget::item {{ height: 22px; }}
+"""
+RIBBON_CONTROL_STYLE = "QComboBox, QDoubleSpinBox { padding-top: 1px; padding-bottom: 1px; min-height: 20px; }"
+
+
 # ------------------------------------------------------------------ page
 class ResultsPage(Page):
     title = "Results"
@@ -671,72 +765,53 @@ class ResultsPage(Page):
         self._detail_key = None
         self._stale: set[int] = set()
         self._loading_tree = False
+        self._ribbon_refresh = False
+        self.view = "spreadsheet"
+        self._history = ["spreadsheet"]
+        self._hist_pos = 0
         self.loader = RowsLoader(self)
         self.loader.loaded.connect(self._rows_loaded)
         self.loader.failed.connect(self._load_failed)
         self.loader.progress.connect(lambda f: self.progress.setValue(int(f * 100)))
         self.loader.busy_changed.connect(self._busy_changed)
+        self._holder = QWidget(self)  # home of the controls shown in the ribbon (filters, plot options)
+        self._holder.hide()
 
-        # ---- toolbar ---------------------------------------------------------
-        self.seg_check = QCheckBox("Show time periods")
-        self.seg_check.setToolTip("Also show results per time bin / custom period (set on the Experiment page)")
+        # ---- filters (shown in the ribbon: Filter / Time periods) -------------------------------------
+        self.seg_check = QCheckBox("Show time periods", self._holder)
+        self.seg_check.setToolTip("Also show results per time segment (time bins / custom periods — see “Set "
+                                  "segment length”)")
         self.seg_check.toggled.connect(self._seg_toggled)
-        self.period_combo = QComboBox()
-        self.period_combo.setMinimumWidth(130)
+        self.period_combo = self._ribbon_combo(135)
+        self.period_combo.setToolTip("Show only this time period")
         self.period_combo.currentIndexChanged.connect(self._apply_filters)
-        self.group_combo = QComboBox()
-        self.group_combo.setMinimumWidth(110)
+        self.group_combo = self._ribbon_combo(140)
+        self.group_combo.setToolTip("Show only the tests of animals given this treatment")
         self.group_combo.currentIndexChanged.connect(self._apply_filters)
-        self.stage_combo = QComboBox()
-        self.stage_combo.setMinimumWidth(110)
+        self.stage_combo = self._ribbon_combo(140)
+        self.stage_combo.setToolTip("Show only the tests of this stage")
         self.stage_combo.currentIndexChanged.connect(self._apply_filters)
-        recalc = QPushButton("Recalculate")
-        recalc.setToolTip("Recompute all results from the tracks (e.g. after changing analysis settings)")
-        recalc.clicked.connect(lambda: self.reload(force=True))
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setMaximumWidth(160)
+        self.progress.setMaximumWidth(180)
         self.progress.setFormat("Calculating… %p%")
         self.progress.hide()
         self.count_lbl = QLabel()
-        self.count_lbl.setStyleSheet("color:palette(mid);")
-        export = QPushButton("Export")
-        em = QMenu(export)
-        em.addAction("CSV file…", self.export_csv)
-        em.addAction("Tab-separated text…", self.export_tsv)
-        em.addAction("Excel workbook (.xlsx)…", self.export_xlsx)
-        em.addAction("Selected cells…", self.export_selection)
-        em.addSeparator()
-        em.addAction("Experiment as XML (with raw tracks)…", self.export_xml)
-        em.addAction("Raw data per test (CSV)…", self.export_raw)
-        export.setMenu(em)
-        copy = QPushButton("Copy")
-        copy.setToolTip("Copy the selected cells (or the whole shown table) as tab-separated text for Excel / Prism")
-        copy.clicked.connect(self.copy_to_clipboard)
-        report = QPushButton("HTML report…")
-        report.clicked.connect(self.html_report)
-        bar = QHBoxLayout()
-        bar.addWidget(self.seg_check)
-        bar.addWidget(self.period_combo)
-        bar.addSpacing(12)
-        bar.addWidget(QLabel("Group"))
-        bar.addWidget(self.group_combo)
-        bar.addWidget(QLabel("Stage"))
-        bar.addWidget(self.stage_combo)
-        bar.addSpacing(12)
-        bar.addWidget(recalc)
-        bar.addWidget(self.progress)
-        bar.addWidget(self.count_lbl)
-        bar.addStretch()
-        bar.addWidget(export)
-        bar.addWidget(copy)
-        bar.addWidget(report)
+        self.count_lbl.setObjectName("Hint")
 
-        # ---- measure chooser ------------------------------------------------
-        chooser = QWidget()
-        cl = QVBoxLayout(chooser)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.addWidget(QLabel("<b>Measures</b>"))
+        # ---- measure chooser (“Select data”) -------------------------------------------------------
+        self.chooser = QWidget()
+        self.chooser.setFixedWidth(300)
+        cl = QVBoxLayout(self.chooser)
+        cl.setContentsMargins(0, 0, 14, 0)
+        cl.setSpacing(6)
+        head = QLabel("Select data")
+        head.setObjectName("SectionTitle")
+        cl.addWidget(head)
+        hint = QLabel("Tick the measures to show in the spreadsheet.")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        cl.addWidget(hint)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search measures…")
         self.search.setClearButtonEnabled(True)
@@ -756,31 +831,36 @@ class ResultsPage(Page):
         sb.addWidget(b_none)
         cl.addLayout(sb)
         self.measure_lbl = QLabel()
-        self.measure_lbl.setStyleSheet("color:palette(mid);")
+        self.measure_lbl.setObjectName("Hint")
         cl.addWidget(self.measure_lbl)
+        self.chooser.hide()
         self._tree_timer = QTimer(self)
         self._tree_timer.setSingleShot(True)
         self._tree_timer.setInterval(0)
         self._tree_timer.timeout.connect(self._update_columns)
 
-        # ---- table ---------------------------------------------------------------
+        # ---- spreadsheet ---------------------------------------------------------------------------------
         self.model = ResultsModel(self)
         self.proxy = ResultsProxy(self)
         self.proxy.setSourceModel(self.model)
         self.table = QTableView()
+        self.table.setObjectName("ResultsTable")
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(-1, Qt.AscendingOrder)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
+        self.table.setShowGrid(True)
+        self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.verticalHeader().setDefaultSectionSize(22)
+        self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.table.verticalHeader().setMinimumWidth(28)
+        self.table.verticalHeader().hide()
         hh = self.table.horizontalHeader()
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh.setResizeContentsPrecision(60)
         hh.setMinimumSectionSize(48)
+        hh.setHighlightSections(False)
         self.table.selectionModel().currentRowChanged.connect(lambda *_: self._select_changed())
         self.table.doubleClicked.connect(self._open_test)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -788,22 +868,36 @@ class ResultsPage(Page):
         self.empty_lbl = QLabel()
         self.empty_lbl.setAlignment(Qt.AlignCenter)
         self.empty_lbl.setWordWrap(True)
-        self.empty_lbl.setStyleSheet("color:palette(mid);font-size:14px;")
+        self.empty_lbl.setObjectName("Hint")
+        self.empty_lbl.setStyleSheet("font-size:15px;")
         self.empty_lbl.hide()
-        tw = QWidget()
-        tl = QVBoxLayout(tw)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.addWidget(self.table, 1)
-        tl.addWidget(self.empty_lbl, 1)
+        sheet = QWidget()
+        sl = QHBoxLayout(sheet)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
+        sl.addWidget(self.chooser)
+        sl.addWidget(self.table, 1)
+        sl.addWidget(self.empty_lbl, 1)
 
-        # ---- detail panel ---------------------------------------------------------
-        detail = QWidget()
-        dl = QVBoxLayout(detail)
-        dl.setContentsMargins(0, 0, 0, 0)
-        self.detail_lbl = QLabel("Select a row to see its track")
-        self.detail_lbl.setStyleSheet("font-weight:bold;")
-        dl.addWidget(self.detail_lbl)
-        self.tabs = QTabWidget()
+        # ---- track plots / heat maps / video export (a list of tests and the selected test) ----------------
+        self.test_list = QListWidget()
+        self.test_list.setObjectName("TestList")
+        self.test_list.setFixedWidth(230)
+        self.test_list.currentRowChanged.connect(self._test_list_changed)
+        self.detail_lbl = QLabel("Select a test")
+        self.detail_lbl.setObjectName("PlotCaption")
+        self.mode_a = QToolButton()
+        self.mode_b = QToolButton()
+        self._modes = QButtonGroup(self)
+        for i, b in enumerate((self.mode_a, self.mode_b)):
+            b.setObjectName("ModeButton")
+            b.setCheckable(True)
+            b.setAutoRaise(False)
+            self._modes.addButton(b, i)
+        self._modes.idClicked.connect(self._mode_clicked)
+        self.tabs = QTabWidget()  # plot canvases; the explorer / mode buttons choose the one shown
+        self.tabs.tabBar().hide()
+        self.tabs.setDocumentMode(True)
         self.track_canvas = PlotCanvas()
         self.heat_canvas = PlotCanvas()
         self.speed_canvas = PlotCanvas()
@@ -812,106 +906,348 @@ class ResultsPage(Page):
                         (self.speed_canvas, "Speed"), (self.groups_canvas, "Groups")):
             c.setMinimumSize(260, 260)
             self.tabs.addTab(c, name)
-        self.tabs.setTabToolTip(2, "Speed over time; freezing episodes shaded")
-        self.tabs.setTabToolTip(3, "Average heat map per group (click “Group heat maps”)")
         self.tabs.currentChanged.connect(self._tab_changed)
-        dl.addWidget(self.tabs, 1)
-        dl.addWidget(self._build_plot_options())
-        db = QHBoxLayout()
-        gh = QPushButton("Group heat maps")
-        gh.setToolTip("Average heat map of each group (tests shown in the table), on a common scale, with each "
-                      "test's alignment applied")
-        gh.clicked.connect(self.group_heatmaps)
-        ot = QPushButton("Open test")
-        ot.setToolTip("Show the selected test in the test viewer")
-        ot.clicked.connect(lambda: self._open_test())
-        vid = QPushButton("Export video…")
-        vid.setToolTip("Save the selected test's video with zones, track, behaviours and time stamp drawn on it")
-        vid.clicked.connect(lambda: self.export_video())
-        sf = QPushButton("Save figure…")
-        sf.clicked.connect(lambda: self.save_figure())
-        cf = QPushButton("Copy")
-        cf.setToolTip("Copy the figure to the clipboard")
-        cf.clicked.connect(self.copy_figure)
-        db.addWidget(gh)
-        db.addWidget(ot)
-        db.addWidget(vid)
-        db.addStretch()
-        db.addWidget(sf)
-        db.addWidget(cf)
-        dl.addLayout(db)
+        plots_panel = QWidget()
+        pl = QVBoxLayout(plots_panel)
+        pl.setContentsMargins(18, 0, 0, 0)
+        ph = QHBoxLayout()
+        ph.addWidget(self.detail_lbl, 1)
+        ph.setSpacing(0)
+        ph.addWidget(self.mode_a)
+        ph.addWidget(self.mode_b)
+        pl.addLayout(ph)
+        pl.addWidget(self.tabs, 1)
+        self.video_opts = VideoExportDialog(self).embed()
+        self.video_lbl = QLabel()
+        self.video_lbl.setObjectName("PlotCaption")
+        vbtn = QPushButton("Export video…")
+        vbtn.setDefault(True)
+        vbtn.clicked.connect(lambda: self.export_video())
+        self.video_preview = QLabel()
+        self.video_preview.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.video_preview.setMinimumSize(320, 240)
+        self.video_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        video_panel = QWidget()
+        vl = QVBoxLayout(video_panel)
+        vl.setContentsMargins(18, 0, 0, 0)
+        vl.addWidget(self.video_lbl)
+        vh = QHBoxLayout()
+        vform = QVBoxLayout()
+        cap = QLabel("Overlays")
+        cap.setObjectName("SectionTitle")
+        vform.addWidget(cap)
+        vform.addWidget(self.video_opts)
+        vb = QHBoxLayout()
+        vb.addWidget(vbtn)
+        vb.addStretch()
+        vform.addLayout(vb)
+        vform.addStretch()
+        vh.addLayout(vform)
+        vh.addSpacing(18)
+        vh.addWidget(self.video_preview, 1)
+        vl.addLayout(vh, 1)
+        self.plot_stack = QStackedWidget()
+        self.plot_stack.addWidget(plots_panel)
+        self.plot_stack.addWidget(video_panel)
+        plot_view = QWidget()
+        pv = QHBoxLayout(plot_view)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(0)
+        pv.addWidget(self.test_list)
+        pv.addWidget(self.plot_stack, 1)
+        self._build_plot_options()
 
-        split = QSplitter(Qt.Horizontal)
-        split.addWidget(chooser)
-        split.addWidget(tw)
-        split.addWidget(detail)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        split.setStretchFactor(2, 0)
-        split.setSizes([215, 560, 425])
-        split.setChildrenCollapsible(False)
+        # ---- views ------------------------------------------------------------------------------------------
         self.charts = ChartsPanel(self)
-        self.main_tabs = QTabWidget()
-        self.main_tabs.addTab(split, "Results table")
-        self.main_tabs.addTab(self.charts, "Charts")
-        self.main_tabs.setTabToolTip(1, "Per-frame parameters over time (speed, distances, zones, head angle…) "
-                                        "with zone bands and scored events")
+        self.main_tabs = QStackedWidget()  # 0 spreadsheet, 1 charts, 2 track plots / heat maps / video export
+        self.main_tabs.addWidget(sheet)
+        self.main_tabs.addWidget(self.charts)
+        self.main_tabs.addWidget(plot_view)
         self.main_tabs.currentChanged.connect(self._main_tab_changed)
+        self.title_lbl = QLabel("Data")
+        self.title_lbl.setObjectName("PageTitle")
+        top = QHBoxLayout()
+        top.addWidget(self.title_lbl)
+        top.addStretch()
+        top.addWidget(self.progress)
+        top.addWidget(self.count_lbl)
         lay = QVBoxLayout(self)
-        lay.addLayout(bar)
+        lay.setContentsMargins(22, 12, 18, 10)
+        lay.setSpacing(4)
+        lay.addLayout(top)
         lay.addWidget(self.main_tabs, 1)
+        self.setStyleSheet(TABLE_STYLE)
+        self._build_actions()
+        self._update_actions()
 
-    def _build_plot_options(self) -> QWidget:
-        w = QWidget()
-        g = QGridLayout(w)
-        g.setContentsMargins(0, 2, 0, 2)
-        g.setHorizontalSpacing(6)
-        g.setVerticalSpacing(3)
-        self.part_combo = _combo(["Centre", "Head"], ["centre", "head"], "Body part drawn in track plots and heat maps")
-        self.color_combo = _combo(["Time", "Speed", "Single colour"], ["time", "speed", "none"],
-                                  "Colour the track by time, speed or any per-frame parameter")
-        self.color_combo.setMinimumContentsLength(10)
-        self.color_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.markers_check = QCheckBox("Markers")
+    # ------------------------------------------------------------------ ribbon / explorer
+    def _ribbon_combo(self, width: int = 150) -> QComboBox:
+        c = QComboBox(self._holder)
+        c.setFixedWidth(width)
+        c.setStyleSheet(RIBBON_CONTROL_STYLE)
+        c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        c.setMinimumContentsLength(6)
+        return c
+
+    def _act(self, text, ic, fn, tip="", checkable=False, small=False) -> QAction:
+        a = QAction(icon(ic), text, self)
+        if not small:
+            a.setIconText(ribbon_label(text))  # keeps the two-line ribbon label when the action changes state
+        a.setToolTip(tip or text)
+        a.setCheckable(checkable)
+        if checkable:
+            a.toggled.connect(fn)
+        else:
+            a.triggered.connect(lambda _=False: fn())
+        return a
+
+    def _build_actions(self):
+        A = self._act
+        self.back_act = A("Back", "back", self.go_back, "Go back to the previous view")
+        self.fwd_act = A("Forward", "forward", self.go_forward, "Go forward to the next view")
+        self.copy_act = A("Copy", "copy", self.copy_to_clipboard,
+                          "Copy the spreadsheet (or the selected range) as tab-separated text for Excel / Prism")
+        self.copy_sel_act = A("Copy selection", "copy_select", self.copy_selection, "Copy only the selected cells",
+                              small=True)
+        self.print_act = A("Print", "print", self.print_table, "Print the spreadsheet")
+        self.save_act = A("Save", "save", self.export_csv, "Save the spreadsheet")
+        m = QMenu(self)
+        m.addAction("CSV file…", self.export_csv)
+        m.addAction("Tab-separated text…", self.export_tsv)
+        m.addAction("Excel workbook (.xlsx)…", self.export_xlsx)
+        m.addAction("Selected cells…", self.export_selection)
+        m.addSeparator()
+        m.addAction("Experiment as XML (with raw tracks)…", self.export_xml)
+        m.addAction("Raw data per test (CSV)…", self.export_raw)
+        self.save_act.setMenu(m)
+        self.report_act = A("HTML report", "report", self.html_report,
+                            "Create a report with the results, statistics, track plots, heat maps and charts")
+        self.select_act = A("Select data", "select_data", self.chooser.setVisible,
+                            "Choose the measures shown in the spreadsheet", checkable=True)
+        self.view_sheet_act = A("View spreadsheet", "view_table", lambda: self.set_view("spreadsheet"),
+                                "Show the results spreadsheet")
+        self.clear_act = A("Clear settings", "clear_settings", self.clear_settings,
+                           "Show every measure and test again (clears filters, sorting and time periods)", small=True)
+        self.segment_act = A("Set segment length", "clock", self.set_segment_length,
+                             "Divide every test into time segments (time bins) of a set length", small=True)
+        self.recalc_act = A("Recalculate", "refresh", lambda: self.reload(force=True),
+                            "Recompute all results from the tracks (e.g. after changing analysis settings)", small=True)
+        self.save_fig_act = A("Save figure", "save", self.save_figure, "Save the figure as PNG, PDF or SVG")
+        self.copy_fig_act = A("Copy", "copy", self.copy_figure, "Copy the figure to the clipboard")
+        self.open_test_act = A("Open test", "video", self._open_test, "Show the selected test in Review and score")
+        self.group_heat_act = A("Treatment heat maps", "layers", self.group_heatmaps,
+                                "Average heat map of each treatment (tests shown in the spreadsheet), on a common "
+                                "scale, with each test's alignment applied")
+        self.video_act = A("Export video", "video_file", self.export_video,
+                           "Save the selected test's video with zones, track, behaviours and time stamp drawn on it")
+        self.measure_act = A("Measure interval", "ruler", self.charts.measure_check.setChecked,
+                             "Drag across a chart to measure the selected time interval", checkable=True)
+        self.charts.measure_check.toggled.connect(self.measure_act.setChecked)
+        self.peaks_act = A("Find peaks", "sparkle", lambda: self.charts.find_peaks(),
+                           "Mark the peaks of the charted (non on/off) parameters")
+        self.chart_save_act = A("Save figure", "save", lambda: self.charts.save_image(), "Save the chart as an image")
+        self.chart_copy_act = A("Copy", "copy", self.charts.copy_image, "Copy the chart to the clipboard")
+        self.chart_data_act = A("Export data", "export", lambda: self.charts.export_data(),
+                                "Save the charted series (one row per frame) as CSV / tab-separated text")
+
+    def ribbon_groups(self):
+        nav = ("Navigation", [(self.back_act, "large"), (self.fwd_act, "large")])
+        host = lambda *rows: self._host(*rows)  # noqa: E731
+        if self.view == "charts":
+            return [nav, ("Chart", [(self.measure_act, "large"), (self.peaks_act, "large")]),
+                    ("Figure", [(self.chart_save_act, "large"), (self.chart_copy_act, "large"),
+                                (self.chart_data_act, "large")])]
+        if self.view == "track":
+            return [nav, ("Body part", [host([self.part_combo])]), ("Colour by", [host([self.color_combo])]),
+                    ("Show", [host([self.markers_check], [self.split_check])]),
+                    ("Figure", [(self.save_fig_act, "large"), (self.copy_fig_act, "large")]),
+                    ("Test", [(self.open_test_act, "large"), (self.video_act, "large")])]
+        if self.view == "heat":
+            return [nav, ("Body part", [host([self.part_combo])]), ("Heat map of", [host([self.heat_of])]),
+                    ("Scale", [host([self.heat_norm], [self.heat_max])]), ("Align", [host([self.align_combo])]),
+                    ("Treatments", [(self.group_heat_act, "large")]),
+                    ("Figure", [(self.save_fig_act, "large"), (self.copy_fig_act, "large")])]
+        if self.view == "video":
+            return [nav, ("Video", [(self.video_act, "large"), (self.open_test_act, "large")])]
+        return [nav, ("Clipboard", [(self.copy_act, "large"), (self.copy_sel_act, "small")]),
+                ("Spreadsheet", [(self.print_act, "large"), (self.save_act, "large"), (self.report_act, "large")]),
+                ("Actions", [(self.select_act, "large"), (self.view_sheet_act, "large"), (self.clear_act, "small"),
+                             (self.segment_act, "small"), (self.recalc_act, "small")]),
+                ("Filter", [host(["Treatment", self.group_combo], ["Stage", self.stage_combo])]),
+                ("Time periods", [host([self.seg_check], [self.period_combo])])]
+
+    def _host(self, *rows) -> RibbonHost:
+        h = RibbonHost(self._holder)
+        for r in rows:
+            h.add_row(*r)
+        h.grid.setRowStretch(0, 0)
+        return h
+
+    def explorer_items(self):
+        return [(label, ic, key) for key, label, ic, _ in VIEWS]
+
+    def show_item(self, key):
+        self.set_view(key)
+
+    def set_view(self, key: str, record: bool = True):
+        """Show a view of the page: spreadsheet, track (plots), heat (maps), charts or video (export)."""
+        if key not in [v[0] for v in VIEWS]:
+            return
+        changed = key != self.view
+        if record and changed:
+            del self._history[self._hist_pos + 1:]
+            self._history.append(key)
+            self._hist_pos = len(self._history) - 1
+        self.view = key
+        self.title_lbl.setText(next(v[3] for v in VIEWS if v[0] == key))
+        self.main_tabs.setCurrentIndex({"spreadsheet": 0, "charts": 1}.get(key, 2))
+        if key in PLOT_VIEWS:
+            self.plot_stack.setCurrentIndex(1 if key == "video" else 0)
+            if key == "track":
+                self.mode_a.setText("Track")
+                self.mode_b.setText("Speed")
+                if self.tabs.currentIndex() not in (0, 2):
+                    self.tabs.setCurrentIndex(0)
+            elif key == "heat":
+                self.mode_a.setText("This test")
+                self.mode_b.setText("By treatment")
+                if self.tabs.currentIndex() not in (1, 3):
+                    self.tabs.setCurrentIndex(1)
+            self._sync_modes()
+            self._fill_test_list()
+            if key == "video":
+                self._update_video_panel()
+        self.count_lbl.setVisible(key == "spreadsheet")
+        self._update_actions()
+        if self.project is not None:
+            self.main.select_explorer(self, key)
+        if changed:
+            self._refresh_ribbon()
+
+    def _refresh_ribbon(self):
+        if self.project is not None and self.main.current_page() is self:
+            self._ribbon_refresh = True
+            try:
+                self.main.refresh_ribbon()
+            finally:
+                self._ribbon_refresh = False
+
+    def go_back(self):
+        if self._hist_pos > 0:
+            self._hist_pos -= 1
+            self.set_view(self._history[self._hist_pos], record=False)
+
+    def go_forward(self):
+        if self._hist_pos < len(self._history) - 1:
+            self._hist_pos += 1
+            self.set_view(self._history[self._hist_pos], record=False)
+
+    def _update_actions(self):
+        self.back_act.setEnabled(self._hist_pos > 0)
+        self.fwd_act.setEnabled(self._hist_pos < len(self._history) - 1)
+        self.view_sheet_act.setEnabled(self.view != "spreadsheet")
+        has = bool(self.rows)
+        for a in (self.copy_act, self.copy_sel_act, self.print_act, self.save_act, self.report_act,
+                  self.group_heat_act):
+            a.setEnabled(has)
+        row = self.current_row() if has else None
+        self.open_test_act.setEnabled(row is not None)
+        self.video_act.setEnabled(row is not None)
+
+    def _mode_clicked(self, i: int):
+        if self.view == "track":
+            self.tabs.setCurrentIndex(2 if i else 0)
+        elif self.view == "heat":
+            if i and (self.groups_canvas.figure is None or not self.groups_canvas.figure.axes):
+                self.group_heatmaps()
+            self.tabs.setCurrentIndex(3 if i else 1)
+
+    def _sync_modes(self):
+        i = self.tabs.currentIndex()
+        (self.mode_b if i in (2, 3) else self.mode_a).setChecked(True)
+
+    def _fill_test_list(self):
+        rows = self.shown_rows()
+        cur = self.current_row()
+        self.test_list.blockSignals(True)
+        self.test_list.clear()
+        sel = -1
+        for i, r in enumerate(rows):
+            sub = [str(r.get("Group") or "")]
+            if self.segmented and r.get("Period") not in (None, "", "Whole test"):
+                sub.append(str(r.get("Period")))
+            text = f"Test {r.get('Test')}  ·  {r.get('Animal', '')}"
+            if any(sub):
+                text += "\n" + "  ·  ".join(x for x in sub if x)
+            self.test_list.addItem(QListWidgetItem(text))
+            if r is cur:
+                sel = i
+        self.test_list.setCurrentRow(sel)
+        self.test_list.blockSignals(False)
+
+    def _test_list_changed(self, i: int):
+        if 0 <= i < self.proxy.rowCount():
+            self.table.selectRow(i)
+
+    def _update_video_panel(self):
+        r = self.current_row()
+        p = self.project
+        test = p.get_test(r.get("Test")) if r is not None and p is not None else None
+        if test is None:
+            self.video_lbl.setText("Select a test")
+            self.video_preview.clear()
+            return
+        self.video_lbl.setText(f"Test {test.id}  ·  {r.get('Animal', '')}"
+                               + (f"  ·  {r.get('Group')}" if r.get("Group") else "")
+                               + ("" if test.video else "  —  no video"))
+        frame = self._frame(test) if test.video else None
+        if frame is None:
+            self.video_preview.clear()
+            return
+        from ..widgets import cv_to_qpixmap
+
+        pm = cv_to_qpixmap(frame)
+        self.video_preview.setPixmap(pm.scaled(self.video_preview.size() * 0.98, Qt.KeepAspectRatio,
+                                               Qt.SmoothTransformation))
+
+    def _build_plot_options(self):
+        self.part_combo = self._ribbon_combo(130)
+        for label, data in (("Centre", "centre"), ("Head", "head")):
+            self.part_combo.addItem(label, data)
+        self.part_combo.setToolTip("Body part drawn in track plots and heat maps")
+        self.color_combo = self._ribbon_combo(170)
+        for label, data in (("Time", "time"), ("Speed", "speed"), ("Single colour", "none")):
+            self.color_combo.addItem(label, data)
+        self.color_combo.setToolTip("Colour the track by time, speed or any per-frame parameter")
+        self.markers_check = QCheckBox("Markers", self._holder)
         self.markers_check.setToolTip("Mark freezing episodes and scored behaviours on the track")
         self.markers_check.setChecked(True)
-        self.split_check = QCheckBox("Split by period")
+        self.split_check = QCheckBox("Split by period", self._holder)
         self.split_check.setToolTip("One small track plot per time period (time bins / custom periods; "
                                     "quarters of the test if none are set)")
-        self.heat_of = _combo([POSITION], [None], "Heat map of the position, or only of frames where a behaviour "
-                                                  "occurred (freezing, immobility, scored behaviours…)")
-        self.heat_of.setMinimumContentsLength(10)
-        self.heat_of.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.heat_norm = _combo(["Automatic", "% of time", "Relative", "Fixed max"],
-                                ["auto", "percent", "relative", "fixed"],
-                                "Colour scale: each map scaled to its own maximum, % of the mapped time per bin, "
-                                "relative to the maximum, or a fixed maximum for comparing tests")
-        self.heat_max = QDoubleSpinBox()
+        self.heat_of = self._ribbon_combo(190)
+        self.heat_of.addItem(POSITION, None)
+        self.heat_of.setToolTip("Heat map of the position, or only of frames where a behaviour occurred (freezing, "
+                                "immobility, scored behaviours…)")
+        self.heat_norm = self._ribbon_combo(130)
+        for label, data in (("Automatic", "auto"), ("% of time", "percent"), ("Relative", "relative"),
+                            ("Fixed max", "fixed")):
+            self.heat_norm.addItem(label, data)
+        self.heat_norm.setToolTip("Colour scale: each map scaled to its own maximum, % of the mapped time per bin, "
+                                  "relative to the maximum, or a fixed maximum for comparing tests")
+        self.heat_max = QDoubleSpinBox(self._holder)
         self.heat_max.setRange(0.001, 1e6)
         self.heat_max.setDecimals(3)
         self.heat_max.setValue(1.0)
+        self.heat_max.setFixedWidth(130)
+        self.heat_max.setStyleSheet(RIBBON_CONTROL_STYLE)
         self.heat_max.setToolTip("Maximum of the colour scale (same units as the colour bar)")
         self.heat_max.setEnabled(False)
-        self.align_combo = _combo(list(plots.TRANSFORMS.values()), list(plots.TRANSFORMS),
-                                  "Orientation of this test in group heat maps (rotate / mirror so that equivalent "
-                                  "parts of the apparatus line up between tests)")
-        g.addWidget(QLabel("Body part"), 0, 0)
-        g.addWidget(self.part_combo, 0, 1)
-        g.addWidget(QLabel("Colour"), 0, 2)
-        g.addWidget(self.color_combo, 0, 3)
-        g.addWidget(self.markers_check, 1, 0, 1, 2)
-        g.addWidget(self.split_check, 1, 2, 1, 2)
-        g.addWidget(QLabel("Heat map of"), 2, 0)
-        g.addWidget(self.heat_of, 2, 1, 1, 3)
-        g.addWidget(QLabel("Scale"), 3, 0)
-        sc = QHBoxLayout()
-        sc.addWidget(self.heat_norm, 1)
-        sc.addWidget(self.heat_max)
-        g.addLayout(sc, 3, 1, 1, 3)
-        g.addWidget(QLabel("Align"), 4, 0)
-        g.addWidget(self.align_combo, 4, 1, 1, 3)
-        g.setColumnStretch(1, 1)
-        g.setColumnStretch(3, 1)
+        self.align_combo = self._ribbon_combo(170)
+        for k, v in plots.TRANSFORMS.items():
+            self.align_combo.addItem(v, k)
+        self.align_combo.setToolTip("Orientation of this test in treatment heat maps (rotate / mirror so that "
+                                    "equivalent parts of the apparatus line up between tests)")
         self._track_opts = [self.color_combo, self.markers_check, self.split_check]
         self._heat_opts = [self.heat_of, self.heat_norm, self.heat_max, self.align_combo]
         for c in (self.part_combo, self.color_combo, self.heat_of, self.heat_norm):
@@ -920,7 +1256,6 @@ class ResultsPage(Page):
             c.toggled.connect(self._options_changed)
         self.heat_max.valueChanged.connect(self._options_changed)
         self.align_combo.currentIndexChanged.connect(self._align_changed)
-        return w
 
     # ------------------------------------------------------------------ project
     def set_project(self, project):
@@ -938,23 +1273,33 @@ class ResultsPage(Page):
         self.tree.clear()
         for c in (self.track_canvas, self.heat_canvas, self.speed_canvas, self.groups_canvas):
             c.set_figure(Figure(figsize=(3, 3)))
-        self.detail_lbl.setText("Select a row to see its track")
+        self.detail_lbl.setText("Select a test")
+        self.test_list.clear()
         self._fill_filter_combos()
         self._charts_stale = True
         if self.main_tabs.currentIndex() == 1:
             self.charts.refresh_tests()
             self._charts_stale = False
+        self._update_actions()
 
     def on_show(self):
-        if self.project is None:
+        if self.project is None or self._ribbon_refresh:
             return
         self._names = _names(self.project)
         self._charts_stale = True
         if self.main_tabs.currentIndex() == 1:
             self._main_tab_changed(1)
         self.reload()
+        QTimer.singleShot(0, self._follow_explorer)
+
+    def _follow_explorer(self):
+        if self.project is not None and self.main.current_page() is self:
+            self.main.select_explorer(self, self.view)
 
     def _main_tab_changed(self, i):
+        want = {0: ("spreadsheet",), 1: ("charts",), 2: PLOT_VIEWS}[i]
+        if self.view not in want:  # e.g. main_tabs.setCurrentIndex(1) from a script
+            self.set_view(want[0])
         if i == 1 and getattr(self, "_charts_stale", True):
             self._charts_stale = False
             self.charts.refresh_tests()
@@ -1000,6 +1345,8 @@ class ResultsPage(Page):
 
     # ------------------------------------------------------------------ data
     def _rows_loaded(self, rows, segmented):
+        if rows is self.rows and segmented == self.segmented and self.model.rows is rows and rows:
+            return  # unchanged (cached rows delivered again when the page is shown)
         self.rows = rows
         self.segmented = segmented
         self._detail_key = None
@@ -1008,12 +1355,15 @@ class ResultsPage(Page):
         self._build_tree()
         self._update_columns()
         if not rows:
-            self.empty_lbl.setText("No results yet.\n\nTrack the tests (Tests page) or score behaviours "
-                                   "(Test view) to see measures here.")
+            self.empty_lbl.setText("No results yet.\n\nTrack the tests (Test › Run tests) or score behaviours "
+                                   "(Test › Review and score) to see measures here.")
         self.empty_lbl.setVisible(not rows)
         self.table.setVisible(bool(rows))
         if rows and not self.table.selectionModel().hasSelection():
             self.table.selectRow(0)
+        if self.view in PLOT_VIEWS:
+            self._fill_test_list()
+        self._update_actions()
 
     def all_columns(self) -> list[str]:
         return result_columns(self.rows)
@@ -1077,7 +1427,7 @@ class ResultsPage(Page):
         hh = self.table.horizontalHeader()
         self.table.resizeColumnsToContents()
         for i in range(len(cols)):
-            hh.resizeSection(i, max(48, min(hh.sectionSize(i), 140)))
+            hh.resizeSection(i, max(56, min(hh.sectionSize(i) + 8, 280)))
         if sort_name in cols:
             self.table.sortByColumn(cols.index(sort_name), self.proxy.sortOrder())
         elif sort_col >= 0:
@@ -1090,7 +1440,8 @@ class ResultsPage(Page):
 
     def _update_count(self):
         if self.rows:
-            self.count_lbl.setText(f"{self.proxy.rowCount()} of {len(self.rows)} rows")
+            n, total = self.proxy.rowCount(), len(self.rows)
+            self.count_lbl.setText(f"{n} rows" if n == total else f"{n} of {total} rows shown")
 
     # ------------------------------------------------------------------ filters
     def _fill_filter_combos(self):
@@ -1103,7 +1454,7 @@ class ResultsPage(Page):
                 v = str(r.get(key, ""))
                 if v and v not in lst:
                     lst.append(v)
-        for combo, items, allname in ((self.group_combo, groups, "All groups"),
+        for combo, items, allname in ((self.group_combo, groups, "All treatments"),
                                       (self.stage_combo, stages, "All stages"),
                                       (self.period_combo, periods, "All periods")):
             cur = combo.currentData()
@@ -1124,6 +1475,8 @@ class ResultsPage(Page):
             f["Period"] = self.period_combo.currentData()
         self.proxy.set_filters(f)
         self._update_count()
+        if self.view in PLOT_VIEWS:
+            self._fill_test_list()
 
     def shown_rows(self, selected_only: bool = False) -> list[dict]:
         """Rows currently shown in the table, in display order (optionally only the selected ones)."""
@@ -1387,16 +1740,108 @@ class ResultsPage(Page):
         n_cols = text.split("\n", 1)[0].count("\t") + 1
         self.main.status(f"Copied {text.count(chr(10)) - 1} rows × {n_cols} columns")
 
+    def copy_selection(self):
+        """Copy only the selected cells (with their column headings)."""
+        sel = self.table.selectionModel().selectedIndexes()
+        if not sel:
+            return
+        rows = sorted({i.row() for i in sel})
+        cols = sorted({i.column() for i in sel})
+        names = [self.model.columns[c] for c in cols]
+        lines = ["\t".join(names)]
+        for i in rows:
+            r = self.model.rows[self.proxy.mapToSource(self.proxy.index(i, 0)).row()]
+            lines.append("\t".join(raw_value(r.get(c)).replace("\t", " ") for c in names))
+        QGuiApplication.clipboard().setText("\n".join(lines) + "\n")
+        self.main.status(f"Copied {len(rows)} rows × {len(cols)} columns")
+
+    def table_html(self) -> str:
+        """The spreadsheet as shown (column headings, filters, number format) as an HTML table."""
+        from html import escape
+
+        cols = self.shown_columns()
+        head = "".join(f"<th>{escape(column_label(c))}</th>" for c in cols)
+        body = []
+        for r in self.shown_rows():
+            cells = []
+            for c in cols:
+                v = r.get(c)
+                align = " align='right'" if is_number(v) else ""
+                cells.append(f"<td{align}>{escape(fmt_value(v))}</td>")
+            body.append("<tr>" + "".join(cells) + "</tr>")
+        name = escape(self.project.name) if self.project is not None else ""
+        return (f"<h3>{name} — results</h3><table border='1' cellspacing='0' cellpadding='3' "
+                f"style='border-collapse:collapse;border-color:#cccccc;font-size:8pt'><tr>{head}</tr>"
+                f"{''.join(body)}</table>")
+
+    def print_table(self, printer=None):
+        """Print the spreadsheet (landscape; a print dialog lets the user choose the printer)."""
+        from PySide6.QtGui import QPageLayout, QTextDocument
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+        if not self.rows:
+            return
+        if printer is None:
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setPageOrientation(QPageLayout.Landscape)
+            if QPrintDialog(printer, self).exec() != QDialog.Accepted:
+                return
+        doc = QTextDocument()
+        doc.setHtml(self.table_html())
+        doc.print_(printer)
+        self.main.status("Spreadsheet sent to the printer")
+        return printer
+
+    def clear_settings(self):
+        """Show every measure and test again: clears the measure selection, filters, sorting and time periods."""
+        if self.project is None:
+            return
+        self.hidden.clear()
+        self.search.clear()
+        for c in (self.group_combo, self.stage_combo, self.period_combo):
+            c.setCurrentIndex(0)
+        self.proxy.sort(-1)
+        self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        if self.seg_check.isChecked():
+            self.seg_check.setChecked(False)
+        self._build_tree()
+        self._update_columns()
+        self.main.status("Spreadsheet settings cleared")
+
+    def set_segment_length(self, seconds: float | None = None):
+        """Divide every test into time segments (the time bins of the analysis settings) and show them."""
+        p = self.project
+        if p is None:
+            return
+        if seconds is None:
+            v, ok = QInputDialog.getDouble(self, "Set segment length",
+                                           "Divide each test into segments of (seconds; 0 = no segments)",
+                                           float(p.analysis.bin_length_s or 0), 0.0, 1e6, 1)
+            if not ok:
+                return
+            seconds = v
+        p.analysis.bin_length_s = float(seconds)
+        if hasattr(self.main, "mark_dirty"):
+            self.main.mark_dirty()
+        if seconds > 0 and not self.seg_check.isChecked():
+            self.seg_check.setChecked(True)  # reloads
+        else:
+            self.reload()
+        self.main.status(f"Segment length: {seconds:g} s" if seconds > 0 else "Time segments switched off")
+
     def _table_menu(self, pos):
         m = QMenu(self)
-        m.addAction("Copy", self.copy_to_clipboard)
+        m.addAction(icon("copy"), "Copy", self.copy_to_clipboard)
+        m.addAction(icon("copy_select"), "Copy selection", self.copy_selection)
         m.addAction("Copy without headers", lambda: QGuiApplication.clipboard().setText(
             self.clipboard_text().split("\n", 1)[1]))
         m.addAction("Save selected cells…", self.export_selection)
         m.addSeparator()
-        m.addAction("Open test", self._open_test)
-        m.addAction("Show in charts", lambda: self.show_charts())
-        m.addAction("Export video with overlays…", lambda: self.export_video())
+        m.addAction(icon("video"), "Open test", self._open_test)
+        m.addAction(icon("track"), "Show track plot", lambda: self.set_view("track"))
+        m.addAction(icon("heatmap"), "Show heat map", lambda: self.set_view("heat"))
+        m.addAction(icon("chart"), "Show in charts", lambda: self.show_charts())
+        m.addAction(icon("video_file"), "Export video with overlays…", lambda: self.export_video())
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def show_charts(self, test_id=None):
@@ -1467,6 +1912,8 @@ class ResultsPage(Page):
         if test is None or not test.video:
             error_box(self, "Export video", "This test has no video.")
             return
+        if options is None and self.view == "video":
+            options = self.video_opts.options()  # the options shown on the Video export view
         if options is None:
             dlg = VideoExportDialog(self)
             if dlg.exec() != QDialog.Accepted:
@@ -1531,6 +1978,15 @@ class ResultsPage(Page):
     def _select_changed(self):
         r = self.current_row()
         p = self.project
+        self._update_actions()
+        if self.view in PLOT_VIEWS:
+            i = self.table.currentIndex().row()
+            if i != self.test_list.currentRow() and i < self.test_list.count():
+                self.test_list.blockSignals(True)
+                self.test_list.setCurrentRow(i)
+                self.test_list.blockSignals(False)
+            if self.view == "video":
+                self._update_video_panel()
         if r is None or p is None:
             return
         test = p.get_test(r.get("Test"))
@@ -1607,6 +2063,7 @@ class ResultsPage(Page):
 
     def _tab_changed(self, *_):
         i = self.tabs.currentIndex()
+        self._sync_modes()
         for w in self._track_opts:
             w.setEnabled(i == 0)
         for w in self._heat_opts:
@@ -1772,8 +2229,9 @@ class ResultsPage(Page):
         def done(fig):
             self.groups_canvas.set_figure(fig)
             self.tabs.setCurrentWidget(self.groups_canvas)
+            self._sync_modes()
 
-        return self._run("Group heat maps", work, on_done=done)
+        return self._run("Treatment heat maps", work, on_done=done)
 
     def save_figure(self, path: str | None = None):
         canvas = self.tabs.currentWidget()

@@ -605,9 +605,14 @@ def track_video(video_path: str, jobs: list[ArenaJob],
     return out
 
 
+APPARATUS_BGR = (31, 138, 255)  # ANY-maze style orange apparatus outlines
+
+
 def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Apparatus | None = None,
-                 trail: Sequence[tuple[float, float]] | None = None, fg: np.ndarray | None = None) -> np.ndarray:
-    """Render zones, detections and trail onto a copy of the frame (BGR)."""
+                 trail: Sequence[tuple[float, float]] | None = None, fg: np.ndarray | None = None,
+                 zone_color: tuple[int, int, int] | None = APPARATUS_BGR) -> np.ndarray:
+    """Render zones, detections and trail onto a copy of the frame (BGR). Zones are outlined in `zone_color`
+    (orange, as in ANY-maze), or in each zone's own colour when zone_color is None."""
     img = frame.copy()
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -617,7 +622,7 @@ def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Appara
         img = cv2.addWeighted(img, 1.0, tint, 0.5, 0)
     if apparatus is not None:
         for z in apparatus.zones:
-            c = _hex_to_bgr(z.color)
+            c = zone_color if zone_color is not None else _hex_to_bgr(z.color)
             cv2.polylines(img, [np.round(z.shape.polygon()).astype(np.int32)], True, c, 1, cv2.LINE_AA)
         for p in apparatus.points:
             cv2.circle(img, (int(p.x), int(p.y)), 4, _hex_to_bgr(p.color), -1, cv2.LINE_AA)

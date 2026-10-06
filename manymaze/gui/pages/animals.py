@@ -1,4 +1,5 @@
-"""Animals page: subjects table, treatment groups (with colours) and custom animal fields."""
+"""Experiment tab (as in ANY-maze): the Animals sheet (Animal, Animal ID, Status, Treatment, custom fields, Sex) and
+the Treatments sheet (name, code, colour, number of animals), with blind coding, retirement, doses and criteria."""
 
 from __future__ import annotations
 
@@ -6,22 +7,28 @@ import csv
 import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-                               QPushButton, QSpinBox, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
+                               QInputDialog, QLabel, QLineEdit, QMessageBox, QSpinBox, QStackedWidget,
+                               QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
 from ...core.project import Animal, Group
+from .. import theme
+from ..icons import icon
 from ..widgets import error_box
 from .base import Page
 
 PALETTE = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#64748b"]
 SEXES = ["", "Male", "Female"]
 ID_KEYS = ("id", "animal", "animal id", "animal_id", "subject", "subject id")
+STATUSES = ["Normal", "Retired"]
+COMBO_KINDS = ("status", "treatment", "sex")
+ROW_H = 32
+MUTED_ROW = "#9ca3af"
+RESERVED = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment")
 
 
 def swatch(color: str, size: int = 12) -> QIcon:
@@ -47,31 +54,141 @@ def unique_id(base: str, taken: set[str]) -> str:
     return f"{base}-{n}"
 
 
-class _ComboDelegate(QStyledItemDelegate):
-    """Editable combo box editor whose choices come from a callable."""
+def two_lines(text: str) -> str:
+    """Split a ribbon label over two balanced lines (as the ribbon does for large buttons)."""
+    if " " not in text or len(text) <= 9 or "\n" in text:
+        return text
+    words = text.split(" ")
+    best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+    return " ".join(words[:best]) + "\n" + " ".join(words[best:])
 
-    def __init__(self, choices, parent=None):
-        super().__init__(parent)
-        self.choices = choices
+
+def ribbon_action(parent, text: str, icon_name: str, fn=None, tip: str = "", checkable: bool = False,
+                  large: bool = True) -> QAction:
+    """A ribbon command. Large buttons keep their two-line label when the action changes (enabled, checked…):
+    the ribbon button re-reads the action's iconText, so the line break is stored there."""
+    a = QAction(icon(icon_name), text, parent)
+    a.setToolTip(tip or text)
+    a.setCheckable(checkable)
+    if large:
+        a.setIconText(two_lines(text))
+    if fn is not None:
+        (a.toggled if checkable else a.triggered).connect(fn)
+    return a
+
+
+def treatment_code(project, name: str) -> str:
+    """Code of a treatment: its blind code while testing blind, else a letter (A, B, …) in list order."""
+    if not name or project is None:
+        return ""
+    if project.blind:
+        return wf.blind_codes(project).get(name, "??")
+    names = [g.name for g in project.groups]
+    if name not in names:
+        return ""
+    n, s = names.index(name) + 1, ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def treatment_text(project, name: str, with_code: bool = True) -> str:
+    """A treatment as shown to the experimenter: "A - Saline", or only its code while testing blind."""
+    if not name or project is None:
+        return name or ""
+    code = treatment_code(project, name)
+    if project.blind:
+        return code
+    return f"{code} - {name}" if with_code and code else name
+
+
+def _strip_code(project, text: str) -> str:
+    """"A - Saline" → "Saline" (the treatment name typed or picked in a cell)."""
+    if " - " in text:
+        code, rest = text.split(" - ", 1)
+        if rest in [g.name for g in project.groups] and treatment_code(project, rest) == code:
+            return rest
+    return text
+
+
+class _SheetDelegate(QStyledItemDelegate):
+    """Cells of the Animals sheet: drop-down editors (with a ▾ drawn in the cell, as in ANY-maze) for Status,
+    Treatment and Sex, and treatment names shown with their code ("A - Saline")."""
+
+    def __init__(self, page):
+        super().__init__(page.table)
+        self.page = page
+
+    def _kind(self, index):
+        return self.page._col_kind(index.column())
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        p = self.page.project
+        if self._kind(index) == "treatment" and p is not None and not p.blind:
+            option.text = treatment_text(p, index.data(Qt.EditRole) or "")
+
+    def _arrow_rect(self, rect: QRect) -> QRect:
+        return QRect(rect.right() - 20, rect.top() + (rect.height() - 10) // 2, 10, 10)
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if self._kind(index) in COMBO_KINDS and index.flags() & Qt.ItemIsEditable:
+            icon("chevron_down").paint(painter, self._arrow_rect(option.rect))
+
+    def editorEvent(self, event, model, option, index):
+        if (event.type() == QEvent.MouseButtonRelease and self._kind(index) in COMBO_KINDS
+                and index.flags() & Qt.ItemIsEditable and event.position().x() >= option.rect.right() - 26):
+            self.page.table.edit(index)  # a click on ▾ opens the list straight away
+            return True
+        return super().editorEvent(event, model, option, index)
 
     def createEditor(self, parent, option, index):
+        kind = self._kind(index)
+        if kind not in COMBO_KINDS:
+            return super().createEditor(parent, option, index)
+        p = self.page.project
         cb = QComboBox(parent)
-        cb.setEditable(True)
-        cb.addItems(self.choices())
-        cb.setInsertPolicy(QComboBox.NoInsert)
+        if kind == "status":
+            cb.addItems(STATUSES)
+        else:
+            cb.setEditable(True)
+            cb.setInsertPolicy(QComboBox.NoInsert)
+            if kind == "treatment":
+                cb.addItem("", "")
+                for g in p.groups:
+                    cb.addItem(swatch(wf.display_color(p, g.name)), treatment_text(p, g.name), g.name)
+            else:
+                cb.addItems(SEXES)
+        cb.activated.connect(lambda _i, cb=cb: (self.commitData.emit(cb), self.closeEditor.emit(cb)))
+        QTimer.singleShot(0, cb.showPopup)
         return cb
 
     def setEditorData(self, editor, index):
-        editor.setCurrentText(index.data(Qt.EditRole) or "")
+        if not isinstance(editor, QComboBox):
+            return super().setEditorData(editor, index)
+        v = index.data(Qt.EditRole) or ""
+        i = editor.findData(v) if self._kind(index) == "treatment" else editor.findText(v)
+        if i >= 0:
+            editor.setCurrentIndex(i)
+        elif editor.isEditable():
+            editor.setEditText(v)
 
     def setModelData(self, editor, model, index):
-        model.setData(index, editor.currentText().strip(), Qt.EditRole)
+        if not isinstance(editor, QComboBox):
+            return super().setModelData(editor, model, index)
+        text = editor.currentText().strip()
+        if self._kind(index) == "treatment":
+            i = editor.findText(text)
+            text = (editor.itemData(i) or "") if i >= 0 else _strip_code(self.page.project, text)
+        model.setData(index, text, Qt.EditRole)
 
 
 class _AddSeveralDialog(QDialog):
     def __init__(self, groups: list[str], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add several animals")
+        self.setWindowTitle("Add animals")
         f = QFormLayout(self)
         self.prefix = QLineEdit("M")
         self.count = QSpinBox()
@@ -96,7 +213,7 @@ class _AddSeveralDialog(QDialog):
         f.addRow("Number of animals", self.count)
         f.addRow("First number", self.start)
         f.addRow("Digits", self.digits)
-        f.addRow("Group", self.group)
+        f.addRow("Treatment", self.group)
         f.addRow("", self.preview)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
@@ -193,125 +310,189 @@ class CriteriaDialog(QDialog):
 
 
 class AnimalsPage(Page):
+    """The Experiment tab: Animals and Treatments sheets with the ANY-maze "Experiment" ribbon."""
+
     title = "Animals"
 
     def __init__(self, main):
         super().__init__(main)
         self._loading = False
+        self.view = "animals"
+        self._cols: list[tuple[str, str]] = []  # (kind, field name) per column of the Animals sheet
 
-        # ---- left: animals table ------------------------------------------------
-        bar = QHBoxLayout()
+        # ---- ribbon actions ------------------------------------------------------------
+        def act(text, ic, fn, tip="", checkable=False, large=True):
+            return ribbon_action(self, text, ic, fn, tip, checkable, large)
 
-        bar2 = QHBoxLayout()
+        self.a_view_treat = act("View treatments", "treatment", lambda on: on and self.set_view("treatments"),
+                                "Show the Treatments sheet: treatment names, codes and colours", True)
+        self.a_view_animals = act("View animals", "animal", lambda on: on and self.set_view("animals"),
+                                  "Show the Animals sheet", True)
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        for a in (self.a_view_treat, self.a_view_animals):
+            grp.addAction(a)
+        self.a_view_animals.blockSignals(True)
+        self.a_view_animals.setChecked(True)
+        self.a_view_animals.blockSignals(False)
+        self.a_add_animals = act("Add animals", "animals_add", self._add_several_dialog,
+                                 "Add a numbered series of animals (e.g. M01…M12)")
+        self.a_del_animals = act("Delete animals", "animal_delete", self.delete_selected_interactive,
+                                 "Delete the selected animals")
+        self.a_reveal = act("Reveal treatment coding", "eye", self._reveal_toggled,
+                            "On: the treatments are visible. Off: blind testing — treatments are shown only as "
+                            "codes while testing and scoring", True)
+        self.a_import_animals = act("Import animals", "import", lambda: self.main.import_table("animals"),
+                                    "Import animals (ID, treatment, sex and other columns) from a spreadsheet saved "
+                                    "by ANY-maze or other software")
+        self.a_import_tests = act("Import tests", "import_tests", lambda: self.main.import_table("tests"),
+                                  "Import a test schedule (animal, stage, trial, apparatus, video) from a spreadsheet")
+        self.retire_btn = act("Retire", "retire", lambda: self.toggle_retire_selected(),
+                              "Withdraw the selected animals from the experiment (their pending tests are skipped "
+                              "and new schedules leave them out), or reinstate retired animals")
+        self.a_dose = act("Dose calculator", "calculator", self.dose_dialog,
+                          "Injection volume from body weight, dose and concentration")
+        self.a_criteria = act("Training criteria", "criteria", self.criteria_dialog,
+                              "Evaluate the training criteria (Protocol) against the results: complete stages and "
+                              "retire animals that failed")
+        self.a_export = act("Export CSV", "export", self._export_dialog, "Save the animal list as a CSV file")
+        self.a_add_one = act("Add animal", "add", self.add_animal_interactive, "Add one animal and type its ID",
+                             large=False)
+        self.a_dup = act("Duplicate", "copy", self.duplicate_selected,
+                         "Copy the selected animals (treatment, sex and fields)", large=False)
+        self.a_field_add = act("Add field", "field_add", self._add_field_dialog,
+                               "Add a column such as Animal weight, Genotype or Date of birth", large=False)
+        self.a_field_rename = act("Rename field", "field_edit", self._rename_field_dialog,
+                                  "Rename the selected field column", large=False)
+        self.a_field_remove = act("Remove field", "delete", self._remove_field_dialog,
+                                  "Remove the selected field column and its values", large=False)
+        self.a_treat_add = act("Add treatment", "add", self._add_group_dialog, "Add a treatment")
+        self.a_treat_rename = act("Rename", "edit", self._rename_group_dialog, "Rename the selected treatment",
+                                  large=False)
+        self.a_treat_color = act("Colour", "heatmap", self._color_group_dialog,
+                                 "Colour of the selected treatment in plots and tables", large=False)
+        self.a_treat_delete = act("Delete treatment", "delete", self._delete_group_dialog,
+                                  "Delete the selected treatment (its animals keep no treatment)", large=False)
+        self._group_acts = [self.a_treat_add, self.a_treat_rename, self.a_treat_color, self.a_treat_delete]
 
-        def button(text, fn, tip="", row=bar):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            if tip:
-                b.setToolTip(tip)
-            row.addWidget(b)
-            return b
-
-        button("Add animal", self.add_animal_interactive)
-        button("Add several…", self._add_several_dialog, "Create a numbered series of animals (e.g. M01…M12)")
-        button("Duplicate", self.duplicate_selected, "Copy the selected animals (group, sex and fields)")
-        button("Delete", self.delete_selected_interactive)
-        bar.addSpacing(16)
-        button("Import CSV…", self._import_dialog, "Columns: ID, Group, Sex; any other column becomes a field")
-        button("Export CSV…", self._export_dialog)
-        self.retire_btn = button("Retire", lambda: self.toggle_retire_selected(),
-                                 "Withdraw the selected animals from the experiment (their pending tests are skipped "
-                                 "and new schedules leave them out), or reinstate retired animals", bar2)
-        button("Training criteria…", self.criteria_dialog,
-               "Evaluate the training criteria (Experiment page) against the results: complete stages and retire "
-               "animals that failed", bar2)
-        button("Dose calculator…", self.dose_dialog, "Injection volume from body weight, dose and concentration",
-               bar2)
-        bar2.addStretch()
-        bar.addStretch()
+        # ---- title row -------------------------------------------------------------------
+        self.title_lbl = QLabel("Animals")
+        self.title_lbl.setObjectName("PageTitle")
         self.summary = QLabel()
-        self.summary.setStyleSheet("color:palette(mid)")
-        bar.addWidget(self.summary)
+        self.summary.setObjectName("Hint")
+        top = QHBoxLayout()
+        top.addWidget(self.title_lbl)
+        top.addStretch()
+        top.addWidget(self.summary, 0, Qt.AlignBottom)
+        self.blind_lbl = QLabel("Blind testing is on: treatments are shown only as codes and cannot be edited. "
+                                "Click <b>Reveal treatment coding</b> to unblind.")
+        self.blind_lbl.setWordWrap(True)
+        self.blind_lbl.setStyleSheet("color:#7c3aed;padding:2px 0 6px 0;")
+        self.blind_lbl.hide()
 
+        # ---- Animals sheet ---------------------------------------------------------------
         self.table = QTableWidget(0, 0)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._sheet_style(self.table)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
-                                   | QAbstractItemView.AnyKeyPressed)
-        self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(26)
-        self.table.horizontalHeader().setHighlightSections(False)
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
+                                   | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
         self.table.setSortingEnabled(True)
+        self.table.setItemDelegate(_SheetDelegate(self))
         self.table.itemChanged.connect(self._cell_changed)
-        self.table.itemSelectionChanged.connect(self._update_retire_btn)
-        self.table.setItemDelegateForColumn(1, _ComboDelegate(self._group_names, self.table))
-        self.table.setItemDelegateForColumn(2, _ComboDelegate(lambda: SEXES, self.table))
+        self.table.itemSelectionChanged.connect(self._update_actions)
         QShortcut(QKeySequence.Delete, self.table, self.delete_selected_interactive)
 
-        left = QVBoxLayout()
-        left.addLayout(bar)
-        left.addWidget(self.table, 1)
-        left.addLayout(bar2)
-        hint = QLabel("Double-click a cell to edit. Typing a new group name in the Group column creates the group. "
-                      "Renaming an animal updates its tests.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:palette(mid)")
-        left.addWidget(hint)
+        # ---- Treatments sheet ------------------------------------------------------------
+        self.treatments = QTableWidget(0, 4)
+        self._sheet_style(self.treatments)
+        self.treatments.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.treatments.setHorizontalHeaderLabels(["Treatment", "Code", "Colour", "Number of animals"])
+        self.treatments.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
+                                        | QAbstractItemView.EditKeyPressed)
+        for c, w in enumerate((320, 90, 160, 170)):
+            self.treatments.setColumnWidth(c, w)
+        self.treatments.itemChanged.connect(self._treatment_changed)
+        self.treatments.itemDoubleClicked.connect(
+            lambda it: self._color_group_dialog() if it.column() == 2 else None)
+        self.treatments.itemSelectionChanged.connect(self._update_actions)
 
-        # ---- right: groups and fields -----------------------------------------
-        gb = QGroupBox("Treatment groups")
-        gl = QVBoxLayout(gb)
-        self.groups_list = QListWidget()
-        self.groups_list.setStyleSheet("QListWidget::item{padding:4px 2px}")
-        self.groups_list.itemDoubleClicked.connect(lambda _it: self._rename_group_dialog())
-        gl.addWidget(self.groups_list)
-        gbar = QHBoxLayout()
-        self._group_btns = []
-        for text, fn in (("Add", self._add_group_dialog), ("Rename…", self._rename_group_dialog),
-                         ("Colour…", self._color_group_dialog), ("Delete", self._delete_group_dialog)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            gbar.addWidget(b)
-            self._group_btns.append(b)
-        gl.addLayout(gbar)
-        self.blind_lbl = QLabel("Blind testing is on: groups are shown as codes and cannot be edited. Turn it off "
-                                "on the Experiment page.")
-        self.blind_lbl.setWordWrap(True)
-        self.blind_lbl.setStyleSheet("color:#9333ea")
-        self.blind_lbl.hide()
-        gl.addWidget(self.blind_lbl)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.table)
+        self.stack.addWidget(self.treatments)
+        self.hint = QLabel()
+        self.hint.setObjectName("Hint")
+        self.hint.setWordWrap(True)
 
-        fb = QGroupBox("Custom fields (extra columns)")
-        fl = QVBoxLayout(fb)
-        self.fields_list = QListWidget()
-        self.fields_list.setStyleSheet("QListWidget::item{padding:4px 2px}")
-        self.fields_list.itemDoubleClicked.connect(lambda _it: self._rename_field_dialog())
-        fl.addWidget(self.fields_list)
-        fbar = QHBoxLayout()
-        for text, fn in (("Add…", self._add_field_dialog), ("Rename…", self._rename_field_dialog),
-                         ("Remove", self._remove_field_dialog)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            fbar.addWidget(b)
-        fl.addLayout(fbar)
-        fnote = QLabel("Fields such as body weight, genotype or date of birth are exported with the results "
-                       "and can be used to filter tests.")
-        fnote.setWordWrap(True)
-        fnote.setStyleSheet("color:palette(mid)")
-        fl.addWidget(fnote)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 10, 18, 10)
+        lay.setSpacing(4)
+        lay.addLayout(top)
+        lay.addWidget(self.blind_lbl)
+        lay.addWidget(self.stack, 1)
+        lay.addWidget(self.hint)
+        self._update_hint()
 
-        right = QVBoxLayout()
-        right.addWidget(gb, 1)
-        right.addWidget(fb, 1)
-        rw = QWidget()
-        rw.setLayout(right)
-        rw.setFixedWidth(330)
-        right.setContentsMargins(0, 0, 0, 0)
+    @staticmethod
+    def _sheet_style(t: QTableWidget):
+        """A light ANY-maze style spreadsheet: roomy rows, thin grey grid, no row header."""
+        t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        t.setAlternatingRowColors(False)
+        t.setShowGrid(True)
+        t.setWordWrap(False)
+        t.verticalHeader().hide()
+        t.verticalHeader().setDefaultSectionSize(ROW_H)
+        t.horizontalHeader().setHighlightSections(False)
+        t.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        t.horizontalHeader().setMinimumHeight(34)
+        t.setStyleSheet("QTableWidget{font-size:14px;gridline-color:#e6e6e6;border:none;}"
+                        "QTableWidget::item{padding:0 6px;}"
+                        "QHeaderView::section{font-size:14px;padding:6px 8px;border:none;"
+                        "border-right:1px solid #ececec;border-bottom:1px solid #d6d6d6;}")
 
-        lay = QHBoxLayout(self)
-        lay.addLayout(left, 1)
-        lay.addWidget(rw)
+    # ------------------------------------------------------------------ ribbon / explorer hooks
+    def ribbon_groups(self):
+        exp = ("Experiment", [self.a_view_treat, self.a_view_animals, self.a_add_animals, self.a_del_animals,
+                              self.a_reveal, self.a_import_animals, self.a_import_tests])
+        if self.view == "treatments":
+            return [exp, ("Treatments", [self.a_treat_add, (self.a_treat_rename, "small"),
+                                         (self.a_treat_color, "small"), (self.a_treat_delete, "small")])]
+        return [exp,
+                ("Animals", [self.retire_btn, self.a_dose, self.a_criteria, self.a_export,
+                             (self.a_add_one, "small"), (self.a_dup, "small")]),
+                ("Fields", [(self.a_field_add, "small"), (self.a_field_rename, "small"),
+                            (self.a_field_remove, "small")])]
+
+    def explorer_items(self):
+        return [("Treatments", "treatment", "treatments"), ("Animals", "animal", "animals")]
+
+    def show_item(self, key):
+        self.set_view(key)
+
+    def set_view(self, view: str):
+        """Switch between the Animals sheet ("animals") and the Treatments sheet ("treatments")."""
+        view = "treatments" if view == "treatments" else "animals"
+        changed = view != self.view
+        self.view = view
+        self.stack.setCurrentWidget(self.treatments if view == "treatments" else self.table)
+        self.title_lbl.setText("Treatments" if view == "treatments" else "Animals")
+        for a, on in ((self.a_view_treat, view == "treatments"), (self.a_view_animals, view == "animals")):
+            if a.isChecked() != on:
+                a.blockSignals(True)
+                a.setChecked(on)
+                a.blockSignals(False)
+        self._update_hint()
+        self._update_actions()
+        self.main.select_explorer(self, view)
+        if changed and self.main.current_page() is self:
+            self.main.refresh_ribbon()
+
+    def _update_hint(self):
+        if self.view == "treatments":
+            self.hint.setText("Double-click a name to rename the treatment, or a colour to change it. While testing "
+                              "blind, treatments are shown by their code only.")
+        else:
+            self.hint.setText("Click a selected cell (or double-click) to edit it; ▾ cells offer a list. Typing a new "
+                              "treatment creates it. Renaming an animal updates its tests.")
 
     # ------------------------------------------------------------------ refresh
     def set_project(self, project):
@@ -331,7 +512,19 @@ class AnimalsPage(Page):
         return out
 
     def _columns(self) -> list[str]:
-        return ["ID", "Group", "Sex"] + list(self.project.animal_fields) + ["Tests", "Status"]
+        """Column titles of the Animals sheet (kinds in self._cols)."""
+        p = self.project
+        self._cols = ([("number", ""), ("id", ""), ("status", ""), ("treatment", "")]
+                      + [("field", f) for f in p.animal_fields] + [("sex", ""), ("tests", "")])
+        titles = {"number": "Animal", "id": "Animal ID", "status": "Status", "treatment": "Treatment", "sex": "Sex",
+                  "tests": "Tests"}
+        return [f if k == "field" else titles[k] for k, f in self._cols]
+
+    def _col_kind(self, c: int) -> str | None:
+        return self._cols[c][0] if 0 <= c < len(self._cols) else None
+
+    def col_of(self, kind: str, field: str = "") -> int:
+        return next((c for c, (k, f) in enumerate(self._cols) if k == kind and (k != "field" or f == field)), -1)
 
     def refresh(self):
         self._loading = True
@@ -340,10 +533,10 @@ class AnimalsPage(Page):
         p = self.project
         if p is None:
             self.table.setColumnCount(0)
-            self.groups_list.clear()
-            self.fields_list.clear()
+            self.treatments.setRowCount(0)
             self.summary.setText("")
             self._loading = False
+            self._update_actions()
             return
         cols = self._columns()
         self.table.setColumnCount(len(cols))
@@ -353,77 +546,139 @@ class AnimalsPage(Page):
         for r, a in enumerate(p.animals):
             self._fill_row(r, a, counts)
         hh = self.table.horizontalHeader()
-        for c in range(len(cols)):
-            hh.setSectionResizeMode(c, QHeaderView.Interactive)
-            self.table.setColumnWidth(c, 130 if c < 3 else 120)
-        self.table.setColumnWidth(len(cols) - 2, 70)
-        self.table.setColumnWidth(len(cols) - 1, 90)
         hh.setStretchLastSection(False)
-        hh.setSectionResizeMode(len(cols) - 3, QHeaderView.Stretch)
+        fm = self.table.fontMetrics()
+        longest = max([len(treatment_text(p, g.name)) for g in p.groups] + [10])
+        widths = {"number": 80, "id": 150, "status": 130, "treatment": min(320, 60 + 9 * longest), "sex": 120,
+                  "tests": 70}
+        for c, (k, f) in enumerate(self._cols):
+            hh.setSectionResizeMode(c, QHeaderView.Interactive)
+            self.table.setColumnWidth(c, widths.get(k) or max(130, fm.horizontalAdvance(f) + 40))
         self.table.setSortingEnabled(True)
         self._loading = False
         self._refresh_side(counts)
 
+    def _item(self, text="", editable=True, align=None) -> QTableWidgetItem:
+        it = QTableWidgetItem(text)
+        if not editable:
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+        if align is not None:
+            it.setTextAlignment(align)
+        return it
+
     def _fill_row(self, r: int, a: Animal, counts: dict):
         p = self.project
-        it = QTableWidgetItem(a.id)
-        it.setData(Qt.UserRole, a)
-        self.table.setItem(r, 0, it)
-        g = QTableWidgetItem(wf.display_group(p, a.group))
+        num = self._item(editable=False, align=Qt.AlignCenter)
+        num.setData(Qt.DisplayRole, p.animals.index(a) + 1)
+        num.setData(Qt.UserRole, a)
+        items = {"number": num, "id": self._item(a.id),
+                 "status": self._item("Retired" if a.retired else "Normal"),
+                 "sex": self._item(a.sex)}
+        if a.retired and a.retired_reason:
+            items["status"].setToolTip(f"Retired: {a.retired_reason}")
+        g = self._item(treatment_text(p, a.group) if p.blind else a.group, editable=not p.blind)
         if a.group:
             g.setIcon(swatch(wf.display_color(p, a.group)))
-        if p.blind:
-            g.setFlags(g.flags() & ~Qt.ItemIsEditable)
-        self.table.setItem(r, 1, g)
-        self.table.setItem(r, 2, QTableWidgetItem(a.sex))
-        for i, f in enumerate(p.animal_fields):
-            self.table.setItem(r, 3 + i, QTableWidgetItem(str(a.fields.get(f, ""))))
+        items["treatment"] = g
         ids = counts.get(a.id, [])
-        n = QTableWidgetItem()
+        n = self._item(editable=False, align=Qt.AlignRight | Qt.AlignVCenter)
         n.setData(Qt.DisplayRole, len(ids))
-        n.setFlags(n.flags() & ~Qt.ItemIsEditable)
-        n.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        n.setForeground(QColor("#6b7280"))
         if ids:
             n.setToolTip("Tests: " + ", ".join(str(i) for i in ids))
-        self.table.setItem(r, 3 + len(p.animal_fields), n)
-        st = QTableWidgetItem("retired" if a.retired else "active")
-        st.setFlags(st.flags() & ~Qt.ItemIsEditable)
-        st.setForeground(QColor("#dc2626" if a.retired else "#16a34a"))
-        if a.retired and a.retired_reason:
-            st.setToolTip(a.retired_reason)
-        self.table.setItem(r, 4 + len(p.animal_fields), st)
+        items["tests"] = n
+        for c, (k, f) in enumerate(self._cols):
+            it = self._item(str(a.fields.get(f, ""))) if k == "field" else items[k]
+            if a.retired:
+                it.setForeground(QColor(MUTED_ROW))
+            self.table.setItem(r, c, it)
 
     def _refresh_side(self, counts=None):
         p = self.project
         counts = counts if counts is not None else self._test_counts()
-        cur_g = self._current_group()
-        self.groups_list.clear()
-        for g in p.groups:
-            n = sum(1 for a in p.animals if a.group == g.name)
-            it = QListWidgetItem(swatch(wf.display_color(p, g.name), 14),
-                                 f"{wf.display_group(p, g.name)}    ({n} animal{'s' if n != 1 else ''})")
-            it.setData(Qt.UserRole, g.name)
-            self.groups_list.addItem(it)
-            if g.name == cur_g:
-                self.groups_list.setCurrentItem(it)
-        cur_f = self.fields_list.currentItem().text() if self.fields_list.currentItem() else None
-        self.fields_list.clear()
-        for f in p.animal_fields:
-            it = QListWidgetItem(f)
-            self.fields_list.addItem(it)
-            if f == cur_f:
-                self.fields_list.setCurrentItem(it)
+        self._fill_treatments()
         n_tests = sum(len(v) for k, v in counts.items() if p.get_animal(k))
         n_ret = sum(1 for a in p.animals if a.retired)
-        self.summary.setText(f"{len(p.animals)} animals · {len(p.groups)} groups · {n_tests} tests"
+        nt = len(p.groups)
+        self.summary.setText(f"{len(p.animals)} animals · {nt} treatment{'s' if nt != 1 else ''} · {n_tests} tests"
                              + (f" · {n_ret} retired" if n_ret else ""))
-        for b in self._group_btns:
-            b.setEnabled(not p.blind)
         self.blind_lbl.setVisible(p.blind)
-        self._update_retire_btn()
+        self.a_reveal.blockSignals(True)
+        self.a_reveal.setChecked(not p.blind)
+        self.a_reveal.blockSignals(False)
+        self._update_actions()
+
+    def _fill_treatments(self):
+        p = self.project
+        cur_g = self._current_group()
+        t = self.treatments
+        self._loading = True
+        t.setRowCount(len(p.groups))
+        for r, g in enumerate(p.groups):
+            n = sum(1 for a in p.animals if a.group == g.name)
+            name = self._item(g.name if not p.blind else "Hidden (blind testing)", editable=not p.blind)
+            name.setData(Qt.UserRole, g.name)
+            if p.blind:
+                name.setForeground(QColor(MUTED_ROW))
+            col = self._item(wf.display_color(p, g.name) if not p.blind else "", editable=False)
+            col.setIcon(swatch(wf.display_color(p, g.name), 16))
+            col.setToolTip("Double-click to change the colour")
+            cnt = self._item(editable=False, align=Qt.AlignRight | Qt.AlignVCenter)
+            cnt.setData(Qt.DisplayRole, n)
+            for c, it in enumerate((name, self._item(treatment_code(p, g.name), editable=False), col, cnt)):
+                t.setItem(r, c, it)
+            if g.name == cur_g:
+                t.setCurrentCell(r, 0)
+        self._loading = False
 
     def _changed(self):
         self.main.mark_dirty()
+
+    def _update_actions(self, *_):
+        p = self.project
+        has = p is not None
+        animals = self.view == "animals"
+        sel = self.selected_animals() if has and animals else []
+        for a in (self.a_add_animals, self.a_add_one, self.a_import_animals, self.a_import_tests, self.a_reveal,
+                  self.a_field_add, self.a_export, self.a_criteria, self.a_dose):
+            a.setEnabled(has)
+        for a in (self.a_del_animals, self.a_dup):
+            a.setEnabled(bool(sel))
+        self._update_retire_btn()
+        field = self._current_field()
+        self.a_field_rename.setEnabled(has and bool(p.animal_fields))
+        self.a_field_remove.setEnabled(has and bool(p.animal_fields))
+        if field:
+            self.a_field_remove.setToolTip(f"Remove the column “{field}” and its values")
+        blind = has and p.blind
+        self.a_treat_add.setEnabled(has and not blind)
+        cur = self._current_group() if has else None
+        for a in (self.a_treat_rename, self.a_treat_color, self.a_treat_delete):
+            a.setEnabled(bool(cur) and not blind)
+
+    # ------------------------------------------------------------------ blind coding
+    def _reveal_toggled(self, on: bool):
+        p = self.project
+        if p is None:
+            return
+        if on and p.blind and QMessageBox.question(
+                self, "Reveal treatment coding", "Reveal the treatments? The experimenter will no longer be blind "
+                "to the treatment of each animal.") != QMessageBox.Yes:
+            self.a_reveal.blockSignals(True)
+            self.a_reveal.setChecked(False)
+            self.a_reveal.blockSignals(False)
+            return
+        self.set_blind(not on)
+
+    def set_blind(self, blind: bool):
+        p = self.project
+        p.blind = bool(blind)
+        if p.blind:
+            wf.blind_codes(p)
+        self._changed()
+        self.refresh()
+        self.main.status("Blind testing: treatments are shown as codes." if p.blind
+                         else "Treatment coding revealed.")
 
     # ------------------------------------------------------------------ animals
     def _taken(self) -> set[str]:
@@ -454,8 +709,9 @@ class AnimalsPage(Page):
         a = self.add_animal(group=self._current_group() or "")
         r = self._row_of(a)
         if r >= 0:
-            self.table.setCurrentCell(r, 0)
-            self.table.editItem(self.table.item(r, 0))
+            c = self.col_of("id")
+            self.table.setCurrentCell(r, c)
+            self.table.editItem(self.table.item(r, c))
 
     def add_several(self, prefix: str, count: int, group: str = "", start: int = 1, digits: int = 2) -> list[Animal]:
         ids = [f"{prefix}{start + i:0{digits}d}" for i in range(count)]
@@ -530,7 +786,7 @@ class AnimalsPage(Page):
         if n_tests:
             msg += (f"\n\n{n_tests} test{'s' if n_tests > 1 else ''} refer to "
                     f"{'these animals' if len(sel) > 1 else 'this animal'}; they are kept but will have no "
-                    "group or animal details.")
+                    "treatment or animal details.")
         if QMessageBox.question(self, "Delete animals", msg) == QMessageBox.Yes:
             self.delete_animals(sel)
 
@@ -553,7 +809,7 @@ class AnimalsPage(Page):
     def _cell_changed(self, item: QTableWidgetItem):
         if self._loading or self.project is None:
             return
-        r, c = item.row(), item.column()
+        r, kind = item.row(), self._col_kind(item.column())
         idit = self.table.item(r, 0)
         if idit is None:
             return
@@ -562,7 +818,7 @@ class AnimalsPage(Page):
         p = self.project
         self._loading = True
         try:
-            if c == 0:
+            if kind == "id":
                 if text != a.id:
                     if not text:
                         self.main.status("An animal ID cannot be empty")
@@ -573,21 +829,38 @@ class AnimalsPage(Page):
                                                              "Animal IDs must be unique.")
                     else:
                         self.rename_animal(a, text)
-            elif c == 1:
+            elif kind == "status":
+                retire = text.lower().startswith("retire")
+                if retire and not a.retired:
+                    n = wf.retire_animal(p, a, "")
+                    self.main.status(f"Retired {a.id} ({n} pending tests skipped).")
+                elif not retire and a.retired:
+                    n = wf.reinstate_animal(p, a)
+                    self.main.status(f"Reinstated {a.id} ({n} skipped tests resumed).")
+                item.setText("Retired" if a.retired else "Normal")
+                for c in range(self.table.columnCount()):
+                    it = self.table.item(r, c)
+                    if it is not None and self._col_kind(c) != "tests":
+                        it.setForeground(QColor(MUTED_ROW) if a.retired else QColor(theme.TEXT))
+                self._changed()
+                self._refresh_side()
+            elif kind == "treatment":
                 if p.blind:
-                    item.setText(wf.display_group(p, a.group))
+                    item.setText(treatment_text(p, a.group))
                     return
+                text = _strip_code(p, text)
                 if text and text not in self._group_names():
                     self.ensure_group(text)
                 a.group = text
+                item.setText(text)
                 item.setIcon(swatch(p.group_color(text)) if text else QIcon())
                 self._changed()
                 self._refresh_side()
-            elif c == 2:
+            elif kind == "sex":
                 a.sex = text
                 self._changed()
-            elif 3 <= c < 3 + len(p.animal_fields):
-                a.fields[p.animal_fields[c - 3]] = text
+            elif kind == "field":
+                a.fields[self._cols[item.column()][1]] = text
                 self._changed()
         finally:
             self._loading = False
@@ -629,7 +902,7 @@ class AnimalsPage(Page):
             return None
         if not p.training_criteria:
             QMessageBox.information(self, "Training criteria", "No training criteria are defined. Add them on the "
-                                    "Experiment page (Training criteria).")
+                                    "Protocol (Training criteria).")
             return None
         try:
             rep = self.evaluate_criteria()
@@ -676,8 +949,31 @@ class AnimalsPage(Page):
 
     # ------------------------------------------------------------------ groups
     def _current_group(self) -> str | None:
-        it = self.groups_list.currentItem()
+        r = self.treatments.currentRow()
+        it = self.treatments.item(r, 0) if r >= 0 else None
         return it.data(Qt.UserRole) if it else None
+
+    def _treatment_changed(self, item: QTableWidgetItem):
+        if self._loading or self.project is None or item.column() != 0:
+            return
+        old, new = item.data(Qt.UserRole), item.text().strip()
+        if not new or new == old:
+            self._loading = True
+            item.setText(old)
+            self._loading = False
+            return
+        if new in self._group_names():
+            QTimer.singleShot(0, self.refresh)
+            QMessageBox.warning(self, "Rename treatment", f"A treatment named “{new}” already exists.")
+            return
+        g = next((g for g in self.project.groups if g.name == old), None)
+        if g is not None:
+            g.name = new
+            for a in self.project.animals:
+                if a.group == old:
+                    a.group = new
+            self._changed()
+        QTimer.singleShot(0, self.refresh)  # not while the sheet is emitting itemChanged
 
     def _next_color(self) -> str:
         used = {g.color.lower() for g in self.project.groups}
@@ -733,20 +1029,20 @@ class AnimalsPage(Page):
     def _add_group_dialog(self):
         if self.project is None:
             return
-        name, ok = QInputDialog.getText(self, "Add group", "Group name:",
-                                        text=f"Group {len(self.project.groups) + 1}")
+        name, ok = QInputDialog.getText(self, "Add treatment", "Treatment name:",
+                                        text=f"Treatment {len(self.project.groups) + 1}")
         if ok and name.strip():
             if self.add_group(name) is None:
-                QMessageBox.warning(self, "Add group", f"A group named “{name.strip()}” already exists.")
+                QMessageBox.warning(self, "Add treatment", f"A treatment named “{name.strip()}” already exists.")
 
     def _rename_group_dialog(self):
         old = self._current_group()
         if not old:
             return
-        new, ok = QInputDialog.getText(self, "Rename group", "New name:", text=old)
+        new, ok = QInputDialog.getText(self, "Rename treatment", "New name:", text=old)
         if ok and new.strip() and new.strip() != old:
             if not self.rename_group(old, new):
-                QMessageBox.warning(self, "Rename group", f"A group named “{new.strip()}” already exists.")
+                QMessageBox.warning(self, "Rename treatment", f"A treatment named “{new.strip()}” already exists.")
 
     def _color_group_dialog(self):
         name = self._current_group()
@@ -761,14 +1057,16 @@ class AnimalsPage(Page):
         if not name:
             return
         n = sum(1 for a in self.project.animals if a.group == name)
-        msg = f"Delete group “{name}”?" + (f"\n\n{n} animals will be left without a group." if n else "")
-        if QMessageBox.question(self, "Delete group", msg) == QMessageBox.Yes:
+        msg = f"Delete the treatment “{name}”?"
+        if n:
+            msg += f"\n\n{n} animals will be left without a treatment."
+        if QMessageBox.question(self, "Delete treatment", msg) == QMessageBox.Yes:
             self.delete_group(name)
 
     # ------------------------------------------------------------------ fields
     def add_field(self, name: str) -> bool:
         name = name.strip()
-        if not name or name in self.project.animal_fields or name.lower() in ("id", "group", "sex", "tests"):
+        if not name or name in self.project.animal_fields or name.lower() in RESERVED:
             return False
         self.project.animal_fields.append(name)
         self._changed()
@@ -787,7 +1085,7 @@ class AnimalsPage(Page):
     def rename_field(self, old: str, new: str) -> bool:
         new = new.strip()
         f = self.project.animal_fields
-        if old not in f or not new or new in f or new.lower() in ("id", "group", "sex", "tests"):
+        if old not in f or not new or new in f or new.lower() in RESERVED:
             return False
         f[f.index(old)] = new
         for a in self.project.animals:
@@ -804,21 +1102,40 @@ class AnimalsPage(Page):
         if ok and name.strip() and not self.add_field(name):
             QMessageBox.warning(self, "Add field", f"“{name.strip()}” is already a column.")
 
+    def _current_field(self) -> str | None:
+        """The field column holding the current cell of the Animals sheet, if any."""
+        if self.project is None:
+            return None
+        c = self.table.currentColumn()
+        return self._cols[c][1] if self._col_kind(c) == "field" else None
+
+    def _pick_field(self, title: str) -> str | None:
+        f = self._current_field()
+        if f:
+            return f
+        fields = list(self.project.animal_fields) if self.project else []
+        if not fields:
+            return None
+        if len(fields) == 1:
+            return fields[0]
+        name, ok = QInputDialog.getItem(self, title, "Field:", fields, 0, False)
+        return name if ok else None
+
     def _rename_field_dialog(self):
-        it = self.fields_list.currentItem()
-        if it is None:
+        old = self._pick_field("Rename field")
+        if not old:
             return
-        new, ok = QInputDialog.getText(self, "Rename field", "New name:", text=it.text())
-        if ok and new.strip() and new.strip() != it.text() and not self.rename_field(it.text(), new):
+        new, ok = QInputDialog.getText(self, "Rename field", "New name:", text=old)
+        if ok and new.strip() and new.strip() != old and not self.rename_field(old, new):
             QMessageBox.warning(self, "Rename field", f"“{new.strip()}” is already a column.")
 
     def _remove_field_dialog(self):
-        it = self.fields_list.currentItem()
-        if it is None:
+        name = self._pick_field("Remove field")
+        if not name:
             return
         if QMessageBox.question(self, "Remove field",
-                                f"Remove the column “{it.text()}” and its values for every animal?") == QMessageBox.Yes:
-            self.remove_field(it.text())
+                                f"Remove the column “{name}” and its values for every animal?") == QMessageBox.Yes:
+            self.remove_field(name)
 
     # ------------------------------------------------------------------ CSV
     def import_csv(self, path: str) -> tuple[int, int]:
@@ -835,7 +1152,7 @@ class AnimalsPage(Page):
         low = [h.lower() for h in header]
         id_col = next((i for i, h in enumerate(low) if h in ID_KEYS), None)
         if id_col is None:
-            raise ValueError("The CSV file needs an “ID” column (header row: ID, Group, Sex, …)")
+            raise ValueError("The CSV file needs an “ID” column (header row: ID, Treatment, Sex, …)")
         g_col = next((i for i, h in enumerate(low) if h in ("group", "treatment", "treatment group")), None)
         s_col = next((i for i, h in enumerate(low) if h in ("sex", "gender")), None)
         f_cols = [(i, h) for i, h in enumerate(header) if i not in (id_col, g_col, s_col) and h
@@ -873,23 +1190,9 @@ class AnimalsPage(Page):
         p = self.project
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["ID", "Group", "Sex"] + list(p.animal_fields))
+            w.writerow(["ID", "Treatment", "Sex"] + list(p.animal_fields))
             for a in p.animals:
                 w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in p.animal_fields])
-
-    def _import_dialog(self):
-        if self.project is None:
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "Import animals", str(self.project.path or Path.home()),
-                                              "CSV files (*.csv *.txt);;All files (*)")
-        if not path:
-            return
-        try:
-            added, updated = self.import_csv(path)
-        except Exception as e:
-            error_box(self, "Import animals", e)
-            return
-        self.main.status(f"Imported {added} new and updated {updated} existing animals from {Path(path).name}")
 
     def _export_dialog(self):
         if self.project is None:

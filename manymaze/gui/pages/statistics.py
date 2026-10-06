@@ -10,11 +10,11 @@ from html import escape
 import numpy as np
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGroupBox, QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
-                               QWidget)
+from PySide6.QtGui import QAction, QGuiApplication, QIcon
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit,
+                               QRadioButton, QScrollArea, QSizePolicy, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ...core import plots
 from ...core import stats as st
@@ -22,10 +22,12 @@ from ...core.export import write_table
 from ...core.project import result_columns
 from ...core.stats import (anova_text, compare_groups, correlation, format_p, stars, summary_text,
                            two_way_anova)
+from .. import theme
+from ..icons import icon
 from ..widgets import PlotCanvas, error_box
 from ._results_cache import RowsLoader, has_periods, info_columns
 from .base import Page
-from .results import FIG_FILTER, TABLE_FILTER, figure_to_clipboard, is_number, numeric_columns
+from .results import FIG_FILTER, TABLE_FILTER, figure_to_clipboard, is_number, numeric_columns, ribbon_label
 
 WHOLE = "Whole test"
 NONE = "(none)"
@@ -45,9 +47,43 @@ DESIGNS = [("between", "Between subjects (two-way ANOVA)"), ("mixed", "Repeated 
            ("srh", "Non-parametric (Scheirer-Ray-Hare)"), ("art", "Aligned rank transform ANOVA")]
 GRAPHS = [("bar", "Column (mean ± error)"), ("point", "Points (mean ± error)"), ("box", "Box plot"),
           ("violin", "Violin plot")]
+# analyses (explorer sub-items under "Statistics"): key, label, icon
+VIEWS = [("compare", "Compare groups", "bars"), ("two", "Two factors", "chart"),
+         ("correlation", "Correlation", "scatter"), ("grouped", "Grouped", "table"),
+         ("categorical", "Categorical", "histogram")]
+# how factors and choices are shown (internal names stay: the "Group" column holds the treatment)
+DISPLAY = {"Group": "Treatment", NONE: "- None -", "(all rows)": "- All tests -"}
+
+STYLE = f"""
+QLabel#StatsHeading {{ color: {theme.HEADING}; font-size: 20px; font-weight: 300; padding: 14px 0 2px 0; }}
+QLabel#StatsPrompt {{ font-size: 13px; }}
+QLabel#ReportTitle {{ color: {theme.HEADING}; font-size: 20px; font-weight: 300; }}
+QLabel#ReportHeading {{ color: {theme.HEADING}; font-size: 15px; padding: 12px 0 2px 0; }}
+QLabel#ReportText {{ font-size: 13px; }}
+QWidget#StatsReport {{ background: {theme.WORK_BG}; }}
+QFrame#StatsSeparator {{ color: {theme.BORDER}; }}
+QComboBox, QDoubleSpinBox {{ min-height: 22px; }}
+QTableWidget {{ border: none; border-top: 1px solid {theme.BORDER}; background: transparent; font-size: 13px; }}
+QTableWidget::item {{ padding: 0 6px; }}
+QHeaderView::section {{ background: transparent; font-style: italic; font-weight: normal; border: none;
+    border-bottom: 1px solid {theme.BORDER}; padding: 4px 6px; }}
+"""
 
 
-def _fmt(v, nd=3) -> str:
+def _label(v) -> str:
+    return DISPLAY.get(v, str(v))
+
+
+def _wide_combo() -> QComboBox:
+    c = QComboBox()
+    c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    c.setMinimumContentsLength(8)
+    c.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    return c
+
+
+def _fmt(v, nd=None) -> str:
+    """Numbers with 4 significant figures (at most 3 decimals), like the tables of ANY-maze's reports."""
     if v is None:
         return ""
     if isinstance(v, (tuple, list)):
@@ -57,6 +93,9 @@ def _fmt(v, nd=3) -> str:
             return str(int(v))
         if not math.isfinite(v):
             return "–"
+        if nd is None:
+            a = abs(float(v))
+            nd = 3 if a < 10 else 2 if a < 100 else 1 if a < 1000 else 0
         return f"{float(v):.{nd}f}"
     return str(v)
 
@@ -82,7 +121,12 @@ def _table(headers: list[str], max_h: int = 240) -> QTableWidget:
     t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
     t.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
     t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    t.verticalHeader().setDefaultSectionSize(22)
+    t.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    t.verticalHeader().setDefaultSectionSize(28)
+    t.setShowGrid(False)
+    t.setFrameShape(QFrame.NoFrame)
+    t.setFocusPolicy(Qt.NoFocus)
+    t.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
     t._max_h = max_h
     return t
 
@@ -168,318 +212,349 @@ class StatisticsPage(Page):
         self._timer.setInterval(30)
         self._timer.timeout.connect(self.recompute)
 
-        # ---- controls --------------------------------------------------------
-        box = QGroupBox("Analysis")
-        f = QFormLayout(box)
-        f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        f.setVerticalSpacing(5)
+        # ---- inputs (laid out below as an ANY-maze style property page) -------------------------------
         self.measure = self._measure_combo()
-        self.factor = QComboBox()
-        self.period = QComboBox()
-        self.period.setToolTip("Time period of the results to analyse (time bins are set on the Experiment page)")
-        self.filter_field = QComboBox()
-        self.filter_value = QComboBox()
-        self.parametric = QComboBox()
-        self.parametric.addItem("Parametric", True)
-        self.parametric.addItem("Non-parametric", False)
-        self.parametric.setToolTip("Used by the automatic test choice: t-test / ANOVA or Mann-Whitney / "
-                                   "Kruskal-Wallis (Wilcoxon / Friedman when paired)")
-        self.method = QComboBox()
+        self.factor = _wide_combo()
+        self.period = _wide_combo()
+        self.period.setToolTip("Time period of the results to analyse (time bins are set on the Protocol page or with "
+                               "“Set segment length” on the Data page)")
+        self.filter_field = _wide_combo()
+        self.filter_value = _wide_combo()
+        self.param_radio = QRadioButton("Parametric")
+        self.param_radio.setChecked(True)
+        self.nonparam_radio = QRadioButton("Non-parametric")
+        for r in (self.param_radio, self.nonparam_radio):
+            r.setToolTip("Used by the automatic test choice: t-test / ANOVA or Mann-Whitney / Kruskal-Wallis "
+                         "(Wilcoxon / Friedman when the same animals were tested at each level)")
+        self._param_group = QButtonGroup(self)
+        self._param_group.addButton(self.param_radio)
+        self._param_group.addButton(self.nonparam_radio)
+        self.param_radio.toggled.connect(self._schedule)
+        self.method = _wide_combo()
         for k, v in METHODS:
             self.method.addItem(v, k)
         self.method.setMaxVisibleItems(20)
-        self.method.setToolTip("Statistical test; Automatic picks one from the number of levels, the parametric "
-                               "choice and pairing")
-        self.posthoc = QComboBox()
+        self.method.setToolTip("Statistical test; Automatic picks one from the number of levels, the type of tests "
+                               "and pairing")
+        self.posthoc = _wide_combo()
         for k, v in st.POSTHOC.items():
-            self.posthoc.addItem(v, k)
-        self.posthoc.setToolTip("Pairwise comparisons after a significant test of more than two levels")
-        self.control = QComboBox()
+            self.posthoc.addItem(icon("posthoc") if k not in ("auto", "none") else QIcon(),
+                                 "- None -" if k == "none" else v, k)
+        self.posthoc.setMaxVisibleItems(20)
+        self.posthoc.setToolTip("Pairwise comparisons after a test of more than two levels (Automatic: Tukey after "
+                                "ANOVA, Games-Howell after Welch's ANOVA, Bonferroni after rank tests)")
+        self.control = _wide_combo()
         self.control.setToolTip("Control level for Dunnett's test")
         self.mu = QDoubleSpinBox()
         self.mu.setRange(-1e9, 1e9)
         self.mu.setDecimals(3)
         self.mu.setToolTip("Reference value for one-sample tests (e.g. 50 % alternation, discrimination index 0)")
-        self.paired = QCheckBox("Repeated measures (pair by animal)")
+        self.paired = QCheckBox("Repeated measures")
         self.paired.setToolTip("Within-animal comparison, e.g. Stage or Period: paired t / Wilcoxon / "
                                "repeated-measures ANOVA / Friedman")
-        f.addRow("Measure", self.measure)
-        f.addRow("Compare", self.factor)
-        f.addRow("Period", self.period)
-        fr = QHBoxLayout()
-        fr.addWidget(self.filter_field, 1)
-        fr.addWidget(QLabel("="))
-        fr.addWidget(self.filter_value, 1)
-        f.addRow("Only", fr)
-        f.addRow("Family", self.parametric)
-        f.addRow("Test", self.method)
-        f.addRow("Post-hoc", self.posthoc)
-        f.addRow("Control", self.control)
-        f.addRow("Test value", self.mu)
-        f.addRow(self.paired)
-        gbox = QGroupBox("Graph")
-        g = QFormLayout(gbox)
-        g.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        g.setVerticalSpacing(5)
-        self.plot_kind = QComboBox()
+        self.plot_kind = _wide_combo()
         for k, v in GRAPHS:
             self.plot_kind.addItem(v, k)
-        self.error = QComboBox()
+        self.error = _wide_combo()
         for k, v in plots.ERRORS.items():
             self.error.addItem(v, k)
         self.points = QCheckBox("Show individual values")
         self.points.setChecked(True)
-        g.addRow("Graph", self.plot_kind)
-        g.addRow("Error bars", self.error)
-        g.addRow(self.points)
-        for w in (self.factor, self.period, self.filter_value, self.parametric, self.plot_kind, self.method,
-                  self.posthoc, self.control, self.error):
+        self.tc_x = _wide_combo()
+        self.tc_by = _wide_combo()
+        self.design = _wide_combo()
+        for k, v in DESIGNS:
+            self.design.addItem(v, k)
+        self.design.setToolTip("Between subjects: every row independent. Repeated: animals measured at every "
+                               "level of the 1st variable (mixed ANOVA with the 2nd variable between animals; "
+                               "Greenhouse-Geisser corrected p-values). Non-parametric: rank-based alternatives.")
+        self.tc_plot = _wide_combo()
+        for k, v in [("line", "Line (mean ± error)")] + GRAPHS:
+            self.tc_plot.addItem(v, k)
+        self.corr_x = self._measure_combo()
+        self.corr_y = self._measure_combo()
+        self.corr_method = _wide_combo()
+        self.corr_method.addItem("Pearson", "pearson")
+        self.corr_method.addItem("Spearman", "spearman")
+        self.corr_method.addItem("Kendall", "kendall")
+        self.corr_by = _wide_combo()
+        self.f1, self.f2, self.f3 = _wide_combo(), _wide_combo(), _wide_combo()
+        self.cat_rows = _wide_combo()
+        self.cat_col = _wide_combo()
+        self.cat_col.setToolTip("A categorical result (e.g. search strategy, first choice) or a factor")
+        for w in (self.factor, self.period, self.filter_value, self.plot_kind, self.method, self.posthoc,
+                  self.control, self.error, self.tc_x, self.tc_by, self.design, self.tc_plot, self.corr_method,
+                  self.corr_by, self.f1, self.f2, self.f3, self.cat_rows, self.cat_col):
             w.currentIndexChanged.connect(self._schedule)
         self.filter_field.currentIndexChanged.connect(self._filter_field_changed)
         self.paired.toggled.connect(self._schedule)
         self.points.toggled.connect(self._schedule)
         self.mu.valueChanged.connect(self._schedule)
 
-        self.status_lbl = QLabel()
-        self.status_lbl.setWordWrap(True)
-        self.status_lbl.setStyleSheet("color:palette(mid);")
-        recalc = QPushButton("Recalculate results")
-        recalc.clicked.connect(lambda: self.reload(force=True))
-        copy = QPushButton("Copy summary")
-        copy.setToolTip("Copy a text summary of the current analysis")
-        copy.clicked.connect(self.copy_summary)
-        save = QPushButton("Save figure…")
-        save.clicked.connect(lambda: self.save_figure())
-        copyfig = QPushButton("Copy figure")
-        copyfig.clicked.connect(self.copy_figure)
-        left_in = QWidget()
-        ll = QVBoxLayout(left_in)
-        ll.setContentsMargins(0, 0, 4, 0)
-        ll.addWidget(box)
-        ll.addWidget(gbox)
-        b1 = QHBoxLayout()
-        b1.addWidget(copy)
-        b1.addWidget(recalc)
-        b2 = QHBoxLayout()
-        b2.addWidget(save)
-        b2.addWidget(copyfig)
-        ll.addLayout(b1)
-        ll.addLayout(b2)
-        ll.addWidget(self.status_lbl)
-        ll.addWidget(QLabel("<b>Summary</b>"))
-        self.summary_box = QPlainTextEdit()
-        self.summary_box.setReadOnly(True)
-        self.summary_box.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.summary_box.setStyleSheet("font-family:monospace;font-size:11px;")
-        self.summary_box.setMinimumHeight(110)
-        ll.addWidget(self.summary_box, 1)
-        left = QScrollArea()
-        left.setWidget(left_in)
-        left.setWidgetResizable(True)
-        left.setFrameShape(QScrollArea.NoFrame)
-        left.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left.setFixedWidth(340)
+        # ---- property page -------------------------------------------------------------------------
+        props = QWidget()
+        props.setObjectName("StatsProps")
+        self._grid = QGridLayout(props)
+        self._grid.setContentsMargins(0, 0, 22, 12)
+        self._grid.setHorizontalSpacing(14)
+        self._grid.setVerticalSpacing(8)
+        self._grid.setColumnMinimumWidth(0, 250)
+        self._grid.setColumnStretch(1, 1)
+        self._rows_by_view: list[tuple[set, list]] = []
+        C, T, R, G, K = "compare", "two", "correlation", "grouped", "categorical"
+        filt = QWidget()
+        fl = QHBoxLayout(filt)
+        fl.setContentsMargins(0, 0, 0, 0)
+        for c in (self.filter_field, self.filter_value):
+            c.setMinimumContentsLength(4)
+        fl.addWidget(self.filter_field, 1)
+        fl.addWidget(QLabel("="))
+        fl.addWidget(self.filter_value, 1)
+        radios = QWidget()
+        rl = QHBoxLayout(radios)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(18)
+        rl.addWidget(self.param_radio)
+        rl.addWidget(self.nonparam_radio)
+        rl.addStretch()
+        spec = [
+            ("head", "Dependent variable", {C, T, G}),
+            ("Select the measure to analyse", self.measure, {C, T, G}),
+            ("head", "Dependent variables", {R}),
+            ("Select the 1st measure (X axis)", self.corr_x, {R}),
+            ("Select the 2nd measure (Y axis)", self.corr_y, {R}),
+            ("head", "Dependent variable", {K}),
+            ("Select the categorical result to analyse", self.cat_col, {K}),
+            ("head", "Independent variables", {C, T, G, R, K}),
+            ("Select the independent variable", self.factor, {C}),
+            ("Were the same animals tested at each level?", self.paired, {C}),
+            ("Select the 1st independent variable", self.tc_x, {T}),
+            ("Optionally select a 2nd independent variable", self.tc_by, {T}),
+            ("Select the design of the analysis", self.design, {T}),
+            ("Select the 1st independent variable", self.f1, {G}),
+            ("Optionally select a 2nd independent variable", self.f2, {G}),
+            ("Optionally select a 3rd independent variable", self.f3, {G}),
+            ("Optionally colour the points by", self.corr_by, {R}),
+            ("Select the variable to group the tests by", self.cat_rows, {K}),
+            ("head", "Tests to include", {C, T, G, R, K}),
+            ("Select the time period to analyse", self.period, {C, T, G, R, K}),
+            ("Optionally only include tests where", filt, {C, T, G, R, K}),
+            ("head", "Options", {C, R}),
+            ("Select the type of statistical tests to use", radios, {C}),
+            ("Optionally select a specific statistical test", self.method, {C}),
+            ("Optionally select a post-hoc test to use", self.posthoc, {C}),
+            ("Select the control group to compare to", self.control, {C}),
+            ("Select the value to compare the measure to", self.mu, {C}),
+            ("Select the type of correlation", self.corr_method, {R}),
+            ("head", "Report format", {C, T, G}),
+            ("Select the type of graph", self.plot_kind, {C, G}),
+            ("Select the type of graph", self.tc_plot, {T}),
+            ("Select what the error bars show", self.error, {C, T, G}),
+            ("Optionally show the value of each test", self.points, {C, T, G}),
+        ]
+        row = 0
+        for text, w, views in spec:
+            if text == "head":
+                lbl = QLabel(w)
+                lbl.setObjectName("StatsHeading")
+                self._grid.addWidget(lbl, row, 0, 1, 2)
+                self._rows_by_view.append((views, [lbl]))
+            else:
+                lbl = QLabel(text)
+                lbl.setWordWrap(True)
+                lbl.setObjectName("StatsPrompt")
+                self._grid.addWidget(lbl, row, 0)
+                self._grid.addWidget(w, row, 1)
+                self._rows_by_view.append((views, [lbl, w]))
+            row += 1
+        self._grid.setRowStretch(row, 1)
+        props_scroll = QScrollArea()
+        props_scroll.setWidget(props)
+        props_scroll.setWidgetResizable(True)
+        props_scroll.setFrameShape(QScrollArea.NoFrame)
+        props_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        props_scroll.setFixedWidth(570)
 
-        # ---- tab 1: compare groups --------------------------------------------
-        self.cmp_canvas = PlotCanvas()
-        self.cmp_canvas.setMinimumSize(340, 300)
-        self.test_lbl = QLabel()
-        self.test_lbl.setWordWrap(True)
-        self.test_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.desc_table = _table(["Group", "n", "Mean", "SD", "SEM", "95% CI", "Median", "Min", "Max"], 200)
-        self.assume_table = _table(["Check", "Group", "p", ""], 200)
+        # ---- reports (one per analysis; the explorer switches between them) -------------------------------
+        self._heads: list[QLabel] = []
+        self._subheads: list[QLabel] = []
+
+        def report(*widgets) -> QScrollArea:
+            w = QWidget()
+            w.setObjectName("StatsReport")
+            lay = QVBoxLayout(w)
+            lay.setContentsMargins(22, 14, 22, 18)
+            lay.setSpacing(6)
+            head = QLabel()
+            head.setObjectName("ReportTitle")
+            head.setWordWrap(True)
+            sub = QLabel()
+            sub.setObjectName("Hint")
+            sub.setWordWrap(True)
+            self._heads.append(head)
+            self._subheads.append(sub)
+            lay.addWidget(head)
+            lay.addWidget(sub)
+            for x in widgets:
+                if isinstance(x, str):
+                    lbl = QLabel(x)
+                    lbl.setObjectName("ReportHeading")
+                    lay.addWidget(lbl)
+                else:
+                    lay.addWidget(x)
+            lay.addStretch()
+            sa = QScrollArea()
+            sa.setWidget(w)
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QScrollArea.NoFrame)
+            sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            return sa
+
+        def canvas(h=330) -> PlotCanvas:
+            c = PlotCanvas()
+            c.setFixedHeight(h)
+            c.setMinimumWidth(320)
+            return c
+
+        def rich() -> QLabel:
+            lbl = QLabel()
+            lbl.setWordWrap(True)
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            lbl.setObjectName("ReportText")
+            return lbl
+
+        # compare groups
+        self.cmp_canvas = canvas(340)
+        self.test_lbl = rich()
+        self.desc_table = _table(["Group", "n", "Mean", "SD", "SEM", "95% CI", "Median", "Min", "Max"], 4000)
+        self.assume_table = _table(["Check", "Group", "p", ""], 4000)
         ah = self.assume_table.horizontalHeader()
         ah.setSectionResizeMode(0, QHeaderView.Stretch)
         for j in (1, 2, 3):
             ah.setSectionResizeMode(j, QHeaderView.ResizeToContents)
-        self.posthoc_table = _table(["Comparison", "Difference", "p", "", "Method"], 200)
-        self.posthoc_lbl = QLabel("<b>Post-hoc comparisons</b>")
-        res = QWidget()
-        rl = QVBoxLayout(res)
-        rl.setContentsMargins(8, 0, 0, 0)
-        rl.addWidget(self.test_lbl)
-        rl.addSpacing(6)
-        rl.addWidget(self.posthoc_lbl)
-        rl.addWidget(self.posthoc_table)
-        rl.addWidget(QLabel("<b>Assumption checks</b>"))
-        rl.addWidget(self.assume_table)
-        rl.addStretch()
-        rs = QScrollArea()
-        rs.setWidget(res)
-        rs.setWidgetResizable(True)
-        rs.setFrameShape(QScrollArea.NoFrame)
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(self.cmp_canvas)
-        top.addWidget(rs)
-        top.setSizes([460, 400])
-        top.setChildrenCollapsible(False)
-        cmp = QWidget()
-        cml = QVBoxLayout(cmp)
-        cml.addWidget(top, 1)
-        cml.addWidget(QLabel("<b>Descriptive statistics</b>"))
-        cml.addWidget(self.desc_table)
-
-        # ---- tab 2: two factors / across stages / periods ----------------------------
-        self.tc_x = QComboBox()
-        self.tc_by = QComboBox()
-        self.design = QComboBox()
-        for k, v in DESIGNS:
-            self.design.addItem(v, k)
-        self.design.setToolTip("Between subjects: every row independent. Repeated: animals measured at every "
-                               "X level (mixed ANOVA with the Lines factor between animals; Greenhouse-Geisser "
-                               "corrected p-values). Non-parametric: rank-based alternatives.")
-        self.tc_plot = QComboBox()
-        for k, v in [("line", "Line (mean ± error)")] + GRAPHS:
-            self.tc_plot.addItem(v, k)
-        for w in (self.tc_x, self.tc_by, self.design, self.tc_plot):
-            w.currentIndexChanged.connect(self._schedule)
-        tcbar = QHBoxLayout()
-        tcbar.addWidget(QLabel("X axis"))
-        tcbar.addWidget(self.tc_x)
-        tcbar.addSpacing(8)
-        tcbar.addWidget(QLabel("Lines"))
-        tcbar.addWidget(self.tc_by)
-        tcbar.addSpacing(8)
-        tcbar.addWidget(QLabel("Design"))
-        tcbar.addWidget(self.design, 1)
-        tcbar.addSpacing(8)
-        tcbar.addWidget(self.tc_plot)
-        self.tc_canvas = PlotCanvas()
-        self.tc_canvas.setMinimumSize(340, 280)
-        self.anova_lbl = QLabel()
-        self.anova_lbl.setWordWrap(True)
-        self.anova_table = _table(["Effect", "SS", "df", "F", "p", "", "p (GG)"])
-        tc = QWidget()
-        tl = QVBoxLayout(tc)
-        tl.addLayout(tcbar)
-        tl.addWidget(self.tc_canvas, 1)
-        tl.addWidget(self.anova_lbl)
-        tl.addWidget(self.anova_table)
-
-        # ---- tab 3: correlation / regression ------------------------------------------
-        self.corr_x = self._measure_combo()
-        self.corr_y = self._measure_combo()
-        self.corr_method = QComboBox()
-        self.corr_method.addItem("Pearson", "pearson")
-        self.corr_method.addItem("Spearman", "spearman")
-        self.corr_method.addItem("Kendall", "kendall")
-        self.corr_by = QComboBox()
-        self.corr_by.setToolTip("Colour the points by")
-        for w in (self.corr_method, self.corr_by):
-            w.currentIndexChanged.connect(self._schedule)
-        cbar = QHBoxLayout()
-        cbar.addWidget(QLabel("X"))
-        cbar.addWidget(self.corr_x, 1)
-        cbar.addWidget(QLabel("Y"))
-        cbar.addWidget(self.corr_y, 1)
-        cbar.addWidget(self.corr_method)
-        cbar.addWidget(QLabel("Colour"))
-        cbar.addWidget(self.corr_by)
-        self.corr_canvas = PlotCanvas()
-        self.corr_canvas.setMinimumSize(340, 280)
-        self.corr_lbl = QLabel()
-        self.corr_lbl.setWordWrap(True)
-        self.corr_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        cr_w = QWidget()
-        crl = QVBoxLayout(cr_w)
-        crl.setContentsMargins(6, 0, 0, 0)
-        crl.addWidget(self.corr_lbl)
-        crl.addStretch()
-        c_split = QSplitter(Qt.Horizontal)
-        c_split.addWidget(self.corr_canvas)
-        c_split.addWidget(cr_w)
-        c_split.setSizes([540, 300])
-        c_split.setChildrenCollapsible(False)
-        cw = QWidget()
-        cwl = QVBoxLayout(cw)
-        cwl.addLayout(cbar)
-        cwl.addWidget(c_split, 1)
-
-        # ---- tab 4: grouped descriptive statistics (up to 3 levels) ---------------------
-        self.f1, self.f2, self.f3 = QComboBox(), QComboBox(), QComboBox()
-        gbar = QHBoxLayout()
-        for lbl, w in (("Group by", self.f1), ("then", self.f2), ("then", self.f3)):
-            gbar.addWidget(QLabel(lbl))
-            gbar.addWidget(w, 1)
-            w.currentIndexChanged.connect(self._schedule)
-        gcopy = QPushButton("Copy table")
-        gcopy.clicked.connect(self.copy_grouped)
-        gsave = QPushButton("Save table…")
-        gsave.clicked.connect(lambda: self.save_grouped())
-        gbar.addWidget(gcopy)
-        gbar.addWidget(gsave)
-        self.grp_canvas = PlotCanvas()
-        self.grp_canvas.setMinimumSize(340, 260)
+        self.posthoc_table = _table(["Comparison", "Difference", "p", "", "Method"], 4000)
+        for j in (2, 3, 4):
+            self.posthoc_table.horizontalHeader().setSectionResizeMode(j, QHeaderView.ResizeToContents)
+        self.posthoc_lbl = QLabel("Post-hoc comparisons")
+        self.posthoc_lbl.setObjectName("ReportHeading")
+        cmp = report(self.test_lbl, self.cmp_canvas, "Descriptive statistics", self.desc_table, self.posthoc_lbl,
+                     self.posthoc_table, "Assumption checks", self.assume_table)
+        # two factors / across stages / periods
+        self.tc_canvas = canvas(340)
+        self.anova_lbl = rich()
+        self.anova_table = _table(["Effect", "SS", "df", "F", "p", "", "p (GG)"], 4000)
+        tc = report(self.anova_lbl, self.tc_canvas, "Analysis of variance", self.anova_table)
+        # correlation / regression
+        self.corr_canvas = canvas(360)
+        self.corr_lbl = rich()
+        cw = report(self.corr_lbl, self.corr_canvas)
+        # grouped descriptive statistics (up to 3 levels)
+        self.grp_canvas = canvas(340)
         self.grp_table = _table(["Level", "n", "Mean", "SD", "SEM", "95% CI", "Median", "Min", "Max"], 10000)
-        self.grp_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        g_split = QSplitter(Qt.Vertical)
-        g_split.addWidget(self.grp_canvas)
-        g_split.addWidget(self.grp_table)
-        g_split.setSizes([420, 220])
-        g_split.setChildrenCollapsible(False)
-        gw = QWidget()
-        gwl = QVBoxLayout(gw)
-        gwl.addLayout(gbar)
-        gwl.addWidget(g_split, 1)
+        gw = report(self.grp_canvas, "Descriptive statistics", self.grp_table)
+        # categorical results
+        self.cat_canvas = canvas(320)
+        self.cat_lbl = rich()
+        self.cat_table = _table(["", "Total"], 4000)
+        kw = report(self.cat_lbl, self.cat_canvas, "Counts", self.cat_table)
 
-        # ---- tab 5: categorical results ---------------------------------------------
-        self.cat_rows = QComboBox()
-        self.cat_col = QComboBox()
-        self.cat_col.setToolTip("A categorical result (e.g. search strategy, first choice) or a factor")
-        for w in (self.cat_rows, self.cat_col):
-            w.currentIndexChanged.connect(self._schedule)
-        kbar = QHBoxLayout()
-        kbar.addWidget(QLabel("Rows"))
-        kbar.addWidget(self.cat_rows, 1)
-        kbar.addWidget(QLabel("Category"))
-        kbar.addWidget(self.cat_col, 2)
-        self.cat_canvas = PlotCanvas()
-        self.cat_canvas.setMinimumSize(340, 260)
-        self.cat_lbl = QLabel()
-        self.cat_lbl.setWordWrap(True)
-        self.cat_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.cat_table = _table(["", "Total"])
-        k_right = QWidget()
-        krl = QVBoxLayout(k_right)
-        krl.setContentsMargins(6, 0, 0, 0)
-        krl.addWidget(self.cat_lbl)
-        krl.addWidget(QLabel("<b>Counts</b>"))
-        krl.addWidget(self.cat_table)
-        krl.addStretch()
-        k_split = QSplitter(Qt.Horizontal)
-        k_split.addWidget(self.cat_canvas)
-        k_split.addWidget(k_right)
-        k_split.setSizes([500, 340])
-        k_split.setChildrenCollapsible(False)
-        kw = QWidget()
-        kwl = QVBoxLayout(kw)
-        kwl.addLayout(kbar)
-        kwl.addWidget(k_split, 1)
+        self.tabs = QStackedWidget()  # one report per analysis (explorer sub-items)
+        for w in (cmp, tc, cw, gw, kw):
+            self.tabs.addWidget(w)
+        self.tabs.currentChanged.connect(self._view_changed)
+        self.summary_box = QPlainTextEdit()  # text summary (copied with “Copy summary”)
+        self.summary_box.setReadOnly(True)
+        self.summary_box.hide()
 
-        self.tabs = QTabWidget()
-        self.tabs.addTab(cmp, "Compare groups")
-        self.tabs.addTab(tc, "Two factors / time course")
-        self.tabs.addTab(cw, "Correlation")
-        self.tabs.addTab(gw, "Grouped (3 levels)")
-        self.tabs.addTab(kw, "Categorical")
-        self.tabs.setTabToolTip(1, "Learning curves and two-factor designs: two-way, mixed (repeated) and "
-                                   "non-parametric ANOVAs")
-        self.tabs.setTabToolTip(3, "Mean / SD / SEM / CI for every combination of up to three factors")
-        self.tabs.setTabToolTip(4, "Chi-square, G-test and Fisher's exact test on categorical results")
-        self.tabs.currentChanged.connect(self._schedule)
+        # ---- page ------------------------------------------------------------------------------------------
+        self.title_lbl = QLabel(VIEWS[0][1])
+        self.title_lbl.setObjectName("PageTitle")
+        self.status_lbl = QLabel()
+        self.status_lbl.setObjectName("Hint")
+        top = QHBoxLayout()
+        top.addWidget(self.title_lbl)
+        top.addStretch()
+        top.addWidget(self.status_lbl)
+        top.addSpacing(18)
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.addWidget(props_scroll)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setObjectName("StatsSeparator")
+        body.addWidget(sep)
+        body.addWidget(self.tabs, 1)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 12, 0, 0)
+        lay.setSpacing(4)
+        lay.addLayout(top)
+        lay.addLayout(body, 1)
+        self.setStyleSheet(STYLE)
 
-        lay = QHBoxLayout(self)
-        lay.addWidget(left)
-        lay.addWidget(self.tabs, 1)
+        # ---- ribbon ------------------------------------------------------------------------------------------
+        def act(text, ic, fn, tip="", small=False):
+            a = QAction(icon(ic), text, self)
+            if not small:
+                a.setIconText(ribbon_label(text))
+            a.setToolTip(tip or text)
+            a.triggered.connect(lambda _=False: fn())
+            return a
+
+        self.run_act = act("Run", "play", self.recompute, "Run the analysis again with the current settings")
+        self.recalc_act = act("Recalculate", "refresh", lambda: self.reload(force=True),
+                              "Recalculate all results from the tracks (e.g. after changing analysis settings)")
+        self.copy_summary_act = act("Copy summary", "copy", self.copy_summary,
+                                    "Copy a text summary of the analysis (for a lab book or a manuscript)")
+        self.save_fig_act = act("Save figure", "save", self.save_figure, "Save the graph as PNG, PDF or SVG")
+        self.save_report_act = act("Save report", "save_report", self.save_report,
+                                   "Save the report (settings, tables and graph) as an HTML file")
+        self.copy_fig_act = act("Copy figure", "copy", self.copy_figure, "Copy the graph to the clipboard", True)
+        self.copy_table_act = act("Copy table", "copy_select", self.copy_grouped,
+                                  "Copy the table of descriptive statistics", True)
+        self.save_table_act = act("Save table", "export", self.save_grouped,
+                                  "Save the table of descriptive statistics (CSV / tab-separated / Excel)", True)
+        self._view_changed(0)
         self._clear_outputs()
+
+    # ------------------------------------------------------------------ shell hooks
+    def ribbon_groups(self):
+        return [("Analysis", [(self.run_act, "large"), (self.recalc_act, "large")]),
+                ("Report", [(self.copy_summary_act, "large"), (self.save_fig_act, "large"),
+                            (self.save_report_act, "large"), (self.copy_fig_act, "small"),
+                            (self.copy_table_act, "small"), (self.save_table_act, "small")])]
+
+    def explorer_items(self):
+        return [(label, ic, key) for key, label, ic in VIEWS]
+
+    def show_item(self, key):
+        i = next((n for n, v in enumerate(VIEWS) if v[0] == key), None)
+        if i is not None and i != self.tabs.currentIndex():
+            self.tabs.setCurrentIndex(i)
+
+    def view(self) -> str:
+        return VIEWS[self.tabs.currentIndex()][0]
+
+    def _view_changed(self, i):
+        key, label, _ = VIEWS[i]
+        self.title_lbl.setText(label)
+        for views, widgets in self._rows_by_view:
+            for w in widgets:
+                w.setVisible(key in views)
+        for a in (self.copy_table_act, self.save_table_act):
+            a.setEnabled(key == "grouped")
+        if self.project is not None:
+            self.main.select_explorer(self, key)
+        self._schedule()
 
     def _measure_combo(self) -> QComboBox:
         c = QComboBox()
         c.setEditable(True)
         c.setInsertPolicy(QComboBox.NoInsert)
         c.setMaxVisibleItems(25)
-        c.setMinimumContentsLength(16)
+        c.setMinimumContentsLength(10)
         c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        c.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        c.lineEdit().setPlaceholderText("Type to search the measures…")
         comp = c.completer()
         comp.setFilterMode(Qt.MatchContains)
         comp.setCaseSensitivity(Qt.CaseInsensitive)
@@ -496,7 +571,12 @@ class StatisticsPage(Page):
 
     def on_show(self):
         if self.project is not None:
+            QTimer.singleShot(0, self._follow_explorer)
             self.reload()
+
+    def _follow_explorer(self):
+        if self.project is not None and self.main.current_page() is self:
+            self.main.select_explorer(self, self.view())
 
     def shutdown(self):
         self.loader.shutdown()
@@ -580,14 +660,18 @@ class StatisticsPage(Page):
         combo.blockSignals(True)
         combo.clear()
         for i, it in enumerate(items):
-            combo.addItem(str(it), data[i] if data else it)
+            combo.addItem(_label(it), data[i] if data else it)
         idx = combo.findData(current) if current is not None else -1
         combo.setCurrentIndex(idx if idx >= 0 else (0 if items else -1))
         combo.blockSignals(False)
 
     def _default_measure(self, measures: list[str]) -> str | None:
+        """The first measure that varies between tests (skipping test duration and detection quality)."""
         for m in measures:
-            if not m.startswith(("Test duration", "Detection")):
+            if m.startswith(("Test duration", "Detection", "Time not detected")):
+                continue
+            vals = {r.get(m) for r in self.rows if is_number(r.get(m))}
+            if len(vals) > 1:
                 return m
         return measures[0] if measures else None
 
@@ -655,7 +739,7 @@ class StatisticsPage(Page):
         self._loading = True
         combos = {"measure": self.measure, "factor": self.factor, "period": self.period, "plot": self.plot_kind,
                   "tc_x": self.tc_x, "tc_by": self.tc_by, "corr_x": self.corr_x, "corr_y": self.corr_y,
-                  "corr_method": self.corr_method, "parametric": self.parametric, "method": self.method,
+                  "corr_method": self.corr_method, "method": self.method,
                   "posthoc": self.posthoc, "error": self.error, "design": self.design, "tc_plot": self.tc_plot,
                   "corr_by": self.corr_by, "f1": self.f1, "f2": self.f2, "f3": self.f3, "cat_rows": self.cat_rows,
                   "cat_col": self.cat_col}
@@ -671,6 +755,8 @@ class StatisticsPage(Page):
             elif k == "control":
                 self._fill_control()
                 self.control.setCurrentIndex(max(0, self.control.findData(str(v))))
+            elif k == "parametric":
+                (self.param_radio if v else self.nonparam_radio).setChecked(True)
             elif k == "mu":
                 self.mu.setValue(float(v))
             elif k == "points":
@@ -687,6 +773,9 @@ class StatisticsPage(Page):
                 raise ValueError(f"Unknown input {k!r}")
         self._loading = False
         self.recompute()
+
+    def is_parametric(self) -> bool:
+        return self.param_radio.isChecked()
 
     def _combo_measure(self, combo: QComboBox) -> str | None:
         t = combo.currentText()
@@ -752,6 +841,12 @@ class StatisticsPage(Page):
         self.corr_lbl.setText("")
         self.cat_lbl.setText("")
         self.summary_box.setPlainText("")
+        for h in self._heads + self._subheads:
+            h.setText("")
+
+    def _set_head(self, i: int, title: str, sub: str = ""):
+        self._heads[i].setText(escape(title))
+        self._subheads[i].setText(escape(sub))
 
     def recompute(self):
         self._timer.stop()
@@ -795,7 +890,7 @@ class StatisticsPage(Page):
             res["p"] = min(ps) if ps else math.nan
             res["statistic"] = math.nan
         else:
-            res = compare_groups(gv, parametric=bool(self.parametric.currentData()), paired=paired, method=method,
+            res = compare_groups(gv, parametric=self.is_parametric(), paired=paired, method=method,
                                  posthoc_method=self.posthoc.currentData(), control=self.control.currentData())
         self.result = res
         self.result_measure = measure
@@ -811,7 +906,7 @@ class StatisticsPage(Page):
         self.cmp_canvas.set_figure(fig)
         # headline
         p = res.get("p", math.nan)
-        html = f"<div style='font-size:15px'><b>{escape(str(res.get('test')))}</b></div>"
+        html = f"<div style='font-size:16px'><b>{escape(str(res.get('test')))}</b></div>"
         if one:
             lines = []
             for g, r in res["one_sample"].items():
@@ -831,7 +926,7 @@ class StatisticsPage(Page):
             html += (f"<div style='font-size:14px'>{escape(', '.join(parts))} "
                      f"<b style='color:{colour}'>{stars(p)}</b></div>")
             if "p_gg" in res:
-                html += f"<div>Greenhouse-Geisser ε = {res['epsilon_gg']:.3f}, {format_p(res['p_gg'])}</div>"
+                html += f"<div>Greenhouse-Geisser ε = {res['epsilon_gg']:.3f}, {escape(format_p(res['p_gg']))}</div>"
             es = dict(res.get("effect_sizes") or {})
             if res.get("effect_size") is not None and res["effect_size"] == res["effect_size"]:
                 es = {res.get("effect_size_name"): res["effect_size"], **es}
@@ -839,14 +934,15 @@ class StatisticsPage(Page):
             if es:
                 html += "<div>" + ", ".join(f"{escape(str(k))} = {v:.3f}" for k, v in es.items()) + "</div>"
         n_total = sum(d["n"] for d in res["descriptive"].values())
-        ctx = f"{measure} by {factor}"
+        ctx = f"by {_label(factor)}"
         extra = self._context(factor)
         if extra:
             ctx += f" · {extra}"
         if paired:
-            ctx += " · paired by animal"
-        html += f"<div style='color:#64748b'>{escape(ctx)} · N = {n_total}</div>"
+            ctx += " · same animals at each level"
+        self._set_head(0, measure, f"{ctx} · N = {n_total}")
         self.test_lbl.setText(html)
+        self.desc_table.setHorizontalHeaderItem(0, QTableWidgetItem(_label(factor)))
         _fill(self.desc_table, [[g, d["n"], d["mean"], d["sd"], d["sem"], d["ci95"], d["median"], d["min"],
                                  d["max"]] for g, d in res["descriptive"].items()])
         checks = []
@@ -877,6 +973,9 @@ class StatisticsPage(Page):
             rows = [r for r in rows if r.get("Period") != WHOLE]
         rows = [r for r in rows if is_number(r.get(measure))]
         by_key = by if by and by != NONE else None
+        sub = f"by {_label(x)}" + (f" and {_label(by_key)}" if by_key else "")
+        extra = self._context(x)
+        self._set_head(1, measure, sub + (f" · {extra}" if extra else ""))
         if by_key is None:
             rows = [{**r, "_all": "All"} for r in rows]
         if not rows:
@@ -905,40 +1004,43 @@ class StatisticsPage(Page):
                     res["effects"] = [{"effect": x, "SS": res["SS"], "df": res["df"][0], "F": res["F"],
                                        "p": res["p"], "p_gg": res["p_gg"], "df_error": res["df"][1]}]
                     res["factors"] = [x]
-                self._show_anova(res, measure, f"Repeated-measures ANOVA — {measure}", f"Within animals: {x}")
+                self._show_anova(res, measure, "Repeated-measures ANOVA", f"Within animals: {_label(x)}")
                 return
             self.anova = None
-            self.anova_lbl.setText(f"<b>{escape(measure)}</b> across {x}.<br>Choose a grouping for “Lines” for a "
-                                   "two-factor analysis, or the “Repeated” design for a repeated-measures ANOVA.")
+            self.anova_lbl.setText(f"<b>{escape(measure)}</b> across {escape(_label(x))}.<br>Optionally select a 2nd "
+                                   "independent variable for a two-factor analysis, or the “Repeated” design for a "
+                                   "repeated-measures ANOVA.")
             _fill(self.anova_table, [])
             return
         if design == "mixed":
             res = st.mixed_anova(rows, measure, between=by_key, within=x, levels=order)
-            desc = f"{by_key} (between animals) × {x} (within animals)"
+            desc = f"{_label(by_key)} (between animals) × {_label(x)} (within animals)"
         elif design == "srh":
             res = st.scheirer_ray_hare(rows, measure, factor_a=by_key, factor_b=x)
-            desc = f"{by_key} × {x}, rank-based (H statistics, χ² p-values)"
+            desc = f"{_label(by_key)} × {_label(x)}, rank-based (H statistics, χ² p-values)"
         elif design == "art":
             res = st.art_anova(rows, measure, factor_a=by_key, factor_b=x)
-            desc = f"{by_key} × {x}, aligned rank transform"
+            desc = f"{_label(by_key)} × {_label(x)}, aligned rank transform"
         else:
             res = two_way_anova(rows, measure, factor_a=by_key, factor_b=x)
-            desc = f"{by_key} × {x} (between-subjects, type II SS)"
-        self._show_anova(res, measure, f"{res.get('test', 'Two-way ANOVA')} — {measure}", desc)
+            desc = f"{_label(by_key)} × {_label(x)} (between-subjects, type II SS)"
+        self._show_anova(res, measure, res.get("test", "Two-way ANOVA"), desc)
 
     def _show_anova(self, res, measure, title, desc):
         self.anova = res
         if "error" in res:
-            self.anova_lbl.setText(f"<b>{escape(title)}</b>: {escape(res['error'])}")
+            err = " ".join(_label(w) for w in str(res["error"]).split(" "))
+            self.anova_lbl.setText(f"<div style='font-size:16px'><b>{escape(title)}</b></div>{escape(err)}")
             _fill(self.anova_table, [])
             return
         extra = f", residual df = {res['df_residual']}" if res.get("df_residual") is not None else ""
         if "epsilon_gg" in res:
             extra += f", Greenhouse-Geisser ε = {res['epsilon_gg']:.3f}"
-        self.anova_lbl.setText(f"<b>{escape(title)}</b><br>{escape(desc)}{extra}")
+        self.anova_lbl.setText(f"<div style='font-size:16px'><b>{escape(title)}</b></div>{escape(desc)}{extra}")
         h = any("H" in e for e in res["effects"])
         _set_headers(self.anova_table, ["Effect", "SS", "df", "H" if h else "F", "p", "", "p (GG)"])
-        _fill(self.anova_table, [[e["effect"], e["SS"], e["df"], e.get("H", e["F"]), format_p(e["p"]), stars(e["p"]),
+        _fill(self.anova_table, [[" × ".join(_label(f) for f in str(e["effect"]).split(" × ")), e["SS"], e["df"],
+                                  e.get("H", e["F"]), format_p(e["p"]), stars(e["p"]),
                                   format_p(e["p_gg"]) if "p_gg" in e else ""] for e in res["effects"]])
 
     def _compute_correlation(self):
@@ -955,6 +1057,8 @@ class StatisticsPage(Page):
         self.corr = res
         self.reg = st.regression(xs, ys)
         self.corr_measures = (mx, my)
+        extra = self._context()
+        self._set_head(2, f"{my} against {mx}", f"N = {len(rows)}" + (f" · {extra}" if extra else ""))
         factor = self.corr_by.currentData()
         groups = [str(r.get(factor, "")) if factor and factor != NONE else "" for r in rows]
         if rows:
@@ -977,11 +1081,10 @@ class StatisticsPage(Page):
         if g.get("slope") == g.get("slope"):
             reg = (f"<br><b>Linear regression</b><div>y = {g['slope']:.4g}·x + {g['intercept']:.4g}</div>"
                    f"<div>slope 95% CI {g['slope_ci'][0]:.4g} to {g['slope_ci'][1]:.4g}</div>"
-                   f"<div>R² = {g['r2']:.3f}, {format_p(g['p'])}</div>")
-        self.corr_lbl.setText(f"<div style='font-size:15px'><b>{name} = {_fmt(r)}</b></div>"
+                   f"<div>R² = {g['r2']:.3f}, {escape(format_p(g['p']))}</div>")
+        self.corr_lbl.setText(f"<div style='font-size:16px'><b>{name} = {_fmt(r)}</b></div>"
                               f"<div style='font-size:14px'>{escape(_p_text(p))}, n = {res.get('n', 0)}</div>"
-                              f"{ci}<div>{strength}</div>{reg}<br>"
-                              f"<div style='color:#64748b'>X: {escape(mx)}<br>Y: {escape(my)}</div>")
+                              f"{ci}<div>{strength}</div>{reg}")
 
     def grouping_factors(self) -> list[str]:
         out = []
@@ -1000,6 +1103,8 @@ class StatisticsPage(Page):
         if "Period" in factors:
             rows = [r for r in rows if r.get("Period") != WHOLE] or rows
         orders = self.orders(factors, rows)
+        extra = self._context("Period" if "Period" in factors else None)
+        self._set_head(3, measure, "by " + " and ".join(_label(f) for f in factors) + (f" · {extra}" if extra else ""))
         self.grouped = st.describe_by(rows, measure, factors, orders)
         self.grouped_factors = factors
         self.grouped_measure = measure
@@ -1009,7 +1114,8 @@ class StatisticsPage(Page):
                                                                                        else factors[0]),
                                 orders=orders, size=(6.4, 3.8))
         self.grp_canvas.set_figure(fig)
-        _set_headers(self.grp_table, factors + ["n", "Mean", "SD", "SEM", "95% CI", "Median", "Min", "Max"])
+        _set_headers(self.grp_table, [_label(f) for f in factors] + ["n", "Mean", "SD", "SEM", "95% CI", "Median",
+                                                                     "Min", "Max"])
         nf = len(factors)
         _fill(self.grp_table, [[d[f] for f in factors] + [d["n"], d["mean"], d["sd"], d["sem"], d["ci95"],
                                                          d["median"], d["min"], d["max"]] for d in self.grouped])
@@ -1032,6 +1138,8 @@ class StatisticsPage(Page):
             _fill(self.cat_table, [])
             return
         rows = self.filtered_rows(use_period=True)
+        extra = self._context()
+        self._set_head(4, f"{_label(cf)} by {_label(rf)}", extra)
         rl, cl, T = st.contingency_table(rows, rf, cf)
         res = st.categorical_test(T, rl, cl)
         self.cat = res
@@ -1040,14 +1148,15 @@ class StatisticsPage(Page):
             self.cat_canvas.set_figure(proportions_figure(rl, cl, T))
         else:
             self.cat_canvas.set_figure(_message_figure("No data"))
-        _set_headers(self.cat_table, [rf] + cl + ["Total"])
+        _set_headers(self.cat_table, [_label(rf)] + cl + ["Total"])
         _fill(self.cat_table, [[r] + [int(v) for v in row] + [int(row.sum())] for r, row in zip(rl, T)])
-        html = f"<div style='font-size:15px'><b>{escape(str(res.get('test')))}</b></div>"
+        html = f"<div style='font-size:16px'><b>{escape(str(res.get('test')))}</b></div>"
         if res.get("p") == res.get("p"):
             html += (f"<div style='font-size:14px'>χ²({res['df']}) = {res['statistic']:.3f}, "
                      f"{escape(_p_text(res['p']))}</div><div>Cramér's V = {res['effect_size']:.3f}</div>")
             if "g_test" in res:
-                html += f"<div>G-test: G = {res['g_test']['statistic']:.3f}, {format_p(res['g_test']['p'])}</div>"
+                html += (f"<div>G-test: G = {res['g_test']['statistic']:.3f}, "
+                         f"{escape(format_p(res['g_test']['p']))}</div>")
             if "fisher" in res:
                 odds = res["fisher"]["odds_ratio"]
                 html += (f"<div>Fisher's exact test: odds ratio = {'∞' if odds == math.inf else _fmt(odds)}, "
@@ -1055,7 +1164,6 @@ class StatisticsPage(Page):
             if res.get("low_expected"):
                 html += ("<div style='color:#b45309'>Some expected counts are below 5: prefer Fisher's exact test "
                          "(2 × 2) or pool categories.</div>")
-        html += f"<div style='color:#64748b'>{escape(cf)} by {escape(rf)}</div>"
         self.cat_lbl.setText(html)
 
     # ------------------------------------------------------------------ actions
@@ -1152,8 +1260,7 @@ class StatisticsPage(Page):
         if path is None:
             base = ""
             if self.project and self.project.path:
-                base = str(self.project.exports_dir() / f"{self.tabs.tabText(self.tabs.currentIndex())}.png"
-                           .replace(" / ", "-").replace(" ", "_"))
+                base = str(self.project.exports_dir() / f"{VIEWS[self.tabs.currentIndex()][1]}.png".replace(" ", "_"))
             path, _ = QFileDialog.getSaveFileName(self, "Save figure", base, FIG_FILTER)
             if not path:
                 return
@@ -1163,6 +1270,99 @@ class StatisticsPage(Page):
             canvas.save(path)
         except Exception as e:
             error_box(self, "Save figure", e)
+            return
+        self.main.status(f"Saved {path}")
+        return path
+
+    # ------------------------------------------------------------------ report
+    def current_tables(self) -> list[tuple[str, QTableWidget]]:
+        i = self.tabs.currentIndex()
+        if i == 0:
+            out = [("Descriptive statistics", self.desc_table)]
+            if self.posthoc_table.rowCount():
+                out.append(("Post-hoc comparisons", self.posthoc_table))
+            return out + [("Assumption checks", self.assume_table)]
+        return [[("Analysis of variance", self.anova_table)], [], [("Descriptive statistics", self.grp_table)],
+                [("Counts", self.cat_table)]][i - 1]
+
+    def report_html(self) -> str:
+        """The current analysis as a stand-alone HTML document (settings, result, tables and the graph)."""
+        import base64
+
+        i = self.tabs.currentIndex()
+        title = self._heads[i].text() or VIEWS[i][1]
+        parts = [f"<h1>{title}</h1>", f"<p class='sub'>{self._subheads[i].text()}</p>"]
+        settings = []
+        for views, widgets in self._rows_by_view:
+            if VIEWS[i][0] not in views or len(widgets) != 2:
+                continue
+            lbl, w = widgets
+            if isinstance(w, QComboBox):
+                val = w.currentText()
+            elif isinstance(w, QCheckBox):
+                val = "Yes" if w.isChecked() else "No"
+                if not lbl.text():
+                    settings.append((w.text(), val))
+                    continue
+            elif isinstance(w, QDoubleSpinBox):
+                val = f"{w.value():g}"
+            elif w.findChild(QRadioButton):
+                val = "Parametric" if self.is_parametric() else "Non-parametric"
+            else:
+                combos = w.findChildren(QComboBox)
+                val = " = ".join(c.currentText() for c in combos if c.isEnabled() and c.currentText())
+            if lbl.text() and w.isEnabled():
+                settings.append((lbl.text(), val))
+        if settings:
+            parts.append("<table class='settings'>" + "".join(f"<tr><td>{escape(a)}</td><td>{escape(b)}</td></tr>"
+                                                             for a, b in settings) + "</table>")
+        text = {0: self.test_lbl, 1: self.anova_lbl, 2: self.corr_lbl, 4: self.cat_lbl}.get(i)
+        if text is not None and text.text():
+            parts.append(f"<div class='result'>{text.text()}</div>")
+        fig = self.current_canvas().figure
+        if fig is not None and fig.axes:
+            png = base64.b64encode(plots.fig_to_png(fig, dpi=150)).decode()
+            parts.append(f"<img src='data:image/png;base64,{png}' alt='graph'>")
+        for name, t in self.current_tables():
+            if not t.rowCount():
+                continue
+            heads = [t.horizontalHeaderItem(j).text() if t.horizontalHeaderItem(j) else ""
+                     for j in range(t.columnCount())]
+            body = "".join("<tr>" + "".join(f"<td>{escape(t.item(r, j).text() if t.item(r, j) else '')}</td>"
+                                            for j in range(t.columnCount())) + "</tr>" for r in range(t.rowCount()))
+            parts.append(f"<h2>{escape(name)}</h2><table><tr>" + "".join(f"<th>{escape(h)}</th>" for h in heads)
+                         + f"</tr>{body}</table>")
+        summary = self.summary()
+        if summary:
+            parts.append(f"<h2>Summary</h2><pre>{escape(summary)}</pre>")
+        style = (f"body{{font-family:'Segoe UI',Helvetica,Arial,sans-serif;margin:32px;color:{theme.TEXT}}}"
+                 f"h1,h2{{color:{theme.HEADING};font-weight:300}}h1{{margin-bottom:0}}.sub{{color:{theme.MUTED}}}"
+                 "table{border-collapse:collapse;margin:6px 0 18px}td,th{padding:4px 10px;text-align:right;"
+                 "border-bottom:1px solid #e3e3e3}td:first-child,th:first-child{text-align:left}"
+                 "th{font-style:italic;font-weight:normal}table.settings td{text-align:left;border:none}"
+                 "img{max-width:760px;display:block;margin:12px 0}pre{background:#f4f4f4;padding:10px}")
+        project = escape(self.project.name) if self.project is not None else ""
+        return (f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title} — {project}</title>"
+                f"<style>{style}</style></head><body><p class='sub'>{project} · Statistical analysis · "
+                f"{escape(VIEWS[i][1])}</p>{''.join(parts)}</body></html>")
+
+    def save_report(self, path: str | None = None):
+        if self.project is None:
+            return
+        if path is None:
+            base = ""
+            if self.project.path:
+                base = str(self.project.exports_dir() / f"{VIEWS[self.tabs.currentIndex()][1]} report.html")
+            path, _ = QFileDialog.getSaveFileName(self, "Save report", base, "HTML file (*.html)")
+            if not path:
+                return
+        if not path.lower().endswith((".html", ".htm")):
+            path += ".html"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.report_html())
+        except Exception as e:
+            error_box(self, "Save report", e)
             return
         self.main.status(f"Saved {path}")
         return path

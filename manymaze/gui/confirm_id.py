@@ -27,15 +27,16 @@ def confirm_animal_id(parent, test, project=None, force: bool = False) -> bool:
     if not force and not confirm_id_enabled(project):
         return True
     while True:
-        text, ok = QInputDialog.getText(parent, "Confirm animal",
-                                        f"Test {test.id}: scan the barcode / microchip or type the ID of the animal "
+        text, ok = QInputDialog.getText(parent, "Animal ID check",
+                                        f"Test {test.id}: scan the barcode or microchip, or type the ID of the animal "
                                         "about to be tested.", QLineEdit.Normal, "")
         if not ok:
             return False
         if id_matches(project, test, text):
             return True
         r = QMessageBox.warning(parent, "Wrong animal",
-                                f"“{text.strip()}” does not match animal {test.animal_id} of test {test.id}.",
+                                f"“{text.strip()}” does not match animal {test.animal_id} of test {test.id}. Check "
+                                "the animal and scan again.",
                                 QMessageBox.Retry | QMessageBox.Cancel)
         if r != QMessageBox.Retry:
             return False

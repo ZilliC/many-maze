@@ -1,4 +1,5 @@
-"""Apparatus page: draw the arena, zones, points and lines over a video frame; templates; calibration."""
+"""Apparatus page (ANY-maze "apparatus map" editor): draw the arena, zones, points and lines over a video frame;
+templates; calibration with a ruler; zone groups and sequences."""
 
 from __future__ import annotations
 
@@ -7,16 +8,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontMetricsF, QIcon, QKeySequence,
                            QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF)
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGraphicsEllipseItem,
-                               QGraphicsItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsRectItem,
-                               QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+                               QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsRectItem,
+                               QGraphicsScene, QGraphicsView, QGroupBox, QHBoxLayout, QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
-                               QRadioButton, QSizePolicy, QSlider, QSpinBox, QSplitter, QTabWidget,
-                               QToolBar, QToolButton, QVBoxLayout, QWidget)
+                               QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from ...core import templates
 from ...core.apparatus import (ENTRY_RULES, GRID_KINDS, Apparatus, Line, PointOfInterest, Sequence, Zone,
@@ -24,40 +25,69 @@ from ...core.apparatus import (ENTRY_RULES, GRID_KINDS, Apparatus, Line, PointOf
 from ...core.geometry import Ellipse, Polygon, Shape
 from ...core.templates import PALETTE, TEMPLATES
 from ...core.video import VIDEO_EXTENSIONS, VideoSource
-from ..widgets import FrameView, compact_form, draw_apparatus, fmt_time, shape_path
+from .. import theme
+from ..icons import icon
+from ..widgets import FrameView, draw_apparatus, fmt_time, shape_path
 from .base import Page
 
-ACCENT = "#e11d48"
+ACCENT = theme.APPARATUS  # zone outlines, selection and handles (ANY-maze orange)
+HIGHLIGHT = "#2aa7d6"  # fill of the selected zone (ANY-maze light blue / teal)
+MAP_BLUE = "#3b78c4"  # outline colour of the drawing-tool icons
+PREVIEW = "#ff8a1f"
 
-# key, label, shortcut, tooltip
+# key, ribbon label, shortcut, tooltip
 TOOLS = [
-    ("select", "Select", "V", "Select, move and reshape items. Drag the white handles to edit vertices; "
-                              "double-click a polygon edge to add a vertex, right-click a vertex to remove it. "
-                              "Ctrl+C / Ctrl+V copy and paste the selection (also into another apparatus)."),
-    ("rect", "Rectangle", "R", "Draw a rectangular zone (Shift: square)"),
-    ("ellipse", "Ellipse", "E", "Draw an elliptical zone (Shift: circle)"),
-    ("polygon", "Polygon", "P", "Click the vertices of a zone; double-click, right-click or Enter closes it"),
+    ("select", "Select objects", "V", "Select, move and reshape objects. Drag the orange handles to edit vertices; "
+                                      "double-click a polygon edge to add a vertex, right-click a vertex to "
+                                      "remove it. Ctrl+C / Ctrl+V copy and paste the selection (also into "
+                                      "another apparatus)."),
+    ("rect", "Rectangle tool", "R", "Draw a rectangular zone (Shift: square)"),
+    ("ellipse", "Ellipse tool", "E", "Draw an elliptical zone (Shift: circle)"),
+    ("polygon", "Multiline tool", "P", "Click the corners of a zone of any shape; double-click, right-click or "
+                                       "Enter closes it"),
     ("point", "Point", "O", "Click to add a point of interest (object, platform, cup…)"),
-    ("line", "Line", "L", "Drag a line; crossings are counted in each direction"),
-    ("arena", "Arena", "A", "Draw the arena boundary (choose rectangle / ellipse / polygon from the arrow menu)"),
-    ("calibrate", "Calibrate", "C", "Drag along something of known length, then enter its real length in cm"),
+    ("line", "Line tool", "L", "Drag a line; crossings are counted in each direction"),
+    ("arena", "Arena", "A", "Draw the arena boundary (the tracker only searches inside it); choose a rectangle, "
+                            "ellipse or polygon"),
+    ("calibrate", "Ruler", "C", "Calibrate: drag the ruler along something of known length (e.g. the arena wall), "
+                                "then enter its real length"),
 ]
 
 HINTS = {
-    "select": "Click to select · drag to move · drag handles to reshape · Del deletes · wheel zooms · "
+    "select": "Click to select · drag to move · drag the handles to reshape · Del deletes · wheel zooms · "
               "middle-drag pans",
     "rect": "Drag to draw a rectangular zone (Shift = square)",
     "ellipse": "Drag to draw an elliptical zone (Shift = circle)",
-    "polygon": "Click to add vertices · double-click / right-click / Enter closes · Backspace undoes a vertex · "
+    "polygon": "Click to add corners · double-click / right-click / Enter closes · Backspace removes a corner · "
                "Esc cancels",
     "point": "Click to place a point of interest",
     "line": "Drag to draw a crossing line",
     "arena": "Draw the arena boundary",
-    "calibrate": "Drag along an object of known length (e.g. the arena wall)",
+    "calibrate": "Drag the ruler along an object of known length (e.g. the arena wall)",
     "template": "Drag a rectangle around the whole apparatus · Esc cancels",
 }
 
-SEQ_END = {"entry": "On entering the last step", "exit": "On leaving the last step"}
+SEQ_END = {"entry": "Complete on entering the last step", "exit": "Complete on leaving the last step"}
+
+# ANY-maze style sentences for the zone and sequence options: attribute -> (text when False, text when True)
+ZONE_SENTENCES = {
+    "hidden": ("This is not a hidden zone", "This is a hidden zone"),
+    "moveable": ("Zone position: the same in all tests", "Zone position: can differ in each test"),
+}
+SEQ_SENTENCES = {
+    "from_start": ("It can begin at any step (rotations count)", "It must begin at the first step"),
+    "allow_other": ("No other zones allowed between steps", "Other zones allowed between steps"),
+    "bidirectional": ("Only in the order shown", "In either direction"),
+    "overlap": ("Sequences cannot overlap", "Sequences may overlap"),
+}
+ENTRY_SENTENCES = {
+    "": "Zone entry: as in analysis settings",
+    "centre": "Zone entry: centre of the animal",
+    "head": "Zone entry: the animal's head",
+    "tail": "Zone entry: the animal's tail base",
+    "body": "Zone entry: part of the body in it",
+    "exclusion": "Zone entry: not in any other zone",
+}
 
 
 # ------------------------------------------------------------------ helpers
@@ -98,106 +128,192 @@ def describe_shape(shape, app: Apparatus | None) -> str:
 
 def color_icon(color: str, size: int = 12) -> QIcon:
     pm = QPixmap(size, size)
-    pm.fill(QColor(color))
-    return QIcon(pm)
-
-
-def tool_icon(kind: str) -> QIcon:
-    pm = QPixmap(32, 32)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    acc = QColor(ACCENT)
-    pen = QPen(acc, 2.2)
-    pen.setJoinStyle(Qt.RoundJoin)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    p.setBrush(QColor(225, 29, 72, 55))
-    pt = QPointF
-    if kind == "select":
-        p.drawPolygon(QPolygonF([pt(10, 5), pt(10, 25), pt(15, 20.5), pt(18.5, 28), pt(22, 26.5), pt(18.5, 19),
-                                 pt(25, 19)]))
-    elif kind == "rect":
-        p.drawRect(QRectF(5, 8, 22, 16))
-    elif kind == "ellipse":
-        p.drawEllipse(QRectF(4, 8, 24, 16))
-    elif kind == "polygon":
-        p.drawPolygon(QPolygonF([pt(5, 22), pt(10, 6), pt(22, 5), pt(27, 17), pt(16, 27)]))
-    elif kind == "point":
-        dpen = QPen(acc, 1.6, Qt.DotLine)
-        p.setPen(dpen)
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(pt(16, 16), 11, 11)
-        p.setPen(Qt.NoPen)
-        p.setBrush(acc)
-        p.drawEllipse(pt(16, 16), 4, 4)
-    elif kind == "line":
-        p.drawLine(pt(6, 26), pt(26, 6))
-        p.setBrush(acc)
-        p.drawEllipse(pt(6, 26), 2.5, 2.5)
-        p.drawEllipse(pt(26, 6), 2.5, 2.5)
-    elif kind == "arena":
-        dpen = QPen(acc, 2.2, Qt.DashLine)
-        p.setPen(dpen)
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(QRectF(5, 5, 22, 22), 3, 3)
-    elif kind == "calibrate":
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(QRectF(3, 12, 26, 9))
-        p.setPen(QPen(acc, 1.4))
-        for i, x in enumerate(range(6, 28, 3)):
-            p.drawLine(pt(x, 12), pt(x, 15.5 if i % 2 else 17.5))
-    elif kind == "grid":
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QRectF(4, 4, 24, 24))
-        p.setPen(QPen(acc, 1.4))
-        p.drawEllipse(QRectF(10, 10, 12, 12))
-        for a in range(0, 360, 60):
-            r = math.radians(a)
-            p.drawLine(pt(16 + 6 * math.cos(r), 16 + 6 * math.sin(r)), pt(16 + 12 * math.cos(r), 16 + 12 * math.sin(r)))
-    elif kind in ("copy", "paste"):
-        p.setBrush(QColor(225, 29, 72, 40))
-        p.drawRoundedRect(QRectF(5, 9, 15, 18), 2, 2)
-        if kind == "copy":
-            p.drawRoundedRect(QRectF(12, 4, 15, 18), 2, 2)
-        else:
-            p.setBrush(acc)
-            p.drawRect(QRectF(9, 6, 7, 5))
-            p.setBrush(Qt.NoBrush)
-            p.drawLine(pt(14, 21), pt(27, 21))
-            p.drawPolyline(QPolygonF([pt(23, 17), pt(27, 21), pt(23, 25)]))
-    elif kind in ("undo", "redo"):
-        p.setBrush(Qt.NoBrush)
-        path = QPainterPath(pt(9, 13))
-        path.cubicTo(pt(15, 6), pt(27, 8), pt(25, 21))
-        p.save()
-        if kind == "redo":
-            p.translate(32, 0)
-            p.scale(-1, 1)
-        p.drawPath(path)
-        p.setBrush(acc)
-        p.drawPolygon(QPolygonF([pt(4, 9), pt(12, 18), pt(13, 8)]))
-        p.restore()
-    elif kind == "fit":
-        p.setBrush(Qt.NoBrush)
-        for x, y, dx, dy in ((5, 5, 1, 1), (27, 5, -1, 1), (5, 27, 1, -1), (27, 27, -1, -1)):
-            p.drawPolyline(QPolygonF([pt(x, y + 7 * dy), pt(x, y), pt(x + 7 * dx, y)]))
-        p.drawRect(QRectF(11, 11, 10, 10))
+    p.setPen(QPen(QColor(color).darker(130), 1))
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), 2, 2)
     p.end()
     return QIcon(pm)
 
 
+def _paint_tool(p: QPainter, kind: str):
+    """Paint a ribbon icon on a 32×32 canvas in the style of ANY-maze's apparatus-map tools: thin blue
+    outlines, orange vertices."""
+    pt = QPointF
+    blue, orange = QColor(MAP_BLUE), QColor(ACCENT)
+
+    def pen(c, w=1.6, style=Qt.SolidLine):
+        q = QPen(QColor(c), w, style)
+        q.setJoinStyle(Qt.RoundJoin)
+        q.setCapStyle(Qt.RoundCap)
+        return q
+
+    def vertex(x, y, s=4.2):
+        p.setPen(Qt.NoPen)
+        p.setBrush(orange)
+        p.drawRect(QRectF(x - s / 2, y - s / 2, s, s))
+
+    p.setBrush(Qt.NoBrush)
+    if kind == "select":
+        p.setPen(pen("#4b5563", 1.4))
+        p.setBrush(QColor("#ffffff"))
+        p.drawPolygon(QPolygonF([pt(9, 3), pt(9, 25), pt(14.5, 20), pt(18.5, 28.5), pt(22, 27), pt(18, 18.5),
+                                 pt(25, 18.5)]))
+    elif kind == "polygon":
+        hexa = [pt(16 + 11 * math.cos(math.radians(a)), 16 + 11 * math.sin(math.radians(a)))
+                for a in range(-90, 270, 60)]
+        p.setPen(pen(blue, 1.5))
+        p.drawPolygon(QPolygonF(hexa))
+        for q in hexa:
+            vertex(q.x(), q.y())
+    elif kind == "rect":
+        p.setPen(pen(blue, 1.6))
+        p.drawRect(QRectF(4, 9, 24, 14))
+    elif kind == "ellipse":
+        p.setPen(pen(blue, 1.6))
+        p.drawEllipse(QRectF(4, 9, 24, 14))
+    elif kind == "line":
+        p.setPen(pen(blue, 1.8))
+        p.drawLine(pt(6, 8), pt(26, 25))
+    elif kind == "point":
+        p.setPen(pen(blue, 1.4, Qt.DotLine))
+        p.drawEllipse(pt(16, 16), 11, 11)
+        p.setPen(Qt.NoPen)
+        p.setBrush(orange)
+        p.drawEllipse(pt(16, 16), 4.5, 4.5)
+    elif kind == "arena":
+        p.setPen(pen(blue, 1.6, Qt.DashLine))
+        p.drawRoundedRect(QRectF(5, 5, 22, 22), 3, 3)
+        for x, y in ((5, 5), (27, 5), (5, 27), (27, 27)):
+            vertex(x, y, 4.6)
+    elif kind == "calibrate":
+        p.setPen(pen(theme.RULER, 2.4))
+        p.drawLine(pt(3, 20), pt(29, 20))
+        p.setPen(pen("#1f9d6a", 1.4))
+        for i, x in enumerate(range(4, 30, 3)):
+            p.drawLine(pt(x, 20), pt(x, 14 if i % 3 == 0 else 17))
+    elif kind == "grid":
+        p.setPen(pen(blue, 1.5))
+        for v in (5, 11.5, 18, 24.5):
+            p.drawLine(pt(v + 1.5, 4), pt(v + 1.5, 28))
+            p.drawLine(pt(4, v + 1.5), pt(28, v + 1.5))
+    elif kind == "select_all":
+        p.setPen(pen("#6b7280", 1.3, Qt.DashLine))
+        p.drawRect(QRectF(5, 5, 22, 22))
+        p.setPen(pen(blue, 1.4))
+        p.drawRect(QRectF(11, 11, 10, 10))
+        for x, y in ((5, 5), (27, 5), (5, 27), (27, 27)):
+            vertex(x, y, 5)
+    elif kind == "delete_sel":
+        p.setPen(pen(blue, 1.5))
+        p.drawRect(QRectF(4, 4, 20, 20))
+        p.setPen(pen("#d9412b", 3))
+        p.drawLine(pt(14, 14), pt(28, 28))
+        p.drawLine(pt(28, 14), pt(14, 28))
+    elif kind == "magnet":
+        p.setPen(QPen(orange, 6.5, Qt.SolidLine, Qt.FlatCap))
+        path = QPainterPath(pt(8, 26))
+        path.lineTo(8, 15)
+        path.arcTo(QRectF(8, 7, 16, 16), 180, -180)
+        path.lineTo(24, 26)
+        p.drawPath(path)
+        p.setPen(QPen(QColor("#d9412b"), 6.5, Qt.SolidLine, Qt.FlatCap))
+        p.drawLine(pt(8, 26), pt(8, 29.5))
+        p.drawLine(pt(24, 26), pt(24, 29.5))
+    elif kind == "fit":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#f2a649"))
+        p.drawRect(QRectF(10, 10, 12, 12))
+        p.setBrush(blue)
+        for ang in (0, 90, 180, 270):
+            p.save()
+            p.translate(16, 16)
+            p.rotate(ang)
+            p.drawPolygon(QPolygonF([pt(-3.5, -10.5), pt(3.5, -10.5), pt(0, -15)]))
+            p.restore()
+    elif kind == "labels":
+        p.setPen(pen(blue, 1.4))
+        p.setBrush(QColor("#ffffff"))
+        p.drawRoundedRect(QRectF(3, 9, 26, 14), 3, 3)
+        f = QFont()
+        f.setPixelSize(10)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("#374151"))
+        p.drawText(QRectF(3, 9, 26, 14), Qt.AlignCenter, "Abc")
+    elif kind == "template":
+        p.setPen(pen(blue, 1.4))
+        p.setBrush(QColor("#ffffff"))
+        p.drawRect(QRectF(3, 3, 26, 26))
+        p.setPen(pen(orange, 1.6))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(7, 7, 18, 18))
+        p.drawRect(QRectF(12, 12, 8, 8))
+        for x, y in ((7, 7), (25, 7), (7, 25), (25, 25)):
+            p.drawLine(pt(x, y), pt(x + (5 if x < 16 else -5), y + (5 if y < 16 else -5)))
+    elif kind == "group":
+        p.setPen(pen(orange, 1.6))
+        p.setBrush(QColor(42, 167, 214, 90))
+        p.drawRect(QRectF(4, 6, 15, 15))
+        p.drawEllipse(QRectF(12, 12, 16, 16))
+    elif kind == "sequence":
+        p.setPen(pen(blue, 1.4))
+        for x, y in ((7, 24), (16, 8), (25, 24)):
+            p.drawEllipse(pt(x, y), 4, 4)
+        p.setPen(pen(orange, 1.8))
+        for (x0, y0), (x1, y1) in (((9, 20.5), (13.5, 12)), ((18.5, 12), (23, 20.5))):
+            p.drawLine(pt(x0, y0), pt(x1, y1))
+            ang = math.atan2(y1 - y0, x1 - x0)
+            for s in (1, -1):
+                p.drawLine(pt(x1, y1), pt(x1 - 4 * math.cos(ang + s * 0.6), y1 - 4 * math.sin(ang + s * 0.6)))
+    elif kind == "clear_cal":
+        p.setPen(pen(theme.RULER, 2.4))
+        p.drawLine(pt(3, 22), pt(24, 22))
+        p.setPen(pen("#1f9d6a", 1.3))
+        for x in range(4, 25, 4):
+            p.drawLine(pt(x, 22), pt(x, 17))
+        p.setPen(pen("#d9412b", 2.6))
+        p.drawLine(pt(19, 4), pt(29, 14))
+        p.drawLine(pt(29, 4), pt(19, 14))
+    elif kind == "redo":
+        p.setPen(pen(blue, 2.2))
+        path = QPainterPath(pt(23, 13))
+        path.cubicTo(pt(17, 6), pt(5, 8), pt(7, 21))
+        p.drawPath(path)
+        p.setPen(Qt.NoPen)
+        p.setBrush(blue)
+        p.drawPolygon(QPolygonF([pt(28, 9), pt(20, 18), pt(19, 8)]))
+
+
+def tool_icon(kind: str) -> QIcon:
+    """Crisp icon at ribbon sizes (16 and 32 px, plus 2× for high-DPI screens)."""
+    ic = QIcon()
+    for size in (16, 32, 64):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.scale(size / 32, size / 32)
+        _paint_tool(p, kind)
+        p.end()
+        ic.addPixmap(pm)
+    return ic
+
+
 def placeholder_frame(w: int, h: int) -> np.ndarray:
-    img = np.full((h, w, 3), (59, 41, 30), np.uint8)
+    """Light grey stand-in for the video frame until a background image is loaded."""
+    img = np.full((h, w, 3), (236, 234, 232), np.uint8)
     step = max(20, int(round(max(w, h) / 16 / 10)) * 10)
     for x in range(0, w, step):
-        cv2.line(img, (x, 0), (x, h), (78, 58, 46), 1)
+        cv2.line(img, (x, 0), (x, h), (222, 219, 216), 1)
     for y in range(0, h, step):
-        cv2.line(img, (0, y), (w, y), (78, 58, 46), 1)
+        cv2.line(img, (0, y), (w, y), (222, 219, 216), 1)
     font = cv2.FONT_HERSHEY_SIMPLEX
     sc = max(0.5, w / 900)
-    for i, (txt, col) in enumerate((("No background image", (241, 245, 248)),
-                                    ("Load a frame from a video (left panel)", (184, 163, 148)))):
+    for i, (txt, col) in enumerate((("No background image", (110, 104, 98)),
+                                    ("Background > Load image from video", (150, 144, 138)))):
         (tw, th), _ = cv2.getTextSize(txt, font, sc * (1.0 if i == 0 else 0.7), 1)
         cv2.putText(img, txt, ((w - tw) // 2, h // 2 + i * int(36 * sc)), font, sc * (1.0 if i == 0 else 0.7),
                     col, 1, cv2.LINE_AA)
@@ -206,7 +322,7 @@ def placeholder_frame(w: int, h: int) -> np.ndarray:
 
 # --------------------------------------------------------------- canvas items
 class Label(QGraphicsItem):
-    """Screen-sized text label with a dark rounded background; transparent to the mouse."""
+    """Small, subtle screen-sized name tag (light pill with a colour dot); transparent to the mouse."""
 
     def __init__(self, text: str, parent=None, color: str = "#ffffff", anchor: str = "center"):
         super().__init__(parent)
@@ -214,8 +330,7 @@ class Label(QGraphicsItem):
         self.setAcceptedMouseButtons(Qt.NoButton)
         self.setAcceptHoverEvents(False)
         self.font = QFont()
-        self.font.setPointSizeF(8.5)
-        self.font.setBold(True)
+        self.font.setPointSizeF(8.0)
         self.anchor = anchor
         self.color = QColor(color)
         self.border = QColor(color)
@@ -232,9 +347,9 @@ class Label(QGraphicsItem):
         self.prepareGeometryChange()
         self.text = text
         fm = QFontMetricsF(self.font)
-        w = fm.horizontalAdvance(text) + 10
-        h = fm.height() + 3
-        self._rect = {"center": QRectF(-w / 2, -h / 2, w, h), "top": QRectF(-w / 2, 5, w, h)}.get(
+        w = fm.horizontalAdvance(text) + 18
+        h = fm.height() + 2
+        self._rect = {"center": QRectF(-w / 2, -h / 2, w, h), "top": QRectF(-w / 2, 4, w, h)}.get(
             self.anchor, QRectF(9, -h - 5, w, h))
 
     def set_anchor(self, anchor: str):
@@ -249,24 +364,28 @@ class Label(QGraphicsItem):
     def paint(self, p, opt, widget=None):
         if not self.text:
             return
-        p.setPen(QPen(self.border, 1))
-        p.setBrush(QColor(15, 23, 42, 185))
-        p.drawRoundedRect(self._rect, 3, 3)
-        p.setPen(self.color)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self._rect
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 215))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        p.setBrush(self.border)
+        p.drawEllipse(QPointF(r.left() + 7, r.center().y()), 3, 3)
+        p.setPen(QColor("#374151"))
         p.setFont(self.font)
-        p.drawText(self._rect, Qt.AlignCenter, self.text)
+        p.drawText(r.adjusted(12, 0, -3, 0), Qt.AlignCenter, self.text)
 
 
 class Handle(QGraphicsRectItem):
-    """Screen-sized vertex handle; drags are reported to the owning item."""
+    """Small square orange vertex handle (screen-sized); drags are reported to the owning item."""
 
     def __init__(self, owner, index: int):
-        super().__init__(-4.5, -4.5, 9, 9, owner)
+        super().__init__(-3.5, -3.5, 7, 7, owner)
         self.owner = owner
         self.index = index
         self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-        self.setBrush(QBrush(QColor("#ffffff")))
-        self.setPen(QPen(QColor("#0f172a"), 1))
+        self.setBrush(QBrush(QColor(ACCENT)))
+        self.setPen(QPen(QColor(ACCENT).darker(125), 1))
         self.setZValue(100)
         self.setCursor(Qt.CrossCursor)
         self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
@@ -286,7 +405,8 @@ class Handle(QGraphicsRectItem):
 
     def mouseMoveEvent(self, e):
         if self._dragging:
-            self.owner.move_handle(self.index, self.owner.mapFromScene(e.scenePos()), e.modifiers())
+            sp = self.owner.page.snap(e.scenePos(), exclude=self.owner)
+            self.owner.move_handle(self.index, self.owner.mapFromScene(sp), e.modifiers())
 
     def mouseReleaseEvent(self, e):
         if self._dragging:
@@ -349,21 +469,26 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
             return
         self.setPath(shape_path(s))
         sel = self.isSelected()
+        pen = QPen(QColor(ACCENT))
+        pen.setCosmetic(True)
         if self.kind == "zone":
             c = QColor(self.model.color)
-            pen = QPen(QColor(ACCENT) if sel else c)
-            pen.setCosmetic(True)
-            pen.setWidthF(2.6 if sel else 1.6)
-            fc = QColor(c)
-            fc.setAlpha(95 if sel else 45)
+            pen.setWidthF(2.0 if sel else 1.3)
             z = self.model
+            if sel:  # ANY-maze highlights the selected zone in light blue
+                fc = QColor(HIGHLIGHT)
+                fc.setAlpha(120)
+            else:
+                fc = QColor(c)
+                fc.setAlpha(26)
             if z.hidden:
-                fc.setAlpha(150 if sel else 110)
-                self.setBrush(QBrush(fc, Qt.BDiagPattern))
+                hc = QColor(HIGHLIGHT if sel else c)
+                hc.setAlpha(160 if sel else 120)
+                self.setBrush(QBrush(hc, Qt.BDiagPattern))
                 pen.setStyle(Qt.DashLine)
             else:
                 self.setBrush(QBrush(fc))
-            self._sync_halo(s, c)
+            self._sync_halo(s, QColor(ACCENT))
             if self.label_at_top:
                 x0, y0, x1, _ = s.bounds()
                 self.label.setPos((x0 + x1) / 2, y0)
@@ -373,11 +498,11 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
             tags = [t for t, on in (("hidden", z.hidden), ("moveable", z.moveable)) if on]
             self.label.set_text(z.name + (f" ({', '.join(tags)})" if tags else ""), self.model.color)
             self.label.setVisible(self.page.show_labels)
+            self.page.schedule_cull()
         else:
-            pen = QPen(QColor(ACCENT if sel else "#f8fafc"))
-            pen.setCosmetic(True)
-            pen.setWidthF(2.6 if sel else 2.0)
+            pen.setWidthF(2.0 if sel else 1.3)
             pen.setStyle(Qt.DashLine)
+            pen.setDashPattern([6, 4])
             self.setBrush(Qt.NoBrush)
         self.setPen(pen)
         self._sync_handles(self.handle_points())
@@ -398,7 +523,7 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
         st.setJoinStyle(Qt.RoundJoin)
         base = shape_path(s)
         self.halo.setPath(st.createStroke(base).united(base).simplified())
-        pen = QPen(c, 1.3, Qt.DotLine)
+        pen = QPen(c, 1.2, Qt.DotLine)
         pen.setCosmetic(True)
         self.halo.setPen(pen)
         self.halo.setBrush(Qt.NoBrush)
@@ -491,7 +616,7 @@ class ShapeItem(_HandlesMixin, QGraphicsPathItem):
 class PointItem(QGraphicsEllipseItem):
     """Point of interest: screen-sized marker plus a ring showing its radius (when calibrated)."""
 
-    R = 6.5
+    R = 5.5
 
     def __init__(self, page, index: int, parent):
         super().__init__(-self.R, -self.R, 2 * self.R, 2 * self.R, parent)
@@ -515,6 +640,7 @@ class PointItem(QGraphicsEllipseItem):
         self.setPos(m.x, m.y)
         self.label.set_text(m.name, m.color)
         self.label.setVisible(self.page.show_labels)
+        self.page.schedule_cull()
         self._update_ring()
         self.update()
 
@@ -524,12 +650,11 @@ class PointItem(QGraphicsEllipseItem):
         if r > 0:
             p = self.pos()
             self.ring.setRect(p.x() - r, p.y() - r, 2 * r, 2 * r)
-            c = QColor(m.color)
-            pen = QPen(c, 1.5, Qt.DashLine)
+            pen = QPen(QColor(ACCENT), 1.2, Qt.DotLine)
             pen.setCosmetic(True)
             self.ring.setPen(pen)
-            fc = QColor(c)
-            fc.setAlpha(25)
+            fc = QColor(m.color)
+            fc.setAlpha(22)
             self.ring.setBrush(fc)
             self.ring.setVisible(True)
         else:
@@ -537,19 +662,22 @@ class PointItem(QGraphicsEllipseItem):
 
     def paint(self, p, opt, widget=None):
         c = QColor(self.model.color)
-        if self.isSelected():
-            p.setPen(QPen(QColor(ACCENT), 2.5))
-            p.setBrush(Qt.NoBrush)
-            p.drawEllipse(QPointF(0, 0), self.R + 1.5, self.R + 1.5)
+        p.setRenderHint(QPainter.Antialiasing)
         p.setPen(QPen(QColor("#ffffff"), 1.5))
         p.setBrush(c)
         p.drawEllipse(QPointF(0, 0), self.R - 1, self.R - 1)
-        p.setPen(QPen(QColor("#0f172a"), 1.2))
-        p.drawLine(QPointF(-2.5, 0), QPointF(2.5, 0))
-        p.drawLine(QPointF(0, -2.5), QPointF(0, 2.5))
+        p.setPen(QPen(QColor(ACCENT), 1.4))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(0, 0), self.R, self.R)
+        if self.isSelected():  # square orange handles around the point, as for zones
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(ACCENT))
+            d = self.R + 3
+            for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+                p.drawRect(QRectF(sx * d - 2.5, sy * d - 2.5, 5, 5))
 
     def boundingRect(self):
-        r = self.R + 3
+        r = self.R + 6
         return QRectF(-r, -r, 2 * r, 2 * r)
 
     def itemChange(self, change, value):
@@ -593,12 +721,13 @@ class LineItem(_HandlesMixin, QGraphicsPathItem):
         sel = self.isSelected()
         pen = QPen(QColor(ACCENT if sel else m.color))
         pen.setCosmetic(True)
-        pen.setWidthF(3.5 if sel else 2.5)
+        pen.setWidthF(2.6 if sel else 2.0)
         pen.setCapStyle(Qt.RoundCap)
         self.setPen(pen)
         self.label.setPos(m.x1 + 0.2 * (m.x2 - m.x1), m.y1 + 0.2 * (m.y2 - m.y1))
         self.label.set_text(m.name, m.color)
         self.label.setVisible(self.page.show_labels)
+        self.page.schedule_cull()
         self._sync_handles([(m.x1, m.y1), (m.x2, m.y2)])
 
     def _tol(self) -> float:
@@ -645,9 +774,101 @@ class LineItem(_HandlesMixin, QGraphicsPathItem):
         self.sync()
 
 
+class RulerItem(QGraphicsItem):
+    """The calibration ruler: a green line with tick marks (every cm, longer every 5 and 10 cm), as in ANY-maze.
+    Ticks keep a constant on-screen length; transparent to the mouse."""
+
+    def __init__(self, x1, y1, x2, y2, px_per_cm: float | None = None, parent=None):
+        super().__init__(parent)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.p1, self.p2 = QPointF(x1, y1), QPointF(x2, y2)
+        self.ppc = px_per_cm or 0.0
+
+    def set_line(self, x1, y1, x2, y2, px_per_cm: float | None = None):
+        self.prepareGeometryChange()
+        self.p1, self.p2 = QPointF(x1, y1), QPointF(x2, y2)
+        self.ppc = px_per_cm or 0.0
+        self.update()
+
+    def boundingRect(self):
+        s = self._scale()
+        m = 14.0 / s
+        return QRectF(self.p1, self.p2).normalized().adjusted(-m, -m, m, m)
+
+    def _scale(self) -> float:
+        sc = self.scene()
+        views = sc.views() if sc is not None else []
+        return (views[0].transform().m11() if views else 1.0) or 1.0
+
+    def paint(self, p, opt, widget=None):
+        s = p.transform().m11() or self._scale()
+        p.setRenderHint(QPainter.Antialiasing)
+        dx, dy = self.p2.x() - self.p1.x(), self.p2.y() - self.p1.y()
+        L = math.hypot(dx, dy)
+        pen = QPen(QColor(theme.RULER), 2.2)
+        pen.setCosmetic(True)
+        pen.setCapStyle(Qt.FlatCap)
+        p.setPen(pen)
+        p.drawLine(self.p1, self.p2)
+        if L < 1e-6:
+            return
+        ux, uy = dx / L, dy / L
+        nx, ny = -uy, ux
+        # tick spacing: 1 cm when calibrated (thinned out until ticks are ≥ 5 screen px apart), else 10 px
+        unit = self.ppc if self.ppc else 10.0
+        step_units = 1
+        for k in (1, 2, 5, 10, 20, 50, 100, 200, 500):
+            step_units = k
+            if unit * k * s >= 5:
+                break
+        major = step_units * (5 if step_units in (1, 10, 100) else 5)
+        tp = QPen(QColor(theme.RULER), 1.3)
+        tp.setCosmetic(True)
+        p.setPen(tp)
+        n = int(L / (unit * step_units)) + 1
+        for i in range(n):
+            d = i * unit * step_units
+            u = i * step_units
+            ln = (9.0 if u % (major * 2) == 0 else 6.5 if u % major == 0 else 4.0) / s
+            x, y = self.p1.x() + ux * d, self.p1.y() + uy * d
+            p.drawLine(QPointF(x, y), QPointF(x + nx * ln, y + ny * ln))
+        ln = 9.0 / s
+        p.drawLine(self.p2, QPointF(self.p2.x() + nx * ln, self.p2.y() + ny * ln))
+
+
+class Badge(QGraphicsItem):
+    """Numbered round badge (sequence steps); screen-sized and transparent to the mouse."""
+
+    R = 8.5
+
+    def __init__(self, text: str, parent=None, color: str = theme.HEADING):
+        super().__init__(parent)
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.text, self.color = text, QColor(color)
+
+    def boundingRect(self):
+        r = self.R + 1.5
+        return QRectF(-r, -r, 2 * r, 2 * r)
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor("#ffffff"), 1.5))
+        p.setBrush(self.color)
+        p.drawEllipse(QPointF(0, 0), self.R, self.R)
+        f = QFont()
+        f.setPointSizeF(7.5)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(self.boundingRect(), Qt.AlignCenter, self.text)
+
+
+
 # --------------------------------------------------------------------- view
 class EditorView(FrameView):
-    """Drawing canvas: implements the tools; scene coordinates are video pixels."""
+    """Drawing canvas: implements the tools; scene coordinates are video pixels. The image sits centred on the
+    near-white work area, as in ANY-maze."""
 
     def __init__(self, page):
         super().__init__()
@@ -657,11 +878,15 @@ class EditorView(FrameView):
         self._poly: list[QPointF] = []
         self._preview: QGraphicsPathItem | None = None
         self._preview_group = None
+        self._preview_ruler: RulerItem | None = None
         self._pan = None
         self.scene().setItemIndexMethod(QGraphicsScene.NoIndex)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setBackgroundBrush(QBrush(QColor(theme.WORK_BG)))
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet(f"QGraphicsView{{background:{theme.WORK_BG};border:none;}}")
 
     def fit(self):
         # fit the whole scene rect (frame + margin) so no scrollbars appear; fitting only the frame makes
@@ -673,6 +898,18 @@ class EditorView(FrameView):
             finally:
                 self._fitting = False
             self._auto_fit = True
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.page.schedule_cull()
+
+    def wheelEvent(self, e):
+        super().wheelEvent(e)
+        self.page.schedule_cull()
+
+    def scale(self, sx, sy):
+        super().scale(sx, sy)
+        self.page.schedule_cull()
 
     # ---- tool state ---------------------------------------------------
     def set_tool(self, tool: str):
@@ -698,22 +935,23 @@ class EditorView(FrameView):
 
     def _clear_preview(self):
         sc = self.scene()
-        if self._preview is not None:
-            sc.removeItem(self._preview)
-            self._preview = None
-        if self._preview_group is not None:
-            sc.removeItem(self._preview_group)
-            self._preview_group = None
+        for attr in ("_preview", "_preview_group", "_preview_ruler"):
+            it = getattr(self, attr)
+            if it is not None:
+                sc.removeItem(it)
+                setattr(self, attr, None)
 
     def _set_preview(self, path: QPainterPath, closed=True):
         if self._preview is None:
             self._preview = QGraphicsPathItem()
-            pen = QPen(QColor("#facc15"), 2, Qt.DashLine)
+            pen = QPen(QColor(PREVIEW), 1.6, Qt.DashLine)
             pen.setCosmetic(True)
             self._preview.setPen(pen)
             self._preview.setZValue(500)
             self.scene().addItem(self._preview)
-        self._preview.setBrush(QColor(250, 204, 21, 45) if closed else Qt.NoBrush)
+        fill = QColor(HIGHLIGHT)
+        fill.setAlpha(60)
+        self._preview.setBrush(fill if closed else Qt.NoBrush)
         self._preview.setPath(path)
 
     # ---- geometry helpers ------------------------------------------------
@@ -733,17 +971,27 @@ class EditorView(FrameView):
             p = self.constrain(p0, p, square)
         r = QRectF(p0, p).normalized()
         if self.tool == "template":
-            self._clear_preview()
+            if self._preview_group is not None:
+                self.scene().removeItem(self._preview_group)
+                self._preview_group = None
             app = self.page.pending_template_preview(r.x(), r.y(), r.width(), r.height())
             if app is not None:
                 self._preview_group = draw_apparatus(self.scene(), app)
                 self._preview_group.setZValue(500)
-            self._set_preview(QPainterPath(), True)
             path = QPainterPath()
             path.addRect(r)
-            self._preview.setPath(path)
-            self._preview.setBrush(Qt.NoBrush)
+            self._set_preview(path, False)
             self.page.show_measure(f"{r.width():.0f} × {r.height():.0f} px")
+            return
+        if self.tool == "calibrate":
+            if self._preview_ruler is None:
+                self._preview_ruler = RulerItem(p0.x(), p0.y(), p.x(), p.y(), self.page.app.px_per_cm
+                                                if self.page.app else None)
+                self._preview_ruler.setZValue(500)
+                self.scene().addItem(self._preview_ruler)
+            self._preview_ruler.set_line(p0.x(), p0.y(), p.x(), p.y(),
+                                         self.page.app.px_per_cm if self.page.app else None)
+            self.page.show_measure(f"Length {math.hypot(p.x() - p0.x(), p.y() - p0.y()):.1f} px")
             return
         path = QPainterPath()
         if kind == "rect":
@@ -781,9 +1029,12 @@ class EditorView(FrameView):
         if len(clean) >= 3:
             self.page.finish_polygon(clean)
 
+    def _scene_pos(self, e) -> QPointF:
+        """Scene position of a mouse event, attracted to nearby vertices when "Points attract" is on."""
+        return self.page.snap(self.mapToScene(e.position().toPoint()))
+
     # ---- events ---------------------------------------------------------
     def mousePressEvent(self, e):
-        p = self.mapToScene(e.position().toPoint())
         if e.button() == Qt.MiddleButton:
             self._pan = e.position()
             self.viewport().setCursor(Qt.ClosedHandCursor)
@@ -792,6 +1043,7 @@ class EditorView(FrameView):
         if self.tool == "select":
             super().mousePressEvent(e)
             return
+        p = self._scene_pos(e)
         self.setFocus()
         kind = self.drag_kind()
         if kind == "polygon":
@@ -827,9 +1079,9 @@ class EditorView(FrameView):
             QGraphicsView.mouseMoveEvent(self, e)
             return
         if self._start is not None:
-            self._update_drag_preview(p, e.modifiers())
+            self._update_drag_preview(self.page.snap(p), e.modifiers())
         elif self._poly:
-            self._update_poly_preview(p)
+            self._update_poly_preview(self.page.snap(p))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MiddleButton and self._pan is not None:
@@ -842,7 +1094,7 @@ class EditorView(FrameView):
             return
         if self._start is not None and e.button() == Qt.LeftButton:
             p0 = self._start
-            p1 = self.mapToScene(e.position().toPoint())
+            p1 = self._scene_pos(e)
             self.cancel_drawing()
             a = self.mapFromScene(p0)
             b = e.position().toPoint()
@@ -857,6 +1109,11 @@ class EditorView(FrameView):
             return
         if self.tool == "select":
             super().mouseDoubleClickEvent(e)
+
+    def contextMenuEvent(self, e):
+        if self.tool != "select" or self.drawing or isinstance(self.itemAt(e.pos()), Handle):
+            return  # right-click finishes / cancels drawing, or removes a vertex
+        self.page.show_context_menu(e.globalPos())
 
     def keyPressEvent(self, e):
         k = e.key()
@@ -892,16 +1149,18 @@ class EditorView(FrameView):
         super().keyPressEvent(e)
 
 
+
 # ---------------------------------------------------------------- widgets
 class ColorButton(QPushButton):
+    """Colour swatch; click to choose a colour."""
+
     color_changed = Signal(str)
 
     def __init__(self, title="Colour", parent=None):
         super().__init__(parent)
         self.title = title
         self._color = "#3b82f6"
-        self.setFixedHeight(24)
-        self.setMinimumWidth(90)
+        self.setFixedSize(30, 26)
         self.clicked.connect(self._choose)
         self.set_color(self._color)
 
@@ -910,16 +1169,85 @@ class ColorButton(QPushButton):
 
     def set_color(self, c: str):
         self._color = c
-        q = QColor(c)
-        fg = "#000" if q.lightnessF() > 0.6 else "#fff"
-        self.setText(c)
-        self.setStyleSheet(f"QPushButton{{background:{c};color:{fg};border:1px solid #64748b;border-radius:4px;}}")
+        self.setToolTip(f"{self.title}: {c} (click to change)")
+        self.setStyleSheet(f"QPushButton{{background:{c};border:1px solid #9ca3af;border-radius:2px;padding:0;}}"
+                           f"QPushButton:hover{{border-color:{theme.ACCENT};}}"
+                           "QPushButton:disabled{background:#e5e7eb;border-color:#d1d5db;}")
 
     def _choose(self):
         c = QColorDialog.getColor(QColor(self._color), self, self.title)
         if c.isValid():
             self.set_color(c.name())
             self.color_changed.emit(c.name())
+
+
+class SentenceChoice(QComboBox):
+    """ANY-maze style yes/no option phrased as a sentence ("This is not a hidden zone ▾"); offers the QCheckBox
+    API (isChecked / setChecked / toggled)."""
+
+    toggled = Signal(bool)
+
+    def __init__(self, sentences: tuple[str, str], tooltip: str = "", parent=None):
+        super().__init__(parent)
+        self.addItem(sentences[0], False)
+        self.addItem(sentences[1], True)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(12)
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.currentIndexChanged.connect(lambda i: self.toggled.emit(i == 1))
+
+    def isChecked(self) -> bool:
+        return self.currentIndex() == 1
+
+    def setChecked(self, on: bool):
+        self.setCurrentIndex(1 if on else 0)
+
+
+def _sentence_combo(items, tooltip: str = "") -> QComboBox:
+    w = QComboBox()
+    for k, lbl in items:
+        w.addItem(lbl, k)
+    w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    w.setMinimumContentsLength(12)
+    if tooltip:
+        w.setToolTip(tooltip)
+    return w
+
+
+def _separator() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.HLine)
+    f.setFixedHeight(1)
+    f.setStyleSheet(f"background:{theme.BORDER};border:none;")
+    return f
+
+
+def _caption(text: str) -> QLabel:
+    lb = QLabel(text)
+    lb.setObjectName("PropCaption")
+    return lb
+
+
+def _name_row(edit: QLineEdit, color: QWidget) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    lb = QLabel("Name")
+    lb.setMinimumWidth(40)
+    row.addWidget(lb)
+    row.addWidget(edit, 1)
+    row.addWidget(color)
+    return row
+
+
+def _button_row(*buttons, stretch: bool = True) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    for b in buttons:
+        row.addWidget(b)
+    if stretch:
+        row.addStretch()
+    return row
 
 
 def _param_label(key: str) -> str:
@@ -967,7 +1295,7 @@ class TemplateDialog(QDialog):
         self.preview.setScene(QGraphicsScene(self.preview))
         self.preview.setFixedSize(220, 220)
         self.preview.setRenderHints(QPainter.Antialiasing)
-        self.preview.setBackgroundBrush(QColor("#1e293b"))
+        self.preview.setBackgroundBrush(QColor("#ffffff"))
         self.preview.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.preview.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.preview.setInteractive(False)
@@ -1228,14 +1556,32 @@ class GridDialog(QDialog):
                 "group": self.group.isChecked(), "params": params}
 
 
+
 class ApparatusPage(Page):
     title = "Apparatus"
+
+    PANEL_QSS = f"""
+QFrame#PropPanel {{ background: {theme.WORK_BG}; border: none; border-left: 1px solid {theme.BORDER}; }}
+QTabWidget#PropTabs::pane {{ border: none; border-top: 1px solid {theme.BORDER}; background: {theme.WORK_BG}; }}
+QTabWidget#PropTabs > QTabBar::tab {{ background: transparent; border: none; border-bottom: 2px solid transparent;
+    padding: 5px 6px 4px 6px; margin: 0; color: {theme.TEXT}; }}
+QTabWidget#PropTabs > QTabBar::tab:selected {{ color: {theme.ACCENT}; border-bottom: 2px solid {theme.ACCENT}; }}
+QTabWidget#PropTabs > QTabBar::tab:hover:!selected {{ background: {theme.HOVER}; }}
+QLabel#PropHeading {{ color: {theme.HEADING}; font-size: 18px; font-weight: 300; }}
+QLabel#PropSubheading {{ color: {theme.HEADING}; font-size: 15px; font-weight: 300; padding-top: 4px; }}
+QLabel#PropCaption {{ color: {theme.TEXT}; padding-top: 2px; }}
+QLabel#FooterCaption {{ color: {theme.HEADING}; font-size: 13px; }}
+QListWidget {{ font-size: 13px; }}
+QListWidget::item {{ padding: 2px 2px; }}
+QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
+"""
 
     def __init__(self, main):
         super().__init__(main)
         self._loading = False
         self._syncing = False
         self.show_labels = True
+        self.snap_enabled = False
         self.arena_shape = "rect"
         self._items: dict[tuple[str, int], QGraphicsItem] = {}
         self._root: QGraphicsPathItem | None = None
@@ -1248,23 +1594,30 @@ class ApparatusPage(Page):
         self._pending_template: dict | None = None
         self._prev_tool = "select"
         self._seq_overlay: QGraphicsPathItem | None = None
+        self._explorer_names: list[str] | None = None
+        self.ruler = None
+        self.ruler_label = None
+        self._cull_timer = QTimer(self)
+        self._cull_timer.setSingleShot(True)
+        self._cull_timer.setInterval(0)
+        self._cull_timer.timeout.connect(self._cull_labels)
 
         self.view = EditorView(self)
         self.view.scene().selectionChanged.connect(self._on_scene_selection)
         self.view.mouse_moved.connect(self._on_mouse_moved)
+        # the list of apparatus is shown in the explorer (one sub-item per apparatus); this hidden list keeps
+        # the current row
+        self.app_list = QListWidget(self)
+        self.app_list.hide()
+        self.app_list.currentRowChanged.connect(self._app_row_changed)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._build_left())
-        splitter.addWidget(self._build_centre())
-        splitter.addWidget(self._build_right())
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-        splitter.setCollapsible(1, False)
-        splitter.setSizes([240, 760, 320])
-        lay = QVBoxLayout(self)
+        self._build_actions()
+        lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(splitter)
+        lay.setSpacing(0)
+        lay.addWidget(self._build_centre(), 1)
+        lay.addWidget(self._build_right())
+        self.setStyleSheet(self.PANEL_QSS)
 
         self._bg_timer = QTimer(self)
         self._bg_timer.setSingleShot(True)
@@ -1272,297 +1625,328 @@ class ApparatusPage(Page):
         self._bg_timer.timeout.connect(self._seek_background)
         self._set_enabled(False)
 
-    # ================================================================ layout
-    def _build_left(self) -> QWidget:
-        w = QWidget()
-        w.setMinimumWidth(240)
-        w.setMaximumWidth(330)
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 4, 0)
+    # ================================================================ ribbon
+    def _action(self, text: str, ic, tip: str, fn=None, shortcut=None, checkable: bool = False) -> QAction:
+        a = QAction(ic if isinstance(ic, QIcon) else icon(ic), text, self)
+        a.setToolTip(tip + (f"  [{QKeySequence(shortcut).toString()}]" if isinstance(shortcut, str) else ""))
+        a.setStatusTip(tip)
+        a.setCheckable(checkable)
+        if shortcut is not None:
+            if isinstance(shortcut, list):
+                a.setShortcuts(shortcut)
+            else:
+                a.setShortcut(QKeySequence(shortcut))
+            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            self.addAction(a)
+        if fn is not None:
+            a.triggered.connect(lambda _=False: fn())
+        return a
 
-        g = QGroupBox("Apparatus")
-        gl = QVBoxLayout(g)
-        self.app_list = QListWidget()
-        self.app_list.setMinimumHeight(70)
-        self.app_list.setMaximumHeight(170)
-        self.app_list.currentRowChanged.connect(self._app_row_changed)
-        self.app_list.itemDoubleClicked.connect(lambda _: self.rename_apparatus())
-        gl.addWidget(self.app_list, 1)
-        grid = QGridLayout()
-        grid.setSpacing(4)
-        self.btn_add = QPushButton("Add")
-        self.btn_add.setToolTip("Add an empty apparatus")
-        self.btn_add.clicked.connect(lambda: self.add_apparatus())
-        self.btn_dup = QPushButton("Duplicate")
-        self.btn_dup.clicked.connect(lambda: self.duplicate_apparatus())
-        self.btn_ren = QPushButton("Rename…")
-        self.btn_ren.clicked.connect(lambda: self.rename_apparatus())
-        self.btn_del = QPushButton("Delete")
-        self.btn_del.clicked.connect(lambda: self.delete_apparatus())
-        grid.addWidget(self.btn_add, 0, 0)
-        grid.addWidget(self.btn_dup, 0, 1)
-        grid.addWidget(self.btn_ren, 1, 0)
-        grid.addWidget(self.btn_del, 1, 1)
-        gl.addLayout(grid)
-        self.btn_tpl = QPushButton("Create from template…")
-        self.btn_tpl.setStyleSheet(f"QPushButton{{background:{ACCENT};color:white;font-weight:bold;padding:6px;"
-                                   "border-radius:4px;} QPushButton:disabled{background:#94a3b8;}")
-        self.btn_tpl.clicked.connect(lambda: self.create_from_template())
-        gl.addWidget(self.btn_tpl)
-        self.app_info = QLabel()
-        self.app_info.setWordWrap(True)
-        self.app_info.setStyleSheet("color:palette(placeholder-text);")
-        gl.addWidget(self.app_info)
-        lay.addWidget(g)
-
-        bg = QGroupBox("Background image")
-        bl = QVBoxLayout(bg)
-        self.btn_bg = QPushButton("Load background from video…")
-        self.btn_bg.clicked.connect(lambda: self.load_background_dialog())
-        bl.addWidget(self.btn_bg)
-        self.test_combo = QComboBox()
-        self.test_combo.setToolTip("Use a frame from the video of one of the experiment's tests")
-        self.test_combo.activated.connect(self._test_combo_activated)
-        bl.addWidget(self.test_combo)
-        trow = QHBoxLayout()
-        self.time_slider = QSlider(Qt.Horizontal)
-        self.time_slider.valueChanged.connect(self._slider_changed)
-        self.time_spin = QDoubleSpinBox()
-        self.time_spin.setDecimals(2)
-        self.time_spin.setSuffix(" s")
-        self.time_spin.setMaximumWidth(92)
-        self.time_spin.valueChanged.connect(self._spin_changed)
-        trow.addWidget(self.time_slider, 1)
-        trow.addWidget(self.time_spin)
-        bl.addLayout(trow)
-        self.bg_label = QLabel("No background")
-        self.bg_label.setWordWrap(True)
-        self.bg_label.setStyleSheet("color:palette(placeholder-text);")
-        bl.addWidget(self.bg_label)
-        lay.addWidget(bg)
-
-        cal = QGroupBox("Calibration")
-        cl = QVBoxLayout(cal)
-        self.cal_label = QLabel()
-        self.cal_label.setWordWrap(True)
-        cl.addWidget(self.cal_label)
-        f = QFormLayout()
-        self.ppc_spin = QDoubleSpinBox()
-        self.ppc_spin.setRange(0.0, 100000.0)
-        self.ppc_spin.setDecimals(3)
-        self.ppc_spin.setSpecialValueText("Not calibrated")
-        self.ppc_spin.setSuffix(" px/cm")
-        self.ppc_spin.setToolTip("Pixels per centimetre. 0 = not calibrated (results in pixels).")
-        self.ppc_spin.editingFinished.connect(self._ppc_edited)
-        f.addRow("Scale", self.ppc_spin)
-        cl.addLayout(f)
-        crow = QHBoxLayout()
-        self.btn_cal = QPushButton("Calibrate with a line")
-        self.btn_cal.clicked.connect(lambda: self.set_tool("calibrate"))
-        self.btn_cal_clear = QPushButton("Clear")
-        self.btn_cal_clear.clicked.connect(self.clear_calibration)
-        crow.addWidget(self.btn_cal, 1)
-        crow.addWidget(self.btn_cal_clear)
-        cl.addLayout(crow)
-        lay.addWidget(cal)
-        tips = QLabel("<b>How to</b><ol style='margin-left:-20px'>"
-                      "<li>Create from template and drag it over the apparatus in the image.</li>"
-                      "<li>Adjust zones: select, drag, or drag their white handles.</li>"
-                      "<li>Check the calibration (or calibrate with a line of known length).</li>"
-                      "<li>Draw extra zones, points or lines with the toolbar.</li></ol>")
-        tips.setWordWrap(True)
-        tips.setStyleSheet("color:palette(placeholder-text);")
-        tips.setAlignment(Qt.AlignTop)
-        lay.addWidget(tips, 1)
-        return w
-
-    def _build_centre(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(4, 0, 4, 0)
-        lay.setSpacing(2)
-        tb = QToolBar()
-        tb.setIconSize(QSize(24, 24))
-        tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        tb.setStyleSheet("QToolBar{spacing:0px;}")
-        self.toolbar = tb
+    def _build_actions(self):
+        # apparatus
+        self.tpl_act = self._action("From template", tool_icon("template"),
+                                    "Create an apparatus from a template (open field, plus maze, water maze…) and "
+                                    "drag it over the apparatus in the image", lambda: self.create_from_template())
+        self.new_act = self._action("New", "add", "Add an empty apparatus and draw its map yourself",
+                                    lambda: self.add_apparatus())
+        self.dup_act = self._action("Duplicate", "copy", "Duplicate the current apparatus",
+                                    lambda: self.duplicate_apparatus())
+        self.ren_act = self._action("Rename", "edit", "Rename the current apparatus (tests that use it follow)",
+                                    lambda: self.rename_apparatus())
+        self.del_act = self._action("Delete", "delete", "Delete the current apparatus",
+                                    lambda: self.delete_apparatus())
+        # drawing tools: an exclusive group of checkable actions
         self.tool_actions: dict[str, QAction] = {}
         grp = QActionGroup(self)
-        grp.setExclusive(True)
+        grp.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
+        self.tool_group = grp
         for key, label, sc, tip in TOOLS:
-            a = QAction(tool_icon(key), label, self)
-            a.setCheckable(True)
-            a.setShortcut(QKeySequence(sc))
-            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-            a.setToolTip(f"{tip}  [{sc}]")
-            a.triggered.connect(lambda _=False, k=key: self.set_tool(k))
+            a = self._action(label, tool_icon(key), tip, lambda k=key: self.set_tool(k), sc, checkable=True)
             grp.addAction(a)
-            tb.addAction(a)
-            self.addAction(a)
             self.tool_actions[key] = a
         self.tool_actions["select"].setChecked(True)
-        # arena shape menu
-        menu = QMenu(self)
+        menu = QMenu(self)  # arena shape
         self.arena_actions = {}
         ag = QActionGroup(self)
         for k, lbl in (("rect", "Rectangle"), ("ellipse", "Ellipse / circle"), ("polygon", "Polygon")):
-            a = menu.addAction(lbl)
+            a = menu.addAction(tool_icon({"polygon": "polygon"}.get(k, k)), lbl)
             a.setCheckable(True)
             a.setChecked(k == "rect")
             ag.addAction(a)
             a.triggered.connect(lambda _=False, k=k: self.set_arena_shape(k))
             self.arena_actions[k] = a
-        btn = tb.widgetForAction(self.tool_actions["arena"])
-        if isinstance(btn, QToolButton):
-            btn.setMenu(menu)
-            btn.setPopupMode(QToolButton.MenuButtonPopup)
-        self.grid_act = QAction(tool_icon("grid"), "Grid…", self)
-        self.grid_act.setShortcut(QKeySequence("G"))
-        self.grid_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-        self.grid_act.setToolTip("Add a regular grid of zones: square cells (in real-world units), concentric rings "
-                                 "or radial sectors  [G]")
-        self.grid_act.triggered.connect(lambda: self.add_grid_dialog())
-        tb.addAction(self.grid_act)
-        self.addAction(self.grid_act)
-        b = tb.widgetForAction(self.grid_act)
-        if isinstance(b, QToolButton):
-            b.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        tb.addSeparator()
-        self.copy_act = QAction(tool_icon("copy"), "Copy", self)
-        self.copy_act.setShortcut(QKeySequence.Copy)
-        self.copy_act.setToolTip("Copy the selected zones, points and lines (Ctrl+C)")
-        self.copy_act.triggered.connect(lambda: self.copy_selected())
-        self.paste_act = QAction(tool_icon("paste"), "Paste", self)
-        self.paste_act.setShortcut(QKeySequence.Paste)
-        self.paste_act.setToolTip("Paste copied items into this apparatus (Ctrl+V)")
-        self.paste_act.triggered.connect(lambda: self.paste())
-        self.undo_act = QAction(tool_icon("undo"), "Undo", self)
-        self.undo_act.setShortcut(QKeySequence.Undo)
-        self.undo_act.setToolTip("Undo (Ctrl+Z)")
-        self.undo_act.triggered.connect(self.undo)
-        self.redo_act = QAction(tool_icon("redo"), "Redo", self)
-        self.redo_act.setShortcuts([QKeySequence.Redo, QKeySequence("Ctrl+Y")])
-        self.redo_act.setToolTip("Redo (Ctrl+Shift+Z)")
-        self.redo_act.triggered.connect(self.redo)
-        self.fit_act = QAction(tool_icon("fit"), "Fit", self)
-        self.fit_act.setShortcut(QKeySequence("F"))
-        self.fit_act.setToolTip("Fit the image to the window [F]")
-        self.fit_act.triggered.connect(self.view.fit)
-        self.labels_act = QAction("Labels", self)
-        self.labels_act.setCheckable(True)
+        self.arena_menu = menu
+        self.tool_actions["arena"].setMenu(menu)
+        self.select_all_act = self._action("Select all", tool_icon("select_all"), "Select every zone, point and line",
+                                           lambda: self.select_all(), "Ctrl+A")
+        self.delete_sel_act = self._action("Delete selection", tool_icon("delete_sel"),
+                                           "Delete the selected objects (Del)", lambda: self.delete_selected())
+        self.snap_act = self._action("Points attract", tool_icon("magnet"),
+                                     "Points attract: new corners and dragged handles snap to nearby corners of "
+                                     "other objects, so zones share their edges exactly", checkable=True)
+        self.snap_act.toggled.connect(self._toggle_snap)
+        self.grid_act = self._action("Zone grid", tool_icon("grid"),
+                                     "Add a regular grid of zones: square cells (in real-world units), concentric "
+                                     "rings or radial sectors", lambda: self.add_grid_dialog(), "G")
+        # define
+        self.group_act = self._action("Zone group", tool_icon("group"),
+                                      "Define a zone group: several zones treated as one (e.g. all corners)",
+                                      lambda: self.add_group())
+        self.seq_act = self._action("Sequence", tool_icon("sequence"),
+                                    "Define a sequence of zone visits (e.g. spontaneous alternation)",
+                                    lambda: self.add_sequence())
+        # calibration / background
+        self.clear_cal_act = self._action("Clear", tool_icon("clear_cal"),
+                                          "Clear the calibration (results in pixels)", self.clear_calibration)
+        self.bg_act = self._action("Video file…", "video_file",
+                                   "Use a frame of a video file as the background image of the map",
+                                   lambda: self.load_background_dialog())
+        self.testvid_act = self._action("Test video", "video", "Use a frame from the video of one of the tests")
+        self.testvid_menu = QMenu(self)
+        self.testvid_menu.aboutToShow.connect(self._fill_test_menu)
+        self.testvid_act.setMenu(self.testvid_menu)
+        # edit
+        self.undo_act = self._action("Undo", "undo", "Undo the last change to the map", self.undo, QKeySequence.Undo)
+        self.redo_act = self._action("Redo", tool_icon("redo"), "Redo", self.redo,
+                                     [QKeySequence(QKeySequence.Redo), QKeySequence("Ctrl+Y")])
+        self.copy_act = self._action("Copy", "copy", "Copy the selected zones, points and lines (Ctrl+C)",
+                                     lambda: self.copy_selected(), QKeySequence.Copy)
+        self.paste_act = self._action("Paste", "paste",
+                                      "Paste copied objects into this apparatus — also into another one (Ctrl+V)",
+                                      lambda: self.paste(), QKeySequence.Paste)
+        # view
+        self.fit_act = self._action("Scale to fit", tool_icon("fit"), "Fit the image to the window",
+                                    self.view.fit, "F")
+        self.labels_act = self._action("Show labels", tool_icon("labels"),
+                                       "Show the names of zones, points and lines on the map", checkable=True)
         self.labels_act.setChecked(True)
-        self.labels_act.setToolTip("Show zone / point / line names on the image")
         self.labels_act.toggled.connect(self._toggle_labels)
-        self.labels_act.setIcon(self._labels_icon())
-        for a in (self.copy_act, self.paste_act):
-            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-            self.addAction(a)
-        for a in (self.undo_act, self.redo_act, self.fit_act, self.labels_act):
-            a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
-            tb.addAction(a)
-            self.addAction(a)
-            b = tb.widgetForAction(a)
-            if isinstance(b, QToolButton):
-                b.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        lay.addWidget(tb)
+
+    def ribbon_groups(self):
+        t = self.tool_actions
+        return [
+            ("Apparatus", [(self.tpl_act, "large"), (self.new_act, "small"), (self.dup_act, "small"),
+                           (self.ren_act, "small"), (self.del_act, "small")]),
+            ("Apparatus map", [(t["select"], "large"), (t["polygon"], "large"), (t["rect"], "small"),
+                               (t["ellipse"], "small"), (t["line"], "small"), (self.select_all_act, "small"),
+                               (self.delete_sel_act, "small"), (self.snap_act, "small")]),
+            ("Define", [(t["arena"], "small"), (t["point"], "small"), (self.grid_act, "small"),
+                        (self.group_act, "small"), (self.seq_act, "small")]),
+            ("Calibration", [(t["calibrate"], "small"), (self.clear_cal_act, "small")]),
+            ("Background", [(self.bg_act, "small"), (self.testvid_act, "small")]),
+            ("View", [(self.fit_act, "small"), (self.labels_act, "small")]),
+        ]
+
+    # ============================================================== explorer
+    def explorer_items(self):
+        p = self.project
+        return [(a.name, "zone", a.name) for a in p.apparatus] if p is not None else []
+
+    def show_item(self, key):
+        p = self.project
+        if p is None:
+            return
+        for i, a in enumerate(p.apparatus):
+            if a.name == key:
+                if self.app_list.currentRow() != i:
+                    self.app_list.setCurrentRow(i)
+                return
+
+    def _sync_explorer(self):
+        """Mirror the apparatus list in the explorer and highlight the current apparatus."""
+        names = [a.name for a in self.project.apparatus] if self.project is not None else []
+        try:
+            if names != self._explorer_names:
+                self._explorer_names = names
+                self.main.refresh_explorer(self)
+            if self.app is not None:
+                self.main.select_explorer(self, self.app.name)
+        except AttributeError:  # main window still being built
+            pass
+
+    # ================================================================ layout
+    def _build_centre(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(18, 8, 14, 8)
+        lay.setSpacing(4)
+        top = QHBoxLayout()
+        self.page_title = QLabel("Apparatus")
+        self.page_title.setObjectName("PageTitle")
+        top.addWidget(self.page_title)
+        top.addStretch()
+        self.app_info = QLabel()
+        self.app_info.setObjectName("Hint")
+        self.app_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        top.addWidget(self.app_info)
+        lay.addLayout(top)
         lay.addWidget(self.view, 1)
         sb = QHBoxLayout()
         self.hint = QLabel(HINTS["select"])
-        self.hint.setStyleSheet("color:palette(placeholder-text);")
+        self.hint.setObjectName("Hint")
         self.hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.measure = QLabel()
+        self.measure.setObjectName("Hint")
         self.coords = QLabel()
-        self.coords.setMinimumWidth(130)
+        self.coords.setObjectName("Hint")
+        self.coords.setMinimumWidth(110)
         self.coords.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         sb.addWidget(self.hint, 1)
         sb.addWidget(self.measure)
         sb.addWidget(self.coords)
         lay.addLayout(sb)
+        lay.addSpacing(2)
+        lay.addWidget(_separator())
+        lay.addSpacing(2)
+
+        def caption(text):
+            cap = QLabel(text)
+            cap.setObjectName("FooterCaption")
+            cap.setFixedWidth(84)
+            return cap
+
+        self.cal_label = QLabel()
+        self.cal_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.ppc_spin = QDoubleSpinBox()
+        self.ppc_spin.setRange(0.0, 100000.0)
+        self.ppc_spin.setDecimals(3)
+        self.ppc_spin.setSpecialValueText("Not calibrated")
+        self.ppc_spin.setSuffix(" px/cm")
+        self.ppc_spin.setMinimumWidth(130)
+        self.ppc_spin.setToolTip("Pixels per centimetre. 0 = not calibrated (results in pixels).")
+        self.ppc_spin.editingFinished.connect(self._ppc_edited)
+        self.btn_cal = QPushButton(tool_icon("calibrate"), "Calibrate with the ruler")
+        self.btn_cal.setToolTip(TOOLS[-1][3])
+        self.btn_cal.clicked.connect(lambda: self.set_tool("calibrate"))
+        self.btn_cal_clear = QPushButton("Clear")
+        self.btn_cal_clear.setToolTip("Clear the calibration (results in pixels)")
+        self.btn_cal_clear.clicked.connect(self.clear_calibration)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(caption("Calibration"))
+        row.addWidget(self.cal_label, 1)
+        row.addWidget(self.ppc_spin)
+        row.addWidget(self.btn_cal)
+        row.addWidget(self.btn_cal_clear)
+        lay.addLayout(row)
+
+        self.test_combo = QComboBox()
+        self.test_combo.setToolTip("Use a frame from the video of one of the experiment's tests")
+        self.test_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.test_combo.setMinimumContentsLength(16)
+        self.test_combo.activated.connect(self._test_combo_activated)
+        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setToolTip("Time in the video of the background frame")
+        self.time_slider.valueChanged.connect(self._slider_changed)
+        self.time_spin = QDoubleSpinBox()
+        self.time_spin.setDecimals(2)
+        self.time_spin.setSuffix(" s")
+        self.time_spin.setMinimumWidth(90)
+        self.time_spin.setToolTip("Time in the video of the background frame")
+        self.time_spin.valueChanged.connect(self._spin_changed)
+        self.bg_label = QLabel("No background")
+        self.bg_label.setObjectName("Hint")
+        self.bg_label.setFixedWidth(210)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(caption("Background"))
+        row.addWidget(self.test_combo)
+        row.addWidget(self.bg_label)
+        row.addWidget(self.time_slider, 1)
+        row.addWidget(self.time_spin)
+        lay.addLayout(row)
         return w
 
-    @staticmethod
-    def _labels_icon() -> QIcon:
-        pm = QPixmap(32, 32)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(ACCENT), 1.8))
-        p.setBrush(QColor(225, 29, 72, 55))
-        p.drawRoundedRect(QRectF(3, 9, 26, 14), 3, 3)
-        f = QFont()
-        f.setPixelSize(11)
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(QRectF(3, 9, 26, 14), Qt.AlignCenter, "Abc")
-        p.end()
-        return QIcon(pm)
+    def _prop_page(self, title: str) -> tuple[QWidget, QVBoxLayout, QLabel]:
+        """A scrollable property page with a blue heading (and a grey count on its right)."""
+        sa = QScrollArea()
+        sa.setObjectName("PropScroll")
+        sa.setWidgetResizable(True)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sa.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        body.setObjectName("PropBody")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(12, 8, 12, 10)
+        lay.setSpacing(6)
+        head = QHBoxLayout()
+        h = QLabel(title)
+        h.setObjectName("PropHeading")
+        head.addWidget(h)
+        head.addStretch()
+        count = QLabel()
+        count.setObjectName("Hint")
+        head.addWidget(count)
+        lay.addLayout(head)
+        sa.setWidget(body)
+        return sa, lay, count
 
     def _build_right(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("PropPanel")
+        panel.setFixedWidth(306)
+        pl0 = QVBoxLayout(panel)
+        pl0.setContentsMargins(1, 6, 0, 0)
         self.tabs = QTabWidget()
-        self.tabs.setMinimumWidth(318)
-        self.tabs.setMaximumWidth(400)
+        self.tabs.setObjectName("PropTabs")
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setExpanding(False)
-        self.tabs.setStyleSheet("QTabBar::tab{padding:4px 5px;}")
+        self.tabs.tabBar().setDrawBase(False)
         self.tabs.currentChanged.connect(self._tab_changed)
+        pl0.addWidget(self.tabs)
+        self._counts: list[QLabel] = []
 
         # ---- zones
-        zw = QWidget()
-        zl = QVBoxLayout(zw)
+        zw, zl, cnt = self._prop_page("Zones")
+        self._counts.append(cnt)
         self.zone_list = QListWidget()
+        self.zone_list.setMinimumHeight(110)
         self.zone_list.currentRowChanged.connect(lambda r: self._list_row_changed("zone", r))
         zl.addWidget(self.zone_list, 1)
-        f = compact_form()
         self.zone_name = QLineEdit()
         self.zone_name.editingFinished.connect(lambda: self.rename_zone(self.zone_list.currentRow(),
                                                                         self.zone_name.text()))
         self.zone_color = ColorButton("Zone colour")
         self.zone_color.color_changed.connect(lambda c: self.set_item_color("zone", self.zone_list.currentRow(), c))
+        zl.addLayout(_name_row(self.zone_name, self.zone_color))
         self.zone_info = QLabel("—")
+        self.zone_info.setObjectName("Hint")
         self.zone_info.setWordWrap(True)
-        f.addRow("Name", self.zone_name)
-        f.addRow("Colour", self.zone_color)
-        f.addRow("Shape", self.zone_info)
-        self.zone_rule = QComboBox()
-        for k, lbl in ENTRY_RULES.items():
-            self.zone_rule.addItem(lbl, k)
-        self.zone_rule.setToolTip("When is the animal in this zone: by its centre, head or tail base, when a "
-                                  "proportion of its body is inside, or when it is in no other zone")
+        zl.addWidget(self.zone_info)
+        self.zone_hidden = SentenceChoice(ZONE_SENTENCES["hidden"],
+                                          "Hidden zone: the animal cannot be seen in it (nest box, tunnel). When it "
+                                          "disappears in or near this zone it is counted as in the zone rather "
+                                          "than lost.")
+        self.zone_hidden.toggled.connect(
+            lambda on: self.set_zone_property(self.zone_list.currentRow(), "hidden", bool(on)))
+        self.zone_moveable = SentenceChoice(ZONE_SENTENCES["moveable"],
+                                            "Position of the zone remains the same in all tests, or can be "
+                                            "different in each test (e.g. a water-maze platform; set it per test "
+                                            "in the test view)")
+        self.zone_moveable.toggled.connect(
+            lambda on: self.set_zone_property(self.zone_list.currentRow(), "moveable", bool(on)))
+        self.zone_rule = _sentence_combo([(k, ENTRY_SENTENCES.get(k, lbl)) for k, lbl in ENTRY_RULES.items()],
+                                         "When is the animal in this zone: by its centre, head or tail base, when "
+                                         "a proportion of its body is inside, or when it is in no other zone")
         self.zone_rule.currentIndexChanged.connect(
             lambda _: self.set_zone_property(self.zone_list.currentRow(), "entry_rule", self.zone_rule.currentData()))
         self.zone_frac = QSpinBox()
         self.zone_frac.setRange(1, 100)
-        self.zone_frac.setSuffix(" % of body")
+        self.zone_frac.setPrefix("At least ")
+        self.zone_frac.setSuffix(" % of the body in the zone")
         self.zone_frac.valueChanged.connect(
             lambda v: self.set_zone_property(self.zone_list.currentRow(), "body_fraction", v / 100.0))
         self.zone_inv = QDoubleSpinBox()
         self.zone_inv.setRange(0, 10000)
         self.zone_inv.setDecimals(1)
-        self.zone_inv.setSpecialValueText("Off")
+        self.zone_inv.setPrefix("Investigation zone: head within ")
+        self.zone_inv.setSpecialValueText("This is not an investigation zone")
         self.zone_inv.setToolTip("Investigation zone: the animal is in the zone while its head is within this "
                                  "distance of it (e.g. sniffing an object)")
         self.zone_inv.valueChanged.connect(
             lambda v: self.set_zone_property(self.zone_list.currentRow(), "investigation_distance_cm", float(v)))
-        self.zone_hidden = QCheckBox("Hidden zone")
-        self.zone_hidden.setToolTip("The animal cannot be seen in it (nest box, tunnel): when it disappears in or "
-                                    "near this zone it is counted as in the zone rather than lost")
-        self.zone_hidden.toggled.connect(
-            lambda on: self.set_zone_property(self.zone_list.currentRow(), "hidden", bool(on)))
-        self.zone_moveable = QCheckBox("Moveable")
-        self.zone_moveable.setToolTip("The position can differ in each test (e.g. a water-maze platform); set it "
-                                      "per test in the test view")
-        self.zone_moveable.toggled.connect(
-            lambda on: self.set_zone_property(self.zone_list.currentRow(), "moveable", bool(on)))
-        flags = QHBoxLayout()
-        flags.addWidget(self.zone_hidden)
-        flags.addWidget(self.zone_moveable)
-        flags.addStretch()
-        f.addRow("Entry", self.zone_rule)
-        f.addRow("", self.zone_frac)
-        f.addRow("Investigate", self.zone_inv)
-        f.addRow("", flags)
-        zl.addLayout(f)
-        zr = QHBoxLayout()
+        for wdg in (self.zone_hidden, self.zone_moveable, self.zone_rule, self.zone_frac, self.zone_inv):
+            zl.addWidget(wdg)
         self.btn_zone_dup = QPushButton("Duplicate")
         self.btn_zone_dup.clicked.connect(lambda: self.duplicate_zone(self.zone_list.currentRow()))
         self.btn_zone_arena = QPushButton("Use as arena")
@@ -1570,154 +1954,154 @@ class ApparatusPage(Page):
         self.btn_zone_arena.clicked.connect(lambda: self.zone_to_arena(self.zone_list.currentRow()))
         self.btn_zone_del = QPushButton("Delete")
         self.btn_zone_del.clicked.connect(lambda: self.delete_item("zone", self.zone_list.currentRow()))
-        self.btn_grid_del = QPushButton("Delete grid")
+        zl.addLayout(_button_row(self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del))
+        self.btn_grid_del = QPushButton("Delete the whole grid")
         self.btn_grid_del.setToolTip("Delete the whole grid this zone belongs to")
         self.btn_grid_del.clicked.connect(lambda: self.delete_grid_of(self.zone_list.currentRow()))
-        for b in (self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del, self.btn_grid_del):
-            zr.addWidget(b)
-        zl.addLayout(zr)
-        arena_box = QGroupBox("Arena boundary")
-        abl = QVBoxLayout(arena_box)
+        zl.addLayout(_button_row(self.btn_grid_del))
+        zl.addSpacing(4)
+        zl.addWidget(_separator())
+        h = QLabel("Arena boundary")
+        h.setObjectName("PropSubheading")
+        zl.addWidget(h)
         self.arena_info = QLabel()
         self.arena_info.setWordWrap(True)
-        abl.addWidget(self.arena_info)
-        ar = QHBoxLayout()
-        ar.addStretch()
+        zl.addWidget(self.arena_info)
         self.btn_arena_sel = QPushButton("Select")
-        self.btn_arena_sel.setToolTip("Select the arena boundary on the image")
+        self.btn_arena_sel.setToolTip("Select the arena boundary on the map")
         self.btn_arena_sel.clicked.connect(lambda: self.select_item("arena", 0))
         self.btn_arena_clear = QPushButton("Remove")
         self.btn_arena_clear.clicked.connect(lambda: self.delete_item("arena", 0))
-        ar.addWidget(self.btn_arena_sel)
-        ar.addWidget(self.btn_arena_clear)
-        abl.addLayout(ar)
-        zl.addWidget(arena_box)
+        zl.addLayout(_button_row(self.btn_arena_sel, self.btn_arena_clear))
         self.tabs.addTab(zw, "Zones")
 
         # ---- points
-        pw = QWidget()
-        pl = QVBoxLayout(pw)
+        pw, pl, cnt = self._prop_page("Points")
+        self._counts.append(cnt)
         self.point_list = QListWidget()
+        self.point_list.setMinimumHeight(110)
         self.point_list.currentRowChanged.connect(lambda r: self._list_row_changed("point", r))
         pl.addWidget(self.point_list, 1)
-        f = compact_form()
         self.point_name = QLineEdit()
         self.point_name.editingFinished.connect(lambda: self.rename_point(self.point_list.currentRow(),
                                                                           self.point_name.text()))
         self.point_color = ColorButton("Point colour")
         self.point_color.color_changed.connect(lambda c: self.set_item_color("point", self.point_list.currentRow(), c))
+        pl.addLayout(_name_row(self.point_name, self.point_color))
         self.point_radius = QDoubleSpinBox()
         self.point_radius.setRange(0, 1000)
         self.point_radius.setDecimals(1)
+        self.point_radius.setPrefix("Near the point: within ")
         self.point_radius.setSuffix(" cm")
         self.point_radius.setToolTip("Distance counted as 'near' the point (object exploration, platform proximity)")
         self.point_radius.valueChanged.connect(self._point_radius_changed)
+        pl.addWidget(self.point_radius)
         self.point_x = QDoubleSpinBox()
         self.point_y = QDoubleSpinBox()
-        for s in (self.point_x, self.point_y):
+        xy = QHBoxLayout()
+        xy.setSpacing(6)
+        xy.addWidget(QLabel("Position"))
+        for s, pre in ((self.point_x, "x "), (self.point_y, "y ")):
             s.setRange(-100000, 100000)
             s.setDecimals(1)
+            s.setPrefix(pre)
             s.setSuffix(" px")
             s.valueChanged.connect(self._point_xy_changed)
-        f.addRow("Name", self.point_name)
-        f.addRow("Colour", self.point_color)
-        f.addRow("Radius", self.point_radius)
-        f.addRow("X", self.point_x)
-        f.addRow("Y", self.point_y)
-        pl.addLayout(f)
+            xy.addWidget(s, 1)
+        pl.addLayout(xy)
         self.btn_point_del = QPushButton("Delete point")
         self.btn_point_del.clicked.connect(lambda: self.delete_item("point", self.point_list.currentRow()))
-        pl.addWidget(self.btn_point_del)
+        pl.addLayout(_button_row(self.btn_point_del))
+        pl.addStretch()
         self.tabs.addTab(pw, "Points")
 
         # ---- lines
-        lw = QWidget()
-        ll = QVBoxLayout(lw)
+        lw, ll, cnt = self._prop_page("Lines")
+        self._counts.append(cnt)
         self.line_list = QListWidget()
+        self.line_list.setMinimumHeight(110)
         self.line_list.currentRowChanged.connect(lambda r: self._list_row_changed("line", r))
         ll.addWidget(self.line_list, 1)
-        f = compact_form()
         self.line_name = QLineEdit()
         self.line_name.editingFinished.connect(lambda: self.rename_line(self.line_list.currentRow(),
                                                                         self.line_name.text()))
         self.line_color = ColorButton("Line colour")
         self.line_color.color_changed.connect(lambda c: self.set_item_color("line", self.line_list.currentRow(), c))
+        ll.addLayout(_name_row(self.line_name, self.line_color))
         self.line_info = QLabel("—")
-        f.addRow("Name", self.line_name)
-        f.addRow("Colour", self.line_color)
-        f.addRow("Length", self.line_info)
-        ll.addLayout(f)
+        self.line_info.setObjectName("Hint")
+        ll.addWidget(self.line_info)
         self.btn_line_del = QPushButton("Delete line")
         self.btn_line_del.clicked.connect(lambda: self.delete_item("line", self.line_list.currentRow()))
-        ll.addWidget(self.btn_line_del)
+        ll.addLayout(_button_row(self.btn_line_del))
+        ll.addStretch()
         self.tabs.addTab(lw, "Lines")
 
         # ---- groups
-        gw = QWidget()
-        gl = QVBoxLayout(gw)
+        gw, gl, cnt = self._prop_page("Zone groups")
+        self._counts.append(cnt)
         self.group_list = QListWidget()
-        self.group_list.setMaximumHeight(130)
+        self.group_list.setMaximumHeight(120)
         self.group_list.currentRowChanged.connect(self._group_row_changed)
         gl.addWidget(self.group_list)
-        gr = QHBoxLayout()
         self.btn_group_add = QPushButton("Add group")
         self.btn_group_add.clicked.connect(lambda: self.add_group())
         self.btn_group_del = QPushButton("Delete")
         self.btn_group_del.clicked.connect(lambda: self.delete_group(self.group_list.currentRow()))
-        gr.addWidget(self.btn_group_add)
-        gr.addWidget(self.btn_group_del)
-        gl.addLayout(gr)
-        f = compact_form()
+        gl.addLayout(_button_row(self.btn_group_add, self.btn_group_del))
         self.group_name = QLineEdit()
         self.group_name.editingFinished.connect(lambda: self.rename_group(self.group_list.currentRow(),
                                                                          self.group_name.text()))
-        f.addRow("Name", self.group_name)
-        gl.addLayout(f)
-        gl.addWidget(QLabel("Zones included:"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Name"))
+        row.addWidget(self.group_name, 1)
+        gl.addLayout(row)
+        gl.addWidget(_caption("The group is made of these zones"))
         self.group_inc = QListWidget()
+        self.group_inc.setMinimumHeight(90)
         self.group_inc.itemChanged.connect(self._group_members_changed)
         gl.addWidget(self.group_inc, 1)
-        gl.addWidget(QLabel("Minus these zones:"))
+        gl.addWidget(_caption("…minus these zones"))
         self.group_exc = QListWidget()
+        self.group_exc.setMinimumHeight(90)
         self.group_exc.itemChanged.connect(self._group_members_changed)
         gl.addWidget(self.group_exc, 1)
         self.tabs.addTab(gw, "Groups")
 
         # ---- sequences
-        sw = QWidget()
-        sl = QVBoxLayout(sw)
+        sw, sl, cnt = self._prop_page("Sequences")
+        self._counts.append(cnt)
         self.seq_list = QListWidget()
-        self.seq_list.setMaximumHeight(110)
+        self.seq_list.setMaximumHeight(96)
         self.seq_list.currentRowChanged.connect(self._seq_row_changed)
         sl.addWidget(self.seq_list)
-        sr = QHBoxLayout()
         self.btn_seq_add = QPushButton("Add sequence")
         self.btn_seq_add.clicked.connect(lambda: self.add_sequence())
         self.btn_seq_del = QPushButton("Delete")
         self.btn_seq_del.clicked.connect(lambda: self.delete_sequence(self.seq_list.currentRow()))
-        sr.addWidget(self.btn_seq_add)
-        sr.addWidget(self.btn_seq_del)
-        sl.addLayout(sr)
-        f = compact_form()
+        sl.addLayout(_button_row(self.btn_seq_add, self.btn_seq_del))
         self.seq_name = QLineEdit()
         self.seq_name.editingFinished.connect(lambda: self.rename_sequence(self.seq_list.currentRow(),
                                                                           self.seq_name.text()))
-        f.addRow("Name", self.seq_name)
-        sl.addLayout(f)
-        sl.addWidget(QLabel("Steps (zones in order):"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Name"))
+        row.addWidget(self.seq_name, 1)
+        sl.addLayout(row)
+        sl.addWidget(_caption("The animal visits these zones in order"))
         self.seq_steps = QListWidget()
+        self.seq_steps.setMinimumHeight(96)
         sl.addWidget(self.seq_steps, 1)
-        st = QHBoxLayout()
         self.seq_zone = QComboBox()
         self.seq_zone.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.seq_zone.setMinimumContentsLength(8)
-        self.btn_step_add = QPushButton("Add")
+        self.btn_step_add = QPushButton("Add step")
         self.btn_step_add.clicked.connect(lambda: self.add_sequence_step(self.seq_list.currentRow(),
                                                                          self.seq_zone.currentText()))
+        st = QHBoxLayout()
+        st.setSpacing(6)
         st.addWidget(self.seq_zone, 1)
         st.addWidget(self.btn_step_add)
         sl.addLayout(st)
-        st2 = QHBoxLayout()
         self.btn_step_up = QPushButton("Up")
         self.btn_step_up.clicked.connect(lambda: self.move_sequence_step(self.seq_list.currentRow(),
                                                                          self.seq_steps.currentRow(), -1))
@@ -1727,37 +2111,39 @@ class ApparatusPage(Page):
         self.btn_step_del = QPushButton("Remove")
         self.btn_step_del.clicked.connect(lambda: self.remove_sequence_step(self.seq_list.currentRow(),
                                                                             self.seq_steps.currentRow()))
-        for b in (self.btn_step_up, self.btn_step_down, self.btn_step_del):
-            st2.addWidget(b)
-        sl.addLayout(st2)
-        self.seq_from_start = QCheckBox("Must begin at the first step")
-        self.seq_from_start.setToolTip("Unchecked: any rotation of the steps counts (e.g. ABC, BCA, CAB)")
-        self.seq_allow_other = QCheckBox("Other zones allowed between steps")
-        self.seq_bidir = QCheckBox("Both directions")
-        self.seq_overlap = QCheckBox("Sequences may overlap")
-        self.seq_overlap.setToolTip("Sliding window: A B C A contains A B C and B C A")
-        for w, attr in ((self.seq_from_start, "from_start"), (self.seq_allow_other, "allow_other"),
-                        (self.seq_bidir, "bidirectional"), (self.seq_overlap, "overlap")):
-            w.toggled.connect(lambda on, a=attr: self.set_sequence_option(self.seq_list.currentRow(), a, bool(on)))
-            sl.addWidget(w)
-        f = compact_form()
-        self.seq_end = QComboBox()
-        for k, lbl in SEQ_END.items():
-            self.seq_end.addItem(lbl, k)
+        sl.addLayout(_button_row(self.btn_step_up, self.btn_step_down, self.btn_step_del))
+        sl.addSpacing(2)
+        self.seq_from_start = SentenceChoice(SEQ_SENTENCES["from_start"],
+                                             "Can begin at any step: any rotation of the steps counts (e.g. ABC, "
+                                             "BCA, CAB)")
+        self.seq_allow_other = SentenceChoice(SEQ_SENTENCES["allow_other"])
+        self.seq_bidir = SentenceChoice(SEQ_SENTENCES["bidirectional"],
+                                        "Either direction: the reversed order also counts (e.g. CBA)")
+        self.seq_overlap = SentenceChoice(SEQ_SENTENCES["overlap"], "Overlapping (sliding window): A B C A "
+                                                                    "contains A B C and B C A")
+        for wdg, attr in ((self.seq_from_start, "from_start"), (self.seq_allow_other, "allow_other"),
+                          (self.seq_bidir, "bidirectional"), (self.seq_overlap, "overlap")):
+            wdg.toggled.connect(lambda on, a=attr: self.set_sequence_option(self.seq_list.currentRow(), a, bool(on)))
+            sl.addWidget(wdg)
+        self.seq_end = _sentence_combo(SEQ_END.items())
         self.seq_end.currentIndexChanged.connect(
             lambda _: self.set_sequence_option(self.seq_list.currentRow(), "end", self.seq_end.currentData()))
+        sl.addWidget(self.seq_end)
         self.seq_max = QDoubleSpinBox()
         self.seq_max.setRange(0, 1e6)
         self.seq_max.setDecimals(1)
+        self.seq_max.setPrefix("Must be completed within ")
         self.seq_max.setSuffix(" s")
-        self.seq_max.setSpecialValueText("No limit")
+        self.seq_max.setSpecialValueText("No time limit")
         self.seq_max.valueChanged.connect(
             lambda v: self.set_sequence_option(self.seq_list.currentRow(), "max_duration_s", float(v)))
-        f.addRow("Complete", self.seq_end)
-        f.addRow("Time limit", self.seq_max)
-        sl.addLayout(f)
+        sl.addWidget(self.seq_max)
         self.tabs.addTab(sw, "Sequences")
-        return self.tabs
+        # long sentences must not widen the panel: let inputs shrink to the panel width
+        for wdg in panel.findChildren(QWidget):
+            if isinstance(wdg, (QComboBox, QDoubleSpinBox, QSpinBox, QLineEdit)):
+                wdg.setMinimumWidth(60)
+        return panel
 
     # ============================================================ page API
     @property
@@ -1774,8 +2160,8 @@ class ApparatusPage(Page):
         self._undo.clear()
         self._redo.clear()
         self._pending_template = None
-        self.view.set_tool("select")
-        self.tool_actions["select"].setChecked(True)
+        self._explorer_names = None
+        self.set_tool("select")
         self._refresh_app_list(select_row=0)
         self._refresh_test_combo()
 
@@ -1828,10 +2214,12 @@ class ApparatusPage(Page):
         self.app_list.setCurrentRow(row)
         self._loading = False
         self._app_selected()
+        self._sync_explorer()
 
     def _app_row_changed(self, _row):
         if not self._loading:
             self._app_selected()
+            self._sync_explorer()
 
     def _app_selected(self):
         app = self.app
@@ -1843,14 +2231,16 @@ class ApparatusPage(Page):
         self._refresh_info()
 
     def _set_enabled(self, on: bool):
-        for a in list(self.tool_actions.values()) + [self.undo_act, self.redo_act, self.grid_act, self.copy_act,
-                                                     self.paste_act]:
+        for a in list(self.tool_actions.values()) + [
+                self.undo_act, self.redo_act, self.grid_act, self.copy_act, self.paste_act, self.dup_act,
+                self.ren_act, self.del_act, self.bg_act, self.testvid_act, self.clear_cal_act, self.select_all_act,
+                self.delete_sel_act, self.group_act, self.seq_act]:
             a.setEnabled(on)
-        for w in (self.tabs, self.btn_dup, self.btn_ren, self.btn_del, self.btn_bg, self.test_combo,
-                  self.time_slider, self.time_spin, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
+        for w in (self.tabs, self.test_combo, self.time_slider, self.time_spin, self.ppc_spin, self.btn_cal,
+                  self.btn_cal_clear):
             w.setEnabled(on)
-        self.btn_add.setEnabled(self.project is not None)
-        self.btn_tpl.setEnabled(self.project is not None)
+        self.new_act.setEnabled(self.project is not None)
+        self.tpl_act.setEnabled(self.project is not None)
 
     def _names(self, exclude: Apparatus | None = None):
         return [a.name for a in self.project.apparatus if a is not exclude]
@@ -1937,9 +2327,10 @@ class ApparatusPage(Page):
 
     def _refresh_info(self):
         app = self.app
+        self.page_title.setText(app.name if app is not None else "Apparatus")
         if app is None:
-            self.app_info.setText("No apparatus yet. Create one from a template (recommended) or add an empty "
-                                  "one and draw the zones yourself." if self.project else "")
+            self.app_info.setText("No apparatus yet — choose Create from template (recommended) or New apparatus "
+                                  "in the ribbon." if self.project else "")
             self.cal_label.setText("")
             self.arena_info.setText("")
             self._update_tab_titles()
@@ -1947,9 +2338,8 @@ class ApparatusPage(Page):
         info = TEMPLATES.get(app.template)
         n = sum(1 for t in self.project.tests if t.apparatus == app.name)
         fs = f"{app.frame_size[0]}×{app.frame_size[1]} px" if app.frame_size else "frame size unknown"
-        self.app_info.setText(f"Template: {info.title if info else app.template}<br>"
-                              f"{len(app.zones)} zones · {len(app.points)} points · {len(app.lines)} lines<br>"
-                              f"Used by {n} test(s) · {fs}")
+        self.app_info.setText(f"{info.title if info else app.template} template · used by {n} test"
+                              f"{'' if n == 1 else 's'} · {fs}")
         self.arena_info.setText(describe_shape(app.arena, app) if app.arena is not None else
                                 "Not set — draw it with the Arena tool. Without an arena the tracker searches "
                                 "the whole frame.")
@@ -1964,22 +2354,24 @@ class ApparatusPage(Page):
         if app is not None and app.px_per_cm:
             extra = ""
             if app.calibration_line and app.calibration_length_cm:
-                extra = f"<br><span style='color:gray'>from a {app.calibration_length_cm:g} cm line</span>"
+                extra = f"ruler on a {app.calibration_length_cm:g} cm line"
             elif app.calibration_length_cm:
-                extra = f"<br><span style='color:gray'>from template ({app.calibration_length_cm:g} cm wide)</span>"
-            self.cal_label.setText(f"<b>1 cm = {app.px_per_cm:.2f} px</b>{extra}")
+                extra = f"template, {app.calibration_length_cm:g} cm wide"
+            self.cal_label.setText(f"1 cm = {app.px_per_cm:.2f} px"
+                                   + (f" <span style='color:{theme.MUTED}'>· {extra}</span>" if extra else ""))
             self.ppc_spin.setValue(app.px_per_cm)
         else:
-            self.cal_label.setText("<b style='color:#d97706'>Not calibrated</b> (results in pixels)")
+            self.cal_label.setText("<span style='color:#c2410c'>Not calibrated</span> "
+                                   f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
             self.ppc_spin.setValue(0)
         self._loading = was
 
     def _update_tab_titles(self):
         app = self.app
-        for i, (lbl, lst) in enumerate((("Zones", "zones"), ("Points", "points"), ("Lines", "lines"),
-                                        ("Groups", "groups"), ("Sequences", "sequences"))):
+        for i, (one, lst) in enumerate((("zone", "zones"), ("point", "points"), ("line", "lines"),
+                                        ("group", "groups"), ("sequence", "sequences"))):
             n = len(getattr(app, lst)) if app else 0
-            self.tabs.setTabText(i, f"{lbl} {n}" if n else lbl)
+            self._counts[i].setText(f"{n} {one}{'' if n == 1 else 's'}" if app else "")
 
     # ============================================================ background
     def _real_frame_size(self):
@@ -2015,8 +2407,8 @@ class ApparatusPage(Page):
         self.time_slider.setRange(0, 0)
         self.time_spin.setRange(0, 0)
         self._loading = was
-        self.bg_label.setText("No background image." if app is None or not app.frame_size else
-                              f"No background image ({w}×{h} px).")
+        self.bg_label.setText("No background image")
+        self.bg_label.setToolTip("" if app is None or not app.frame_size else f"Frame size {w}×{h} px")
 
     def load_background(self, path: str, t: float = 0.0, quiet: bool = False) -> bool:
         """Show the frame at time t of a video as the background for the current apparatus."""
@@ -2129,6 +2521,8 @@ class ApparatusPage(Page):
         self._root.setZValue(0)
         sc.addItem(self._root)
         self._items = {}
+        self.ruler = None
+        self.ruler_label = None
         app = self.app
         if app is not None:
             if app.arena is not None:
@@ -2151,22 +2545,60 @@ class ApparatusPage(Page):
                 self._items[("point", i)] = it
             if app.calibration_line:
                 x1, y1, x2, y2 = app.calibration_line
-                ln = QGraphicsLineItem(x1, y1, x2, y2, self._root)
-                pen = QPen(QColor("#facc15"), 1.5, Qt.DashDotLine)
-                pen.setCosmetic(True)
-                ln.setPen(pen)
-                ln.setZValue(45)
-                ln.setAcceptedMouseButtons(Qt.NoButton)
+                self.ruler = RulerItem(x1, y1, x2, y2, app.px_per_cm, self._root)
+                self.ruler.setZValue(45)
                 if app.calibration_length_cm:
-                    lb = Label(f"{app.calibration_length_cm:g} cm", self._root, "#facc15")
+                    lb = Label(f"{app.calibration_length_cm:g} cm", self._root, theme.RULER, anchor="top")
                     lb.setPos((x1 + x2) / 2, (y1 + y2) / 2)
                     lb.setZValue(46)
                     lb.setVisible(self.show_labels)
+                    self.ruler_label = lb
         if sel is not None and sel in self._items:
             self._items[sel].setSelected(True)
         self._syncing = False
         self._seq_overlay = None
         self._draw_sequence_overlay()
+        self.schedule_cull()
+
+    def schedule_cull(self):
+        if hasattr(self, "_cull_timer") and not self._cull_timer.isActive():
+            self._cull_timer.start()
+
+    def _cull_labels(self):
+        """Hide name tags that would overlap a more important one: the selected object first, then points,
+        lines, the ruler and smaller zones — so the map stays readable with many zones (e.g. grids)."""
+        v = self.view
+        labels = []
+        for (kind, _), it in self._items.items():
+            lb = getattr(it, "label", None)
+            if lb is None or lb.scene() is None:
+                continue
+            if it.isSelected():
+                prio = (0, 0.0)
+            elif kind == "zone":
+                prio = (3, it.get_shape().area())
+            else:
+                prio = (1 if kind == "point" else 2, 0.0)
+            labels.append((prio, lb))
+        if self.ruler_label is not None and self.ruler_label.scene() is not None:
+            labels.append(((2, 0.0), self.ruler_label))
+        labels.sort(key=lambda t: t[0])
+        placed: list[QRectF] = []
+        if self._seq_overlay is not None:  # sequence step badges stay readable
+            for ch in self._seq_overlay.childItems():
+                if isinstance(ch, Badge):
+                    q = v.mapFromScene(ch.scenePos())
+                    placed.append(ch.boundingRect().translated(q.x(), q.y()))
+        for _, lb in labels:
+            if not self.show_labels or not lb.text:
+                lb.setVisible(False)
+                continue
+            q = v.mapFromScene(lb.scenePos())
+            r = lb.boundingRect().translated(q.x(), q.y())
+            ok = not any(r.intersects(o) for o in placed)
+            lb.setVisible(ok)
+            if ok:
+                placed.append(r.adjusted(-3, -1, 3, 1))
 
     def _step_centre(self, name: str):
         app = self.app
@@ -2180,7 +2612,8 @@ class ApparatusPage(Page):
         return float(np.mean([p[0] for p in pts])), float(np.mean([p[1] for p in pts]))
 
     def _draw_sequence_overlay(self):
-        """Numbered arrows between the steps of the selected sequence (while the Sequences tab is shown)."""
+        """White arrows between the steps of the selected sequence, with numbered badges (while the Sequences
+        page is shown), like the arrows in ANY-maze's sequence pictures."""
         if self._seq_overlay is not None and self._seq_overlay.scene() is not None:
             self.view.scene().removeItem(self._seq_overlay)
         self._seq_overlay = None
@@ -2194,33 +2627,42 @@ class ApparatusPage(Page):
         root.setZValue(60)
         root.setAcceptedMouseButtons(Qt.NoButton)
         self._seq_overlay = root
-        col = QColor("#facc15")
         path = QPainterPath()
-        L = max(8.0, 0.025 * max(self.view.frame_size or (640, 480)))
+        L = max(8.0, 0.03 * max(self.view.frame_size or (640, 480)))
         for (x0, y0), (x1, y1) in zip(cents, cents[1:]):
             d = math.hypot(x1 - x0, y1 - y0)
             if d < 1e-6:
                 continue
             ux, uy = (x1 - x0) / d, (y1 - y0) / d
-            sh = min(0.18 * d, 2.2 * L)
+            sh = min(0.2 * d, 2.4 * L)
             a, b = QPointF(x0 + ux * sh, y0 + uy * sh), QPointF(x1 - ux * sh, y1 - uy * sh)
             path.moveTo(a)
             path.lineTo(b)
             for sgn in (1, -1):
                 path.moveTo(b)
-                path.lineTo(b.x() - L * ux + sgn * 0.5 * L * uy, b.y() - L * uy - sgn * 0.5 * L * ux)
+                path.lineTo(b.x() - L * ux + sgn * 0.6 * L * uy, b.y() - L * uy - sgn * 0.6 * L * ux)
+        shadow = QGraphicsPathItem(path, root)
+        sp = QPen(QColor(15, 23, 42, 90), 6)
+        sp.setCosmetic(True)
+        sp.setCapStyle(Qt.RoundCap)
+        sp.setJoinStyle(Qt.RoundJoin)
+        shadow.setPen(sp)
+        shadow.setAcceptedMouseButtons(Qt.NoButton)
+        shadow.setFlag(QGraphicsItem.ItemStacksBehindParent)
         root.setPath(path)
-        pen = QPen(col, 3)
+        pen = QPen(QColor("#ffffff"), 3.2)
         pen.setCosmetic(True)
         pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
         root.setPen(pen)
         for i, (x, y) in enumerate(cents):
-            lb = Label(f"{i + 1}", root, "#facc15")
-            lb.setPos(x, y)
-            lb.setZValue(61)
+            bd = Badge(f"{i + 1}", root)
+            bd.setPos(x, y)
+            bd.setZValue(61)
         if q.bidirectional and len(cents) > 1:
-            lb = Label("both directions", root, "#facc15", anchor="right")
+            lb = Label("both directions", root, theme.HEADING, anchor="right")
             lb.setPos(*cents[0])
+        self.schedule_cull()
 
     def _declutter_labels(self, order):
         """Zones sharing a centre (e.g. Arena around Centre) get their label at the top edge instead."""
@@ -2282,6 +2724,73 @@ class ApparatusPage(Page):
         self.arena_shape = shape
         self.arena_actions[shape].setChecked(True)
         self.set_tool("arena")
+
+    def select_all(self) -> int:
+        """Select every zone, point and line of the map (not the arena boundary)."""
+        self.set_tool("select")
+        self._syncing = True
+        for (kind, _), it in self._items.items():
+            it.setSelected(kind != "arena")
+        self._syncing = False
+        self._sync_lists_from_canvas()
+        return sum(1 for it in self._items.values() if it.isSelected())
+
+    def _toggle_snap(self, on: bool):
+        self.snap_enabled = bool(on)
+
+    def snap(self, p: QPointF, exclude=None) -> QPointF:
+        """"Points attract": the nearest corner of another object within 8 screen pixels, else p itself."""
+        app = self.app
+        if not self.snap_enabled or app is None:
+            return p
+        tol = 8.0 / (self.view.transform().m11() or 1.0)
+        best, bd = None, tol
+        for it in self._items.values():
+            if it is exclude:
+                continue
+            if isinstance(it, ShapeItem):
+                s = it.get_shape()
+                cands = it.handle_points() + ([(s.cx, s.cy)] if isinstance(s, Ellipse) else [])
+            elif isinstance(it, LineItem):
+                m = it.model
+                cands = [(m.x1, m.y1), (m.x2, m.y2)]
+            else:
+                cands = [(it.model.x, it.model.y)]
+            for x, y in cands:
+                d = math.hypot(x - p.x(), y - p.y())
+                if d < bd:
+                    best, bd = (x, y), d
+        return QPointF(*best) if best is not None else p
+
+    def show_context_menu(self, global_pos):
+        """Right-click menu of the map (select tool)."""
+        m = QMenu(self)
+        has_sel = self.selected_key() is not None
+        for a, on in ((self.copy_act, has_sel), (self.paste_act, bool(ApparatusPage._clipboard)),
+                      (self.delete_sel_act, has_sel)):
+            m.addAction(a)
+            a.setEnabled(on and self.app is not None)
+        m.addSeparator()
+        for a in (self.select_all_act, self.undo_act, self.redo_act, self.fit_act):
+            m.addAction(a)
+        m.exec(global_pos)
+        for a in (self.copy_act, self.paste_act, self.delete_sel_act):
+            a.setEnabled(self.app is not None)
+
+    def _fill_test_menu(self):
+        m = self.testvid_menu
+        m.clear()
+        p = self.project
+        tests = [t for t in (p.tests if p else []) if t.video]
+        if not tests:
+            a = m.addAction("No test has a video yet")
+            a.setEnabled(False)
+            return
+        cur = self.app
+        for t in tests:
+            a = m.addAction(icon("video"), f"Test {t.id}: {t.animal_id or '—'} · {Path(t.video).name}"
+                            + ("  (this apparatus)" if cur is not None and t.apparatus == cur.name else ""))
+            a.triggered.connect(lambda _=False, tid=t.id: self.use_test_video(tid))
 
     def show_measure(self, text: str):
         self.measure.setText(text)
@@ -3009,6 +3518,7 @@ class ApparatusPage(Page):
         self.zone_rule.setCurrentIndex(max(0, self.zone_rule.findData(z.entry_rule if z else "")))
         self.zone_frac.setValue(int(round((z.body_fraction if z else 0.8) * 100)))
         self.zone_frac.setEnabled(z is not None and z.entry_rule == "body")
+        self.zone_frac.setVisible(z is not None and z.entry_rule == "body")
         self.zone_inv.setValue(z.investigation_distance_cm if z else 0.0)
         self.zone_inv.setSuffix(f" {app.unit}" if app is not None else " cm")
         self.zone_hidden.setChecked(bool(z and z.hidden))

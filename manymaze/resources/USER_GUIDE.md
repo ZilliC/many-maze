@@ -1,8 +1,30 @@
 # mANY-MAZE user guide
 
-mANY-MAZE is a libre (GPL-3.0-or-later) video-tracking and behavioural-analysis suite. It follows the
-workflow of commercial packages such as ANY-maze: **experiment → animals → apparatus → tests → tracking /
-scoring → results → statistics**. Every page is reachable from the sidebar (or ⌘1 … ⌘8).
+mANY-MAZE is a libre (GPL-3.0-or-later) video-tracking and behavioural-analysis suite designed as a drop-in
+replacement for ANY-maze: the window, the tabs, the terminology and the workflow follow ANY-maze, so ANY-maze users
+can start right away — **Protocol → Experiment → Test → Results**.
+
+## The window
+
+* **Ribbon** — the tabs **File · Protocol · Experiment · Test · Results · Help** each show a ribbon of commands,
+  grouped like in ANY-maze (e.g. *Apparatus map*, *Navigation*, *Clipboard*, *Spreadsheet*, *All apparatus*). The
+  commands change with the page you are on. The save button is at the top right (⌘S / Ctrl+S).
+* **File** (the blue tab) — new / open / demo experiment, save, close, recent experiments, *Import from ANY-maze*
+  (animals, treatments and test schedules from spreadsheets saved by ANY-maze), user guide.
+* **Explorer** — the list on the left of each tab: the protocol elements (Protocol, Animal tracking, Stages, Keys,
+  Procedures, Analysis, Hardware), each apparatus, the treatments and animals, the test schedule / run tests /
+  review pages, the result views (Spreadsheet, Track plots, Heat maps, Charts, Video export) and the statistical
+  analyses.
+
+| ANY-maze | mANY-MAZE |
+| --- | --- |
+| Protocol ▸ Protocol, Animal tracking, Stages, Keys, Procedures | Protocol tab — the same elements |
+| Protocol ▸ Apparatus (apparatus map, zones, points, sequences) | Protocol ▸ Apparatus |
+| Experiment ▸ View treatments / View animals | Experiment tab |
+| Test ▸ test schedule, running tests (panels), TakeNote | Test ▸ Test schedule, Run tests, Review and score |
+| Results ▸ data spreadsheet, track plots, statistics | Results ▸ Data, Statistics |
+| Treatment | Treatment (stored as the animal's group) |
+| Keys: Simple / Toggle / Radio | Keys: Simple (while pressed) / Toggle / Radio / Event |
 
 ---
 
@@ -17,7 +39,7 @@ relative path when they live inside the experiment folder, so the folder can be 
 *File ▸ Create demo experiment* builds a complete open-field experiment from synthetic videos so you can try
 everything without a camera.
 
-### Experiment page
+### Protocol tab
 
 * **Test duration** – analysed length of each test (0 = until the end of the video).
 * **Test starts** – at each test's *start time* (set per test) or automatically **when the animal is first
@@ -34,9 +56,9 @@ everything without a camera.
 * **Analysis settings** – thresholds for mobility, freezing, zone entries, thigmotaxis, object exploration,
   social contact and time bins.
 
-## 2. Animals and groups
+## 2. Experiment tab: treatments and animals
 
-Add animals one by one or in bulk, assign **groups** (treatments/genotypes, each with a colour used in all
+Add animals one by one or in bulk, assign **treatments** (groups/genotypes, each with a colour used in all
 graphs), sex and any number of custom columns (age, weight, litter…). Animals can be imported from / exported
 to CSV (`ID, Group, Sex, …`).
 
@@ -95,7 +117,7 @@ leaving the last step, time limit. Entering a step zone out of order is an error
 completed, attempts, incomplete, errors, completion %, latency to first, first/mean/min/max duration, mean time
 between, rate, total time in sequences, completed reversed.
 
-## 4. Tests
+## 4. Test schedule
 
 A test = one animal × one video (or live recording) × one apparatus × stage/trial. Use *Add tests from
 videos…* to import many videos at once. Tests can also be created without a video (for live testing or manual
@@ -107,7 +129,7 @@ done elsewhere.
 **Variables…** (toolbar or right-click) sets per-test variables that change the analysis: which point of
 interest is the *novel object* (novel object recognition) and the *social stimulus side* (three-chamber).
 
-## 5. Test view — review, tune, score
+## 5. Review and score
 
 * **Video + overlay**: zones, current position, head (red), tail (blue) and trail.
 * **Detection preview**: shows the foreground mask live while you tune settings for this test. Typical
@@ -181,7 +203,7 @@ Define behaviours on the **Experiment** page (*Manually scored behaviours*):
 
 Problems (duplicate keys, unusable keys, more than 46 keys) are listed in red under the table.
 
-#### Scoring in the Test view
+#### Scoring in the Review and score page
 
 Open a test and choose the **Scoring** tab.
 
@@ -193,7 +215,7 @@ Open a test and choose the **Scoring** tab.
 - Scored events are listed with their start, end and duration; click one to jump to it, delete selected events, or
   clear them all. Behaviours still running when you leave the test are closed at the current time.
 - To score several behaviours in repeated viewings, simply replay the video and score other keys: events accumulate.
-- **Notes** for the test can be read and edited under the event list (also editable on the Tests page).
+- **Notes** for the test can be read and edited under the event list (also editable on the Test schedule).
 
 Scoring a video that has not been tracked gives the test the status **scored**; its results then contain the
 behaviour measures only (count, duration, % of test, latency, mean bout, rate). A tracked test keeps the status
@@ -203,7 +225,7 @@ behaviour measures only (count, duration, % of test, latency, mean bout, rate). 
 
 A test without a video (e.g. created with **Add test** or **Schedule…**) can be scored live, with just a timer:
 
-1. Open it in the Test view; the Scoring tab shows the **Observation clock**.
+1. Open it in the Review and score page; the Scoring tab shows the **Observation clock**.
 2. Press **Start**, then score with the keys or buttons as you watch the animal. **Pause** freezes the test time;
    **Resume** continues it.
 3. Press **Stop** (or let the clock reach the test duration). Running behaviours are closed, the observed duration is
@@ -213,7 +235,7 @@ Starting the clock again on a scored test asks whether to delete the previous ev
 
 ### Stages, trials and schedules
 
-- Up to **50 stages** (Experiment page, one per line) and **1–99 trials** per stage.
+- Up to **50 stages** (Protocol tab, one per line) and **1–99 trials** per stage.
 - **Tests → Schedule…** creates tests without video for the chosen animals × stages × trials, in running order:
   - *By animal* — all trials of an animal, then the next animal;
   - *By trial* — trial 1 of every animal, then trial 2, …;
@@ -225,7 +247,7 @@ Starting the clock again on a scored test asks whether to delete the previous ev
 - Combinations that already have a test, retired animals and stages an animal has completed (training criteria) are
   skipped. Animal, stage, trial and apparatus of each test can still be edited by hand afterwards.
 
-### Test status actions (Tests page)
+### Test status actions (Test schedule)
 
 | Status | Meaning |
 |---|---|
@@ -243,7 +265,7 @@ Starting the clock again on a scored test asks whether to delete the previous ev
 
 ### Training criteria
 
-On the Experiment page (*Training criteria*) add, per stage, a condition on a result measure, e.g.
+On the Protocol tab (*Training criteria*) add, per stage, a condition on a result measure, e.g.
 *Training: Escape latency (s) < 10 on 3 consecutive trials; retire after 10 trials*:
 
 - **Measure** — any column of the results (or a procedure result variable), whole-test value.
@@ -252,7 +274,7 @@ On the Experiment page (*Training criteria*) add, per stage, a condition on a re
   include the stage again for it; *Report only*.
 - **Retire after** — animals that have not met the criterion after this many trials are retired.
 
-On the Animals page press **Training criteria…** to see, for every animal, the trials done, the trial at which the
+On the Experiment tab press **Training criteria…** to see, for every animal, the trials done, the trial at which the
 criterion was met and the outcome; **Apply** completes stages and retires failing animals (their pending tests are
 skipped).
 
@@ -267,19 +289,19 @@ skipped).
 
 ### Blind testing
 
-Tick **Blind testing** on the Experiment page: on the Animals, Tests and Test view pages the treatment groups are
+Tick **Blind testing** on the Protocol tab: on the Animals, Tests and Review and score page pages the treatment groups are
 replaced by stable random codes (e.g. *Group NJ55*) with a neutral colour, and groups cannot be renamed or
 re-coloured. Results, statistics and exports keep the real groups. Unticking the box (unblinding) asks for
 confirmation.
 
 ### Animal identification
 
-Tick **Confirm the animal's ID** on the Experiment page to have the experimenter scan the animal's barcode or
+Tick **Confirm the animal's ID** on the Protocol tab to have the experimenter scan the animal's barcode or
 microchip (a USB scanner types like a keyboard) or type its ID before scoring a test (first key/button press, or
 starting the observation clock). The input must match the animal ID or one of its fields whose name contains
 *barcode*, *microchip*, *RFID*, *chip*, *tag* or *transponder*; a mismatch blocks scoring.
 
-## 7. Live testing
+## 7. Running tests (live)
 
 The **Live testing** page tracks animals in real time from cameras — or from video files that simulate cameras, so
 everything can be tried without hardware. Choose a mode with the buttons at the top of the page:
@@ -652,7 +674,7 @@ io_measures(test.io_events, duration, t_range=None, devices=project.io_devices) 
 validate(project.procedures, context) # -> [(procedure index, statement path, message)]
 ```
 
-## 9. Results, plots and data transfer
+## 9. Results: data, plots and data transfer
 
 The results table has one row per test (and per time bin / period when enabled). Choose which measures to
 show, filter by group or stage, export **CSV**, **Excel** (with Animals, Tests and Settings sheets) or copy to
@@ -717,7 +739,7 @@ exit from a zone, a manual mark, or an input switching on; with offset, duration
 (1 = first, 0 = every occurrence). Example: *the 30 s after the animal first left the start box*. Paused time is
 excluded from all times and distances.
 
-### Track plots (Results page → Track tab)
+### Track plots (Results ▸ Data ▸ Track plots)
 
 Select a row of the results table to see the test's track on its first video frame. The options under the plot apply
 to the selected test:
@@ -730,9 +752,9 @@ to the selected test:
 - **Split by period**: shows one small track plot per time period (time bins, custom periods or event-anchored
   periods), all on the same colour scale. If the experiment has no periods, the test is split into quarters.
 
-Selecting a time-period row (with **Show time periods** ticked) limits the track plot and heat map to that period.
+Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time periods) limits the track plot and heat map to that period.
 
-### Heat maps (Heat map and Groups tabs)
+### Heat maps (Results ▸ Data ▸ Heat maps)
 
 - **Heat map of**: where the animal spent its time, or only the frames where a behaviour happened: freezing, immobile,
   mobile, any scored behaviour (`<behaviour>: active`), near the wall, and so on.
@@ -742,11 +764,11 @@ Selecting a time-period row (with **Show time periods** ticked) limits the track
   of the apparatus line up between tests in group heat maps. For example, the target quadrant of a water maze or the
   novel object's side. The setting is saved with the test as `variables["heatmap_transform"]` and does not change any
   results.
-- **Group heat maps**: averages the heat maps of each group's tests shown in the table. Each test's alignment is
+- **By treatment** (*Treatment heat maps*): averages the heat maps of each treatment's tests shown in the table. Each test's alignment is
   applied, the maps are drawn on a common apparatus frame and colour scale, and the chosen behaviour, scale and time
   period are used.
 
-### Charts of parameters over time (Results page → Charts tab)
+### Charts of parameters over time (Results ▸ Data ▸ Charts)
 
 Choose a test (and an animal if several were tracked together), then tick up to 10 parameters. They are drawn on a
 shared time axis:
@@ -787,7 +809,7 @@ Chart tools:
   frame by frame as CSV or tab-separated text.
 - In the results table, right-click a row and choose **Show in charts** to open that test's charts.
 
-### Video export with overlays
+### Video export with overlays (Results ▸ Data ▸ Video export)
 
 Select a test in the results table and click **Export video…**. You can choose:
 
@@ -803,7 +825,7 @@ The video is written in the background with a progress bar and can be cancelled.
 available (VideoToolbox on Apple Silicon). Frames are streamed, so memory use does not depend on the video's length.
 From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", OverlayOptions(...))`.
 
-### Data transfer (Results page)
+### Data transfer (Data page)
 
 - **Copy**: copies the selected cells as tab-separated text, ready to paste into Excel or Prism. Select any rectangular
   range with the mouse, or click the row numbers. With nothing (or one row) selected, it copies the whole shown table.
@@ -813,9 +835,9 @@ From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", O
 - **Export → Selected cells…**: the selected range as CSV, TSV or xlsx (chosen by the file extension).
 - **Export → Experiment as XML (with raw tracks)…**: the whole experiment in one file, described below.
 - **Export → Raw data per test (CSV)…**: one file per test and animal, with time, the raw track columns (pixels) and
-  every per-frame parameter from the Charts tab in calibrated units.
+  every per-frame parameter from the Charts view in calibrated units.
 - **HTML report…**: you can also set the heat-map scale (including one scale for all tests) and add charts of the
-  parameters ticked in the Charts tab.
+  parameters ticked in the Charts view.
 
 #### XML format (`format-version="1"`)
 

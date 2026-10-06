@@ -225,11 +225,15 @@ def test_skip_reperform_clear(win):
     p = win.project
     page = win.goto("TestsPage")
     page.select_ids({1})
-    assert page.a_skip.text() == "Skip"
+    assert page.a_skip.isEnabled() and not page.a_resume.isEnabled()
     page.toggle_skip()
-    assert p.get_test(1).status == "skipped" and page.a_skip.text() == "Resume"
+    assert p.get_test(1).status == "skipped" and page.a_resume.isEnabled() and not page.a_skip.isEnabled()
     assert all(r["Test"] != 1 for r in p.results())
     page.toggle_skip()
+    assert p.get_test(1).status == "tracked"
+    page.skip_selected()
+    assert p.get_test(1).status == "skipped"
+    page.resume_selected()
     assert p.get_test(1).status == "tracked"
     new = page.reperform_selected()
     assert len(new) == 1 and p.get_test(1).status == "superseded" and new[0].attempt == 2
@@ -274,13 +278,19 @@ def test_blind_display(win, monkeypatch):
     p.blind = True
     tests = win.goto("TestsPage")
     shown = tests.model.index(0, C_GROUP).data()
-    assert shown.startswith("Group ") and shown not in ("Control", "Anxious")
+    codes = wf.blind_codes(p)
+    assert shown in (codes["Control"], codes["Anxious"]) and shown not in ("Control", "Anxious")
+    assert tests.model.headerData(C_GROUP, Qt.Horizontal) == "Code"
     animals = win.goto("AnimalsPage")
-    r = next(r for r in range(animals.table.rowCount()) if animals.table.item(r, 0).text() == "C1")
-    assert animals.table.item(r, 1).text() == wf.display_group(p, "Control")
-    assert not animals._group_btns[0].isEnabled() and animals.groups_list.item(0).text().startswith("Group ")
+    c_id, c_tr = animals.col_of("id"), animals.col_of("treatment")
+    r = next(r for r in range(animals.table.rowCount()) if animals.table.item(r, c_id).text() == "C1")
+    assert animals.table.item(r, c_tr).text() == codes["Control"]
+    assert not animals._group_acts[0].isEnabled() and not animals.a_reveal.isChecked()
+    assert "Control" not in animals.treatments.item(0, 0).text()
+    assert animals.treatments.item(0, 1).text() == codes["Control"]
     v = open_view(win)
-    assert "Control" not in v.info_lbl.text() and wf.display_group(p, "Control") in v.info_lbl.text()
+    assert "Control" not in v.info_lbl.text() and codes["Control"] in v.info_lbl.text()
+    assert "Control" not in v.title_lbl.text()
     # results keep the real groups
     assert {r["Group"] for r in p.results()} == {"Control", "Anxious"}
     # unblinding asks for confirmation
@@ -293,6 +303,18 @@ def test_blind_display(win, monkeypatch):
     exp.blind.setChecked(False)
     assert not p.blind
     assert tests.model.index(0, C_GROUP).data() in ("Control", "Anxious")
+    assert tests.model.headerData(C_GROUP, Qt.Horizontal) == "Treatment"
+    # the Experiment ribbon's "Reveal treatment coding" switches blind testing too (asking before revealing)
+    animals = win.goto("AnimalsPage")
+    assert animals.a_reveal.isChecked()
+    animals.a_reveal.setChecked(False)
+    assert p.blind
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    animals.a_reveal.setChecked(True)
+    assert p.blind and not animals.a_reveal.isChecked()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    animals.a_reveal.setChecked(True)
+    assert not p.blind
 
 
 # ---------------------------------------------------------------- experiment page
@@ -338,9 +360,9 @@ def test_retire_criteria_and_doses(win, monkeypatch):
     res = page.criteria_dialog()
     assert res["retired"] == ["A1"] and p.get_animal("A1").retired
     assert wf.completed_stages(p) == {"C1": ["Training"]}
-    status_col = page.table.columnCount() - 1
-    r = next(r for r in range(page.table.rowCount()) if page.table.item(r, 0).text() == "A1")
-    assert page.table.item(r, status_col).text() == "retired"
+    status_col, id_col = page.col_of("status"), page.col_of("id")
+    r = next(r for r in range(page.table.rowCount()) if page.table.item(r, id_col).text() == "A1")
+    assert page.table.item(r, status_col).text() == "Retired"
     assert "1 retired" in page.summary.text()
     page.table.selectRow(r)
     assert page.retire_btn.text() == "Reinstate"
@@ -365,8 +387,14 @@ def test_retire_criteria_and_doses(win, monkeypatch):
     vols = page.dose_dialog()
     assert vols["C1"] == pytest.approx(0.125) and vols["A1"] == pytest.approx(0.15)
     c = next(c for c in range(page.table.columnCount()) if page.table.horizontalHeaderItem(c).text() == "Volume (mL)")
-    r = next(r for r in range(page.table.rowCount()) if page.table.item(r, 0).text() == "C1")
+    r = next(r for r in range(page.table.rowCount()) if page.table.item(r, id_col).text() == "C1")
     assert page.table.item(r, c).text() == "0.125"
+    # the Status drop-down retires / reinstates too
+    r = next(r for r in range(page.table.rowCount()) if page.table.item(r, id_col).text() == "C1")
+    page.table.item(r, status_col).setText("Retired")
+    assert p.get_animal("C1").retired
+    page.table.item(r, status_col).setText("Normal")
+    assert not p.get_animal("C1").retired
 
 
 # ---------------------------------------------------------------- screenshot

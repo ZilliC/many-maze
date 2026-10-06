@@ -28,7 +28,8 @@ TESTS = OrderedDict([
     ("Scheirer-Ray-Hare", "two factors"), ("Aligned rank transform ANOVA", "two factors"),
     ("Tukey HSD", "post-hoc"), ("Bonferroni", "post-hoc"), ("Holm", "post-hoc"), ("Šidák", "post-hoc"),
     ("Benjamini-Hochberg (FDR)", "post-hoc"), ("Dunnett (vs control)", "post-hoc"), ("Games-Howell", "post-hoc"),
-    ("Dunn", "post-hoc"),
+    ("Dunn", "post-hoc"), ("Duncan's multiple range test", "post-hoc"), ("Fisher's LSD", "post-hoc"),
+    ("Scheffé's test", "post-hoc"), ("Student-Newman-Keuls", "post-hoc"),
     ("Chi-square test of independence", "categorical"), ("Fisher's exact test", "categorical"),
     ("G-test (log-likelihood ratio)", "categorical"), ("Chi-square goodness of fit", "categorical"),
     ("Pearson correlation", "correlation"), ("Spearman correlation", "correlation"),
@@ -46,10 +47,15 @@ METHODS_K = OrderedDict([("auto", "Automatic"), ("anova", "One-way ANOVA"), ("we
                          ("alexander_govern", "Alexander-Govern"), ("kruskal", "Kruskal-Wallis"),
                          ("median", "Mood's median test"), ("rm_anova", "Repeated-measures ANOVA"),
                          ("friedman", "Friedman")])
-POSTHOC = OrderedDict([("auto", "Automatic"), ("tukey", "Tukey HSD"), ("bonferroni", "Bonferroni"),
-                       ("holm", "Holm"), ("sidak", "Šidák"), ("fdr", "Benjamini-Hochberg (FDR)"),
-                       ("dunnett", "Dunnett (vs control)"), ("games_howell", "Games-Howell"), ("dunn", "Dunn"),
-                       ("none", "None")])
+POSTHOC = OrderedDict([("auto", "Automatic"), ("none", "None"), ("bonferroni", "Bonferroni test"),
+                       ("duncan", "Duncan's test"), ("lsd", "Fisher's LSD test"), ("scheffe", "Scheffé's test"),
+                       ("sidak", "Šidák test"), ("snk", "Student-Newman-Keuls test"), ("tukey", "Tukey test"),
+                       ("holm", "Holm test"), ("fdr", "Benjamini-Hochberg (FDR)"),
+                       ("dunnett", "Dunnett test (vs control)"), ("games_howell", "Games-Howell test"),
+                       ("dunn", "Dunn's test")])
+# post-hoc tests based on the ANOVA error term (mean square error), as in ANY-maze / SPSS / agricolae
+ERROR_TERM_POSTHOC = {"lsd": "Fisher's LSD", "scheffe": "Scheffé", "snk": "Student-Newman-Keuls",
+                      "duncan": "Duncan"}
 _TWO_TO_K = {"student": "anova", "welch": "welch_anova", "mannwhitney": "kruskal", "ks": "kruskal",
              "brunnermunzel": "kruskal", "paired_t": "rm_anova", "wilcoxon": "friedman"}
 PAIRED_METHODS = {"paired_t", "wilcoxon", "rm_anova", "friedman"}
@@ -198,13 +204,110 @@ def _dunn(names, data, adjust="bonferroni"):
 _ADJ_NAMES = {"bonferroni": "Bonferroni", "holm": "Holm", "sidak": "Šidák", "fdr": "FDR", "none": "unadjusted"}
 
 
+def anova_error_term(data, paired: bool = False) -> tuple[float, float]:
+    """(mean square error, error df) of a one-way design: the within-groups term of a between-subjects ANOVA, or
+    the condition × subject residual of a repeated-measures ANOVA (`paired`, rows matched by position)."""
+    data = [np.asarray(d, float) for d in data]
+    k = len(data)
+    if paired:
+        Y = np.column_stack([d[:min(len(x) for x in data)] for d in data])
+        n = Y.shape[0]
+        grand = Y.mean()
+        ss_err = ((Y - Y.mean(axis=1, keepdims=True) - Y.mean(axis=0, keepdims=True) + grand) ** 2).sum()
+        df = (n - 1) * (k - 1)
+    else:
+        ss_err = sum(((d - d.mean()) ** 2).sum() for d in data)
+        df = sum(len(d) for d in data) - k
+    return (float(ss_err / df) if df > 0 else math.nan), float(df)
+
+
+def range_test_p(q: float, r: int, df: float, method: str = "snk") -> float:
+    """p-value of a studentized range statistic q for two means r steps apart (r = number of ordered means spanned,
+    both included) in a multiple range test.
+
+    snk: Student-Newman-Keuls, P(Q_{r,df} ≥ q) — the Tukey test for the whole range r = k.
+    duncan: Duncan's new multiple range test, whose protection level for r means is α_r = 1 - (1 - α)^(r - 1);
+    the p-value is the α at which q equals the critical range: 1 - P(Q_{r,df} < q)^(1 / (r - 1)).
+    """
+    if not (q == q) or not (df == df) or df <= 0 or r < 2:
+        return math.nan
+    if math.isinf(q):
+        return 0.0
+    sf = float(sps.studentized_range.sf(q, r, df))
+    sf = min(max(sf, 0.0), 1.0)
+    if method == "duncan":
+        return float(min(1.0, -math.expm1(math.log1p(-sf) / (r - 1)))) if sf < 1 else 1.0
+    return sf
+
+
+def range_test_critical(r: int, df: float, method: str = "snk", alpha: float = 0.05) -> float:
+    """Critical studentized range for r means (SNK / Tukey: q_{1-α}(r, df); Duncan: q_{(1-α)^(r-1)}(r, df)).
+    Multiply by sqrt(MSE / n) for the least significant range."""
+    level = (1 - alpha) ** (r - 1) if method == "duncan" else 1 - alpha
+    return float(sps.studentized_range.ppf(level, r, df))
+
+
+def _error_term_posthoc(names, data, method: str, paired: bool = False, stepwise: bool = True) -> list[dict]:
+    """Fisher's LSD, Scheffé, Student-Newman-Keuls and Duncan's multiple range test, all using the ANOVA error term.
+
+    Unequal group sizes use the harmonic (Tukey-Kramer) standard error of each difference. For the stepwise
+    multiple range tests (SNK, Duncan) the reported p-value of a pair is the largest p of the ranges that contain it
+    (a pair cannot differ when a wider range enclosing it does not), so p ≤ α reproduces the step-down decisions;
+    `p_unadjusted` holds the pair's own range p-value (as reported by e.g. R's agricolae).
+    """
+    k = len(data)
+    mse, df = anova_error_term(data, paired)
+    means = np.array([d.mean() for d in data])
+    ns = np.array([len(d) for d in data], float)
+    if paired:
+        ns[:] = min(len(d) for d in data)
+    rank = np.empty(k, int)
+    rank[np.argsort(means, kind="stable")] = np.arange(k)
+    label = ERROR_TERM_POSTHOC[method]
+    out = []
+    for i, j in itertools.combinations(range(k), 2):
+        diff = float(means[i] - means[j])
+        se2 = mse * (1 / ns[i] + 1 / ns[j])
+        e = {"a": names[i], "b": names[j], "diff": diff, "test": label}
+        if not (se2 == se2) or df <= 0:
+            p = math.nan
+        elif se2 <= 0:
+            p = 1.0 if diff == 0 else 0.0
+        elif method == "lsd":
+            t = abs(diff) / math.sqrt(se2)
+            e["t"], e["df"] = t, df
+            p = float(2 * sps.t.sf(t, df))
+        elif method == "scheffe":
+            F = diff ** 2 / (se2 * (k - 1))
+            e["F"], e["df"] = F, (k - 1, df)
+            p = float(sps.f.sf(F, k - 1, df))
+        else:
+            q = abs(diff) / math.sqrt(se2 / 2)
+            r = abs(int(rank[i]) - int(rank[j])) + 1
+            e["q"], e["steps"], e["df"] = q, r, df
+            p = range_test_p(q, r, df, method)
+        e["p"] = e["p_unadjusted"] = float(min(1.0, p)) if p == p else math.nan
+        out.append(e)
+    if stepwise and method in ("snk", "duncan"):
+        span = {id(e): sorted((int(rank[names.index(e["a"])]), int(rank[names.index(e["b"])]))) for e in out}
+        for e in out:
+            lo, hi = span[id(e)]
+            enclosing = [x["p_unadjusted"] for x in out if span[id(x)][0] <= lo and span[id(x)][1] >= hi
+                         and x["p_unadjusted"] == x["p_unadjusted"]]
+            if enclosing:
+                e["p"] = float(max(enclosing))
+    return out
+
+
 @_quiet
 def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: bool = True, paired: bool = False,
             control: str | None = None) -> list[dict]:
     """Pairwise comparisons between groups.
 
-    tukey / games_howell / dunnett (vs `control`, default first group) / dunn, or pairwise tests (t-tests,
-    Welch t, paired t; Mann-Whitney / Wilcoxon when non-parametric) adjusted by bonferroni / holm / sidak / fdr.
+    tukey / games_howell / dunnett (vs `control`, default first group) / dunn; the ANOVA-error-term tests lsd
+    (Fisher's LSD), scheffe, snk (Student-Newman-Keuls) and duncan (Duncan's multiple range test; these use the
+    repeated-measures error term when paired); or pairwise tests (t-tests, Welch t, paired t; Mann-Whitney / Wilcoxon
+    when non-parametric) adjusted by bonferroni / holm / sidak / fdr.
     """
     names = [k for k, v in groups.items() if len(_clean(v)) > 0]
     data = [_clean(groups[k]) for k in names]
@@ -213,6 +316,8 @@ def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: 
     if paired:
         n = min(len(d) for d in data)
         data = [d[:n] for d in data]
+    if method in ERROR_TERM_POSTHOC:
+        return _error_term_posthoc(names, data, method, paired)
     if method == "tukey" and not paired:
         tk = sps.tukey_hsd(*data)
         return [{"a": names[i], "b": names[j], "diff": float(data[i].mean() - data[j].mean()),

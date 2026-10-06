@@ -20,7 +20,9 @@ a = Analysis(
                                           "onnx.numpy_helper"] +
                   ["manymaze.core." + m for m in ("iodevices", "operant", "periods", "sequences", "charts",
                                                   "videoexport", "workflow", "camera", "livegroup")] +
-                  ["manymaze.gui." + m for m in ("procedure_editor", "touchscreen", "live_widgets", "confirm_id")],
+                  ["manymaze.gui." + m for m in ("procedure_editor", "touchscreen", "live_widgets", "confirm_id", "import_wizard",
+                                                 "ribbon", "theme", "icons", "pages.protocol_pages")] +
+                  ["manymaze.core.importers"],
     excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "IPython"],
     noarchive=False,
 )

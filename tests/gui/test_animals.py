@@ -44,8 +44,9 @@ def col(page, name):
 
 
 def row_of(page, aid):
+    c = col(page, "Animal ID")
     for r in range(page.table.rowCount()):
-        if page.table.item(r, 0).text() == aid:
+        if page.table.item(r, c).text() == aid:
             return r
     return -1
 
@@ -55,7 +56,10 @@ def test_table_and_counts(page):
     assert page.table.rowCount() == len(p.animals) == 4
     r = row_of(page, "C1")
     assert page.table.item(r, col(page, "Tests")).data(Qt.DisplayRole) == 1
-    assert page.groups_list.count() == 2
+    assert page.treatments.rowCount() == 2
+    assert [page.table.horizontalHeaderItem(c).text() for c in range(4)] == ["Animal", "Animal ID", "Status",
+                                                                             "Treatment"]
+    assert page.table.item(r, col(page, "Status")).text() == "Normal"
 
 
 def test_add_duplicate_delete(page):
@@ -81,15 +85,15 @@ def test_inline_edit_rename_and_group(page):
     p = page.project
     tests_c1 = [t for t in p.tests if t.animal_id == "C1"]
     r = row_of(page, "C1")
-    page.table.item(r, 0).setText("Ctrl-1")
+    page.table.item(r, col(page, "Animal ID")).setText("Ctrl-1")
     assert p.get_animal("Ctrl-1") is not None and p.get_animal("C1") is None
     assert all(t.animal_id == "Ctrl-1" for t in tests_c1)
     # duplicate ID rejected
     r = row_of(page, "C2")
-    page.table.item(r, 0).setText("A1")
-    assert p.get_animal("C2") is not None and page.table.item(row_of(page, "C2"), 0).text() == "C2"
-    # typing a new group creates it
-    page.table.item(row_of(page, "C2"), col(page, "Group")).setText("Vehicle")
+    page.table.item(r, col(page, "Animal ID")).setText("A1")
+    assert p.get_animal("C2") is not None and page.table.item(row_of(page, "C2"), col(page, "Animal ID")).text() == "C2"
+    # typing a new treatment creates it
+    page.table.item(row_of(page, "C2"), col(page, "Treatment")).setText("Vehicle")
     assert p.get_animal("C2").group == "Vehicle"
     g = next(g for g in p.groups if g.name == "Vehicle")
     assert g.color not in ("#3b82f6", "#ef4444")
@@ -107,7 +111,7 @@ def test_groups_and_fields(page, monkeypatch):
     assert p.group_color("Saline") == "#123456"
     from PySide6.QtGui import QColor
     from PySide6.QtWidgets import QColorDialog, QInputDialog
-    page.groups_list.setCurrentRow(0)
+    page.treatments.setCurrentCell(0, 0)
     monkeypatch.setattr(QColorDialog, "getColor", lambda *a, **k: QColor("#abcdef"))
     page._color_group_dialog()
     assert p.groups[0].color == "#abcdef"
@@ -142,7 +146,7 @@ def test_csv_roundtrip(page, tmp_path):
     out = tmp_path / "out.csv"
     page.export_csv(str(out))
     rows = list(csv.reader(out.open()))
-    assert rows[0] == ["ID", "Group", "Sex", "Genotype", "Weight"]
+    assert rows[0] == ["ID", "Treatment", "Sex", "Genotype", "Weight"]
     assert ["K7", "KO", "Female", "KO", "25"] in rows
     assert len(rows) == 6
 

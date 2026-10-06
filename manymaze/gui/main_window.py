@@ -10,9 +10,9 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -39,7 +39,7 @@ PAGES = [
 # ribbon tabs and the explorer entries of each: (label, icon, page class)
 SECTIONS = [
     ("Protocol", [("Protocol", "protocol", "ExperimentPage"), ("Apparatus", "zone", "ApparatusPage")]),
-    ("Experiment", [("Animals", "animal", "AnimalsPage")]),
+    ("Experiment", [("Experiment", "animal", "AnimalsPage")]),
     ("Test", [("Test schedule", "schedule", "TestsPage"), ("Run tests", "play", "LivePage"),
               ("Review and score", "video", "TestViewPage")]),
     ("Results", [("Data", "table", "ResultsPage"), ("Statistics", "bars", "StatisticsPage")]),
@@ -101,12 +101,12 @@ class WelcomePage(QWidget):
         lay.setSpacing(0)
         side = QWidget()
         side.setObjectName("BackstageSide")
-        side.setFixedWidth(230)
+        side.setFixedWidth(250)
         side.setStyleSheet(f"QWidget#BackstageSide{{background:{theme.ACCENT};}}"
-                           "QToolButton{color:white;background:transparent;border:none;text-align:left;"
-                           "padding:10px 26px;font-size:15px;}"
-                           "QToolButton:hover{background:rgba(255,255,255,0.18);}"
-                           "QToolButton:disabled{color:rgba(255,255,255,0.45);}")
+                           "QPushButton{color:white;background:transparent;border:none;text-align:left;"
+                           "padding:10px 26px;font-size:15px;border-radius:0;}"
+                           "QPushButton:hover{background:rgba(255,255,255,0.18);}"
+                           "QPushButton:disabled{color:rgba(255,255,255,0.45);background:transparent;}")
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 18, 0, 12)
         sl.setSpacing(0)
@@ -116,11 +116,12 @@ class WelcomePage(QWidget):
                               ("demo", "Open demo experiment", main.create_demo),
                               ("save", "Save", main.save), ("save_as", "Save as", main.save_as),
                               ("close", "Close experiment", main.close_project),
+                              ("import", "Import from ANY-maze", main.import_menu),
                               ("folder", "Show in folder", main.reveal_folder),
                               ("help", "User guide", main._open_guide), ("info", "About", main.about)):
-            b = QToolButton()
-            b.setText(text)
-            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            b = QPushButton(text)
+            b.setFlat(True)
+            b.setCursor(Qt.PointingHandCursor)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.clicked.connect(fn)
             sl.addWidget(b)
@@ -165,7 +166,7 @@ class WelcomePage(QWidget):
             it.setFlags(Qt.NoItemFlags)
             self.recent.addItem(it)
         has = self.main.project is not None
-        for k in ("save", "save_as", "close", "folder"):
+        for k in ("save", "save_as", "close", "folder", "import"):
             self.side_buttons[k].setEnabled(has)
 
 
@@ -688,6 +689,28 @@ class MainWindow(QMainWindow):
     def close_project(self):
         if self.maybe_save():
             self.set_project(None)
+
+    def import_menu(self):
+        """Import animals or a test schedule from spreadsheets saved by ANY-maze (or other software)."""
+        if self.project is None:
+            return
+        m = QMenu(self)
+        m.addAction(icon("animal"), "Animals and treatments…", lambda: self.import_table("animals"))
+        m.addAction(icon("schedule"), "Test schedule…", lambda: self.import_table("tests"))
+        btn = self.welcome.side_buttons.get("import")
+        m.exec(btn.mapToGlobal(btn.rect().topRight()) if btn is not None and btn.isVisible() else QCursor.pos())
+
+    def import_table(self, kind: str, path: str | None = None):
+        from .import_wizard import ImportDialog
+
+        dlg = ImportDialog(self.project, kind, self, path=path)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        n = len(dlg.result or [])
+        self.mark_dirty()
+        self.status(f"Imported {n} {'animals' if kind == 'animals' else 'tests'}.")
+        self.show_page(self.page("AnimalsPage" if kind == "animals" else "TestsPage"))
+        return dlg.result
 
     def reveal_folder(self):
         if self.project and self.project.path:

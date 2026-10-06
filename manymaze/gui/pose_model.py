@@ -47,9 +47,13 @@ class PoseModelBox(QGroupBox):
         self.custom_btn.setToolTip("Use your own exported keypoint model (.onnx with a .json description)")
         self.custom_btn.clicked.connect(self.choose_custom)
         row = QHBoxLayout()
+        row.setSpacing(6)
         for b in (self.install_btn, self.remove_btn, self.custom_btn):
             row.addWidget(b)
+        row.addStretch()
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 6, 0, 2)
+        lay.setSpacing(6)
         lay.addWidget(self.status)
         lay.addLayout(row)
         self.refresh()

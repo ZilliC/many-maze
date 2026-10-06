@@ -13,16 +13,17 @@ from __future__ import annotations
 import copy
 import json
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
-                               QSpinBox, QSplitter, QStyle, QTableWidget, QTableWidgetItem, QTextBrowser,
-                               QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+                               QTextBrowser, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import iodevices as iod
 from ..core import procedures as pr
+from .icons import icon as named_icon
 
 ROLE = Qt.UserRole
 ELSE = "__else__"
@@ -64,8 +65,121 @@ def _combo() -> QComboBox:
     return cb
 
 
+TYPE_ROLE = Qt.UserRole + 1  # statement type of a tree item (ELSE for an Else branch)
+ENABLED_ROLE = Qt.UserRole + 2  # False for a disabled statement
+
+# ANY-maze style statement blocks: (fill, border); parameters sit in a lighter "pill"
+BLOCK_COLORS = {"wait": ("#ffc2c2", "#f28b8b"), "stop": ("#ffc2c2", "#e46a6a"),
+                "do": ("#cdf3c6", "#97d68d"),
+                "if": ("#ffe1a6", "#ecb453"), ELSE: ("#ffe1a6", "#ecb453"), "repeat": ("#ffeaa0", "#e2be4a"),
+                "when": ("#cfe0fb", "#8eaee6"),
+                "set": ("#e5d4f7", "#b897df"), "var": ("#e5d4f7", "#b897df"),
+                "comment": ("#f2f2f2", "#e0e0e0")}
+PILL_COLORS = {"wait": "#dcb8f0", "when": "#dcb8f0", "if": "#fff6dc", "repeat": "#fff6dc", "do": "#f3fcf0",
+               "set": "#f7f0fd", "var": "#f7f0fd", "stop": "#ffe9e9"}
+BLOCK_LABELS = [("Wait until ", "Wait until:"), ("Wait for ", "Wait for:"), ("Wait ", "Wait:"), ("When ", "When:"),
+                ("If ", "If:"), ("Repeat ", "Repeat:"), ("Set ", "Set:"), ("Do: ", "Action:"), ("# ", "Note:"),
+                ("Variable ", "Variable:")]
+
+
+def block_parts(text: str, type_: str | None) -> tuple[str, str]:
+    """Split a statement summary into the block's label and its parameters ("Do: Pellet" -> "Action:", "Pellet")."""
+    if type_ == ELSE:
+        return "Else:", ""
+    if type_ == "stop":
+        return "Stop:", text
+    for prefix, label in BLOCK_LABELS:
+        if text.startswith(prefix):
+            return label, text[len(prefix):]
+    if type_ == "comment":
+        return "Note:", text
+    return text, ""
+
+
+def mono_font(base: QFont | None = None) -> QFont:
+    f = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+    f.setFamilies(["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New", f.family()])
+    size = base.pointSizeF() if base is not None and base.pointSizeF() > 0 else 10.0
+    f.setPointSizeF(size)
+    return f
+
+
+class StatementDelegate(QStyledItemDelegate):
+    """Paints each statement as an ANY-maze-like coloured rounded block: red "Wait", green "Action", orange
+    "If/Repeat", blue "When", purple "Set/Variable", grey "Note", with the parameters in a lighter pill."""
+
+    ROW_HEIGHT = 32
+
+    def _font(self, option) -> QFont:
+        return mono_font(option.font)
+
+    def _geometry(self, option, index):
+        font = self._font(option)
+        fm = QFontMetrics(font)
+        label, body = block_parts(index.data(Qt.DisplayRole) or "", index.data(TYPE_ROLE))
+        lw = fm.horizontalAdvance(label)
+        bw = fm.horizontalAdvance(body) if body else 0
+        width = 10 + lw + (10 + bw + 14 if body else 0) + 10
+        return font, fm, label, body, lw, bw, width
+
+    def sizeHint(self, option, index):
+        *_, width = self._geometry(option, index)
+        return QSize(width + 30, self.ROW_HEIGHT)
+
+    def paint(self, p: QPainter, option, index):
+        font, fm, label, body, lw, bw, width = self._geometry(option, index)
+        t = index.data(TYPE_ROLE)
+        enabled = index.data(ENABLED_ROLE) is not False
+        bg = index.data(Qt.BackgroundRole)
+        error = isinstance(bg, QBrush) and bg.style() != Qt.NoBrush
+        selected = bool(option.state & QStyle.State_Selected)
+        fill, border = BLOCK_COLORS.get(t, ("#eeeeee", "#d0d0d0"))
+        pill = PILL_COLORS.get(t)
+        text_col = QColor("#262626")
+        if not enabled:
+            fill, border, pill, text_col = "#efefef", "#d6d6d6", "#f7f7f7", QColor("#9a9a9a")
+        r = option.rect
+        icon = index.data(Qt.DecorationRole)
+        extra = 20 if isinstance(icon, QIcon) and not icon.isNull() else 0
+        block = QRectF(r.x() + 1.5, r.y() + 2.5, min(width, max(40, r.width() - 4 - extra)), r.height() - 5)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        fc = QColor(fill)
+        if selected:
+            fc = fc.darker(108)
+        pen = QPen(QColor("#dc2626") if error else QColor("#2f6fbf") if selected else QColor(border))
+        pen.setWidthF(2.0 if (error or selected) else 1.0)
+        p.setPen(pen)
+        p.setBrush(fc)
+        p.drawRoundedRect(block, 6, 6)
+        f = QFont(font)
+        f.setStrikeOut(not enabled)
+        p.setFont(f)
+        p.setPen(text_col)
+        x = block.x() + 10
+        avail = block.right() - x - 8
+        p.drawText(QRectF(x, block.y(), min(lw, avail), block.height()), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(label, Qt.ElideRight, int(max(0, avail))))
+        if body:
+            bx = x + lw + 10
+            pw = min(bw + 14, block.right() - bx - 6)
+            if pw > 20:
+                pr_ = QRectF(bx, block.y() + 4, pw, block.height() - 8)
+                if pill:
+                    p.setPen(QPen(QColor(border).lighter(105), 1))
+                    p.setBrush(QColor(pill))
+                    p.drawRoundedRect(pr_, 4, 4)
+                p.setPen(text_col)
+                p.drawText(pr_.adjusted(7, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                           fm.elidedText(body, Qt.ElideRight, int(pr_.width() - 11)))
+        if extra:
+            icon.paint(p, int(block.right() + 4), int(r.y() + (r.height() - 16) / 2), 16, 16)
+        p.restore()
+
+
 class StatementTree(QTreeWidget):
-    """Tree of statements with internal drag & drop; emits ``dropped`` after a move."""
+    """Tree of statements with internal drag & drop; emits ``dropped`` after a move. Statements are painted as
+    coloured blocks (``StatementDelegate``)."""
 
     dropped = Signal()
 
@@ -75,9 +189,17 @@ class StatementTree(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setDefaultDropAction(Qt.MoveAction)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.setIndentation(22)
+        self.setIndentation(24)
         self.setUniformRowHeights(True)
         self.setAnimated(False)
+        self.setItemDelegate(StatementDelegate(self))
+        pal = self.palette()  # the delegate draws the selection itself (blue outline)
+        for grp in (QPalette.Active, QPalette.Inactive):
+            pal.setColor(grp, QPalette.Highlight, QColor(0, 0, 0, 0))
+        self.setPalette(pal)
+        self.setStyleSheet("QTreeWidget{background:white;selection-background-color:transparent;}"
+                           "QTreeWidget::item:selected, QTreeWidget::item:hover, QTreeWidget::branch:selected,"
+                           "QTreeWidget::branch:hover{background:transparent;}")
 
     drag_item = None
 
@@ -123,6 +245,7 @@ class ProcedureEditor(QWidget):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.addWidget(QLabel("<b>Procedures</b>"))
         self.proc_list = QListWidget()
+        self.proc_list.setStyleSheet("QListWidget::item{padding:4px 2px;}")
         self.proc_list.setToolTip("All ticked procedures run at the same time during a live test. "
                                   "Double-click to rename.")
         self.proc_list.currentRowChanged.connect(lambda *_: self._proc_selected())
@@ -298,7 +421,7 @@ class ProcedureEditor(QWidget):
         cur = self.proc_list.currentRow() if select is None else select
         self.proc_list.clear()
         for p in self.procs:
-            it = QListWidgetItem(str(p.get("name", "Procedure")))
+            it = QListWidgetItem(named_icon("procedure"), str(p.get("name", "Procedure")))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
             it.setCheckState(Qt.Checked if p.get("enabled", True) else Qt.Unchecked)
             self.proc_list.addItem(it)
@@ -402,6 +525,7 @@ class ProcedureEditor(QWidget):
                     el = QTreeWidgetItem(it)
                     self._set_meta(el, {"type": ELSE}, p + ("else",))
                     el.setText(0, "Else")
+                    el.setData(0, TYPE_ROLE, ELSE)
                     el.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
                     f = el.font(0)
                     f.setBold(True)
@@ -420,6 +544,8 @@ class ProcedureEditor(QWidget):
         else:
             self._set_meta(it, data, path)
         it.setText(0, pr.describe_statement(st))
+        it.setData(0, TYPE_ROLE, t)
+        it.setData(0, ENABLED_ROLE, st.get("enabled", True) is not False)
         it.setToolTip(0, "")
         flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
         if t in pr.CONTAINERS:

@@ -82,7 +82,8 @@ def test_several_tests_at_once(win):
     e1 = page.add_session_row(k1, "Left box", "L1")
     e2 = page.add_session_row(k1, "Right box", "R1")
     e3 = page.add_session_row(k2, p.apparatus[0].name, "C1", trial=3)
-    assert page.sess_table.rowCount() == 3 and len(page.mosaic.views) == 2
+    assert page.sess_table.rowCount() == 3 and len(page.mosaic.panels) == 3  # one test panel per test
+    assert len({e.source_key for e in page.group.entries}) == 2
     # the layout of the session table is kept in the project
     saved = p.settings_extra["live"]["multi"]
     assert len(saved["sources"]) == 2 and [s["apparatus"] for s in saved["sessions"]][:2] == ["Left box",

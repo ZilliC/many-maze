@@ -1,13 +1,15 @@
-"""Live testing page: track animals in real time from cameras (or video files simulating them).
+"""Run tests page (ANY-maze's Test page while testing): track animals in real time from cameras (or video files
+simulating them), each test in a panel with its own toolbar, title, camera image and Session log / Video / Zones tabs.
 
 Three modes: one test; several tests at once (several cameras and / or several apparatus in one camera image,
-with collective start / pause / stop); observation only (no camera, a clock and scoring keys).
+panels in a grid with collective start / pause / stop); observation only (TakeNote: no camera, a clock and keys).
 """
 
 from __future__ import annotations
 
 import copy
 import datetime as _dt
+import json
 import os
 import re
 import threading
@@ -17,12 +19,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QThread, QTime, QTimer, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                               QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
+from PySide6.QtCore import QEvent, QRectF, QSize, QThread, QTime, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox,
+                               QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QListWidget, QMenu, QMessageBox, QPushButton,
-                               QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QStyle, QTableWidget,
+                               QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTabWidget, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
 
 from ...core import procedures as procs
@@ -31,10 +33,12 @@ from ...core.camera import CameraView, SourceSpec, TransformedSource, camera_set
 from ...core.live import LiveSession, ObservationSession, open_devices
 from ...core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, save_live_test
 from ...core.procedures import Outputs
-from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_overlay, median_background
+from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, median_background
 from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras
-from ..live_widgets import CameraOptionsDialog, MonitorPanel, MosaicView, ObservationPanel
-from ..widgets import FrameView, Worker, error_box, fmt_time
+from ..icons import icon
+from ..live_widgets import (LAYOUT_LABELS, LAYOUTS, CameraOptionsDialog, MonitorPanel, ObservationPanel,
+                            PanelGrid, PanelSettingsDialog, TestPanel, draw_tracking, short_time)
+from ..widgets import Worker, cv_to_qpixmap, error_box, fmt_time
 from .base import Page
 
 RESOLUTIONS = [("Camera default", None), ("640 × 480", (640, 480)), ("800 × 600", (800, 600)),
@@ -46,18 +50,15 @@ TRIGGER_LABELS = {
 }
 ACTION_LABELS = {"serial": "Serial command", "ttl": "TTL output", "beep": "Beep", "mark": "Mark event",
                  "end_test": "End the test", "log": "Log message"}
-STATE_STYLE = {
-    "idle": ("Not armed", "#64748b"),
-    "preview": ("Preview", "#0ea5e9"),
-    "waiting": ("Waiting for animal…", "#f59e0b"),
-    "running": ("Running", "#dc2626"),
-    "paused": ("Paused", "#ca8a04"),
-    "finished": ("Finished", "#7c3aed"),
-}
 START_MODES = [("immediate", "Immediately when armed"), ("on_detection", "When the animal is detected"),
                ("experimenter_leaves", "When the experimenter leaves the view"),
                ("manual", "On a start key (keyboard / remote)"), ("scheduled", "At a clock time")]
-MODES = [("single", "One test"), ("multi", "Several tests at once"), ("observe", "Observation only (no camera)")]
+MODES = [("single", "One test"), ("multi", "Several tests"), ("observe", "Observation only")]
+MODE_ACTIONS = [("single", "One test", "video", "Run one test: one camera, one apparatus."),
+                ("multi", "Several tests", "grid", "Run several tests at once: several cameras and / or several "
+                 "apparatus in one camera image, each in its own panel."),
+                ("observe", "Observation only", "observe", "TakeNote: score behaviour by direct observation, "
+                 "without a camera.")]
 _KEY_NAMES = {"pagedown": "PgDown", "pgdown": "PgDown", "pagedn": "PgDown", "pageup": "PgUp", "pgup": "PgUp",
               "space": "Space", "esc": "Esc", "escape": "Esc", "enter": "Return", "return": "Return"}
 
@@ -246,8 +247,37 @@ class FrameGrabber(QThread):
                 self.frame_ready.emit(*out)
 
 
+class _PanelGroup(LiveGroup):
+    """LiveGroup whose display images only carry the animals and their trails: the test panels draw the apparatus
+    on top of the image (sharp at any zoom, highlighted zones, optional labels)."""
+
+    show_trail = True
+
+    def render(self, key: str, frame: np.ndarray) -> np.ndarray:
+        img = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        img = img.copy()
+        for e in self.entries_for(key):
+            s = e.session
+            if s is None:
+                continue
+            trail = None
+            if self.show_trail and getattr(s, "cols", None) and s.state in ("running", "paused"):
+                with s.lock:
+                    trail = list(zip(s.cols["x"][-250:], s.cols["y"][-250:]))
+            draw_tracking(img, self._last_dets.get(e.id, []), trail, copy=False)
+        return img
+
+
+VIEW_DEFAULTS = {"layout": "2x2", "fit": True, "trail": True, "zones": True, "labels": False, "hide_report": False,
+                 "hide_apparatus": False, "panel": {}}
+
+
 class LivePage(Page):
-    title = "Live testing"
+    """Run tests: ANY-maze's Test page while tests run — a panel per test (toolbar, title, camera image with the
+    apparatus, time slider, Session log / Video / Zones tabs), several panels in a grid, and a collapsible report
+    (setup, real-time monitor, procedures, results, log) on the right.  Commands live in the ribbon."""
+
+    title = "Run tests"
 
     def __init__(self, main):
         super().__init__(main)
@@ -273,6 +303,7 @@ class LivePage(Page):
         self._hold_finished = False
         self._shown_state = None
         self._bg_mode_value = "frame"  # plain copies of widget state read from the grabber thread
+        self._show_trail = True
         self._source_is_file = False
         self._outputs: Outputs | None = None
         self._schedule: ClockSchedule | None = None  # single-test scheduled start
@@ -282,33 +313,21 @@ class LivePage(Page):
         self.devices = None  # core.iodevices.DeviceManager while tests run
         self.mode = "single"
         # several tests at once
-        self.group = LiveGroup()
+        self.group = _PanelGroup()
         self._group_bgs: dict[str, np.ndarray] = {}
-        self._row_widgets: dict[int, dict] = {}
+        self._panels: dict[int, TestPanel] = {}
         self._group_outputs: Outputs | None = None
         # observation only
         self.obs: ObservationSession | None = None
         self.obs_test = None
         self._obs_new = False
         self._key_filter = False
+        self._undo: list[tuple] = []  # (session, [(kind, event, behaviour), ...]) per scoring key press
+        self.prefs = self._load_view_prefs()
 
-        # ---- mode bar --------------------------------------------------------------------------------
-        self.mode_btns: dict[str, QPushButton] = {}
-        mode_bar = QHBoxLayout()
-        mode_bar.setSpacing(0)
-        self.mode_group = QButtonGroup(self)
-        for i, (key, lbl) in enumerate(MODES):
-            b = QPushButton(lbl)
-            b.setCheckable(True)
-            b.setMinimumHeight(28)
-            b.clicked.connect(lambda _=False, k=key: self.set_mode(k))
-            self.mode_group.addButton(b)
-            self.mode_btns[key] = b
-            mode_bar.addWidget(b)
-        self.mode_btns["single"].setChecked(True)
-        mode_bar.addStretch()
+        self._build_actions()
 
-        # ---- left: one stacked panel per mode -------------------------------------------------------
+        # ---- test panels: one page per mode
         self.left_stack = QStackedWidget()
         self.left_stack.addWidget(self._build_single())
         self.left_stack.addWidget(self._build_multi())
@@ -316,16 +335,15 @@ class LivePage(Page):
         self.obs_panel.start_clicked.connect(self.obs_start)
         self.obs_panel.pause_clicked.connect(self.obs_pause)
         self.obs_panel.stop_clicked.connect(lambda: self.obs_stop(save=True))
+        self.obs_panel.undo_clicked.connect(lambda: self.undo_last_event(self.obs))
         if self.obs_panel.pad is not None:
             self.obs_panel.pad.pressed.connect(lambda n: self._pad(n, True))
             self.obs_panel.pad.released.connect(lambda n: self._pad(n, False))
         self.left_stack.addWidget(self.obs_panel)
-        left = QVBoxLayout()
-        left.addLayout(mode_bar)
-        left.addWidget(self.left_stack, 1)
 
-        # ---- right: tabs ----------------------------------------------------------------------------
+        # ---- the report: a collapsible side panel (ribbon: View ▸ Hide report)
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("LiveReport")
         self.tabs.setUsesScrollButtons(True)
         self.setup_tab = self._build_setup()
         self.monitor = MonitorPanel()
@@ -333,6 +351,7 @@ class LivePage(Page):
         mon_scroll.setWidget(self.monitor)
         mon_scroll.setWidgetResizable(True)
         mon_scroll.setFrameShape(QScrollArea.NoFrame)
+        mon_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.monitor_tab = mon_scroll
         self.procedures_tab = self._build_procedures()
         self.results_tab = self._build_results()
@@ -342,15 +361,18 @@ class LivePage(Page):
         self.tabs.addTab(self.procedures_tab, "Procedures")
         self.tabs.addTab(self.results_tab, "Results")
         self.tabs.addTab(self.log_tab, "Log")
-        self.tabs.setFixedWidth(410)
+        self.tabs.setFixedWidth(372)
 
         lay = QHBoxLayout(self)
-        lay.addLayout(left, 1)
+        lay.setContentsMargins(8, 8, 8, 6)
+        lay.setSpacing(8)
+        lay.addWidget(self.left_stack, 1)
         lay.addWidget(self.tabs)
         self._set_state_display("idle")
+        self._apply_view_prefs()
         self._update_buttons()
 
-        # ≤ 5 Hz: monitor, session table, schedules, saving finished tests; ~12 Hz: mosaic images
+        # ≤ 5 Hz: monitor, panels, schedules, saving finished tests; ~12 Hz: camera images of the panels
         self._ui_timer = QTimer(self)
         self._ui_timer.setInterval(200)
         self._ui_timer.timeout.connect(self._tick)
@@ -359,101 +381,358 @@ class LivePage(Page):
         self._mosaic_timer.setInterval(80)
         self._mosaic_timer.timeout.connect(self._refresh_mosaic)
 
+    # ================================================================== ribbon
+    def _act(self, name: str, text: str, tip: str, fn=None, checkable: bool = False) -> QAction:
+        a = QAction(icon(name), text, self)
+        a.setToolTip(tip)
+        a.setStatusTip(tip)
+        a.setCheckable(checkable)
+        if fn is not None:
+            a.triggered.connect(lambda _=False: fn())
+        return a
+
+    def _build_actions(self):
+        A = self._act
+        # All apparatus
+        self.start_all_act = A("play", "Start all", "Start the test of every apparatus (they are armed first if "
+                               "needed). One test: arm it, or start it now when it is waiting.", self.start_all_clicked)
+        self.start_now_act = A("play", "Start all now", "Start every test immediately, without waiting for its "
+                               "start condition.", self.start_all_now)
+        self.arm_all_act = A("timer", "Arm all", "Arm every test: each one starts when its start condition is met "
+                             "(animal detected, start key, clock time…).", self.arm_all_clicked)
+        m = QMenu(self)
+        m.addAction(self.start_now_act)
+        m.addAction(self.arm_all_act)
+        self.start_all_act.setMenu(m)
+        self.stop_all_act = A("stop", "Stop all", "Stop every running test (you choose to save or discard).",
+                              self.stop_all_clicked)
+        self.pause_all_act = A("pause", "Pause all", "Pause every running test (the test clocks stop).",
+                               self.pause_all_clicked)
+        self.resume_all_act = A("resume", "Resume all", "Resume every paused test.", self.resume_all_clicked)
+        # Session
+        self.add_source_act = A("camera_add", "Add\nsource", "Use a camera, or a video file that "
+                                "simulates one.")
+        m = QMenu(self)
+        m.addAction(icon("camera"), "Camera…", self.add_camera_clicked)
+        m.addAction(icon("video_file"), "Video file (simulated camera)…", self.add_file_clicked)
+        m.addSeparator()
+        m.addAction(icon("refresh"), "Scan for cameras", self.scan_cameras)
+        self.add_source_act.setMenu(m)
+        self.add_panel_act = A("panel_add", "Add test panel", "Add a test (camera image × apparatus × animal) to "
+                               "the session — switches to Several tests.", self.add_panel_clicked)
+        self.remove_panel_act = A("delete", "Remove panel", "Remove the selected test panel.",
+                                  self.remove_session_row)
+        self.capture_bg_act = A("image_capture", "Capture backgrounds", "Take the current camera image(s) as the "
+                                "empty-arena background. The arenas must be empty.", self.capture_backgrounds_clicked)
+        self.cam_opts_act = A("settings", "Camera options", "Region of the image, digital zoom / pan, rotation, "
+                              "flip, merging two cameras.", self.camera_options_clicked)
+        self.camera_act = A("video", "Camera image", "Turn the camera image(s) on or off (preview before "
+                            "the test).", self.camera_toggled, checkable=True)
+        self.next_test_act = A("forward", "Next test", "Go to the next test of the test schedule.", self.next_test)
+        # View
+        self.layout_act = A("layout_grid", "Apparatus\nlayout", "How the test panels are arranged.")
+        m = QMenu(self)
+        self._layout_group = QActionGroup(self)
+        self.layout_acts: dict[str, QAction] = {}
+        for k, lbl in LAYOUT_LABELS.items():
+            a = m.addAction(lbl)
+            a.setCheckable(True)
+            a.triggered.connect(lambda _=False, k=k: self.set_layout(k))
+            self._layout_group.addAction(a)
+            self.layout_acts[k] = a
+        self.layout_act.setMenu(m)
+        self.fit_act = A("fit", "Scale\nto fit", "Scale the camera images to fit their panels (off: 1:1 pixels).",
+                         lambda: self._set_pref("fit", self.fit_act.isChecked()), checkable=True)
+        self.indicators_act = A("highlighter", "Tracking\nindicators", "What is drawn on the camera images.")
+        m = QMenu(self)
+        self.trail_act = m.addAction("Animal's track (trail)")
+        self.zones_act = m.addAction("Highlight the zone the animal is in")
+        self.labels_act = m.addAction("Zone names")
+        for a, k in ((self.trail_act, "trail"), (self.zones_act, "zones"), (self.labels_act, "labels")):
+            a.setCheckable(True)
+            a.triggered.connect(lambda on, k=k: self._set_pref(k, on))
+        self.indicators_act.setMenu(m)
+        self.hide_report_act = A("report_hide", "Hide report", "Hide the report on the right (setup, monitor, "
+                                 "procedures, results, log) to give the panels more room.",
+                                 lambda: self._set_pref("hide_report", self.hide_report_act.isChecked()),
+                                 checkable=True)
+        self.hide_app_act = A("eye_off", "Hide apparatus", "Hide the apparatus drawn over the camera images.",
+                              lambda: self._set_pref("hide_apparatus", self.hide_app_act.isChecked()),
+                              checkable=True)
+        self.panel_settings_act = A("panel_settings", "Panel settings", "What each test panel shows.",
+                                    self.panel_settings)
+        # Mode
+        self._mode_group = QActionGroup(self)
+        self.mode_acts: dict[str, QAction] = {}
+        for key, lbl, ic, tip in MODE_ACTIONS:
+            a = A(ic, lbl, tip, lambda k=key: self.set_mode(k), checkable=True)
+            self._mode_group.addAction(a)
+            self.mode_acts[key] = a
+        self.mode_acts["single"].setChecked(True)
+        self.mode_btns = self.mode_acts  # older name
+
+    def ribbon_groups(self):
+        # (large labels carry their own line break: the ribbon's automatic one is lost when an action changes)
+        start = QToolButton()  # a split button, as in ANY-maze: click starts, ▾ offers "now" / "arm"
+        start.setObjectName("RibbonLarge")
+        start.setDefaultAction(self.start_all_act)
+        start.setPopupMode(QToolButton.MenuButtonPopup)
+        start.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        start.setIconSize(QSize(32, 32))
+        start.setAutoRaise(True)
+        start.setFocusPolicy(Qt.NoFocus)
+        start.setMinimumWidth(60)
+        start.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        return [("All apparatus", [start, (self.stop_all_act, "small"), (self.pause_all_act, "small"),
+                                   (self.resume_all_act, "small")]),
+                ("Session", [(self.add_source_act, "large"), (self.add_panel_act, "small"),
+                             (self.remove_panel_act, "small"), (self.capture_bg_act, "small"),
+                             (self.camera_act, "small"), (self.cam_opts_act, "small"), (self.next_test_act, "small")]),
+                ("View", [(self.layout_act, "large"), (self.fit_act, "large"), (self.indicators_act, "large"),
+                          (self.hide_report_act, "small"), (self.hide_app_act, "small"),
+                          (self.panel_settings_act, "small")]),
+                ("Mode", [(self.mode_acts[k], "small") for k, *_ in MODE_ACTIONS])]
+
+    def explorer_items(self):
+        """Several tests: one explorer entry per test panel."""
+        if self.mode != "multi":
+            return []
+        return [(self._entry_short(e), "video", e.id) for e in self._entries()]
+
+    def show_item(self, key):
+        self._panel_clicked(key)
+
+    def _refresh_explorer(self):
+        try:
+            self.main.refresh_explorer(self)
+        except Exception:  # pragma: no cover - the window is still being built
+            pass
+
+    # ---- ribbon commands (they act on the test(s) of the current mode)
+    def start_all_clicked(self):
+        if self.mode == "multi":
+            self.start_all()
+        elif self.mode == "observe":
+            self.obs_start()
+        else:
+            self._arm_clicked()
+
+    def start_all_now(self):
+        if self.mode == "multi":
+            self.start_all()
+        elif self.mode == "observe":
+            self.obs_start()
+        else:
+            self.start_now()
+
+    def arm_all_clicked(self):
+        if self.mode == "multi":
+            self.arm_all()
+        elif self.mode == "observe":
+            self.obs_start()
+        else:
+            self.arm()
+        self._update_buttons()
+
+    def stop_all_clicked(self):
+        if self.mode == "multi":
+            self._stop_all_clicked()
+        elif self.mode == "observe":
+            self.obs_stop(save=True)
+        else:
+            self._stop_clicked()
+        self._update_buttons()
+
+    def pause_all_clicked(self):
+        if self.mode == "multi":
+            self.group_pause_all()
+        elif self.mode == "observe":
+            if self.obs is not None and self.obs.state == "running":
+                self.obs_pause()
+        elif self.session is not None and self.session.state == "running":
+            self.toggle_pause()
+        self._update_buttons()
+
+    def resume_all_clicked(self):
+        if self.mode == "multi":
+            self.group_resume_all()
+        elif self.mode == "observe":
+            if self.obs is not None and self.obs.state == "paused":
+                self.obs_pause()
+        elif self.session is not None and self.session.state == "paused":
+            self.toggle_pause()
+        self._update_buttons()
+
+    def add_camera_clicked(self):
+        i, ok = QInputDialog.getInt(self, "Add camera", "Camera number (0 = first camera):", 0, 0, 63)
+        if not ok:
+            return
+        if self.mode == "multi":
+            self.add_source(i)
+            return
+        restart = self.grabber is not None
+        self.stop_preview()
+        if self.camera.findData(i) < 0:
+            self.camera.addItem(f"Camera {i}", i)
+        self.camera.setCurrentIndex(self.camera.findData(i))
+        self.cam_radio.setChecked(True)
+        self._update_single_title()
+        if restart:
+            self.start_preview()
+
+    def add_file_clicked(self):
+        if self.mode == "multi":
+            self._add_file_source()
+        else:
+            self._choose_sim_file()
+
+    def add_panel_clicked(self):
+        if self.mode != "multi" and not self.set_mode("multi"):
+            return None
+        return self.add_session_row()
+
+    def capture_backgrounds_clicked(self):
+        if self.mode == "multi":
+            self.capture_group_backgrounds()
+        else:
+            self.capture_background()
+
+    def camera_options_clicked(self):
+        if self.mode == "multi":
+            self.multi_camera_options()
+        else:
+            self.camera_options()
+
+    def camera_toggled(self):
+        if self.mode == "multi":
+            self._toggle_cameras()
+        elif self.mode == "single":
+            self._toggle_preview()
+        self._update_buttons()
+
+    # ---- view preferences (kept in the user's settings, not in the experiment)
+    def _load_view_prefs(self) -> dict:
+        d = dict(VIEW_DEFAULTS)
+        try:
+            raw = self.main.settings.value("live/view", "")
+            if raw:
+                d.update(json.loads(raw))
+        except Exception:
+            pass
+        return d
+
+    def _save_view_prefs(self):
+        try:
+            self.main.settings.setValue("live/view", json.dumps(self.prefs))
+        except Exception:
+            pass
+
+    def _set_pref(self, key: str, value):
+        self.prefs[key] = value
+        self._save_view_prefs()
+        self._apply_view_prefs()
+
+    def set_layout(self, key: str):
+        self._set_pref("layout", key if key in LAYOUTS else "2x2")
+
+    def panel_settings(self) -> bool:
+        dlg = PanelSettingsDialog(self.prefs.get("panel") or {}, self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self._set_pref("panel", dlg.result_settings())
+        return True
+
+    def _all_panels(self) -> list[TestPanel]:
+        return [self.single_panel] + list(self._panels.values())
+
+    def _apply_view_prefs(self):
+        d = self.prefs
+        for a, k in ((self.fit_act, "fit"), (self.trail_act, "trail"), (self.zones_act, "zones"),
+                     (self.labels_act, "labels"), (self.hide_report_act, "hide_report"),
+                     (self.hide_app_act, "hide_apparatus")):
+            a.setChecked(bool(d.get(k)))
+        lay = d.get("layout") if d.get("layout") in LAYOUTS else "2x2"
+        self.layout_acts[lay].setChecked(True)
+        self.mosaic.set_layout_key(lay)
+        self._show_trail = self.group.show_trail = bool(d.get("trail", True))
+        self.tabs.setVisible(not d.get("hide_report"))
+        for p in self._all_panels():
+            self._apply_prefs_to_panel(p)
+
+    def _apply_prefs_to_panel(self, p: TestPanel):
+        d = self.prefs
+        p.view.set_scale_to_fit(bool(d.get("fit", True)))
+        p.view.set_indicators(zones=bool(d.get("zones", True)), labels=bool(d.get("labels", False)))
+        p.view.set_apparatus_visible(not d.get("hide_apparatus"))
+        p.apply_settings(d.get("panel") or {})
+
     # ================================================================== UI construction
     def _build_single(self) -> QWidget:
-        self.view = FrameView()
-        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.placeholder = QLabel("Choose a camera (or a video file to simulate one) and press “Start preview”.")
-        self.placeholder.setAlignment(Qt.AlignCenter)
-        self.placeholder.setStyleSheet("color:#94a3b8;font-size:14px;background:#1e293b;padding:6px")
-
-        dash = QWidget()
-        dash.setObjectName("dash")
-        dash.setStyleSheet("#dash{background:palette(base);border:1px solid palette(mid);border-radius:6px}"
-                           "QLabel[role=cap]{color:palette(mid);font-size:11px}"
-                           "QLabel[role=val]{font-size:18px;font-weight:600}")
-        dg = QGridLayout(dash)
-        dg.setContentsMargins(10, 6, 10, 6)
-        self.state_lbl = QLabel()
-        self.state_lbl.setAlignment(Qt.AlignCenter)
-        self.state_lbl.setMinimumWidth(170)
-        dg.addWidget(self.state_lbl, 0, 0, 2, 1)
-        self.vals = {}
-        for i, (key, cap) in enumerate((("elapsed", "Elapsed"), ("remaining", "Remaining"), ("zone", "Current zone"),
-                                        ("distance", "Distance"), ("events", "Events"))):
-            c = QLabel(cap)
-            c.setProperty("role", "cap")
-            v = QLabel("—")
-            v.setProperty("role", "val")
-            dg.addWidget(c, 0, i + 1)
-            dg.addWidget(v, 1, i + 1)
-            self.vals[key] = v
-        dg.setColumnStretch(3, 2)
-        for c in (1, 2, 4, 5):
-            dg.setColumnStretch(c, 1)
-
-        self.arm_btn = QPushButton("Arm / Start test")
-        self.arm_btn.setStyleSheet("QPushButton{font-weight:600}")
-        self.arm_btn.clicked.connect(self._arm_clicked)
-        self.pause_btn = QPushButton("Pause")
-        self.pause_btn.clicked.connect(self.toggle_pause)
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.clicked.connect(self._stop_clicked)
-        self.next_btn = QPushButton("Next test ▸")
-        self.next_btn.clicked.connect(self.next_test)
-        self.preview_btn = QPushButton("Start preview")
-        self.preview_btn.clicked.connect(self._toggle_preview)
-        self.keys_lbl = QLabel()
-        self.keys_lbl.setWordWrap(True)
-        self.keys_lbl.setStyleSheet("color:palette(mid)")
-        ctl = QHBoxLayout()
-        for b in (self.preview_btn, self.arm_btn, self.pause_btn, self.stop_btn, self.next_btn):
-            b.setMinimumHeight(34)
-            ctl.addWidget(b)
+        p = TestPanel(single=True)
+        self.single_panel = p
+        self.view = p.view
+        self.state_lbl = p.state_lbl
+        self.vals = p.vals
+        self.arm_btn = p.start_btn
+        self.pause_btn = p.pause_btn
+        self.stop_btn = p.stop_btn
+        self.preview_btn = p.camera_btn
+        self.next_btn = p.next_btn
+        p.start_clicked.connect(self._arm_clicked)
+        p.start_now.connect(self.start_now)
+        p.arm_clicked.connect(self.arm)
+        p.pause_clicked.connect(self.toggle_pause)
+        p.stop_clicked.connect(self._stop_clicked)
+        p.undo_clicked.connect(lambda: self.undo_last_event(self.session))
+        p.camera_btn.clicked.connect(lambda: (self._toggle_preview(), self._update_buttons()))
+        p.bg_btn.clicked.connect(self.capture_background)
+        p.next_btn.clicked.connect(self.next_test)
+        p.menu.addAction(self.cam_opts_act)
+        p.menu.addAction(self.capture_bg_act)
+        p.menu.addSeparator()
+        p.menu.addAction(self.panel_settings_act)
+        p.view.set_message("Choose a camera — or a video file that simulates one — in Setup, then press ▶ to "
+                           "start the test, or turn on the camera image to preview it.")
         self.score_pad = _scoring_pad()
         if self.score_pad is not None:
             self.score_pad.pressed.connect(lambda n: self._pad(n, True))
             self.score_pad.released.connect(lambda n: self._pad(n, False))
+        self.keys_lbl = QLabel()
+        self.keys_lbl.setObjectName("Hint")
+        self.keys_lbl.setWordWrap(True)
         w = QWidget()
-        left = QVBoxLayout(w)
-        left.setContentsMargins(0, 0, 0, 0)
-        left.addWidget(self.placeholder)
-        left.addWidget(self.view, 1)
-        left.addWidget(dash)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addWidget(p, 1)
         if self.score_pad is not None:
-            left.addWidget(self.score_pad)
-        left.addLayout(ctl)
-        left.addWidget(self.keys_lbl)
+            v.addWidget(self.score_pad)
+        v.addWidget(self.keys_lbl)
         return w
 
     def _build_multi(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
-        self.mosaic = MosaicView()
-        self.mosaic.tile_clicked.connect(self._tile_clicked)
+        v.setSpacing(4)
+        self.mosaic = PanelGrid()
+        self.mosaic.panel_clicked.connect(self._panel_clicked)
         v.addWidget(self.mosaic, 1)
+        self.group_lbl = QLabel()
+        self.group_lbl.setObjectName("Hint")
+        self.group_lbl.setWordWrap(True)
+        v.addWidget(self.group_lbl)
+        return w
 
-        bar = QHBoxLayout()
-        self.cams_btn = QPushButton("Start cameras")
-        self.cams_btn.clicked.connect(self._toggle_cameras)
-        self.g_arm = QPushButton("Arm all")
-        self.g_arm.setStyleSheet("QPushButton{font-weight:600}")
-        self.g_arm.clicked.connect(lambda: self.arm_all())
-        self.g_start = QPushButton("Start all now")
-        self.g_start.clicked.connect(self.start_all)
-        self.g_pause = QPushButton("Pause all")
-        self.g_pause.clicked.connect(self.group_pause_all)
-        self.g_resume = QPushButton("Resume all")
-        self.g_resume.clicked.connect(self.group_resume_all)
-        self.g_stop = QPushButton("Stop all")
-        self.g_stop.clicked.connect(self._stop_all_clicked)
-        for b in (self.cams_btn, self.g_arm, self.g_start, self.g_pause, self.g_resume, self.g_stop):
-            b.setMinimumHeight(32)
-            bar.addWidget(b)
-        v.addLayout(bar)
-
+    def _build_session_table(self) -> QGroupBox:
+        box = QGroupBox("Test panels")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 4, 0, 4)
+        hint = QLabel("Each row is a test panel: the camera or video it uses, its apparatus and the animal, stage "
+                      "and trial tested. Add and remove panels with the ribbon.")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
         self.sess_table = QTableWidget(0, 8)
         self.sess_table.setHorizontalHeaderLabels(["Source", "Apparatus", "Animal", "Stage", "Trial", "State",
                                                    "Time", ""])
@@ -462,52 +741,68 @@ class LivePage(Page):
         self.sess_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.sess_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.sess_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sess_table.setShowGrid(False)
         hh = self.sess_table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        for c, wd in ((1, 110), (2, 78), (3, 70), (4, 52), (5, 78), (6, 64), (7, 92)):
+        for c, wd in ((1, 92), (2, 62), (3, 62), (4, 50)):
             self.sess_table.setColumnWidth(c, wd)
-        self.sess_table.setFixedHeight(172)
-        self.sess_table.currentCellChanged.connect(lambda *_: self._refresh_monitor(force=True))
+        for c in (5, 6, 7):  # state, time and controls are shown by the panels themselves
+            self.sess_table.setColumnHidden(c, True)
+        self.sess_table.setMinimumHeight(120)
+        self.sess_table.setMaximumHeight(200)
+        self.sess_table.currentCellChanged.connect(lambda *_: self._selection_changed())
         v.addWidget(self.sess_table)
-
-        row = QHBoxLayout()
-        self.add_src_btn = QToolButton()
-        self.add_src_btn.setText("Add source ▾")
-        self.add_src_btn.setPopupMode(QToolButton.InstantPopup)
-        m = QMenu(self.add_src_btn)
-        m.addAction("Camera…", self._add_camera_source)
-        m.addAction("Video file (simulated camera)…", self._add_file_source)
-        self.add_src_btn.setMenu(m)
-        self.add_src_btn.setMinimumHeight(28)
-        self.cam_opts_multi = QPushButton("Camera options…")
-        self.cam_opts_multi.clicked.connect(self.multi_camera_options)
-        self.add_sess_btn = QPushButton("Add session")
-        self.add_sess_btn.clicked.connect(lambda: self.add_session_row())
-        self.rm_sess_btn = QPushButton("Remove")
-        self.rm_sess_btn.clicked.connect(self.remove_session_row)
-        self.cap_bgs_btn = QPushButton("Capture backgrounds")
-        self.cap_bgs_btn.setToolTip("Take the current image of every camera as its empty-arena background.")
-        self.cap_bgs_btn.clicked.connect(self.capture_group_backgrounds)
-        row.addWidget(self.add_src_btn)
-        for b in (self.cam_opts_multi, self.add_sess_btn, self.rm_sess_btn, self.cap_bgs_btn):
-            row.addWidget(b)
-        row.addStretch()
-        v.addLayout(row)
-        self.group_lbl = QLabel()
-        self.group_lbl.setWordWrap(True)
-        self.group_lbl.setStyleSheet("color:palette(mid)")
-        v.addWidget(self.group_lbl)
-        return w
+        # the selected panel's test, edited with wide inputs (ANY-maze style property rows)
+        self.row_editor = QWidget()
+        f = QFormLayout(self.row_editor)
+        f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        f.setContentsMargins(0, 8, 0, 0)
+        f.setVerticalSpacing(7)
+        self.row_source = QComboBox()
+        self.row_apparatus = QComboBox()
+        self.row_animal = QComboBox()
+        self.row_animal.setEditable(True)
+        self.row_animal.setInsertPolicy(QComboBox.NoInsert)
+        self.row_stage = QComboBox()
+        self.row_stage.setEditable(True)
+        self.row_trial = QSpinBox()
+        self.row_trial.setRange(1, 10000)
+        self.row_source.currentIndexChanged.connect(self._row_editor_changed)
+        self.row_apparatus.currentIndexChanged.connect(self._row_editor_changed)
+        self.row_animal.currentTextChanged.connect(self._row_editor_changed)
+        self.row_stage.currentTextChanged.connect(self._row_editor_changed)
+        self.row_trial.valueChanged.connect(self._row_editor_changed)
+        f.addRow("Camera / video", self.row_source)
+        f.addRow("Apparatus", self.row_apparatus)
+        f.addRow("Animal", self.row_animal)
+        f.addRow("Stage", self.row_stage)
+        f.addRow("Trial", self.row_trial)
+        v.addWidget(self.row_editor)
+        return box
 
     def _build_setup(self) -> QWidget:
         inner = QWidget()
         v = QVBoxLayout(inner)
+        v.setContentsMargins(10, 4, 10, 10)
+
+        def form(box):
+            f = QFormLayout(box)
+            f.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            f.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            f.setHorizontalSpacing(10)
+            f.setVerticalSpacing(7)
+            f.setContentsMargins(0, 4, 0, 4)
+            return f
+
+        self.panels_box = self._build_session_table()
+        v.addWidget(self.panels_box)
 
         src = QGroupBox("Video source")
-        f = QFormLayout(src)
-        self.cam_radio = QRadioButton("Camera")
-        self.sim_radio = QRadioButton("Simulate with a video file")
+        f = form(src)
+        self.cam_radio = QRadioButton("Use a camera")
+        self.sim_radio = QRadioButton("Simulate a camera with a video file")
         self.src_group = QButtonGroup(self)
         self.src_group.addButton(self.cam_radio)
         self.src_group.addButton(self.sim_radio)
@@ -516,7 +811,8 @@ class LivePage(Page):
         self.camera = QComboBox()
         self.camera.addItem("Camera 0", 0)
         self.camera.currentIndexChanged.connect(self._camera_changed)
-        self.scan_btn = QPushButton("Scan cameras")
+        self.scan_btn = QPushButton("Scan")
+        self.scan_btn.setToolTip("Look for cameras connected to this computer")
         self.scan_btn.clicked.connect(self.scan_cameras)
         row = QHBoxLayout()
         row.addWidget(self.camera, 1)
@@ -526,7 +822,7 @@ class LivePage(Page):
             self.resolution.addItem(lbl, val)
         self.cam_fps = QSpinBox()
         self.cam_fps.setRange(0, 240)
-        self.cam_fps.setSpecialValueText("Default")
+        self.cam_fps.setSpecialValueText("Camera default")
         self.cam_fps.setSuffix(" fps")
         self.sim_path = QLineEdit()
         self.sim_path.setPlaceholderText("No file chosen")
@@ -540,27 +836,22 @@ class LivePage(Page):
         for s in (1.0, 2.0, 4.0, 8.0):
             self.sim_speed.addItem(f"{s:g}× real time", s)
         self.sim_speed.currentIndexChanged.connect(self._speed_changed)
-        self.cam_opts_btn = QPushButton("Camera options…")
-        self.cam_opts_btn.setToolTip("Region of the image, digital zoom / pan, rotation, flip, merge two cameras")
-        self.cam_opts_btn.clicked.connect(self.camera_options)
         self.view_lbl = QLabel()
-        self.view_lbl.setStyleSheet("color:palette(mid)")
+        self.view_lbl.setObjectName("Hint")
         self.view_lbl.setWordWrap(True)
+        self.view_lbl.setToolTip("Change with Camera options in the ribbon")
         f.addRow(self.cam_radio)
-        f.addRow("Device", row)
-        f.addRow("Resolution", self.resolution)
+        f.addRow("Camera", row)
+        f.addRow("Image size", self.resolution)
         f.addRow("Frame rate", self.cam_fps)
         f.addRow(self.sim_radio)
-        f.addRow("File", srow)
-        f.addRow("Speed", self.sim_speed)
-        orow = QHBoxLayout()
-        orow.addWidget(self.cam_opts_btn)
-        orow.addWidget(self.view_lbl, 1)
-        f.addRow(orow)
+        f.addRow("Video file", srow)
+        f.addRow("Play it at", self.sim_speed)
+        f.addRow("Camera options", self.view_lbl)
         v.addWidget(src)
 
         tb = QGroupBox("Test")
-        f = QFormLayout(tb)
+        f = form(tb)
         self.test_combo = QComboBox()
         self.test_combo.currentIndexChanged.connect(self._test_selected)
         self.animal = QComboBox()
@@ -572,7 +863,9 @@ class LivePage(Page):
         self.trial.setRange(1, 10000)
         self.apparatus = QComboBox()
         self.apparatus.currentIndexChanged.connect(self._apparatus_changed)
-        f.addRow("Run", self.test_combo)
+        for sig in (self.animal.currentTextChanged, self.stage.currentTextChanged, self.trial.valueChanged):
+            sig.connect(lambda *_: self._update_single_title())
+        f.addRow("Test to run", self.test_combo)
         f.addRow("Animal", self.animal)
         f.addRow("Stage", self.stage)
         f.addRow("Trial", self.trial)
@@ -580,7 +873,7 @@ class LivePage(Page):
         v.addWidget(tb)
 
         sb = QGroupBox("Start and end")
-        f = QFormLayout(sb)
+        f = form(sb)
         self.duration = QDoubleSpinBox()
         self.duration.setRange(0, 1e6)
         self.duration.setDecimals(1)
@@ -606,27 +899,25 @@ class LivePage(Page):
             w.editingFinished.connect(self._save_live_settings)
         self.sched_time.timeChanged.connect(self._save_live_settings)
         self.sched_daily.toggled.connect(self._save_live_settings)
-        f.addRow("Duration", self.duration)
-        f.addRow("Test starts", self.start_mode)
+        f.addRow("Test duration", self.duration)
+        f.addRow("The test starts", self.start_mode)
         f.addRow("Start time", trow)
         f.addRow("Start keys", self.start_keys)
         f.addRow("Stop keys", self.stop_keys)
         v.addWidget(sb)
 
         db = QGroupBox("Detection and recording")
-        f = QFormLayout(db)
+        f = form(db)
         self.bg_mode = QComboBox()
         self.bg_mode.addItem("Empty-arena image", "frame")
         self.bg_mode.addItem("Adaptive (learns while running)", "adaptive")
         self.bg_mode.currentIndexChanged.connect(self._bg_mode_changed)
-        self.capture_btn = QPushButton("Capture empty-arena background")
-        self.capture_btn.setToolTip("Take the current frame as the background. The arena must be empty.")
-        self.capture_btn.clicked.connect(self.capture_background)
         self.bg_status = QLabel("No background captured")
-        self.bg_status.setStyleSheet("color:palette(mid)")
-        self.record = QCheckBox("Record video of the test")
+        self.bg_status.setObjectName("Hint")
+        self.bg_status.setWordWrap(True)
+        self.record = QCheckBox("Record a video of the test")
         self.record.setChecked(True)
-        self.record_overlay = QCheckBox("Burn time and events into the video")
+        self.record_overlay = QCheckBox("Burn the time and events into the video")
         self.record_overlay.setToolTip("Write the test time, the clock time and the latest event labels on the "
                                        "recorded video (otherwise the recording is clean).")
         self.record_overlay.toggled.connect(self._save_live_settings)
@@ -641,13 +932,12 @@ class LivePage(Page):
         self.serial.setEditable(True)
         self.serial_note = QLabel()
         self.serial_note.setWordWrap(True)
-        self.serial_note.setStyleSheet("color:palette(mid)")
+        self.serial_note.setObjectName("Hint")
         f.addRow("Background", self.bg_mode)
-        f.addRow("", self.capture_btn)
         f.addRow("", self.bg_status)
-        f.addRow("", self.record)
-        f.addRow("", self.record_overlay)
-        f.addRow("Warn if lost for", self.lost_warn)
+        f.addRow(self.record)
+        f.addRow(self.record_overlay)
+        f.addRow("Warn if the animal is lost for", self.lost_warn)
         f.addRow("Serial port", self.serial)
         f.addRow("", self.serial_note)
         v.addWidget(db)
@@ -660,6 +950,7 @@ class LivePage(Page):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.panels_box.setVisible(False)
         self._source_mode_changed()
         self._start_mode_changed()
         return scroll
@@ -684,19 +975,20 @@ class LivePage(Page):
     def _build_rules(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        info = QLabel("Rules run during live tests: when a trigger happens (time, zone entry, freezing…) the "
+        info = QLabel("Rules run during live tests: when something happens (a time, a zone entry, freezing…) the "
                       "action is performed — e.g. send a command to an Arduino over the serial port, beep, or "
                       "mark an event in the test.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:palette(mid)")
+        info.setObjectName("Hint")
         v.addWidget(info)
         self.proc_table = QTableWidget(0, 3)
-        self.proc_table.setHorizontalHeaderLabels(["Trigger", "Action", "Description"])
+        self.proc_table.setHorizontalHeaderLabels(["When", "Action", "Description"])
         self.proc_table.verticalHeader().hide()
         self.proc_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.proc_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.proc_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.proc_table.setWordWrap(True)
+        self.proc_table.setShowGrid(False)
         hh = self.proc_table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -704,9 +996,9 @@ class LivePage(Page):
         self.proc_table.currentCellChanged.connect(lambda *_: self._load_rule_editor())
         v.addWidget(self.proc_table, 1)
         bb = QHBoxLayout()
-        add = QPushButton("Add rule")
+        add = QPushButton(icon("add"), "Add rule")
         add.clicked.connect(lambda: self.add_rule())
-        rm = QPushButton("Remove")
+        rm = QPushButton(icon("delete"), "Remove")
         rm.clicked.connect(self.remove_rule)
         bb.addWidget(add)
         bb.addWidget(rm)
@@ -716,6 +1008,7 @@ class LivePage(Page):
 
         ed = QGroupBox("Selected rule")
         f = QFormLayout(ed)
+        f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.r_trigger = QComboBox()
         for k in procs.TRIGGERS:
             self.r_trigger.addItem(TRIGGER_LABELS.get(k, k), k)
@@ -757,22 +1050,25 @@ class LivePage(Page):
     def _build_results(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        self.results_title = QLabel("Results of the last live test appear here.")
+        v.setContentsMargins(10, 4, 10, 8)
+        self.results_title = QLabel("The results of the last test appear here.")
+        self.results_title.setObjectName("SectionTitle")
         self.results_title.setWordWrap(True)
-        self.results_title.setStyleSheet("font-weight:600")
         v.addWidget(self.results_title)
         self.results = QTableWidget(0, 2)
         self.results.setHorizontalHeaderLabels(["Measure", "Value"])
         self.results.verticalHeader().hide()
+        self.results.verticalHeader().setDefaultSectionSize(26)
         self.results.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.results.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.results.setShowGrid(False)
         self.results.setAlternatingRowColors(True)
         v.addWidget(self.results, 1)
         row = QHBoxLayout()
-        self.open_test_btn = QPushButton("Open in test viewer")
+        self.open_test_btn = QPushButton(icon("video"), "Open in Review and score")
         self.open_test_btn.clicked.connect(lambda: self.main.open_test(self.last_test_id))
         self.open_test_btn.setEnabled(False)
-        nb = QPushButton("Next test ▸")
+        nb = QPushButton(icon("forward"), "Next test")
         nb.clicked.connect(self.next_test)
         row.addWidget(self.open_test_btn)
         row.addStretch()
@@ -784,7 +1080,10 @@ class LivePage(Page):
     def _build_log(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(10, 8, 10, 8)
         self.log = QListWidget()
+        self.log.setWordWrap(True)
+        self.log.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.addWidget(self.log)
         clear = QPushButton("Clear")
         clear.clicked.connect(self.log.clear)
@@ -800,16 +1099,21 @@ class LivePage(Page):
         self.stop_test(save=False, quiet=True)
         self.stop_preview()
         self.group.close()
-        self.group = LiveGroup()
+        self.group = _PanelGroup()
+        self.group.show_trail = self._show_trail
+        self._panels = {}  # the panels of the previous experiment go with its session
         self._group_bgs = {}
         self.obs_stop(save=False)
         self._close_devices()
         self._background = None
         self._file_background = None
+        self._undo = []
         self.bg_status.setText("No background captured")
         self.results.setRowCount(0)
-        self.results_title.setText("Results of the last live test appear here.")
+        self.results_title.setText("The results of the last test appear here.")
         self.log.clear()
+        self.single_panel.log.clear()
+        self.single_panel.view.set_apparatus(None)
         self.monitor.clear()
         if project is not None:
             self.duration.setValue(project.test_duration_s)
@@ -881,12 +1185,13 @@ class LivePage(Page):
         if self.score_pad is not None:
             self.score_pad.setVisible(bool(p.behaviours))
         self._update_keys_label()
+        self._update_single_title()
         self._update_buttons()
 
     def on_hide(self):
         if self.any_active():
-            self.main.status("Live tests are still running in the background — return to “Live testing” to "
-                             "follow or stop them.", 10000)
+            self.main.status("Tests are still running in the background — return to “Run tests” to follow or "
+                             "stop them.", 10000)
             return
         self.stop_preview()
         self.stop_cameras()
@@ -933,19 +1238,20 @@ class LivePage(Page):
     # ================================================================== modes
     def set_mode(self, mode: str) -> bool:
         if mode == self.mode:
-            self.mode_btns[mode].setChecked(True)
+            self.mode_acts[mode].setChecked(True)
             return True
         if self.any_active():
-            QMessageBox.information(self, "Live testing", "Stop the running test(s) before changing the mode.")
-            self.mode_btns[self.mode].setChecked(True)
+            QMessageBox.information(self, "Run tests", "Stop the running test(s) before changing the mode.")
+            self.mode_acts[self.mode].setChecked(True)
             return False
         if self.mode == "single":
             self.stop_preview()
         elif self.mode == "multi":
             self.stop_cameras()
         self.mode = mode
-        self.mode_btns[mode].setChecked(True)
+        self.mode_acts[mode].setChecked(True)
         self.left_stack.setCurrentIndex([m for m, _ in MODES].index(mode))
+        self.panels_box.setVisible(mode == "multi")
         self.src_box.setVisible(mode == "single")
         self.test_box.setVisible(mode != "multi")
         self.det_box.setVisible(mode != "observe")
@@ -955,8 +1261,10 @@ class LivePage(Page):
         else:
             self._mosaic_timer.stop()
         self._update_keys_label()
+        self._update_single_title()
         self._update_buttons()
         self._refresh_monitor(force=True)
+        self._refresh_explorer()
         return True
 
     # ================================================================== settings persistence
@@ -1048,6 +1356,13 @@ class LivePage(Page):
         self._file_background = None
         self._source_is_file = True
         self._load_single_view()
+        if self.grabber is None and self._second is None:  # show the first image until the preview starts
+            f = _first_frame(path)
+            if f is not None:
+                try:
+                    self.view.set_frame(self._view.apply(f))
+                except Exception:
+                    pass
 
     def _choose_sim_file(self):
         start = str(self.project.path) if self.project and self.project.path else str(Path.home())
@@ -1082,6 +1397,7 @@ class LivePage(Page):
         self._second = d.get("second")
         self._merge_layout = d.get("layout", "side")
         self.view_lbl.setText(_describe_view(self._view, self._second, self._merge_layout))
+        self._update_single_title()
 
     def _merge_choices(self, exclude=None) -> list[tuple[str, object]]:
         out = [(self.camera.itemText(i), self.camera.itemData(i)) for i in range(self.camera.count())]
@@ -1136,7 +1452,7 @@ class LivePage(Page):
             return True
         src = self._source()
         if src is None:
-            QMessageBox.information(self, "Live testing", "Choose a video file to simulate a camera first.")
+            QMessageBox.information(self, "Run tests", "Choose a video file to simulate a camera first.")
             return False
         size = self.resolution.currentData() if not self.simulating else None
         fps = self.cam_fps.value() if not self.simulating else None
@@ -1152,7 +1468,6 @@ class LivePage(Page):
         g.finished.connect(self._grabber_finished)
         self.grabber = g
         g.start()
-        self.placeholder.hide()
         self._update_buttons()
         if self.session is None:
             self._set_state_display("preview")
@@ -1175,7 +1490,7 @@ class LivePage(Page):
             self.start_preview()
         else:
             if self.session is not None:
-                QMessageBox.information(self, "Live testing", "Stop the test before stopping the camera.")
+                QMessageBox.information(self, "Run tests", "Stop the test before stopping the camera.")
                 return
             self.stop_preview()
 
@@ -1206,7 +1521,7 @@ class LivePage(Page):
         if self.session is not None:
             self.stop_test(save=len(self.session.cols["t"]) > 0, quiet=True)
         self.stop_preview()
-        error_box(self, "Live testing", msg)
+        error_box(self, "Run tests", msg)
 
     def _on_source_ended(self):
         if self.session is None:
@@ -1231,10 +1546,14 @@ class LivePage(Page):
         if self._loading or self.project is None:
             return
         app = self.project.get_apparatus(self.apparatus.currentText()) if self.project.apparatus else None
+        if self.session is not None:  # the armed test keeps its apparatus (with its moved zones)
+            return
         with self._lock:
             self._apparatus = app
             self._preview_tracker = None
+        self.single_panel.view.set_apparatus(app)
         self._refresh_zone_choices()
+        self._update_single_title()
 
     def _detection_settings(self, test=None) -> DetectionSettings:
         s = DetectionSettings.from_dict(self.project.detection.to_dict())
@@ -1286,8 +1605,7 @@ class LivePage(Page):
                 zm = app.zone_membership(np.array([d.x]), np.array([d.y]))
                 zones = [k for k, v in zm.items() if bool(np.asarray(v).ravel()[0])]
             info["zones"] = zones
-        disp = draw_overlay(frame, dets, app, trail)
-        self._annotate(disp, info)
+        disp = draw_tracking(frame, [d] if d is not None else [], trail if self._show_trail else None)
         return disp, info
 
     def _make_preview_tracker(self, frame, app):
@@ -1305,27 +1623,6 @@ class LivePage(Page):
             tr.set_background(bg if bg.ndim == 2 else cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY))
         return tr
 
-    @staticmethod
-    def _annotate(img, info):
-        st = info["state"]
-        waiting = {"experimenter": "WAITING FOR EXPERIMENTER", "leaving": "WAITING FOR HAND TO LEAVE",
-                   "animal": "WAITING FOR ANIMAL"}.get(info.get("phase") or "", "WAITING FOR ANIMAL")
-        txt = {"running": f"REC {fmt_time(info.get('elapsed', 0))}", "waiting": waiting,
-               "paused": f"PAUSED {fmt_time(info.get('elapsed', 0))}", "finished": "FINISHED"}.get(st, "PREVIEW")
-        col = STATE_STYLE.get(st, STATE_STYLE["preview"])[1].lstrip("#")
-        bgr = (int(col[4:6], 16), int(col[2:4], 16), int(col[0:2], 16))
-        scale = max(0.4, img.shape[1] / 1300)
-        th = max(1, int(round(scale * 1.6)))
-        (tw, tht), base = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, scale, th)
-        pad = max(4, int(6 * scale))
-        dot = tht if st == "running" else 0
-        cv2.rectangle(img, (6, 6), (6 + tw + dot + 3 * pad, 6 + tht + base + 2 * pad), bgr, -1)
-        if dot:
-            cv2.circle(img, (6 + pad + dot // 2, 6 + pad + tht // 2), max(2, dot // 3), (255, 255, 255), -1,
-                       cv2.LINE_AA)
-        cv2.putText(img, txt, (6 + 2 * pad + dot - (pad if not dot else 0), 6 + pad + tht),
-                    cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), th, cv2.LINE_AA)
-
     def feed_frame(self, frame: np.ndarray, ts: float):
         """Process and display a frame synchronously (used when driving the page without a grabber)."""
         self._on_frame(*self.process_frame(frame, ts))
@@ -1333,8 +1630,8 @@ class LivePage(Page):
     def _on_frame(self, disp, info):
         if self.grabber is not None:
             self.grabber.ack()
-        self.placeholder.hide()
         self.view.set_frame(disp)
+        self.view.set_active_zones(info["zones"])
         state = info["state"]
         if self.session is not None or not self._hold_finished:
             self._set_state_display(state)
@@ -1343,11 +1640,11 @@ class LivePage(Page):
             self._update_buttons()
         self.vals["zone"].setText(", ".join(info["zones"]) if info["zones"] else
                                   ("—" if info["detected"] else "not detected"))
-        if self.session is not None:
+        if self.session is not None and "elapsed" in info:  # (a preview frame may arrive just after arming)
             el = info["elapsed"]
             dur = info["duration"]
-            self.vals["elapsed"].setText(fmt_time(el))
-            self.vals["remaining"].setText(fmt_time(max(0.0, dur - el)) if dur else "∞")
+            self.single_panel.set_state(state, el, dur)
+            self._update_single_title(el)
             self.vals["distance"].setText(f"{info['distance']:.1f} {info['unit']}")
             self.vals["events"].setText(str(info["events"]))
             fired = info["fired"]
@@ -1374,6 +1671,42 @@ class LivePage(Page):
             if t.apparatus:
                 self.apparatus.setCurrentText(t.apparatus)
             self.duration.setValue(t.duration_s or self.project.test_duration_s)
+        self._update_single_title()
+
+    def _update_single_title(self, elapsed: float | None = None):
+        """Title of the single-test / observation panel ("Open field: Animal C1, Day 1 trial 2 - 0:38") and the
+        video source shown next to it."""
+        if not hasattr(self, "apparatus") or not hasattr(self, "obs_panel"):
+            return
+        s = self.session if self.mode == "single" else self.obs
+        t = self.test if self.mode == "single" else self.obs_test
+        if t is not None:
+            animal, stage, trial, app = t.animal_id, t.stage, t.trial, t.apparatus
+        else:
+            animal, stage = self.animal.currentText().strip(), self.stage.currentText().strip()
+            trial, app = self.trial.value(), self.apparatus.currentText()
+        what = f"Animal {animal or '?'}, {(stage + ' ') if stage else ''}trial {trial}"
+        if s is not None and elapsed is None:
+            elapsed = s.elapsed if s.state != "waiting" else 0.0
+        clock = f" - {short_time(elapsed)}" if s is not None else ""
+        if self.mode == "observe":
+            self.obs_panel.set_title(f"Observation: {what}{clock}")
+            return
+        title = f"{app}: {what}{clock}" if app else f"{what}{clock}"
+        if self.single_panel.title.text() != title:
+            self.single_panel.set_title(title)
+        if self.simulating:
+            path = self.sim_path.text().strip()
+            src, tip = (path or "No video file chosen"), path
+        else:
+            src = self.camera.currentText() or "Camera"
+            if self.resolution.currentData():
+                src += f" · {self.resolution.currentText()}"
+            tip = src
+        desc = self.view_lbl.text()
+        if desc and desc != "Whole image":
+            tip += f" ({desc})"
+        self.single_panel.set_source(src, tip)
 
     def _refresh_zone_choices(self):
         app = self._apparatus
@@ -1399,14 +1732,14 @@ class LivePage(Page):
         if p is None:
             return None, False
         if p.path is None:
-            QMessageBox.information(self, "Live testing", "Save the experiment first.")
+            QMessageBox.information(self, "Run tests", "Save the experiment first.")
             return None, False
         if need_apparatus and not p.apparatus:
-            QMessageBox.information(self, "Live testing", "Draw an apparatus first (Apparatus page).")
+            QMessageBox.information(self, "Run tests", "Draw an apparatus first (Apparatus page).")
             return None, False
         aid = self.animal.currentText().strip()
         if not aid:
-            QMessageBox.information(self, "Live testing", "Choose or type the animal ID.")
+            QMessageBox.information(self, "Run tests", "Choose or type the animal ID.")
             return None, False
         tid = self.test_combo.currentData()
         test = p.get_test(tid) if tid is not None else None
@@ -1515,11 +1848,25 @@ class LivePage(Page):
         when = self.start_mode.currentText().lower()
         if self._schedule is not None:
             when = f"at {self._schedule.next_fire:%H:%M} ({self._schedule.next_fire:%a %d %b})"
+        self.single_panel.log.clear()
+        self.single_panel.view.set_apparatus(session.apparatus)
         self._log(f"Test {test.id} armed — animal {test.animal_id}, {'until stopped' if not dur else f'{dur:g} s'}, "
                   f"start {when}")
         self._set_state_display("waiting")
+        self._update_single_title(0.0)
         self._update_buttons()
         return True
+
+    def start_now(self) -> bool:
+        """▶ ▾ Start now: arm the test if needed and start it without waiting for its start condition."""
+        if self.session is None and not self.arm():
+            return False
+        s = self.session
+        if s is not None and s.state == "waiting":
+            s.request_start()
+            self._log("Start requested.")
+        self._update_buttons()
+        return s is not None
 
     def toggle_pause(self) -> bool:
         if self.mode == "observe":
@@ -1600,6 +1947,7 @@ class LivePage(Page):
         self._update_buttons()
         self._close_devices()
         self.on_show()
+        self.single_panel.set_title(f"{self.single_panel.title.text()} - {short_time(el)}")
         if not quiet:
             self.main.status(f"Test {test.id} saved. Press “Next test” to continue.")
 
@@ -1670,9 +2018,10 @@ class LivePage(Page):
         key = self.group.add_source(spec)
         self._save_group_layout()
         self._refresh_row_choices()
-        if self.group.runners or self.cams_btn.text().startswith("Stop"):
+        if self.group.runners:
             self.start_cameras()
-        self._update_mosaic_tiles()
+        self._sync_panels()
+        self.main.status(f"Added {spec.label}. Add a test panel for every apparatus it shows.")
         return key
 
     def _add_camera_source(self):
@@ -1690,12 +2039,13 @@ class LivePage(Page):
 
     def add_session_row(self, source_key: str | None = None, apparatus: str | None = None,
                         animal: str | None = None, stage: str | None = None, trial: int | None = None):
-        """Add a test row (source × apparatus × animal / stage / trial) to the multi-test table."""
+        """Add a test panel (source × apparatus × animal / stage / trial) to the session."""
         p = self.project
         if p is None:
             return None
         if not self.group.sources:
-            QMessageBox.information(self, "Live testing", "Add a camera or a video file first (Add source).")
+            QMessageBox.information(self, "Run tests", "Add a camera or a video file first (Add camera / video "
+                                    "source).")
             return None
         keys = list(self.group.sources)
         source_key = source_key if source_key in self.group.sources else self._selected_source() or keys[0]
@@ -1714,7 +2064,7 @@ class LivePage(Page):
         self._relabel(e)
         self._rebuild_session_table()
         self._save_group_layout()
-        self.sess_table.selectRow(len(self.group.entries) - 1)
+        self.sess_table.selectRow(len(self._entries()) - 1)
         return e
 
     def remove_session_row(self):
@@ -1722,7 +2072,7 @@ class LivePage(Page):
         if e is None:
             return
         if e.state in ("waiting", "running", "paused"):
-            QMessageBox.information(self, "Live testing", "Stop this test before removing it.")
+            QMessageBox.information(self, "Run tests", "Stop this test before removing it.")
             return
         self.group.remove(e)
         keep = {x.source_key for x in self.group.entries}
@@ -1730,113 +2080,232 @@ class LivePage(Page):
             self.group.stop_sources([k])
             self.group.sources.pop(k, None)
         self._rebuild_session_table()
-        self._update_mosaic_tiles()
         self._save_group_layout()
+        self._update_buttons()
 
     def _relabel(self, e):
         m = e.meta
         e.label = f"{m.get('animal') or '?'} · {m.get('apparatus') or '?'}"
 
+    def _entries(self) -> list:
+        return [x for x in self.group.entries if x.source_key is not None]
+
+    @staticmethod
+    def _entry_short(e) -> str:
+        return f"{e.meta.get('apparatus') or '?'}: {e.meta.get('animal') or '?'}"
+
     def _rebuild_session_table(self):
         t = self.sess_table
+        cur = self._selected_entry()
+        t.blockSignals(True)
         t.setRowCount(0)
-        self._row_widgets = {}
-        p = self.project
-        for e in [x for x in self.group.entries if x.source_key is not None]:
+        rows = self._entries()
+        for e in rows:
             r = t.rowCount()
             t.insertRow(r)
-            w = {}
-            src = QComboBox()
-            for k, spec in self.group.sources.items():
-                src.addItem(spec.label, k)
-            src.setCurrentIndex(max(0, src.findData(e.source_key)))
-            app = QComboBox()
-            app.addItems([a.name for a in p.apparatus] if p else [])
-            app.setCurrentText(e.meta.get("apparatus", ""))
-            animal = QComboBox()
-            animal.setEditable(True)
-            animal.setInsertPolicy(QComboBox.NoInsert)
-            animal.addItems([a.id for a in p.animals] if p else [])
-            animal.setCurrentText(e.meta.get("animal", ""))
-            stage = QComboBox()
-            stage.setEditable(True)
-            stage.addItems(p.stages if p else [])
-            stage.setCurrentText(e.meta.get("stage", ""))
-            trial = QSpinBox()
-            trial.setRange(1, 10000)
-            trial.setValue(int(e.meta.get("trial", 1)))
-            w.update(source=src, apparatus=app, animal=animal, stage=stage, trial=trial)
-            for c, wd in enumerate((src, app, animal, stage, trial)):
-                t.setCellWidget(r, c, wd)
-            src.currentIndexChanged.connect(lambda *_a, e=e: self._row_edited(e))
-            app.currentIndexChanged.connect(lambda *_a, e=e: self._row_edited(e))
-            animal.currentTextChanged.connect(lambda *_a, e=e: self._row_edited(e))
-            stage.currentTextChanged.connect(lambda *_a, e=e: self._row_edited(e))
-            trial.valueChanged.connect(lambda *_a, e=e: self._row_edited(e))
-            t.setItem(r, 5, QTableWidgetItem(""))
-            t.setItem(r, 6, QTableWidgetItem(""))
-            ctl = QWidget()
-            h = QHBoxLayout(ctl)
-            h.setContentsMargins(2, 0, 2, 0)
-            h.setSpacing(2)
-            for kind, icon, tip in (("start", QStyle.SP_MediaPlay, "Arm / start now / resume"),
-                                    ("pause", QStyle.SP_MediaPause, "Pause"),
-                                    ("stop", QStyle.SP_MediaStop, "Stop and save")):
-                b = QToolButton()
-                b.setIcon(self.style().standardIcon(icon))
-                b.setToolTip(tip)
-                b.setAutoRaise(True)
-                b.clicked.connect(lambda _=False, e=e, k=kind: self.row_action(e, k))
-                h.addWidget(b)
-                w[kind] = b
-            t.setCellWidget(r, 7, ctl)
-            w["entry"] = e
-            self._row_widgets[e.id] = w
+            for c in range(7):
+                t.setItem(r, c, QTableWidgetItem(""))
+            self._fill_row(r, e)
+        if rows:
+            t.setCurrentCell(rows.index(cur) if cur in rows else 0, 0)
+        t.blockSignals(False)
+        self._load_row_editor()
+        self._sync_panels()
         self._update_row_states()
-        self._update_mosaic_tiles()
+
+    def _fill_row(self, r: int, e):
+        spec = self.group.sources.get(e.source_key)
+        m = e.meta
+        for c, txt in enumerate((spec.label if spec is not None else "?", m.get("apparatus", ""),
+                                 m.get("animal", ""), m.get("stage", ""), str(m.get("trial", 1)))):
+            it = self.sess_table.item(r, c)
+            if it is not None and it.text() != txt:
+                it.setText(txt)
+                it.setToolTip(txt)
+
+    def _load_row_editor(self):
+        """Show the selected panel's camera / apparatus / animal / stage / trial in the editor below the table."""
+        e = self._selected_entry()
+        p = self.project
+        eds = (self.row_source, self.row_apparatus, self.row_animal, self.row_stage, self.row_trial)
+        for w in eds:
+            w.blockSignals(True)
+        try:
+            self.row_source.clear()
+            for k, spec in self.group.sources.items():
+                self.row_source.addItem(spec.label, k)
+            self.row_apparatus.clear()
+            self.row_apparatus.addItems([a.name for a in p.apparatus] if p else [])
+            self.row_animal.clear()
+            self.row_animal.addItems([a.id for a in p.animals] if p else [])
+            self.row_stage.clear()
+            self.row_stage.addItems(p.stages if p else [])
+            if e is not None:
+                self.row_source.setCurrentIndex(max(0, self.row_source.findData(e.source_key)))
+                self.row_apparatus.setCurrentText(e.meta.get("apparatus", ""))
+                self.row_animal.setCurrentText(e.meta.get("animal", ""))
+                self.row_stage.setCurrentText(e.meta.get("stage", ""))
+                self.row_trial.setValue(int(e.meta.get("trial", 1)))
+        finally:
+            for w in eds:
+                w.blockSignals(False)
+        self.row_editor.setEnabled(e is not None and e.state not in ("waiting", "running", "paused"))
 
     def _refresh_row_choices(self):
         if self.mode == "multi" or self.group.entries:
             self._rebuild_session_table()
 
-    def _row_edited(self, e):
-        w = self._row_widgets.get(e.id)
-        if w is None or e.state in ("waiting", "running", "paused"):
+    def _row_editor_changed(self, *_):
+        e = self._selected_entry()
+        if e is None or e.state in ("waiting", "running", "paused"):
             return
-        e.source_key = w["source"].currentData()
-        e.meta.update(apparatus=w["apparatus"].currentText(), animal=w["animal"].currentText().strip(),
-                      stage=w["stage"].currentText().strip(), trial=w["trial"].value(), test_id=None)
+        e.source_key = self.row_source.currentData() or e.source_key
+        e.meta.update(apparatus=self.row_apparatus.currentText(), animal=self.row_animal.currentText().strip(),
+                      stage=self.row_stage.currentText().strip(), trial=self.row_trial.value(), test_id=None)
         e.apparatus = self.project.get_apparatus(e.meta["apparatus"]) if self.project else None
         self._relabel(e)
+        self._fill_row(self._entries().index(e), e)
         self._save_group_layout()
-        self._update_mosaic_tiles()
+        self._sync_panels()
 
     def _selected_entry(self):
         r = self.sess_table.currentRow()
-        rows = [x for x in self.group.entries if x.source_key is not None]
+        rows = self._entries()
         return rows[r] if 0 <= r < len(rows) else None
 
     def _selected_source(self):
         e = self._selected_entry()
         return e.source_key if e is not None else None
 
-    def _tile_clicked(self, key):
-        rows = [x for x in self.group.entries if x.source_key is not None]
-        for i, e in enumerate(rows):
-            if e.source_key == key:
-                self.sess_table.selectRow(i)
+    def _selection_changed(self):
+        e = self._selected_entry()
+        self._load_row_editor()
+        if e is not None:
+            self.mosaic.set_current(e.id)
+            try:
+                self.main.select_explorer(self, e.id)
+            except Exception:  # pragma: no cover
+                pass
+        self._refresh_monitor(force=True)
+        self._update_buttons()
+
+    def _panel_clicked(self, entry_id: int):
+        for i, e in enumerate(self._entries()):
+            if e.id == entry_id:
+                if self.sess_table.currentRow() != i:
+                    self.sess_table.selectRow(i)
+                else:
+                    self._selection_changed()
                 return
 
-    def _update_mosaic_tiles(self):
-        used = []
-        for e in self.group.entries:
-            if e.source_key is not None and e.source_key not in used:
-                used.append(e.source_key)
-        used += [k for k in self.group.sources if k not in used]
-        self.mosaic.set_sources([(k, self.group.sources[k].label) for k in used if k in self.group.sources])
+    # ---- the test panels of the session
+    def _new_panel(self, e) -> TestPanel:
+        p = TestPanel(single=False)
+        eid = e.id
+        ent = lambda: self.group.entry(eid)  # noqa: E731 - the entry object may be replaced by a new session
+        p.clicked.connect(lambda: self._panel_clicked(eid))
+        p.start_clicked.connect(lambda: ent() is not None and self.row_action(ent(), "start"))
+        p.start_now.connect(lambda: ent() is not None and self._start_entry_now(ent()))
+        p.arm_clicked.connect(lambda: ent() is not None and ent().state in ("idle", "finished")
+                              and self.arm_all([ent()]))
+        p.pause_clicked.connect(lambda: ent() is not None and self.row_action(ent(), "pause"))
+        p.stop_clicked.connect(lambda: ent() is not None and self.row_action(ent(), "stop"))
+        p.undo_clicked.connect(lambda: ent() is not None and self.undo_last_event(ent().session))
+        p.menu.addAction(icon("settings"), "Camera options…",
+                         lambda: (self._panel_clicked(eid), self.multi_camera_options()))
+        p.menu.addAction(icon("delete"), "Remove this test panel",
+                         lambda: (self._panel_clicked(eid), self.remove_session_row()))
+        p.menu.addSeparator()
+        p.menu.addAction(self.panel_settings_act)
+        p.view.set_message("Turn on the camera image (Show camera image) or press ▶ to start the test.")
+        self._apply_prefs_to_panel(p)
+        return p
+
+    def _focus_rect(self, e) -> QRectF | None:
+        """Several apparatus in one camera image: each panel shows its own apparatus."""
+        if e.apparatus is None or len(self.group.entries_for(e.source_key)) < 2:
+            return None
+        try:
+            x0, y0, x1, y1 = e.apparatus.arena_or_bounds().bounds()
+        except Exception:
+            return None
+        m = 0.05 * max(x1 - x0, y1 - y0) + 4
+        return QRectF(x0 - m, y0 - m, x1 - x0 + 2 * m, y1 - y0 + 2 * m)
+
+    def _sync_panels(self):
+        """One panel per test of the session, in the order of the table."""
+        panels = {}
+        for e in self._entries():
+            p = self._panels.get(e.id) or self._new_panel(e)
+            panels[e.id] = p
+            spec = self.group.sources.get(e.source_key)
+            if spec is not None:
+                src = str(spec.source) if spec.is_file else spec.label
+                p.set_source(src, src)
+            p.view.set_apparatus(e.session.apparatus if e.session is not None and
+                                 getattr(e.session, "apparatus", None) is not None else e.apparatus)
+            p.view.set_focus(self._focus_rect(e))
+        self._panels = panels
+        self.mosaic.set_panels(panels)
+        cur = self._selected_entry()
+        if cur is not None:
+            self.mosaic.set_current(cur.id)
+        self._update_panels()
+        self._refresh_explorer()
+
+    def _panel_title(self, e) -> str:
+        m = e.meta
+        stage = m.get("stage") or ""
+        title = (f"{m.get('apparatus') or '?'}: Animal {m.get('animal') or '?'}, {(stage + ' ') if stage else ''}"
+                 f"trial {m.get('trial', 1)}")
+        if e.session is not None:
+            title += f" - {short_time(e.elapsed if e.state != 'waiting' else 0.0)}"
+        return title
+
+    def _update_panels(self):
+        """State, time, statistics and zones of every panel (≤ 5 Hz)."""
+        for e in self._entries():
+            p = self._panels.get(e.id)
+            if p is None:
+                continue
+            s = e.session
+            st = e.state
+            title = self._panel_title(e)
+            if p.title.text() != title:
+                p.set_title(title)
+            if s is None:
+                p.set_state("idle")
+                p.reset_values()
+            else:
+                p.set_state(st, e.elapsed if st != "waiting" else 0.0, getattr(s, "duration_s", 0.0) or 0.0)
+                stats = getattr(s, "stats", None)
+                if stats is not None and st in ("running", "paused", "finished"):
+                    with s.lock:
+                        zones = stats.current_zones() if stats.detected else []
+                        rows = stats.rows() if p.stack.currentIndex() == 2 else None
+                        dist, unit = stats.distance, stats.unit
+                    inner = [z for z in zones if z != "Arena"] or zones
+                    p.vals["zone"].setText(", ".join(inner) if inner else ("—" if stats.detected else
+                                                                           "not detected"))
+                    p.vals["distance"].setText(f"{dist:.1f} {unit}")
+                    p.view.set_active_zones(zones if st != "finished" else [])
+                    if rows is not None:
+                        p.set_zone_rows(rows, zones)
+                p.vals["events"].setText(str(len(s.events)))
+            active = st in ("waiting", "running", "paused")
+            p.start_btn.setEnabled(st != "running" and self.project is not None)
+            p.start_btn.setText("Start now" if st == "waiting" else "Resume" if st == "paused" else "Arm / Start test")
+            p.start_btn.setToolTip(p.start_btn.text())
+            p.pause_btn.setEnabled(st in ("running", "paused"))
+            p.pause_btn.setText("Resume" if st == "paused" else "Pause")
+            p.pause_btn.setIcon(icon("resume" if st == "paused" else "pause"))
+            p.pause_btn.setToolTip(p.pause_btn.text())
+            p.stop_btn.setEnabled(active)
+            p.undo_btn.setEnabled(self._can_undo(s))
+            p.set_recording(st in ("running", "paused") and bool(e.meta.get("record_path")), e.meta.get("record_path"))
 
     def _update_row_states(self):
-        rows = [x for x in self.group.entries if x.source_key is not None]
+        rows = self._entries()
         for r, e in enumerate(rows):
             st = e.state
             s = e.session
@@ -1847,26 +2316,18 @@ class LivePage(Page):
             it = self.sess_table.item(r, 5)
             if it is not None and it.text() != txt:
                 it.setText(txt)
-                it.setForeground(Qt.white if st != "idle" else Qt.black)
-                it.setBackground(_qcolor(STATE_STYLE.get(st, STATE_STYLE["idle"])[1]) if st != "idle" else
-                                 _qcolor("#e2e8f0"))
             it = self.sess_table.item(r, 6)
             if it is not None:
                 it.setText(fmt_time(e.elapsed) if s is not None else "")
-            w = self._row_widgets.get(e.id)
-            if w is not None:
-                active = st in ("waiting", "running", "paused")
-                for k in ("source", "apparatus", "animal", "stage", "trial"):
-                    w[k].setEnabled(not active)
-                w["pause"].setEnabled(st == "running")
-                w["stop"].setEnabled(active)
-                w["start"].setEnabled(st != "running")
+        sel = self._selected_entry()
+        self.row_editor.setEnabled(sel is not None and sel.state not in ("waiting", "running", "paused"))
+        self._update_panels()
 
     # ---- cameras of the group
     def _toggle_cameras(self):
         if self.group.runners:
             if any(e.state in ("waiting", "running", "paused") for e in self.group.entries):
-                QMessageBox.information(self, "Live testing", "Stop the tests before stopping the cameras.")
+                QMessageBox.information(self, "Run tests", "Stop the tests before stopping the cameras.")
                 return
             self.stop_cameras()
         else:
@@ -1874,18 +2335,16 @@ class LivePage(Page):
 
     def start_cameras(self) -> bool:
         if not self.group.sources:
-            QMessageBox.information(self, "Live testing", "Add a camera or a video file first (Add source).")
+            QMessageBox.information(self, "Run tests", "Add a camera or a video file first (Add camera / video "
+                                    "source).")
             return False
         self.group.start_sources(speed=self.sim_speed.currentData() or 1.0)
-        self.cams_btn.setText("Stop cameras")
-        self._update_mosaic_tiles()
         self._mosaic_timer.start()
         self._update_buttons()
         return True
 
     def stop_cameras(self):
         self.group.stop_sources()
-        self.cams_btn.setText("Start cameras")
         self._update_buttons()
 
     def capture_group_backgrounds(self) -> int:
@@ -1938,7 +2397,7 @@ class LivePage(Page):
         if key in self.group.runners:
             self.group.stop_sources([key])
             self.group.start_sources(speed=self.sim_speed.currentData() or 1.0, keys=[key])
-        self._update_mosaic_tiles()
+        self._sync_panels()
 
     def _save_group_layout(self):
         if self.project is None or self._loading:
@@ -1977,12 +2436,12 @@ class LivePage(Page):
         if p is None or e.session is not None and e.state != "finished":
             return False
         if p.path is None:
-            QMessageBox.information(self, "Live testing", "Save the experiment first.")
+            QMessageBox.information(self, "Run tests", "Save the experiment first.")
             return False
         m = e.meta
         app = p.get_apparatus(m.get("apparatus") or "") if p.apparatus else None
         if app is None or not m.get("animal"):
-            self._log(f"{e.label}: choose an apparatus and an animal first.")
+            self._log(f"{e.label}: choose an apparatus and an animal first.", e)
             return False
         if e.source_key not in self.group.runners and not self.start_cameras():
             return False
@@ -2026,7 +2485,11 @@ class LivePage(Page):
             s.set_background(bg)
         self.group.arm(e, s)
         self.main.mark_dirty()
-        self._log(f"{e.label}: test {test.id} armed ({self.start_mode.currentText().lower()}).")
+        p_ = self._panels.get(e.id)
+        if p_ is not None:
+            p_.log.clear()
+            p_.view.set_apparatus(s.apparatus)
+        self._log(f"{e.label}: test {test.id} armed ({self.start_mode.currentText().lower()}).", e)
         return True
 
     def arm_all(self, entries=None) -> int:
@@ -2072,11 +2535,28 @@ class LivePage(Page):
             else:
                 self.group.start(e)
         elif kind == "pause":
-            self.group.pause(e)
+            if st == "paused":
+                self.group.resume(e)
+                self._log(f"{fmt_time(e.elapsed)}  test resumed", e)
+            elif st == "running":
+                self.group.pause(e)
+                self._log(f"{fmt_time(e.elapsed)}  test paused", e)
         elif kind == "stop":
             self.group.stop(e, save=st in ("running", "paused"))
+            self._save_finished_entries()
         self._update_row_states()
         self._update_buttons()
+
+    def _start_entry_now(self, e):
+        """Panel ▶ ▾ Start now: arm the test if needed and start it without waiting for its start condition."""
+        if e.state in ("idle", "finished") and not self.arm_all([e]):
+            return False
+        if e.state == "waiting":
+            e.session.request_start()
+            self._log("Start requested.", e)
+        self._update_row_states()
+        self._update_buttons()
+        return True
 
     def start_all(self):
         if not any(e.session is not None and e.state != "finished" for e in self.group.entries):
@@ -2115,24 +2595,26 @@ class LivePage(Page):
             s = e.session
             test = p.get_test(m.get("test_id")) if p is not None and m.get("test_id") is not None else None
             for t, msg in s.warnings:
-                self._log(f"{e.label} · {fmt_time(t)}  warning: {msg}")
+                self._log(f"{e.label} · {fmt_time(t)}  warning: {msg}", e)
             if e.aborted or test is None or not save_live_test(p, test, s, m.get("record_path")):
                 _remove_file(m.get("record_path"))
                 if test is not None and m.get("new_test") and test in p.tests:
                     p.tests.remove(test)
-                self._log(f"{e.label}: test discarded.")
+                self._log(f"{e.label}: test discarded.", e)
             else:
                 self.main.mark_dirty()
                 self.main.save()
                 self.last_test_id = test.id
-                self._log(f"{e.label}: test {test.id} finished after {fmt_time(s.elapsed)} and saved.")
+                self._log(f"{e.label}: test {test.id} finished after {fmt_time(s.elapsed)} and saved.", e)
                 self._show_results(test, switch=False)
                 m["trial"] = int(m.get("trial", 1)) + 1
-                w = self._row_widgets.get(e.id)
-                if w is not None:
-                    w["trial"].blockSignals(True)
-                    w["trial"].setValue(m["trial"])
-                    w["trial"].blockSignals(False)
+                rows = self._entries()
+                if e in rows:
+                    self._fill_row(rows.index(e), e)
+                if e is self._selected_entry():
+                    self.row_trial.blockSignals(True)
+                    self.row_trial.setValue(m["trial"])
+                    self.row_trial.blockSignals(False)
             m["test_id"] = None
             m["record_path"] = None
         if not any(e.state in ("waiting", "running", "paused") for e in self.group.entries):
@@ -2171,6 +2653,7 @@ class LivePage(Page):
             self._log(f"Observation of test {test.id} started — animal {test.animal_id}.")
         self._enable_shortcuts(True)
         self.obs_panel.show_session(self.obs, self.obs.duration_s)
+        self._update_single_title()
         self._update_buttons()
         return True
 
@@ -2220,10 +2703,16 @@ class LivePage(Page):
         if self.obs is not None:
             self.obs.tick()
             self.obs_panel.show_session(self.obs, self.obs.duration_s)
+            self._update_single_title()
             if self.obs.state == "finished":
                 self.obs_stop(save=True)
         if self.score_pad is not None and self.mode == "single":
             self.score_pad.set_active(list(self.session.open_states) if self.session is not None else [])
+        s = self.session
+        if s is not None and self.mode == "single" and self.single_panel.stack.currentIndex() == 2:
+            with s.lock:
+                rows, zones = s.stats.rows(), (s.stats.current_zones() if s.stats.detected else [])
+            self.single_panel.set_zone_rows(rows, zones)
         if self.group.entries:
             self.group.tick(now)
             self._save_finished_entries()
@@ -2235,8 +2724,14 @@ class LivePage(Page):
     def _refresh_mosaic(self):
         for key, r in list(self.group.runners.items()):
             d = r.take_display()
-            if d is not None:
-                self.mosaic.set_frame(key, d)
+            if d is None:
+                continue
+            panels = [self._panels[e.id] for e in self.group.entries_for(key) if e.id in self._panels]
+            if panels:
+                pix = cv_to_qpixmap(d)  # one conversion for every panel showing this camera
+                for p in panels:
+                    if p.isVisible() or not p.view.frame_size:
+                        p.view.set_pixmap(pix)
         if self.group.warnings and self.group_lbl.text() != self.group.warnings[-1][1]:
             self.group_lbl.setText(self.group.warnings[-1][1])
 
@@ -2377,31 +2872,88 @@ class LivePage(Page):
         s = self._scoring_target()
         if s is None or s.state != "running":
             return False
+        e = self._entry_of(s)
+        done = []  # what this key press did, for Undo: (kind, event, behaviour)
         if not down:
             if b.kind != "hold" or b.name not in s.open_states:
                 return False
             ev = s.score(b.name, "state")
-            self._log(f"{fmt_time(ev['t_end'])}  {b.name} ends")
+            self._log(f"{fmt_time(ev['t_end'])}  {b.name} ends", e)
+            self._push_undo(s, [("end", ev, b.name)])
             return True
         s.key(b.key)
         if b.kind == "point":
             ev = s.score(b.name, "point")
-            self._log(f"{fmt_time(ev['t'])}  {b.name}")
+            self._log(f"{fmt_time(ev['t'])}  {b.name}", e)
+            done.append(("point", ev, b.name))
         elif b.name in s.open_states:
             if b.kind == "hold":
                 return True
             ev = s.score(b.name, "state")
-            self._log(f"{fmt_time(ev['t_end'])}  {b.name} ends")
+            self._log(f"{fmt_time(ev['t_end'])}  {b.name} ends", e)
+            done.append(("end", ev, b.name))
         else:
             for o in wf.exclusive_partners(self.project.behaviours, b):
                 if o.name in s.open_states:
                     end = s.score(o.name, "state")
-                    self._log(f"{fmt_time(end['t_end'])}  {o.name} ends")
+                    self._log(f"{fmt_time(end['t_end'])}  {o.name} ends", e)
+                    done.append(("end", end, o.name))
             ev = s.score(b.name, "state")
-            self._log(f"{fmt_time(ev['t'])}  {b.name} starts")
+            self._log(f"{fmt_time(ev['t'])}  {b.name} starts", e)
+            done.append(("start", ev, b.name))
+        self._push_undo(s, done)
         if s is self.session:
             self.vals["events"].setText(str(len(s.events)))
         return True
+
+    def _entry_of(self, session):
+        if session is None or session is self.session or session is self.obs:
+            return None
+        return next((x for x in self.group.entries if x.session is session), None)
+
+    def _push_undo(self, session, done):
+        if done:
+            self._undo.append((session, done))
+            del self._undo[:-200]
+            self._update_undo_buttons()
+
+    def _can_undo(self, session) -> bool:
+        return session is not None and session.state in ("running", "paused") and \
+            any(s is session for s, _ in self._undo)
+
+    def undo_last_event(self, session=None) -> bool:
+        """Panel toolbar ↶: take back the last scoring key press of this test (a point event, the start or the end
+        of a behaviour)."""
+        session = session if session is not None else self._scoring_target()
+        i = next((i for i in range(len(self._undo) - 1, -1, -1) if self._undo[i][0] is session), None)
+        if session is None or i is None or session.state not in ("running", "paused"):
+            return False
+        _, done = self._undo.pop(i)
+        with session.lock:
+            for kind, ev, name in reversed(done):
+                if kind in ("point", "start"):
+                    session.events[:] = [x for x in session.events if x is not ev]
+                    if session.open_states.get(name) is ev:
+                        session.open_states.pop(name)
+                else:
+                    ev["t_end"] = None
+                    session.open_states[name] = ev
+        self._log("Undo: " + ", ".join(f"{name} {'ends' if k == 'end' else 'starts' if k == 'start' else ''}".strip()
+                                       for k, _, name in done), self._entry_of(session))
+        if session is self.session:
+            self.vals["events"].setText(str(len(session.events)))
+        if session is self.obs:
+            self.obs_panel.show_session(session, session.duration_s)
+        self._update_undo_buttons()
+        return True
+
+    def _update_undo_buttons(self):
+        self.single_panel.undo_btn.setEnabled(self._can_undo(self.session))
+        self.obs_panel.undo_btn.setEnabled(self._can_undo(self.obs))
+        for e in self._entries():
+            p = self._panels.get(e.id)
+            if p is not None:
+                p.undo_btn.setEnabled(self._can_undo(e.session))
 
     def eventFilter(self, obj, e):
         t = e.type()
@@ -2529,44 +3081,87 @@ class LivePage(Page):
             self._load_rule_editor()
 
     # ================================================================== helpers
-    def _log(self, msg: str):
+    def _log(self, msg: str, entry=None):
+        """Write to the report's log and to the Session log of the test's panel."""
         self.log.addItem(msg)
         self.log.scrollToBottom()
+        if entry is not None:
+            p = self._panels.get(entry.id)
+            if p is not None:
+                p.append_log(msg)
+        elif self.mode == "single":
+            self.single_panel.append_log(msg)
 
     def _set_state_display(self, state: str):
         if state == self._shown_state:
             return
         self._shown_state = state
-        text, col = STATE_STYLE.get(state, STATE_STYLE["idle"])
-        self.state_lbl.setText(text)
-        self.state_lbl.setStyleSheet(f"background:{col};color:white;font-weight:700;font-size:15px;"
-                                     "border-radius:6px;padding:8px 10px")
+        self.single_panel.set_state(state)
         if state in ("idle", "preview"):
-            for k in ("elapsed", "remaining", "distance", "events"):
-                self.vals[k].setText("—")
-            if state == "idle":
+            self.single_panel.reset_values()
+            if state == "preview":
                 self.vals["zone"].setText("—")
 
     def _update_buttons(self):
         s = self.session
         armed = s is not None
         has = self.project is not None
-        self.arm_btn.setEnabled(has and (not armed or s.state == "waiting"))
-        self.arm_btn.setText("Start now" if armed and s.state == "waiting" else "Arm / Start test")
-        self.pause_btn.setEnabled(armed and s.state in ("running", "paused"))
-        self.pause_btn.setText("Resume" if armed and s.state == "paused" else "Pause")
+        mode = self.mode
+        st = s.state if armed else None
+        # the single test panel's toolbar
+        self.arm_btn.setEnabled(has and (not armed or st == "waiting"))
+        self.arm_btn.setText("Start now" if st == "waiting" else "Arm / Start test")
+        self.arm_btn.setToolTip("Start the test now" if st == "waiting" else
+                                "Arm the test: it starts when its start condition is met (▾ to start it now)")
+        self.pause_btn.setEnabled(st in ("running", "paused"))
+        self.pause_btn.setText("Resume" if st == "paused" else "Pause")
+        self.pause_btn.setIcon(icon("resume" if st == "paused" else "pause"))
+        self.pause_btn.setToolTip(self.pause_btn.text())
         self.stop_btn.setEnabled(armed)
         self.next_btn.setEnabled(has and not armed)
-        self.preview_btn.setText("Stop preview" if self.grabber is not None else "Start preview")
+        self.preview_btn.setChecked(self.grabber is not None)
+        self.preview_btn.setToolTip("Turn the camera image off" if self.grabber is not None else
+                                    "Show the camera image (preview)")
         self.preview_btn.setEnabled(has and not armed)
-        self.capture_btn.setEnabled(not armed)
-        states = [e.state for e in self.group.entries if e.source_key is not None]
-        self.g_arm.setEnabled(has and any(st in ("idle", "finished") for st in states))
-        self.g_start.setEnabled(has and bool(states) and any(st != "running" for st in states))
-        self.g_pause.setEnabled("running" in states)
-        self.g_resume.setEnabled("paused" in states)
-        self.g_stop.setEnabled(any(st in ("waiting", "running", "paused") for st in states))
-        self.cams_btn.setText("Stop cameras" if self.group.runners else "Start cameras")
+        self.single_panel.bg_btn.setEnabled(has and not armed)
+        self.single_panel.set_recording(st in ("running", "paused") and bool(self._record_path), self._record_path)
+        self._update_undo_buttons()
+        # ribbon: All apparatus
+        states = [e.state for e in self._entries()]
+        o = self.obs
+        if mode == "multi":
+            start = has and bool(states) and any(x != "running" for x in states)
+            arm = has and any(x in ("idle", "finished") for x in states)
+            pause, resume = "running" in states, "paused" in states
+            stop = any(x in ("waiting", "running", "paused") for x in states)
+        elif mode == "observe":
+            ost = o.state if o is not None else None
+            start = arm = has and ost in (None, "finished", "waiting", "paused")
+            pause, resume, stop = ost == "running", ost == "paused", ost in ("waiting", "running", "paused")
+        else:
+            start = has and (not armed or st == "waiting")
+            arm = has and not armed
+            pause, resume, stop = st == "running", st == "paused", armed
+        self.start_all_act.setEnabled(start)
+        self.start_now_act.setEnabled(start)
+        self.arm_all_act.setEnabled(arm)
+        self.pause_all_act.setEnabled(pause)
+        self.resume_all_act.setEnabled(resume)
+        self.stop_all_act.setEnabled(stop)
+        # ribbon: Session
+        cams = mode != "observe"
+        single_free = not (mode == "single" and armed)
+        self.add_source_act.setEnabled(has and cams and single_free)
+        self.add_panel_act.setEnabled(has and (mode == "multi" or not self.any_active()))
+        e = self._selected_entry() if mode == "multi" else None
+        self.remove_panel_act.setEnabled(e is not None and e.state not in ("waiting", "running", "paused"))
+        self.capture_bg_act.setEnabled(has and ((mode == "single" and not armed) or
+                                                (mode == "multi" and bool(self.group.runners))))
+        self.cam_opts_act.setEnabled(has and cams and single_free and (mode == "single" or bool(self.group.sources)))
+        on = (self.grabber is not None) if mode == "single" else bool(self.group.runners) if mode == "multi" else False
+        self.camera_act.setChecked(on)
+        self.camera_act.setEnabled(has and cams and single_free)
+        self.next_test_act.setEnabled(has and mode != "multi" and not armed and (o is None or o.state == "finished"))
         self.obs_panel.show_session(self.obs, self.obs.duration_s if self.obs else 0.0)
 
 
@@ -2585,12 +3180,6 @@ def _confirm_id(parent, test) -> bool:
     except Exception:  # pragma: no cover
         return True
     return bool(confirm_animal_id(parent, test))
-
-
-def _qcolor(hex_: str):
-    from PySide6.QtGui import QColor
-
-    return QColor(hex_)
 
 
 def _remove_file(path):

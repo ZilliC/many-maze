@@ -167,11 +167,90 @@ def test_statistics_catalogue_and_compat():
     for m in ("welch_anova", "alexander_govern", "kruskal", "median", "rm_anova", "friedman", "student", "ks"):
         res = st.compare_groups(g3, method=m)
         assert 0 <= res["p"] <= 1, m
-    for ph in ("tukey", "bonferroni", "holm", "sidak", "fdr", "dunnett", "games_howell", "dunn"):
+    for ph in ("tukey", "bonferroni", "holm", "sidak", "fdr", "dunnett", "games_howell", "dunn", "duncan", "lsd",
+               "scheffe", "snk"):
         res = st.compare_groups(g3, posthoc_method=ph, control="B")
         assert res["posthoc"] and all(0 <= x["p"] <= 1 for x in res["posthoc"]), ph
     assert len(st.compare_groups(g3, posthoc_method="dunnett", control="B")["posthoc"]) == 2
     assert st.two_way_anova([], "v")["error"]
+
+
+# sweet potato yield by virus (R package agricolae, data(sweetpotato)): MSE = 22.48917 on 8 df
+SWEETPOTATO = OrderedDict(cc=[28.5, 21.7, 23.0], fc=[14.9, 10.6, 13.1], ff=[41.8, 39.2, 28.0],
+                          oo=[38.2, 40.4, 32.1])
+
+
+def test_range_posthoc_tests_against_published_values():
+    mse, df = st.anova_error_term([np.array(v) for v in SWEETPOTATO.values()])
+    assert mse == pytest.approx(22.48917, abs=1e-5) and df == 8
+    s = (mse / 3) ** 0.5
+    # least significant ranges printed by agricolae's duncan.test / SNK.test / LSD.test / HSD.test (alpha = 0.05)
+    duncan = [st.range_test_critical(r, df, "duncan") * s for r in (2, 3, 4)]
+    snk = [st.range_test_critical(r, df, "snk") * s for r in (2, 3, 4)]
+    assert duncan == pytest.approx([8.928965, 9.304825, 9.514910], abs=2e-5)
+    assert snk == pytest.approx([8.928965, 11.064170, 12.399670], abs=2e-5)
+    # Duncan's table of significant studentized ranges (Harter 1960), 8 error df: 3.26, 3.40, 3.47
+    assert [st.range_test_critical(r, 8, "duncan") for r in (2, 3, 4)] == pytest.approx([3.261, 3.399, 3.475],
+                                                                                         abs=1e-3)
+    # a difference equal to the least significant range has p = alpha
+    for r, crit in zip((2, 3, 4), duncan):
+        assert st.range_test_p(crit / s, r, df, "duncan") == pytest.approx(0.05, abs=1e-6)
+    for r, crit in zip((2, 3, 4), snk):
+        assert st.range_test_p(crit / s, r, df, "snk") == pytest.approx(0.05, abs=1e-6)
+
+    def sig(method, **kw):
+        res = st.posthoc(SWEETPOTATO, method, **kw)
+        return {frozenset((x["a"], x["b"])) for x in res if x["p"] < 0.05}, {(x["a"], x["b"]): x for x in res}
+
+    pairs = {frozenset(p) for p in [("cc", "fc"), ("cc", "ff"), ("cc", "oo"), ("fc", "ff"), ("fc", "oo")]}
+    # agricolae groups: Duncan, SNK and LSD: oo a, ff a, cc b, fc c; HSD: oo a, ff ab, cc bc, fc c
+    for m in ("duncan", "snk", "lsd"):
+        assert sig(m)[0] == pairs, m
+    assert sig("tukey")[0] == {frozenset(p) for p in [("cc", "oo"), ("fc", "ff"), ("fc", "oo")]}
+    # Scheffé's critical difference sqrt((k-1) F(0.95; 3, 8)) * sqrt(2 MSE / n) = 13.52: only fc differs
+    sch, by = sig("scheffe")
+    assert sch == {frozenset(p) for p in [("fc", "ff"), ("fc", "oo")]}
+    f_crit = sps.f.ppf(0.95, 3, 8)
+    assert f_crit == pytest.approx(4.066181, abs=1e-6)
+    msd = (3 * f_crit) ** 0.5 * (2 * mse / 3) ** 0.5
+    assert msd == pytest.approx(13.5237, abs=1e-3)
+    # exact values: LSD = pooled t-test; Scheffé F = t² / (k - 1)
+    t = 11.533333 / (2 * mse / 3) ** 0.5
+    _, lsd = sig("lsd")
+    assert lsd[("cc", "fc")]["p"] == pytest.approx(2 * sps.t.sf(t, 8), rel=1e-5)
+    assert by[("cc", "fc")]["p"] == pytest.approx(sps.f.sf(t ** 2 / 3, 3, 8), rel=1e-5)
+    # SNK over the whole range = Tukey HSD; Duncan over 2 adjacent means = LSD
+    _, snk_res = sig("snk")
+    tk = sps.tukey_hsd(*[np.array(v) for v in SWEETPOTATO.values()])
+    assert snk_res[("fc", "oo")]["p"] == pytest.approx(tk.pvalue[1, 3], rel=1e-4)
+    _, dun = sig("duncan")
+    assert dun[("cc", "fc")]["p"] == pytest.approx(lsd[("cc", "fc")]["p"], rel=1e-6)
+    # step-down: no pair is more significant than a wider range that contains it
+    assert snk_res[("fc", "ff")]["p"] >= snk_res[("fc", "oo")]["p"]
+    assert snk_res[("fc", "ff")]["p_unadjusted"] < snk_res[("fc", "ff")]["p"]
+    # ordering of conservativeness for every pair
+    for key in lsd:
+        assert lsd[key]["p"] <= dun[key]["p"] + 1e-12 <= snk_res[key]["p"] + 1e-9 <= by[key]["p"] + 1e-9
+
+
+def test_range_posthoc_tests_two_groups_and_designs():
+    rng = np.random.default_rng(11)
+    a, b = rng.normal(0, 1, 7), rng.normal(1.2, 1, 9)
+    student = sps.ttest_ind(a, b).pvalue  # with two groups every test reduces to Student's t-test
+    for m in ("lsd", "scheffe", "snk", "duncan"):
+        assert st.posthoc(OrderedDict(a=a, b=b), m)[0]["p"] == pytest.approx(student, rel=1e-4), m
+    # paired: the error term of the repeated-measures ANOVA; with 2 conditions LSD = paired t-test
+    c = a + rng.normal(0.4, 0.3, 7)
+    assert st.posthoc(OrderedDict(a=a, c=c), "lsd", paired=True)[0]["p"] == pytest.approx(
+        sps.ttest_rel(a, c).pvalue, rel=1e-6)
+    # through compare_groups (one-way ANOVA, unequal n)
+    g3 = OrderedDict(A=a, B=b, C=rng.normal(3, 1, 6))
+    for m, name in (("duncan", "Duncan"), ("lsd", "Fisher's LSD"), ("scheffe", "Scheffé"),
+                    ("snk", "Student-Newman-Keuls")):
+        res = st.compare_groups(g3, method="anova", posthoc_method=m)
+        assert len(res["posthoc"]) == 3 and all(x["test"] == name and 0 <= x["p"] <= 1 for x in res["posthoc"])
+    # degenerate data do not raise
+    assert st.posthoc(OrderedDict(a=[1.0, 1.0], b=[1.0, 1.0], c=[2.0, 2.0]), "snk")[0]["p"] == 1.0
 
 
 def test_statistics_against_references():

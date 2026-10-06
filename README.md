@@ -16,11 +16,17 @@ License: **GPL-3.0-or-later** (the optional, separately downloaded pose-model we
 for academic, non-commercial use). Written in Python with OpenCV, NumPy/SciPy, matplotlib and Qt 6 (PySide6) — all
 of which ship native `arm64` builds for macOS, so the app runs natively on M1/M2/M3/M4 Macs (no Rosetta).
 
-![Screenshot](docs/screenshots/testview.png)
+![Screenshot](docs/screenshots/run_tests.png)
 
-More screenshots: [experiment](docs/screenshots/experiment.png) · [apparatus designer](docs/screenshots/apparatus.png) ·
-[tests](docs/screenshots/tests.png) · [live testing](docs/screenshots/live.png) · [results](docs/screenshots/results.png) ·
-[statistics](docs/screenshots/statistics.png)
+The window follows ANY-maze — ribbon tabs **File · Protocol · Experiment · Test · Results**, an explorer on the
+left of each tab, ANY-maze terminology (treatments, keys, stages, test schedule, apparatus map) — so ANY-maze users
+can switch without retraining. Screenshots: [protocol](docs/screenshots/protocol.png) ·
+[keys](docs/screenshots/keys.png) · [procedures](docs/screenshots/procedures.png) ·
+[apparatus map](docs/screenshots/apparatus.png) · [experiment](docs/screenshots/experiment.png) ·
+[test schedule](docs/screenshots/test_schedule.png) · [review and score](docs/screenshots/review.png) ·
+[data](docs/screenshots/data.png) · [track plots](docs/screenshots/track_plots.png) ·
+[heat maps](docs/screenshots/heat_maps.png) · [charts](docs/screenshots/charts.png) ·
+[statistics](docs/screenshots/statistics.png) · [file](docs/screenshots/file.png)
 
 ## Features
 
@@ -39,7 +45,7 @@ More screenshots: [experiment](docs/screenshots/experiment.png) · [apparatus de
 | **Time segmentation** | Regular time bins, custom periods and **event-anchored periods** (e.g. the 30 s after first leaving a zone); pauses excluded |
 | **Visualisation** | Track plots coloured by speed / time / any parameter with behaviour markers and per-period panels; heat maps (normalised, per behaviour, group-averaged with alignment); charts of 40+ parameters over time with zone bands; **tracked-video export with overlays** |
 | **Statistics** | 42 procedures: t / Welch / Mann-Whitney, one-way / Welch ANOVA, Kruskal-Wallis, repeated-measures and mixed ANOVA, two-way (incl. Scheirer–Ray–Hare and ART), post-hoc (Tukey, Bonferroni, Holm, Šidák, FDR, Dunnett, Games–Howell, Dunn), Friedman, chi-square / G / Fisher, correlations & regression, assumption checks, effect sizes; grouping at up to 3 levels; column / line / scatter / box / violin graphs |
-| **Data transfer** | CSV, tab-separated, Excel, clipboard (any cell range), **XML of the whole experiment incl. raw tracks**, raw per-frame CSV with derived parameters, self-contained HTML reports |
+| **Data transfer** | **Import from ANY-maze** (animals, treatments, test schedules and track data from spreadsheets saved by ANY-maze or other software, with automatic column matching), CSV, tab-separated, Excel, clipboard (any cell range), **XML of the whole experiment incl. raw tracks**, raw per-frame CSV with derived parameters, self-contained HTML reports |
 | **Apple Silicon speed** | Parallel tracking across all cores, **VideoToolbox** hardware decoding / recording, Core ML inference |
 | **Automation** | `manymaze` command line for batch tracking, export and reports |
 
@@ -73,13 +79,14 @@ Also works on Linux and Windows.
 
 ## Quick start
 
-1. *File ▸ Create demo experiment* — six synthetic open-field videos, two groups, already tracked.
-2. Browse **Test view** to see tracks, tune detection, and score behaviours with the keyboard.
-3. **Results** → choose measures → export to Excel or generate an HTML report.
-4. **Statistics** → compare *Centre: time (%)* between *Control* and *Anxious*.
+1. **File ▸ Open demo experiment** — six synthetic open-field videos, two treatments, already tracked.
+2. **Test ▸ Review and score** — see tracks, tune detection, and score keys with the keyboard or on-screen buttons.
+3. **Results ▸ Data** — choose measures (*Select data*), export to Excel or create an HTML report.
+4. **Results ▸ Statistics** — compare *Centre: time (%)* between *Control* and *Anxious*.
 
-For your own experiment: *File ▸ New experiment* → add animals → in **Apparatus** load a frame from one of
-your videos and *Create from template* → **Tests ▸ Add tests from videos** → *Track all* → **Results**.
+For your own experiment: **File ▸ New experiment** → **Protocol ▸ Apparatus**: load a frame from one of your videos
+and *From template* → **Experiment**: add animals and treatments (or *Import animals* from an ANY-maze spreadsheet) →
+**Test ▸ Test schedule ▸ Add tests from videos** → *Track all untracked* → **Results**.
 
 ### Command line
 

@@ -40,6 +40,7 @@ class RibbonGroup(QFrame):
         self._small_col: QGridLayout | None = None
         self._small_n = 0
         self.buttons: list[QToolButton] = []
+        self.widgets: list[QWidget] = []  # page-owned widgets: detached (not deleted) when the group goes
 
     def _button(self, action: QAction, large: bool) -> QToolButton:
         b = QToolButton()
@@ -54,11 +55,12 @@ class RibbonGroup(QFrame):
             b.setIconSize(LARGE_ICON)
             b.setMinimumWidth(52)
             b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-            text = action.text().replace("&", "")
+            text = action.iconText().replace("&", "")
             if " " in text and len(text) > 9 and "\n" not in text:  # two lines, like the ribbon of ANY-maze
                 words = text.split(" ")
                 best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
-                b.setText(" ".join(words[:best]) + "\n" + " ".join(words[best:]))
+                # stored on the action so the button keeps it when the action changes (enabled, checked…)
+                action.setIconText(" ".join(words[:best]) + "\n" + " ".join(words[best:]))
         else:
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             b.setIconSize(SMALL_ICON)
@@ -87,6 +89,7 @@ class RibbonGroup(QFrame):
     def add_widget(self, w: QWidget):
         self._small_col = None
         self.row.addWidget(w)
+        self.widgets.append(w)
 
 
 class RibbonPanel(QWidget):
@@ -111,7 +114,9 @@ class RibbonPanel(QWidget):
 
     def set_context(self, groups) -> list[RibbonGroup]:
         """Replace the contextual groups: [(title, [QAction | (QAction, "large"|"small") | QWidget, ...]), ...]."""
-        for g in self.context:  # the page owns the actions; only the buttons go
+        for g in self.context:  # the page owns the actions and widgets; only the buttons go
+            for w in g.widgets:
+                w.setParent(None)
             g.setParent(None)
             g.deleteLater()
         self.context = []

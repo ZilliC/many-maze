@@ -14,9 +14,8 @@ from manymaze.core.project import Project
 from manymaze.core.track import Track
 from manymaze.gui.main_window import MainWindow
 from manymaze.gui.pages import tests as tests_mod
-from manymaze.gui.pages.tests import (C_ANIMAL, C_DUR, C_STAGE, C_START, C_TRIAL, AddVideosDialog, DlcImportDialog,
-                                      VariablesDialog,
-                                      track_tests_job, tracking_batches)
+from manymaze.gui.pages.tests import (C_ANIMAL, C_DUR, C_STAGE, C_START, C_STATUS, C_TRIAL, AddVideosDialog,
+                                      DlcImportDialog, VariablesDialog, track_tests_job, tracking_batches)
 from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
@@ -68,6 +67,8 @@ def test_table_and_summary(page):
     assert "4</b> tests" in page.summary.text() and "4 tracked" in page.summary.text()
     # group column comes from the animal; status coloured
     assert page.model.index(0, 2).data() in ("Control", "Anxious")
+    assert page.model.headerData(C_STATUS, Qt.Horizontal) == "Testing status"
+    assert page.model.index(0, C_STATUS).data() == "Tracked"
     # sorting by animal
     page.table.sortByColumn(C_ANIMAL, Qt.AscendingOrder)
     names = [page.proxy.index(r, C_ANIMAL).data() for r in range(4)]

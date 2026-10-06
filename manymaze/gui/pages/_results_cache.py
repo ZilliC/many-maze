@@ -134,16 +134,26 @@ class RowsLoader(QObject):
             self._set_busy(False)
             self.loaded.emit([], segmented)
             return
+        fp = fingerprint(project)
         if not force:
-            rows = cached_rows(project, segmented)
+            rows = cached_rows(project, segmented, fp)
             if rows is not None:
                 self._set_busy(False)
                 self.loaded.emit(rows, segmented)
                 return
+            # the same calculation is already running (e.g. the page was shown twice): deliver its result
+            for w in self._workers:
+                if w.key == (id(project), segmented, fp) and w.isRunning() and not w.stopping:
+                    w.gen = gen
+                    self._set_busy(True)
+                    return
         w = Worker(lambda progress, stop: get_rows(project, segmented, force, progress), self)
-        w.signals.progress.connect(lambda f: gen == self._gen and self.progress.emit(f))
-        w.signals.done.connect(lambda rows: self._done(gen, rows, segmented))
-        w.signals.failed.connect(lambda msg: self._failed(gen, msg))
+        w.key = (id(project), segmented, fp)
+        w.gen = gen
+        w.stopping = False
+        w.signals.progress.connect(lambda f: w.gen == self._gen and self.progress.emit(f))
+        w.signals.done.connect(lambda rows: self._done(w.gen, rows, segmented))
+        w.signals.failed.connect(lambda msg: self._failed(w.gen, msg))
         w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
         self._workers.append(w)
         self._set_busy(True)
@@ -177,5 +187,6 @@ class RowsLoader(QObject):
     def shutdown(self):
         self.cancel()
         for w in list(self._workers):
+            w.stopping = True
             w.stop()
             w.wait(30000)

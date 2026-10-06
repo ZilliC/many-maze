@@ -8,7 +8,7 @@ from typing import Callable
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QFormLayout, QGraphicsEllipseItem, QGraphicsItemGroup, QGraphicsLineItem,
                                QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsView, QHBoxLayout, QLabel, QMessageBox, QProgressDialog, QPushButton,
@@ -117,6 +117,7 @@ class FrameView(QGraphicsView):
 
 
 def shape_path(shape) -> QPainterPath:
+    """QPainterPath of a zone / arena shape in video-pixel coordinates."""
     path = QPainterPath()
     if isinstance(shape, Ellipse):
         path.addEllipse(QPointF(shape.cx, shape.cy), shape.rx, shape.ry)
@@ -129,50 +130,59 @@ def shape_path(shape) -> QPainterPath:
 
 def draw_apparatus(scene: QGraphicsScene, app: Apparatus | None, labels: bool = True,
                    fill_alpha: int = 40) -> QGraphicsItemGroup:
-    """Add a read-only rendering of an apparatus to a scene; returns the item group."""
+    """Add a read-only rendering of an apparatus to a scene in the style of ANY-maze — thin orange outlines,
+    zones lightly tinted with their colour, small dark labels — and return the item group."""
+    from . import theme
+
+    orange = QColor(theme.APPARATUS)
     group = QGraphicsItemGroup()
     scene.addItem(group)
     if app is None:
         return group
+
+    def outline(width=1.3, style=Qt.SolidLine):
+        pen = QPen(orange)
+        pen.setCosmetic(True)
+        pen.setWidthF(width)
+        pen.setStyle(style)
+        return pen
+
     if app.arena is not None:
         it = QGraphicsPathItem(shape_path(app.arena))
-        pen = QPen(QColor("#f8fafc"), 0)
-        pen.setCosmetic(True)
-        pen.setWidthF(1.5)
-        pen.setStyle(Qt.DashLine)
-        it.setPen(pen)
+        it.setPen(outline(1.3, Qt.DashLine))
         group.addToGroup(it)
+    font = QFont()
+    font.setPointSizeF(8.0)
     for z in app.zones:
         it = QGraphicsPathItem(shape_path(z.shape))
-        c = QColor(z.color)
-        pen = QPen(c)
-        pen.setCosmetic(True)
-        pen.setWidthF(1.5)
-        it.setPen(pen)
-        fc = QColor(c)
-        fc.setAlpha(fill_alpha)
+        it.setPen(outline(1.3, Qt.DashLine if z.hidden else Qt.SolidLine))
+        fc = QColor(z.color)
+        fc.setAlpha(max(0, min(255, int(fill_alpha * 0.7))))
         it.setBrush(QBrush(fc))
         group.addToGroup(it)
         if labels:
             cx, cy = z.shape.centroid()
             tx = QGraphicsSimpleTextItem(z.name)
+            tx.setFont(font)
             tx.setBrush(QBrush(QColor("#ffffff")))
+            halo = QPen(QColor(31, 41, 55, 200))
+            halo.setWidthF(0.6)
+            tx.setPen(halo)
             tx.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations)
+            br = tx.boundingRect()
+            tx.setTransform(QTransform.fromTranslate(-br.width() / 2, -br.height() / 2))
             tx.setPos(cx, cy)
             group.addToGroup(tx)
     for p in app.points:
         r = 4
         it = QGraphicsEllipseItem(p.x - r, p.y - r, 2 * r, 2 * r)
         it.setBrush(QBrush(QColor(p.color)))
-        it.setPen(QPen(Qt.NoPen))
+        it.setPen(outline(1.2))
         group.addToGroup(it)
         if p.radius_cm and app.px_per_cm:
             rr = p.radius_cm * app.px_per_cm
             ring = QGraphicsEllipseItem(p.x - rr, p.y - rr, 2 * rr, 2 * rr)
-            pen = QPen(QColor(p.color))
-            pen.setCosmetic(True)
-            pen.setStyle(Qt.DotLine)
-            ring.setPen(pen)
+            ring.setPen(outline(1.0, Qt.DotLine))
             group.addToGroup(ring)
     for l in app.lines:
         it = QGraphicsLineItem(l.x1, l.y1, l.x2, l.y2)
