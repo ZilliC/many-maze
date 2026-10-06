@@ -191,3 +191,7 @@ def test_track_video_with_real_pose_session(clip, tmp_path, monkeypatch):
     assert tr.meta["pose_model"] == "tiny" and tr.meta["pose_device"] == "CPUExecutionProvider"
     assert np.isfinite(tr.hx).all() and (tr.hx >= 0).all() and (tr.hx < 400).all()
     assert not math.isnan(float(np.nanmean(tr.angle)))
+
+
+def test_recorder_closed_without_frames(tmp_path):
+    VideoRecorder(str(tmp_path / "probe.mp4"), 25, (64, 48)).close()

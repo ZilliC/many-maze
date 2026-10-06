@@ -363,9 +363,15 @@ class VideoRecorder:
 
     def close(self):
         if self._av is not None:
-            for pkt in self._stream.encode():
-                self._av.mux(pkt)
-            self._av.close()
+            if self.frames:
+                for pkt in self._stream.encode():
+                    self._av.mux(pkt)
+                self._av.close()
+            else:  # never written: the (lazily opened) hardware encoder may not even exist
+                try:
+                    self._av.close()
+                except Exception:
+                    pass
             self._av = None
         if getattr(self, "writer", None) is not None:
             self.writer.release()
