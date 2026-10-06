@@ -135,7 +135,8 @@ def test_simulated_live_test_threaded(win):
     p = win.project
     video = p.abs_path(p.tests[1].video)
     page = setup_page(win, video, duration=2.0)
-    page.sim_speed.setCurrentIndex(page.sim_speed.findData(4.0))
+    # real time: at higher speeds the 8 s video can run out before the 2 s test ends on slow machines
+    page.sim_speed.setCurrentIndex(page.sim_speed.findData(1.0))
     page.start_mode.setCurrentIndex(page.start_mode.findData("on_detection"))
     assert page.start_preview()
     for _ in range(100):
