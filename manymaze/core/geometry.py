@@ -1,0 +1,238 @@
+"""Geometric shapes used for arenas, zones, points of interest and lines.
+
+All coordinates are in video pixels (x to the right, y downwards).
+Shapes serialise to plain dicts so they can be stored in project JSON.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+
+
+@dataclass
+class Shape:
+    """Base class. Concrete shapes: Polygon, Ellipse."""
+
+    def contains(self, x, y) -> np.ndarray:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def to_dict(self) -> dict:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def area(self) -> float:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def centroid(self) -> tuple[float, float]:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def polygon(self, n: int = 72) -> np.ndarray:  # pragma: no cover - abstract
+        """Return an (N, 2) float array approximating the outline."""
+        raise NotImplementedError
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        p = self.polygon()
+        return float(p[:, 0].min()), float(p[:, 1].min()), float(p[:, 0].max()), float(p[:, 1].max())
+
+    def mask(self, shape_hw: tuple[int, int]) -> np.ndarray:
+        """Binary uint8 mask (255 inside) of the given frame size."""
+        m = np.zeros(shape_hw[:2], np.uint8)
+        pts = np.round(self.polygon(180)).astype(np.int32)
+        cv2.fillPoly(m, [pts], 255)
+        return m
+
+    def distance_to_edge(self, x, y) -> np.ndarray:
+        """Unsigned distance from points to the outline of the shape."""
+        poly = self.polygon(180)
+        return _distance_to_polyline(np.asarray(x, float), np.asarray(y, float), poly, closed=True)
+
+    def translated(self, dx: float, dy: float) -> "Shape":  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def scaled(self, sx: float, sy: float, ox: float = 0.0, oy: float = 0.0) -> "Shape":  # pragma: no cover
+        raise NotImplementedError
+
+
+@dataclass
+class Polygon(Shape):
+    points: list[tuple[float, float]] = field(default_factory=list)
+
+    def _arr(self) -> np.ndarray:
+        return np.asarray(self.points, dtype=float).reshape(-1, 2)
+
+    def contains(self, x, y) -> np.ndarray:
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        p = self._arr()
+        if len(p) < 3:
+            return np.zeros(np.broadcast(x, y).shape, bool)
+        inside = np.zeros(np.broadcast(x, y).shape, bool)
+        xj, yj = p[-1]
+        for xi, yi in p:
+            cond = (yi > y) != (yj > y)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                xint = (xj - xi) * (y - yi) / (yj - yi) + xi
+            inside ^= cond & (x < xint)
+            xj, yj = xi, yi
+        return inside & np.isfinite(x) & np.isfinite(y)
+
+    def area(self) -> float:
+        p = self._arr()
+        if len(p) < 3:
+            return 0.0
+        x, y = p[:, 0], p[:, 1]
+        return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2)
+
+    def centroid(self) -> tuple[float, float]:
+        p = self._arr()
+        if len(p) < 3:
+            return (float(p[:, 0].mean()), float(p[:, 1].mean())) if len(p) else (0.0, 0.0)
+        x, y = p[:, 0], p[:, 1]
+        cross = x * np.roll(y, -1) - np.roll(x, -1) * y
+        a = cross.sum() / 2
+        if abs(a) < 1e-9:
+            return float(x.mean()), float(y.mean())
+        cx = ((x + np.roll(x, -1)) * cross).sum() / (6 * a)
+        cy = ((y + np.roll(y, -1)) * cross).sum() / (6 * a)
+        return float(cx), float(cy)
+
+    def polygon(self, n: int = 72) -> np.ndarray:
+        return self._arr()
+
+    def to_dict(self) -> dict:
+        return {"type": "polygon", "points": [[float(a), float(b)] for a, b in self.points]}
+
+    def translated(self, dx, dy):
+        return Polygon([(x + dx, y + dy) for x, y in self.points])
+
+    def scaled(self, sx, sy, ox=0.0, oy=0.0):
+        return Polygon([(ox + (x - ox) * sx, oy + (y - oy) * sy) for x, y in self.points])
+
+
+@dataclass
+class Ellipse(Shape):
+    cx: float = 0.0
+    cy: float = 0.0
+    rx: float = 1.0
+    ry: float = 1.0
+
+    def contains(self, x, y) -> np.ndarray:
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        with np.errstate(invalid="ignore"):
+            r = ((x - self.cx) / self.rx) ** 2 + ((y - self.cy) / self.ry) ** 2
+            return np.nan_to_num(r, nan=np.inf) <= 1.0
+
+    def area(self) -> float:
+        return float(math.pi * self.rx * self.ry)
+
+    def centroid(self) -> tuple[float, float]:
+        return float(self.cx), float(self.cy)
+
+    def polygon(self, n: int = 72) -> np.ndarray:
+        t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        return np.column_stack([self.cx + self.rx * np.cos(t), self.cy + self.ry * np.sin(t)])
+
+    def distance_to_edge(self, x, y) -> np.ndarray:
+        if abs(self.rx - self.ry) < 1e-6:
+            d = np.hypot(np.asarray(x, float) - self.cx, np.asarray(y, float) - self.cy)
+            return np.abs(d - self.rx)
+        return super().distance_to_edge(x, y)
+
+    def to_dict(self) -> dict:
+        return {"type": "ellipse", "cx": self.cx, "cy": self.cy, "rx": self.rx, "ry": self.ry}
+
+    def translated(self, dx, dy):
+        return Ellipse(self.cx + dx, self.cy + dy, self.rx, self.ry)
+
+    def scaled(self, sx, sy, ox=0.0, oy=0.0):
+        return Ellipse(ox + (self.cx - ox) * sx, oy + (self.cy - oy) * sy, self.rx * abs(sx), self.ry * abs(sy))
+
+
+def rect(x: float, y: float, w: float, h: float) -> Polygon:
+    return Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+
+
+def circle(cx: float, cy: float, r: float) -> Ellipse:
+    return Ellipse(cx, cy, r, r)
+
+
+def rotated_rect(cx: float, cy: float, length: float, width: float, angle_deg: float, anchor: str = "center") -> Polygon:
+    """Rectangle of `length` along angle_deg (0 = +x, 90 = +y/down).
+
+    anchor='start' puts one short edge centred on (cx, cy) and extends outwards.
+    """
+    a = math.radians(angle_deg)
+    ux, uy = math.cos(a), math.sin(a)
+    vx, vy = -uy, ux
+    if anchor == "start":
+        s0, s1 = 0.0, length
+    else:
+        s0, s1 = -length / 2, length / 2
+    hw = width / 2
+    pts = []
+    for s, t in ((s0, -hw), (s1, -hw), (s1, hw), (s0, hw)):
+        pts.append((cx + ux * s + vx * t, cy + uy * s + vy * t))
+    return Polygon(pts)
+
+
+def shape_from_dict(d: dict) -> Shape:
+    t = d.get("type")
+    if t == "polygon":
+        return Polygon([tuple(p) for p in d["points"]])
+    if t in ("ellipse", "circle"):
+        if t == "circle":
+            return Ellipse(d["cx"], d["cy"], d["r"], d["r"])
+        return Ellipse(d["cx"], d["cy"], d["rx"], d["ry"])
+    if t == "rect":
+        return rect(d["x"], d["y"], d["w"], d["h"])
+    raise ValueError(f"Unknown shape type: {t!r}")
+
+
+def _distance_to_polyline(x: np.ndarray, y: np.ndarray, poly: np.ndarray, closed: bool) -> np.ndarray:
+    pts = np.asarray(poly, float)
+    if closed:
+        a = pts
+        b = np.roll(pts, -1, axis=0)
+    else:
+        a = pts[:-1]
+        b = pts[1:]
+    px = np.asarray(x, float)[..., None]
+    py = np.asarray(y, float)[..., None]
+    abx = b[:, 0] - a[:, 0]
+    aby = b[:, 1] - a[:, 1]
+    denom = abx**2 + aby**2
+    denom = np.where(denom == 0, 1e-12, denom)
+    t = np.clip(((px - a[:, 0]) * abx + (py - a[:, 1]) * aby) / denom, 0, 1)
+    dx = px - (a[:, 0] + t * abx)
+    dy = py - (a[:, 1] + t * aby)
+    return np.sqrt(dx**2 + dy**2).min(axis=-1)
+
+
+def segments_intersect(p1, p2, q1, q2) -> np.ndarray:
+    """Vectorised test whether segments p1->p2 intersect the single segment q1->q2.
+
+    p1, p2: (N, 2) arrays; q1, q2: length-2 sequences. Returns (N,) bool array and
+    the sign of the crossing (+1 / -1 relative to q direction) as an int array.
+    """
+    p1 = np.asarray(p1, float)
+    p2 = np.asarray(p2, float)
+    qx, qy = q2[0] - q1[0], q2[1] - q1[1]
+
+    def side(px, py):
+        # points exactly on the line count as being on the positive side so a crossing that
+        # touches the line is counted exactly once
+        return np.where(qx * (py - q1[1]) - qy * (px - q1[0]) >= 0, 1.0, -1.0)
+
+    s1 = side(p1[:, 0], p1[:, 1])
+    s2 = side(p2[:, 0], p2[:, 1])
+    rx = p2[:, 0] - p1[:, 0]
+    ry = p2[:, 1] - p1[:, 1]
+    t1 = np.sign(rx * (q1[1] - p1[:, 1]) - ry * (q1[0] - p1[:, 0]))
+    t2 = np.sign(rx * (q2[1] - p1[:, 1]) - ry * (q2[0] - p1[:, 0]))
+    hit = (s1 * s2 < 0) & (t1 * t2 <= 0)
+    hit &= np.isfinite(p1).all(axis=1) & np.isfinite(p2).all(axis=1)
+    return hit, np.where(hit, s2.astype(int), 0)

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.mmaze/
+.DS_Store
+packaging/*.iconset/
+packaging/*.icns

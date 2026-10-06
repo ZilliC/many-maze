@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manymaze"
+version = "0.1.0"
+description = "mANY-MAZE: a libre video-tracking and behavioural analysis suite for animal behaviour experiments"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+authors = [{ name = "mANY-MAZE contributors" }]
+keywords = ["behaviour", "neuroscience", "video tracking", "rodent", "maze", "open field", "elevated plus maze", "water maze"]
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+  "numpy>=1.24",
+  "opencv-python-headless>=4.8",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "openpyxl>=3.1",
+  "PySide6>=6.6",
+]
+
+[project.optional-dependencies]
+serial = ["pyserial>=3.5"]
+dev = ["pytest>=7", "pyinstaller>=6.3"]
+
+[project.scripts]
+manymaze = "manymaze.cli:main"
+
+[project.gui-scripts]
+manymaze-gui = "manymaze.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["manymaze*"]
+
+[tool.setuptools.package-data]
+manymaze = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

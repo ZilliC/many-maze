@@ -1,0 +1,470 @@
+"""Shared Qt widgets and helpers: frame display, video player, background workers, plot canvas."""
+
+from __future__ import annotations
+
+import traceback
+from typing import Callable
+
+import cv2
+import numpy as np
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (QFormLayout, QGraphicsEllipseItem, QGraphicsItemGroup, QGraphicsLineItem,
+                               QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem,
+                               QGraphicsView, QHBoxLayout, QLabel, QMessageBox, QProgressDialog, QPushButton,
+                               QSizePolicy, QSlider, QStyle, QVBoxLayout, QWidget)
+
+from ..core.apparatus import Apparatus
+from ..core.geometry import Ellipse
+from ..core.video import VideoSource
+
+
+# ---------------------------------------------------------------- conversion
+def cv_to_qimage(frame: np.ndarray) -> QImage:
+    if frame.ndim == 2:
+        h, w = frame.shape
+        img = QImage(frame.data, w, h, w, QImage.Format_Grayscale8)
+        return img.copy()
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    h, w, _ = rgb.shape
+    return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+
+
+def cv_to_qpixmap(frame: np.ndarray) -> QPixmap:
+    return QPixmap.fromImage(cv_to_qimage(frame))
+
+
+def fmt_time(t: float) -> str:
+    if t is None or t != t:
+        return "--:--"
+    m, s = divmod(max(0.0, t), 60)
+    return f"{int(m):02d}:{s:05.2f}"
+
+
+def error_box(parent, title: str, exc: BaseException | str):
+    msg = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
+    QMessageBox.critical(parent, title, msg)
+
+
+# --------------------------------------------------------------- frame view
+class FrameView(QGraphicsView):
+    """Zoomable view showing a video frame; scene coordinates are video pixels."""
+
+    clicked = Signal(float, float)
+    mouse_moved = Signal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setScene(QGraphicsScene(self))
+        self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        self.setBackgroundBrush(QBrush(QColor("#1e293b")))
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setMouseTracking(True)
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.pixmap_item.setZValue(-100)
+        self.scene().addItem(self.pixmap_item)
+        self._auto_fit = True
+        self.frame_size: tuple[int, int] | None = None
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumSize(320, 240)
+
+    def set_frame(self, frame: np.ndarray | None):
+        if frame is None:
+            return
+        h, w = frame.shape[:2]
+        self.pixmap_item.setPixmap(cv_to_qpixmap(frame))
+        if self.frame_size != (w, h):
+            self.frame_size = (w, h)
+            self.scene().setSceneRect(QRectF(-20, -20, w + 40, h + 40))
+            self.fit()
+
+    def fit(self):
+        if self.frame_size and not getattr(self, "_fitting", False):
+            # fit the whole scene rect (frame + margin) so scrollbars never toggle and re-trigger resizes
+            self._fitting = True
+            try:
+                self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+            finally:
+                self._fitting = False
+            self._auto_fit = True
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._auto_fit:
+            self.fit()
+
+    def wheelEvent(self, e):
+        f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(f, f)
+        self._auto_fit = False
+
+    def mousePressEvent(self, e):
+        p = self.mapToScene(e.position().toPoint())
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit(p.x(), p.y())
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        p = self.mapToScene(e.position().toPoint())
+        self.mouse_moved.emit(p.x(), p.y())
+        super().mouseMoveEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MiddleButton or e.modifiers() & Qt.AltModifier:
+            self.fit()
+        super().mouseDoubleClickEvent(e)
+
+
+def shape_path(shape) -> QPainterPath:
+    path = QPainterPath()
+    if isinstance(shape, Ellipse):
+        path.addEllipse(QPointF(shape.cx, shape.cy), shape.rx, shape.ry)
+    else:
+        pts = shape.polygon()
+        path.addPolygon(QPolygonF([QPointF(float(x), float(y)) for x, y in pts]))
+        path.closeSubpath()
+    return path
+
+
+def draw_apparatus(scene: QGraphicsScene, app: Apparatus | None, labels: bool = True,
+                   fill_alpha: int = 40) -> QGraphicsItemGroup:
+    """Add a read-only rendering of an apparatus to a scene; returns the item group."""
+    group = QGraphicsItemGroup()
+    scene.addItem(group)
+    if app is None:
+        return group
+    if app.arena is not None:
+        it = QGraphicsPathItem(shape_path(app.arena))
+        pen = QPen(QColor("#f8fafc"), 0)
+        pen.setCosmetic(True)
+        pen.setWidthF(1.5)
+        pen.setStyle(Qt.DashLine)
+        it.setPen(pen)
+        group.addToGroup(it)
+    for z in app.zones:
+        it = QGraphicsPathItem(shape_path(z.shape))
+        c = QColor(z.color)
+        pen = QPen(c)
+        pen.setCosmetic(True)
+        pen.setWidthF(1.5)
+        it.setPen(pen)
+        fc = QColor(c)
+        fc.setAlpha(fill_alpha)
+        it.setBrush(QBrush(fc))
+        group.addToGroup(it)
+        if labels:
+            cx, cy = z.shape.centroid()
+            tx = QGraphicsSimpleTextItem(z.name)
+            tx.setBrush(QBrush(QColor("#ffffff")))
+            tx.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations)
+            tx.setPos(cx, cy)
+            group.addToGroup(tx)
+    for p in app.points:
+        r = 4
+        it = QGraphicsEllipseItem(p.x - r, p.y - r, 2 * r, 2 * r)
+        it.setBrush(QBrush(QColor(p.color)))
+        it.setPen(QPen(Qt.NoPen))
+        group.addToGroup(it)
+        if p.radius_cm and app.px_per_cm:
+            rr = p.radius_cm * app.px_per_cm
+            ring = QGraphicsEllipseItem(p.x - rr, p.y - rr, 2 * rr, 2 * rr)
+            pen = QPen(QColor(p.color))
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.DotLine)
+            ring.setPen(pen)
+            group.addToGroup(ring)
+    for l in app.lines:
+        it = QGraphicsLineItem(l.x1, l.y1, l.x2, l.y2)
+        pen = QPen(QColor(l.color))
+        pen.setCosmetic(True)
+        pen.setWidthF(2)
+        it.setPen(pen)
+        group.addToGroup(it)
+    return group
+
+
+# --------------------------------------------------------------- video player
+class VideoPlayer(QWidget):
+    """Video display with transport controls.
+
+    Set `overlay` to a callable (index, frame) -> frame to draw on frames before display.
+    Emits frame_changed(index, t) after a frame is shown.
+    """
+
+    frame_changed = Signal(int, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.view = FrameView()
+        self.source: VideoSource | None = None
+        self.overlay: Callable[[int, np.ndarray], np.ndarray] | None = None
+        self.index = 0
+        self.current_frame: np.ndarray | None = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.speed = 1.0
+        self.range_start = 0  # frames
+        self.range_end: int | None = None
+
+        st = self.style()
+        self.play_btn = QPushButton()
+        self.play_btn.setIcon(st.standardIcon(QStyle.SP_MediaPlay))
+        self.play_btn.setToolTip("Play / pause (Space)")
+        self.play_btn.clicked.connect(self.toggle)
+        back = QPushButton()
+        back.setIcon(st.standardIcon(QStyle.SP_MediaSeekBackward))
+        back.setToolTip("Back 1 frame (←); Shift: 1 s")
+        back.clicked.connect(lambda: self.step(-1))
+        fwd = QPushButton()
+        fwd.setIcon(st.standardIcon(QStyle.SP_MediaSeekForward))
+        fwd.setToolTip("Forward 1 frame (→); Shift: 1 s")
+        fwd.clicked.connect(lambda: self.step(1))
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.valueChanged.connect(self._slider_moved)
+        self.time_lbl = QLabel("--:--")
+        self.time_lbl.setMinimumWidth(150)
+        self.speed_btn = QPushButton("1×")
+        self.speed_btn.setToolTip("Playback speed")
+        self.speed_btn.clicked.connect(self._cycle_speed)
+        bar = QHBoxLayout()
+        for w in (back, self.play_btn, fwd, self.speed_btn):
+            bar.addWidget(w)
+        bar.addWidget(self.slider, 1)
+        bar.addWidget(self.time_lbl)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.view, 1)
+        lay.addLayout(bar)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    # ------------------------------------------------------------------
+    def open(self, path: str) -> bool:
+        self.close_video()
+        try:
+            self.source = VideoSource(path)
+        except Exception as e:
+            self.time_lbl.setText(f"cannot open: {e}")
+            return False
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, max(0, self.source.frame_count - 1))
+        self.slider.setValue(0)
+        self.slider.blockSignals(False)
+        self.seek(0)
+        return True
+
+    def close_video(self):
+        self.pause()
+        if self.source is not None:
+            self.source.release()
+            self.source = None
+
+    @property
+    def fps(self) -> float:
+        return self.source.fps if self.source else 25.0
+
+    @property
+    def time(self) -> float:
+        return self.index / self.fps
+
+    def seek(self, index: int):
+        if self.source is None:
+            return
+        index = int(max(0, min(index, max(0, self.source.frame_count - 1))))
+        f = self.source.frame_at(index)
+        if f is None:
+            return
+        self.index = index
+        self._show(f)
+
+    def seek_time(self, t: float):
+        self.seek(int(round(t * self.fps)))
+
+    def refresh(self):
+        if self.current_frame is not None:
+            self._show(self.current_frame)
+
+    def _show(self, f):
+        self.current_frame = f
+        disp = self.overlay(self.index, f) if self.overlay else f
+        self.view.set_frame(disp)
+        self.slider.blockSignals(True)
+        self.slider.setValue(self.index)
+        self.slider.blockSignals(False)
+        total = self.source.duration if self.source else 0
+        self.time_lbl.setText(f"{fmt_time(self.time)} / {fmt_time(total)}  [{self.index}]")
+        self.frame_changed.emit(self.index, self.time)
+
+    def _slider_moved(self, v):
+        self.seek(v)
+
+    def step(self, n: int):
+        self.pause()
+        self.seek(self.index + n)
+
+    def play(self):
+        if self.source is None:
+            return
+        self.timer.start(max(1, int(1000 / (self.fps * self.speed))))
+        self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+
+    def pause(self):
+        self.timer.stop()
+        self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+
+    def toggle(self):
+        if self.timer.isActive():
+            self.pause()
+        else:
+            self.play()
+
+    @property
+    def playing(self) -> bool:
+        return self.timer.isActive()
+
+    def _cycle_speed(self):
+        speeds = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+        i = speeds.index(self.speed) if self.speed in speeds else 2
+        self.speed = speeds[(i + 1) % len(speeds)]
+        self.speed_btn.setText(f"{self.speed:g}×")
+        if self.playing:
+            self.play()
+
+    def _tick(self):
+        if self.source is None:
+            return
+        skip = max(1, int(round(self.speed / 2))) if self.speed > 2 else 1
+        if skip > 1:
+            self.seek(self.index + skip)
+        else:
+            ok, f = self.source.read()
+            if not ok:
+                self.pause()
+                return
+            self.index = self.source.pos - 1
+            self._show(f)
+        end = self.range_end if self.range_end is not None else (self.source.frame_count - 1)
+        if self.index >= end:
+            self.pause()
+
+    def keyPressEvent(self, e):
+        step = int(self.fps) if e.modifiers() & Qt.ShiftModifier else 1
+        if e.key() == Qt.Key_Space:
+            self.toggle()
+        elif e.key() == Qt.Key_Right:
+            self.step(step)
+        elif e.key() == Qt.Key_Left:
+            self.step(-step)
+        else:
+            super().keyPressEvent(e)
+
+
+# ---------------------------------------------------------------- workers
+class _WorkerSignals(QObject):
+    progress = Signal(float)
+    done = Signal(object)
+    failed = Signal(str)
+
+
+class Worker(QThread):
+    """Run fn(progress_cb, should_stop) in a thread. Connect .signals.done / .failed / .progress."""
+
+    def __init__(self, fn: Callable, parent=None):
+        super().__init__(parent)
+        self.fn = fn
+        self.signals = _WorkerSignals()
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            res = self.fn(self.signals.progress.emit, lambda: self._stop)
+            self.signals.done.emit(res)
+        except Exception as e:  # pragma: no cover - surfaced to UI
+            traceback.print_exc()
+            self.signals.failed.emit(f"{type(e).__name__}: {e}")
+
+
+def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callable | None = None,
+                      on_fail: Callable | None = None, cancellable: bool = True) -> Worker:
+    """Run fn(progress, should_stop) in a background thread with a modal progress dialog."""
+    dlg = QProgressDialog(title, "Cancel" if cancellable else None, 0, 1000, parent)
+    dlg.setWindowTitle(title)
+    dlg.setWindowModality(Qt.WindowModal)
+    dlg.setMinimumDuration(0)
+    dlg.setAutoClose(False)
+    dlg.setAutoReset(False)
+    dlg.setValue(0)
+    w = Worker(fn, parent)
+    w.signals.progress.connect(lambda f: dlg.setValue(int(f * 1000)))
+    dlg.canceled.connect(w.stop)
+
+    def finished(res):
+        dlg.close()
+        if on_done:
+            on_done(res)
+
+    def failed(msg):
+        dlg.close()
+        if on_fail:
+            on_fail(msg)
+        else:
+            error_box(parent, title, msg)
+
+    w.signals.done.connect(finished)
+    w.signals.failed.connect(failed)
+    w.finished.connect(w.deleteLater)
+    if not hasattr(parent, "_workers"):
+        parent._workers = []
+    parent._workers.append(w)
+    w.finished.connect(lambda: parent._workers.remove(w) if w in parent._workers else None)
+    w.start()
+    dlg.show()
+    return w
+
+
+# ---------------------------------------------------------------- plotting
+class PlotCanvas(QWidget):
+    """Hosts a matplotlib Figure produced by core.plots."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self.canvas = None
+        self.figure = None
+
+    def set_figure(self, fig):
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+        if self.canvas is not None:
+            self._lay.removeWidget(self.canvas)
+            self.canvas.setParent(None)
+            self.canvas.deleteLater()
+        self.figure = fig
+        self.canvas = FigureCanvasQTAgg(fig)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._lay.addWidget(self.canvas)
+        self.canvas.draw_idle()
+
+    def save(self, path: str, dpi: int = 300):
+        if self.figure is not None:
+            self.figure.savefig(path, dpi=dpi, bbox_inches="tight")
+
+
+def form_row_widget(*widgets) -> QWidget:
+    w = QWidget()
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(0, 0, 0, 0)
+    for x in widgets:
+        lay.addWidget(x)
+    return w
+
+
+def compact_form() -> QFormLayout:
+    f = QFormLayout()
+    f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    f.setLabelAlignment(Qt.AlignRight)
+    return f
