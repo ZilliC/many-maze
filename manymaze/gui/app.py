@@ -67,10 +67,34 @@ def _smoke_test(app, window) -> int:
 
     from ..core.demo import create_demo_project
 
+    from ..core import pose
+    from ..core.batch import track_tests
+    from ..core.video import FrameReader, VideoRecorder, hw_decoder_name
+
     with tempfile.TemporaryDirectory() as d:
-        proj = create_demo_project(Path(d) / "smoke.mmaze", n_per_group=1, seconds=4)
+        proj = create_demo_project(Path(d) / "smoke.mmaze", n_per_group=1, seconds=4, track=False)
+        res = track_tests(proj, proj.tests, workers=2)  # worker processes inside the frozen app
+        assert sorted(res["tracked"]) == [t.id for t in proj.tests] and not res["errors"], res
         rows = proj.results()
         assert rows and rows[0]["Total distance (cm)"] > 0, rows
+        with FrameReader(proj.abs_path(proj.tests[0].video)) as r:
+            decoder = r.backend
+            assert sum(1 for _ in r) > 0
+        rec = VideoRecorder(str(Path(d) / "rec.mp4"), 25, (64, 48))
+        import numpy as np
+        for _ in range(10):
+            rec.write(np.zeros((48, 64, 3), np.uint8))
+        rec.close()
+        ck = os.environ.get("MANYMAZE_SMOKE_POSE")  # path to the SuperAnimal checkpoint: test the AI pipeline
+        if ck:
+            os.environ["MANYMAZE_MODELS"] = str(Path(d) / "models")
+            pose.install_model("topviewmouse_rtmpose_s", source_path=ck)
+            proj.detection.body_parts = "pose"
+            tr = proj.track_test(proj.tests[0])[0]
+            assert tr.detected.mean() > 0.9 and tr.meta["pose_device"], tr.meta
+            print(f"smoke test: pose model ran on {tr.meta['pose_device']}")
+        print(f"smoke test: {res['workers']} parallel workers, decoder {decoder}, hardware decoder "
+              f"{hw_decoder_name()}, recorder {rec.backend}, inference providers {pose.available_providers()}")
         window.set_project(proj)
         for i in range(window.nav.count()):
             window.nav.setCurrentRow(i)

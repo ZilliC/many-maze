@@ -15,7 +15,9 @@ a = Analysis(
     datas=[(str(ROOT / "manymaze" / "resources"), "manymaze/resources")],
     hiddenimports=["manymaze.gui.pages." + m for m in
                    ("experiment", "animals", "apparatus", "tests", "testview", "live", "results", "statistics",
-                    "_results_cache")] + ["matplotlib.backends.backend_qtagg"],
+                    "_results_cache")] + ["matplotlib.backends.backend_qtagg", "manymaze.core.batch",
+                                          "manymaze.core.pose", "manymaze.gui.pose_model", "onnx", "onnx.helper",
+                                          "onnx.numpy_helper"],
     excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "IPython"],
     noarchive=False,
 )

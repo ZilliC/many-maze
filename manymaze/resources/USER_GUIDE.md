@@ -28,7 +28,9 @@ everything without a camera.
   for instantaneous events, e.g. defecation).
 * **Custom analysis periods** – named time windows (e.g. *Tone 1: 120–150 s*) that override regular time bins;
   ideal for fear-conditioning CS periods.
-* **Detection settings** – defaults for all tests (each test can override them, see §5).
+* **Detection settings** – defaults for all tests (each test can override them, see §5). *Body parts from*
+  chooses how head, body centre and tail base are found: from the animal's shape (fast, no model) or with the
+  **pose model** (deep learning, see §5.1).
 * **Analysis settings** – thresholds for mobility, freezing, zone entries, thigmotaxis, object exploration,
   social contact and time bins.
 
@@ -92,6 +94,35 @@ interest is the *novel object* (novel object recognition) and the *social stimul
    is found by PCA, and the end that the animal moves towards is the head (with frame-to-frame consistency).
 5. **Motion** (changed pixels between frames, normalised by body area) is stored for freezing / immobility.
 6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
+
+### 5.1 Pose model (AI body parts)
+
+With *Body parts from: Pose model*, a deep-learning keypoint model (DeepLabCut's **SuperAnimal-TopViewMouse**,
+RTMPose-S, 27 keypoints) is run on a crop around each detected animal and gives the **nose**, **body centre** and
+**tail base**. It is much more robust than the shape method to shadows, reflections on walls, bedding and poor
+contrast, and it keeps the animal tracked for a while when the blob is lost. Keypoints below *Min keypoint
+confidence* fall back to the shape estimate.
+
+* Install it once from **Experiment ▸ Pose model ▸ Install…** (23 MB download, converted on your computer; no
+  Python deep-learning framework needed).
+* **Licence:** the model *weights* are licensed by the Mathis lab for **academic, non-commercial use only**
+  (mANY-MAZE itself is GPL). Please cite Ye et al. 2024, *Nature Communications* 15:5165.
+* On Apple Silicon it runs through **Core ML on the Neural Engine / GPU** (*Run pose model on: Auto*); elsewhere on
+  the CPU (or an NVIDIA GPU with onnxruntime-gpu).
+* **Custom ONNX…** uses your own keypoint model (e.g. exported from DeepLabCut, SLEAP or MMPose): an `.onnx`
+  file plus a `.json` beside it with `input_size`, `mean`/`std`, `output` (`"simcc"` or `"heatmap"`),
+  `keypoints` and `parts` (`{"nose": …, "centre": …, "tail_base": …}`).
+
+### 5.2 Speed on Apple Silicon
+
+* **Parallel tracking** – *Track all* tracks several videos at once in separate processes (all cores but one,
+  limited by memory; two when the pose model shares the Neural Engine). Tests filmed in the same video are still
+  tracked in a single pass.
+* **Hardware video decoding** – videos are decoded with Apple **VideoToolbox** and tracking reads the luma plane
+  directly (no colour conversion). Set `MANYMAZE_HWACCEL=0` to disable, or `MANYMAZE_DECODER=opencv` to use
+  OpenCV only.
+* **Hardware recording** – live tests are recorded with VideoToolbox's H.264 encoder (MP4), leaving the CPU for
+  tracking.
 
 ## 6. Live testing
 
@@ -160,7 +191,7 @@ Learning curves across stages or time bins with two-way ANOVA (Group × Stage), 
 manymaze                                  # GUI
 manymaze demo ~/Desktop/demo.mmaze        # demo experiment
 manymaze track video.mp4 --template epm --bbox 100,40,520,520 --size-cm 75 -o results.csv
-manymaze project ~/exp.mmaze track        # batch-track untracked tests
+manymaze project ~/exp.mmaze track        # batch-track untracked tests in parallel (--workers N)
 manymaze project ~/exp.mmaze results -o results.xlsx --bins
 manymaze project ~/exp.mmaze report -o report.html
 manymaze templates                        # list apparatus templates

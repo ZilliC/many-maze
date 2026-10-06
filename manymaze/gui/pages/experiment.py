@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox
 
 from ...core.project import Behaviour
 from ...core.templates import TEMPLATES
+from ...core import pose
+from ..pose_model import PoseModelBox
 from .base import ANALYSIS_SPEC, DETECTION_SPEC, Page, SettingsForm
 
 
@@ -105,7 +107,11 @@ class ExperimentPage(Page):
         dl = QVBoxLayout(det)
         self.det_form = SettingsForm(DETECTION_SPEC)
         self.det_form.changed.connect(self.main.mark_dirty)
+        self.det_form.changed.connect(self._update_pose_box)
         dl.addWidget(self.det_form)
+        self.pose_box = PoseModelBox()
+        self.pose_box.changed.connect(self.main.mark_dirty)
+        dl.addWidget(self.pose_box)
         dl.addStretch()
 
         # ---- right: analysis ---------------------------------------------------
@@ -133,6 +139,7 @@ class ExperimentPage(Page):
 
     def on_show(self):
         p = self.project
+        self.pose_box.set_settings(p.detection if p is not None else None)
         if p is None:
             return
         self._loading = True
@@ -151,6 +158,13 @@ class ExperimentPage(Page):
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
         self._loading = False
+
+    def _update_pose_box(self):
+        self.pose_box.refresh()
+        if self.project is not None and self.project.detection.body_parts == "pose" \
+                and self.project.detection.pose_model in pose.MODELS \
+                and not pose.is_installed(self.project.detection.pose_model):
+            self.main.status("The pose model is not installed yet — press Install… under the detection settings.")
 
     def _store(self, *_):
         if self._loading or self.project is None:

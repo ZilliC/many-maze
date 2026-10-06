@@ -6,7 +6,9 @@ live cameras) or by plain intensity thresholding.  Estimates body centre,
 head and tail points, orientation, blob area and a pixel-change "motion" value
 used for freezing / immobility analysis.  Supports several arenas per video
 (e.g. four open fields filmed together) and several animals per arena with
-identity maintenance.
+identity maintenance.  Optionally refines head / body centre / tail base with a
+deep-learning pose model (core.pose) run on a crop around each detected animal —
+on Apple Silicon through Core ML (Neural Engine / GPU).
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
 from .track import Track
-from .video import VideoSource
+from .video import FrameReader, VideoSource
 
 
 @dataclass
@@ -48,6 +50,10 @@ class DetectionSettings:
     duration_s: float = 0.0  # analyse this many seconds (0 = to end)
     frame_step: int = 1  # analyse every Nth frame
     arena_margin_px: int = 4
+    body_parts: str = "contour"  # "contour": head/tail from blob shape; "pose": deep-learning keypoints
+    pose_model: str = "topviewmouse_rtmpose_s"  # core.pose.MODELS key or path to a custom .onnx
+    pose_min_conf: float = 0.3  # keypoints below this confidence fall back to the contour estimate
+    pose_device: str = "auto"  # "auto" (Core ML on macOS) | "cpu"
 
     def to_dict(self):
         return asdict(self)
@@ -72,12 +78,31 @@ class Detection:
     motion: float = math.nan
     detected: bool = False
     contour: np.ndarray | None = field(default=None, repr=False)
+    keypoints: np.ndarray | None = field(default=None, repr=False)  # (K, 3) x, y, confidence from the pose model
 
 
 def to_gray(frame: np.ndarray) -> np.ndarray:
     if frame.ndim == 3:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return frame
+
+
+_POSE_CACHE: dict[tuple, object] = {}
+
+
+def pose_estimator(settings: DetectionSettings, threads: int = 0):
+    """Shared (per process) pose estimator for these settings; creating a session is expensive (Core ML compile)."""
+    from . import pose
+    from .video import default_threads
+    threads = threads or default_threads()
+    key = (settings.pose_model, settings.pose_device, threads)
+    if key not in _POSE_CACHE:
+        model = settings.pose_model
+        if model in pose.MODELS and not pose.is_installed(model):
+            raise RuntimeError(f"The pose model “{pose.MODELS[model]['title']}” is not installed. Install it in "
+                               "Experiment ▸ Default detection settings ▸ Body parts.")
+        _POSE_CACHE[key] = pose.PoseEstimator(model, device=settings.pose_device, threads=threads)
+    return _POSE_CACHE[key]
 
 
 def median_background(frames: Sequence[np.ndarray]) -> np.ndarray:
@@ -115,9 +140,18 @@ def _odd(k: int) -> int:
 class ArenaTracker:
     """Tracks the animal(s) within one arena mask of a frame."""
 
-    def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None = None):
+    def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None = None, pose=None):
         self.s = settings
         self.mask = arena_mask
+        self.pose = pose
+        self.pose_error = ""
+        if pose is None and settings.body_parts == "pose":
+            try:  # previews / live sessions fall back to the animal shape (track_video reports the error instead)
+                self.pose = pose_estimator(settings)
+            except Exception as e:
+                self.pose_error = str(e)
+        self._last_box: list[tuple | None] = [None] * max(1, settings.n_animals)
+        self._last_area: list[float] = [math.nan] * max(1, settings.n_animals)
         self.background: np.ndarray | None = None
         self._bg_float: np.ndarray | None = None
         self.prev_gray: np.ndarray | None = None
@@ -218,7 +252,8 @@ class ArenaTracker:
         if n == 1 and dets and self._single_area is None:
             self._single_area = dets[0].area
         dets = self._assign(dets, n)
-        self._head_tail_consistency(dets)
+        posed = self._apply_pose(frame, dets) if self.pose is not None and frame.ndim == 3 else set()
+        self._head_tail_consistency(dets, skip=posed)
         self._motion(gray, dets)
         if self.s.background == "adaptive" and self._bg_float is not None:
             # update background only where no animal is present
@@ -344,7 +379,50 @@ class ArenaTracker:
                 out[free.pop(0)] = d
         return out
 
-    def _head_tail_consistency(self, dets: list[Detection]):
+    def _apply_pose(self, frame: np.ndarray, dets: list[Detection]) -> set[int]:
+        """Refine head / centre / tail base with the pose model. Returns indices whose head/tail came from it.
+
+        The crop is the blob's bounding box; if the blob was lost (poor contrast) the last box is re-used and a
+        confident pose detection keeps the animal tracked."""
+        idx, boxes = [], []
+        H, W = frame.shape[:2]
+        for i, d in enumerate(dets):
+            if d.detected and d.contour is not None:
+                x, y, w, h = cv2.boundingRect(d.contour)
+                box = (x, y, x + w, y + h)
+                self._last_box[i], self._last_area[i] = box, d.area
+            else:
+                box = self._last_box[i]
+            if box is not None:
+                idx.append(i)
+                boxes.append(box)
+        if not boxes:
+            return set()
+        posed = set()
+        thr = self.s.pose_min_conf
+        for i, k in zip(idx, self.pose.predict(frame, boxes)):
+            d = dets[i]
+            d.keypoints = k
+            parts = self.pose.body_parts(k)
+            nose, centre, tail = parts.get("nose"), parts.get("centre"), parts.get("tail_base")
+            ok = lambda p: p is not None and p[2] >= thr and math.isfinite(p[0]) and 0 <= p[0] < W and 0 <= p[1] < H
+            if not d.detected:
+                if not ok(centre):
+                    continue
+                d.detected, d.area = True, self._last_area[i]
+                d.x, d.y = centre[0], centre[1]
+                x0, y0, x1, y1 = self._last_box[i]
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                self._last_box[i] = (x0 + d.x - cx, y0 + d.y - cy, x1 + d.x - cx, y1 + d.y - cy)
+            elif ok(centre):
+                d.x, d.y = centre[0], centre[1]
+            if ok(nose) and ok(tail):
+                d.hx, d.hy, d.tx, d.ty = nose[0], nose[1], tail[0], tail[1]
+                d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
+                posed.add(i)
+        return posed
+
+    def _head_tail_consistency(self, dets: list[Detection], skip: set[int] = frozenset()):
         for i, d in enumerate(dets):
             hist = self._history[i]
             if not d.detected:
@@ -353,7 +431,7 @@ class ArenaTracker:
             hist.append((d.x, d.y))
             if len(hist) > 6:
                 del hist[0]
-            if math.isnan(d.hx):
+            if math.isnan(d.hx) or i in skip:
                 continue
             p = self.prev[i] if i < len(self.prev) else None
             flip = False
@@ -437,7 +515,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                 progress: Callable[[float], None] | None = None,
                 should_stop: Callable[[], bool] | None = None,
                 frame_callback: Callable[[int, np.ndarray, list[list[Detection]]], None] | None = None,
-                background: np.ndarray | None = None) -> list[list[Track]]:
+                background: np.ndarray | None = None, decode_threads: int = 0) -> list[list[Track]]:
     """Track every arena in a video file in a single pass.
 
     Returns tracks[job_index][animal_index].  Times are relative to start_time_s
@@ -446,6 +524,9 @@ def track_video(video_path: str, jobs: list[ArenaJob],
     if not jobs:
         return []
     s0 = jobs[0].settings
+    pose = None
+    if any(j.settings.body_parts == "pose" for j in jobs):
+        pose = pose_estimator(next(j.settings for j in jobs if j.settings.body_parts == "pose"), threads=decode_threads)
     with VideoSource(video_path) as v:
         W, H = v.width, v.height
         trackers = []
@@ -454,7 +535,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             mask = job.mask
             if mask is None and job.apparatus is not None:
                 mask = job.apparatus.arena_or_bounds().mask((H, W))
-            tr = ArenaTracker(job.settings, mask)
+            tr = ArenaTracker(job.settings, mask, pose=pose if job.settings.body_parts == "pose" else None)
             if job.settings.method == "background" and job.settings.background != "adaptive":
                 if background is not None:
                     tr.set_background(background)
@@ -472,12 +553,12 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             end = 10**12
         step = max(1, int(s0.frame_step))
         builders = [[_TrackBuilder() for _ in range(max(1, j.settings.n_animals))] for j in jobs]
-        v.seek(start)
-        i = start
         total = max(1, end - start)
-        while i < end:
-            ok, frame = v.read()
-            if not ok:
+    # colour is only needed for the pose model and preview callbacks; otherwise decode straight to grey
+    reader = FrameReader(video_path, start, gray=pose is None and frame_callback is None, threads=decode_threads)
+    with reader:
+        for i, frame in reader:
+            if i >= end:
                 break
             if (i - start) % step == 0:
                 t = (i - start) / fps
@@ -489,9 +570,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     all_dets.append(dets)
                 if frame_callback:
                     frame_callback(i, frame, all_dets)
-            i += 1
-            if progress and (i - start) % 25 == 0:
-                progress(min(1.0, (i - start) / total))
+            if progress and (i + 1 - start) % 25 == 0:
+                progress(min(1.0, (i + 1 - start) / total))
             if should_stop and should_stop():
                 break
         if progress:
@@ -503,6 +583,10 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             tr = b.build(fps / step)
             tr.meta["video"] = str(video_path)
             tr.meta["video_start_s"] = s0.start_time_s
+            tr.meta["decoder"] = reader.backend
+            if job.settings.body_parts == "pose" and pose is not None:
+                tr.meta["pose_model"] = job.settings.pose_model
+                tr.meta["pose_device"] = pose.provider
             tracks.append(postprocess(tr, job.settings))
         out.append(tracks)
     return out
@@ -537,6 +621,10 @@ def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Appara
         col = colors[i % len(colors)]
         if d.contour is not None:
             cv2.drawContours(img, [d.contour], -1, col, 1, cv2.LINE_AA)
+        if d.keypoints is not None:
+            for kx, ky, kc in d.keypoints:
+                if kc >= 0.3 and math.isfinite(kx):
+                    cv2.circle(img, (int(kx), int(ky)), 2, (255, 255, 0), -1, cv2.LINE_AA)
         cv2.circle(img, (int(d.x), int(d.y)), 4, col, -1, cv2.LINE_AA)
         if not math.isnan(d.hx):
             cv2.circle(img, (int(d.hx), int(d.hy)), 4, (0, 0, 255), -1, cv2.LINE_AA)

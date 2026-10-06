@@ -64,6 +64,14 @@ DETECTION_SPEC = [
     ("head_tail", "Detect head and tail", "bool", None, ""),
     ("tail_strip", "Tail removal strength", "float", (0.0, 1.0, 0.05, 2),
      "Opening kernel relative to body size used to strip the tail before locating head/tail."),
+    ("body_parts", "Body parts from", "choice", [("contour", "Animal shape"), ("pose", "Pose model (AI)")],
+     "Animal shape: head and tail from the blob outline (fast, no model needed). Pose model: a deep-learning "
+     "keypoint model locates nose, body centre and tail base (more robust to shadows, reflections and poor "
+     "contrast; runs on the Neural Engine / GPU on Apple Silicon). Install the model below first."),
+    ("pose_min_conf", "Min keypoint confidence", "float", (0.0, 1.0, 0.05, 2),
+     "Pose keypoints below this confidence fall back to the animal-shape estimate."),
+    ("pose_device", "Run pose model on", "choice", [("auto", "Auto (ANE / GPU)"), ("cpu", "CPU")],
+     "Neural Engine / GPU uses Core ML on macOS (CUDA on NVIDIA PCs); falls back to the CPU automatically."),
     ("motion_threshold", "Motion threshold (grey)", "int", (1, 255, 1),
      "Pixel change counted as movement for freezing / immobility."),
     ("max_gap_s", "Interpolate gaps up to (s)", "float", (0.0, 60.0, 0.1, 2), ""),

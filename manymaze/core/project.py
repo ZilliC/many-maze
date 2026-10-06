@@ -117,7 +117,12 @@ class Project:
             raise ValueError("No project path")
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / "tracks").mkdir(exist_ok=True)
-        d = {
+        tmp = self.path / (PROJECT_FILE + ".tmp")
+        tmp.write_text(json.dumps(self.to_dict(), indent=1))
+        os.replace(tmp, self.path / PROJECT_FILE)
+
+    def to_dict(self) -> dict:
+        return {
             "format": "manymaze-project",
             "version": FORMAT_VERSION,
             "name": self.name,
@@ -137,16 +142,17 @@ class Project:
             "procedures": self.procedures,
             "created": self.created,
         }
-        tmp = self.path / (PROJECT_FILE + ".tmp")
-        tmp.write_text(json.dumps(d, indent=1))
-        os.replace(tmp, self.path / PROJECT_FILE)
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> "Project":
         pdir = cls.project_dir(path)
-        d = json.loads((pdir / PROJECT_FILE).read_text())
+        return cls.from_dict(json.loads((pdir / PROJECT_FILE).read_text()), pdir)
+
+    @classmethod
+    def from_dict(cls, d: dict, path: str | os.PathLike | None = None) -> "Project":
+        pdir = Path(path) if path is not None else None
         p = cls(
-            name=d.get("name", pdir.stem),
+            name=d.get("name", pdir.stem if pdir else ""),
             description=d.get("description", ""),
             protocol=d.get("protocol", "custom"),
             test_duration_s=d.get("test_duration_s", 300.0),

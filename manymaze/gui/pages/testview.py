@@ -723,6 +723,8 @@ class TestViewPage(Page):
         dets, fg = tracker.process(frame)
         img = draw_overlay(frame, dets, app if draw_zones else None, fg=fg)
         hud.append(("detection preview", "#f87171"))
+        if tracker.pose_error:
+            hud.append((f"pose model unavailable: {tracker.pose_error}", "#fbbf24"))
         found = [d for d in dets if d.detected]
         if found:
             info = "; ".join(f"animal {i + 1}: ({d.x:.0f}, {d.y:.0f}) px, area {d.area:.0f} px²"

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QListWidgetItem, QMenu, QMessageBox, QSpinBox, QStyle, QStyledItemDelegate,
                                QTableView, QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout)
 
+from ...core.batch import TrackingCancelled, track_tests, tracking_batches  # noqa: F401 (re-exported)
 from ...core.track import Track, import_deeplabcut_csv
 from ...core.video import VIDEO_EXTENSIONS, VideoSource
 from ..widgets import error_box, run_with_progress
@@ -27,70 +28,12 @@ STATUS_COLORS = {"pending": "#d97706", "tracked": "#16a34a", "excluded": "#94a3b
 
 
 # ------------------------------------------------------------------ tracking jobs
-class TrackingCancelled(Exception):
-    pass
-
-
-def _stopper(should_stop):
-    """Wrap should_stop so that cancelling aborts tracking before partial tracks are saved."""
-
-    def check():
-        if should_stop and should_stop():
-            raise TrackingCancelled()
-        return False
-
-    return check
-
-
-def tracking_batches(project, tests) -> list[list]:
-    """Group tests that share a video and time window so they are tracked in one pass."""
-    batches: dict[tuple, list] = {}
-    order = []
-    for t in tests:
-        if not t.video:
-            continue
-        s = project.detection_for(t)
-        if project.start_mode == "on_detection":
-            key = ("single", t.id)
-        else:
-            key = (project.abs_path(t.video), round(s.start_time_s, 4), round(s.duration_s, 4), s.frame_step)
-        if key not in batches:
-            batches[key] = []
-            order.append(key)
-        batches[key].append(t)
-    return [batches[k] for k in order]
-
-
 def track_tests_job(project, tests):
-    """Return fn(progress, should_stop) tracking tests in a background thread.
+    """Return fn(progress, should_stop) tracking tests (in parallel processes) from a background thread.
 
-    The result is a dict {"tracked": [test ids], "cancelled": bool, "errors": [str]}.
+    The result is a dict {"tracked": [test ids], "cancelled": bool, "errors": [str], "workers": n}.
     """
-    batches = tracking_batches(project, tests)
-
-    def run(progress, should_stop):
-        out = {"tracked": [], "cancelled": False, "errors": []}
-        stop = _stopper(should_stop)
-        n = max(1, len(batches))
-        for bi, batch in enumerate(batches):
-            def prog(f, bi=bi):
-                progress((bi + min(1.0, f)) / n)
-
-            try:
-                if len(batch) == 1:
-                    project.track_test(batch[0], prog, stop)
-                else:
-                    project.track_video_tests(batch, prog, stop)
-                out["tracked"].extend(t.id for t in batch)
-            except TrackingCancelled:
-                out["cancelled"] = True
-                break
-            except Exception as e:  # keep going with the other videos
-                out["errors"].append(f"Test {', '.join(str(t.id) for t in batch)}: {type(e).__name__}: {e}")
-        progress(1.0)
-        return out
-
-    return run
+    return lambda progress, should_stop: track_tests(project, tests, progress, should_stop)
 
 
 # ------------------------------------------------------------------ model
@@ -896,7 +839,8 @@ class TestsPage(Page):
         self.main.save()
         self.refresh()
         self.select_ids(set(res["tracked"]))
-        msg = f"Tracked {len(res['tracked'])} test{'s' if len(res['tracked']) != 1 else ''}."
+        msg = f"Tracked {len(res['tracked'])} test{'s' if len(res['tracked']) != 1 else ''}"
+        msg += f" ({res['workers']} videos in parallel)." if res.get("workers", 1) > 1 else "."
         if res["cancelled"]:
             msg += " Cancelled — the remaining tests were left untouched."
         self.main.status(msg)

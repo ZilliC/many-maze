@@ -11,7 +11,8 @@ zero mazes, Y / T / radial arm mazes, Morris water maze, Barnes maze, novel obje
 three-chamber sociability, fear conditioning (freezing), forced swim / tail suspension and fully custom
 apparatus.
 
-License: **GPL-3.0-or-later**. Written in Python with OpenCV, NumPy/SciPy, matplotlib and Qt 6 (PySide6) — all
+License: **GPL-3.0-or-later** (the optional, separately downloaded pose-model weights are licensed by their authors
+for academic, non-commercial use). Written in Python with OpenCV, NumPy/SciPy, matplotlib and Qt 6 (PySide6) — all
 of which ship native `arm64` builds for macOS, so the app runs natively on M1/M2/M3/M4 Macs (no Rosetta).
 
 ![Screenshot](docs/screenshots/testview.png)
@@ -28,6 +29,8 @@ More screenshots: [experiment](docs/screenshots/experiment.png) · [apparatus de
 | **Animals** | Groups/treatments with colours, sex, unlimited custom fields, CSV import/export |
 | **Apparatus designer** | Draw arenas, rectangle/ellipse/polygon zones, points of interest, crossing lines, zone groups (union − exclusion), calibration in cm; one-click templates fitted to your video; several apparatus per video |
 | **Video tracking** | Background subtraction (median / empty-arena frame / adaptive) or thresholding; dark, light or auto contrast; body centre, **head and tail** detection; multiple animals per arena with identity maintenance; multiple arenas per video in a single pass; gap interpolation & smoothing; pixel-change motion index for freezing |
+| **AI body parts** | Optional deep-learning pose model (DeepLabCut SuperAnimal-TopViewMouse, 27 keypoints) for nose / centre / tail base, robust to shadows and reflections; runs on the **Neural Engine / GPU via Core ML**; bring-your-own ONNX models |
+| **Apple Silicon speed** | Parallel tracking of many videos across all cores, **VideoToolbox** hardware decoding (greyscale straight from the luma plane) and hardware H.264 recording |
 | **Live testing** | Cameras via AVFoundation, simultaneous recording, start on detection, procedures (zone/time/freezing triggers → serial/TTL commands, beeps, event marks, end test) for Arduino-driven stimuli |
 | **Manual scoring** | Keyboard-scored state and point behaviours during playback or live |
 | **Track tools** | Review with overlays, detection preview while tuning, track corrections, DeepLabCut CSV import |
@@ -89,8 +92,12 @@ manymaze project ~/Experiments/EPM.mmaze report -o report.html
 
 * Synthetic videos (tests): body centre error < 4 px, head detected within 12 px in > 85 % of frames.
 * Real footage (DeepLabCut open-field example frames, black mouse on white floor, single-frame detection
-  without temporal cues): median nose error 3.5 px, tail-base error 4.5 px, no head/tail inversions; ~190 fps
-  tracking at 640×480.
+  without temporal cues): median nose error 3.5 px, tail-base error 4.5 px, no head/tail inversions; ~250 fps
+  tracking at 640×480 on two x86 cores.
+* With the pose model: median nose error 3.0 px, tail-base error 2.6 px on the same labelled frames, and correct
+  head/centre where the shape method is fooled by reflections on the walls.
+* `scripts/benchmark.py` measures decoding, recording, pose inference and parallel tracking on your machine; CI
+  runs it on Apple Silicon (see the *benchmark* job summary).
 
 ## Development
 

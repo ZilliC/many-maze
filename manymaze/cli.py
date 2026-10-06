@@ -80,11 +80,14 @@ def cmd_project(a):
 
     p = Project.load(a.dir)
     if a.action == "track":
+        from .core.batch import track_tests
+
         todo = [t for t in p.tests if t.video and (a.all or not p.has_track(t)) and t.status != "excluded"]
-        for t in todo:
-            p.track_test(t, progress=_progress(f"test {t.id}"))
-            p.save()
-        print(f"Tracked {len(todo)} tests")
+        res = track_tests(p, todo, progress=_progress("tracking"), workers=a.workers)
+        p.save()
+        for e in res["errors"]:
+            print(e, file=sys.stderr)
+        print(f"Tracked {len(res['tracked'])} of {len(todo)} tests ({res['workers']} parallel workers)")
     elif a.action == "results":
         from .core.export import export_results
 
@@ -143,6 +146,7 @@ def main(argv=None):
     pr.add_argument("dir")
     pr.add_argument("action", choices=["info", "track", "results", "report"])
     pr.add_argument("--all", action="store_true", help="re-track tests that already have tracks")
+    pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")
     pr.add_argument("-o", "--output")
     d = sub.add_parser("demo", help="create a demo project with synthetic videos")
