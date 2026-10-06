@@ -16,7 +16,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 
 from .apparatus import Apparatus
-from .measures import AnalysisSettings, ffill, kinematics, moving_average, runs, zone_visits
+from .measures import AnalysisSettings, ffill, kinematics, moving_average, occupancy, runs, zone_visits
 from .track import Track
 
 STATE, VALUE, COUNT = "state", "value", "count"
@@ -83,14 +83,17 @@ class _Ctx:
         return max(1, int(round(1.0 / max(self.tr.dt, 1e-6))))
 
     def memb(self):
+        """Zone / group occupancy as the analysis computes it (entry rules, body proportion, investigation
+        distance, hidden zones)."""
         if self._memb is None:
-            px, py = self.tr.bodypart(self.s.zone_body_part)
-            self._memb = self.app.zone_membership(ffill(px), ffill(py))
+            self._memb, self._hmemb, _ = occupancy(self.tr, self.app, self.s)
         return self._memb
 
     def hmemb(self):
         if self._hmemb is None:
-            self._hmemb = self.app.zone_membership(self.hx, self.hy)
+            self.memb()
+            if self._hmemb is None:
+                self._hmemb = occupancy(self.tr, self.app, self.s, part="head")[0]
         return self._hmemb
 
     def arena(self):
@@ -110,7 +113,7 @@ class _Ctx:
 
     def visits_mask(self, inside):
         m = np.zeros(len(self.k.t), bool)
-        for a, b in zone_visits(self.k.t, self.k.dur, inside, self.s):
+        for a, b in zone_visits(self.k.t, self.k.dur, inside, self.s, all_runs=True):
             m[a:b] = True
         return m
 
@@ -477,8 +480,7 @@ def zone_bands(track: Track, app: Apparatus, zones: list[str], settings=None) ->
     s = settings or AnalysisSettings()
     if not len(track):
         return []
-    px, py = track.bodypart(s.zone_body_part)
-    memb = app.zone_membership(ffill(px), ffill(py))
+    memb = occupancy(track, app, s)[0]
     t, dur = track.t, track.frame_durations()
     palette = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#64748b"]
     out = []
@@ -487,7 +489,7 @@ def zone_bands(track: Track, app: Apparatus, zones: list[str], settings=None) ->
             continue
         z = app.zone(zn)
         col = z.color if z is not None else palette[i % len(palette)]
-        spans = [(float(t[a]), float(t[b - 1] + dur[b - 1])) for a, b in zone_visits(t, dur, memb[zn], s)]
+        spans = [(float(t[a]), float(t[b - 1] + dur[b - 1])) for a, b in zone_visits(t, dur, memb[zn], s, all_runs=True)]
         out.append((zn, col, spans))
     return out
 

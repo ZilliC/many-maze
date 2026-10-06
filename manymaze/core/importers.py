@@ -8,6 +8,7 @@ roles; :func:`guess_mapping` proposes a mapping from the header names (ANY-maze,
 from __future__ import annotations
 
 import csv
+import io
 import math
 import re
 from pathlib import Path
@@ -18,7 +19,8 @@ from .track import Track
 
 # role -> header patterns (lower case, regular expressions), most specific first
 ANIMAL_ROLES = {
-    "id": [r"^animal id$", r"^animal$", r"^subject( id)?$", r"^id$", r"^animal (no|number|#)$", r"^rat|^mouse"],
+    "id": [r"^animal id$", r"^animal$", r"^subject( id)?$", r"^id$", r"^animal (no|number|#)$",
+           r"^(rat|mouse)( id| no| number)?$"],
     "group": [r"^treatment", r"^group", r"^condition", r"^genotype"],
     "sex": [r"^sex$", r"^gender$"],
 }
@@ -45,6 +47,18 @@ TRACK_ROLES = {
 }
 
 
+def _read_text(p: Path) -> str:
+    """Decode a text export: UTF-16/32 by BOM (Excel "Unicode text"), else UTF-8, else Windows cp1252."""
+    raw = p.read_bytes()
+    for bom, enc in ((b"\xff\xfe\x00\x00", "utf-32"), (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
+        if raw.startswith(bom):
+            return raw.decode(enc)
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 def read_table(path: str | Path) -> tuple[list[str], list[list[str]]]:
     """Header and rows of a CSV / TSV / text / Excel file (first sheet). Values are strings."""
     p = Path(path)
@@ -54,13 +68,13 @@ def read_table(path: str | Path) -> tuple[list[str], list[list[str]]]:
         ws = load_workbook(p, read_only=True, data_only=True).worksheets[0]
         rows = [["" if v is None else str(v) for v in r] for r in ws.iter_rows(values_only=True)]
     else:
-        text = p.read_text(encoding="utf-8-sig", errors="replace")
+        text = _read_text(p)
         sample = text[:20000]
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
         except csv.Error:
             dialect = csv.excel_tab if "\t" in sample else csv.excel
-        rows = [r for r in csv.reader(text.splitlines(), dialect)]
+        rows = [r for r in csv.reader(io.StringIO(text, newline=""), dialect)]
     rows = [r for r in rows if any(c.strip() for c in r)]
     if not rows:
         return [], []
@@ -86,21 +100,31 @@ def guess_mapping(header: list[str], roles: dict[str, list[str]]) -> dict[str, i
     return out
 
 
+_TIME_UNITS = {"ms": 0.001, "min": 60.0, "mins": 60.0, "h": 3600.0, "hr": 3600.0, "hrs": 3600.0}
+
+
 def parse_number(s: str) -> float:
     """Numbers as ANY-maze writes them: "2.168m", "18.9s", "0:43", "1,5", "" -> nan."""
     s = str(s).strip()
     if not s:
         return math.nan
-    if re.fullmatch(r"-?\d+:\d{1,2}(:\d{1,2})?(\.\d+)?", s):  # h:mm:ss / m:ss
-        parts = [float(x) for x in s.lstrip("-").split(":")]
+    if re.fullmatch(r"[-+]?\d+:\d{1,2}(:\d{1,2})?(\.\d+)?", s):  # h:mm:ss / m:ss
+        parts = [float(x) for x in s.lstrip("-+").split(":")]
         v = 0.0
         for x in parts:
             v = v * 60 + x
         return -v if s.startswith("-") else v
-    m = re.match(r"^[-+]?(\d+[.,]?\d*|[.,]\d+)([eE][-+]?\d+)?", s.replace(" ", ""))
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):  # a date/time cell is not a number
+        return math.nan
+    compact = s.replace(" ", "")
+    if re.fullmatch(r"[-+]?\d{1,3}(,\d{3})+(\.\d+)?", compact):  # 1,234.5 — thousands separators
+        compact = compact.replace(",", "")
+    m = re.match(r"^[-+]?(\d+[.,]?\d*|[.,]\d+)([eE][-+]?\d+)?", compact)
     if not m:
         return math.nan
-    return float(m.group(0).replace(",", "."))
+    v = float(m.group(0).replace(",", "."))
+    unit = compact[m.end():].lower()
+    return v * _TIME_UNITS.get(unit, 1.0)  # "5 min" → 300 s, "150ms" → 0.15 s; other units are kept as-is
 
 
 def _cell(row, idx):
@@ -144,8 +168,11 @@ def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | N
             project.stages.append(stage)
         trial = parse_number(_cell(r, mapping.get("trial")))
         video = _cell(r, mapping.get("video"))
-        if video and video_dir is not None and not Path(video).is_absolute():
-            video = str(Path(video_dir) / video)
+        if video and video_dir is not None:
+            if re.match(r"^[A-Za-z]:[\\/]", video) or "\\" in video:  # a Windows path from ANY-maze
+                video = video.replace("\\", "/").rsplit("/", 1)[-1]
+            if not Path(video).is_absolute():
+                video = str(Path(video_dir) / video)
         app = _cell(r, mapping.get("apparatus"))
         app = app if app in [x.name for x in project.apparatus] else ""
         t = project.add_test(video, aid, app, stage=stage, trial=int(trial) if math.isfinite(trial) else 1)

@@ -31,7 +31,8 @@ from ...core import procedures as procs
 from ...core import workflow as wf
 from ...core.camera import CameraView, SourceSpec, TransformedSource, camera_settings, set_camera_settings
 from ...core.live import LiveSession, ObservationSession, open_devices
-from ...core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, save_live_test
+from ...core.livegroup import (DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, autosave_path_for,
+                               device_plan, recover_autosaves, save_live_test)
 from ...core.procedures import Outputs
 from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, median_background
 from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras
@@ -768,7 +769,11 @@ class LivePage(Page):
         self.row_stage.setEditable(True)
         self.row_trial = QSpinBox()
         self.row_trial.setRange(1, 10000)
+        self.row_device = QComboBox()
+        self.row_device.setToolTip("The I/O device (box) of this test: its procedures only see that device's "
+                                   "inputs and drive its outputs. Needed when several tests run at once.")
         self.row_source.currentIndexChanged.connect(self._row_editor_changed)
+        self.row_device.currentIndexChanged.connect(self._row_editor_changed)
         self.row_apparatus.currentIndexChanged.connect(self._row_editor_changed)
         self.row_animal.currentTextChanged.connect(self._row_editor_changed)
         self.row_stage.currentTextChanged.connect(self._row_editor_changed)
@@ -778,6 +783,7 @@ class LivePage(Page):
         f.addRow("Animal", self.row_animal)
         f.addRow("Stage", self.row_stage)
         f.addRow("Trial", self.row_trial)
+        f.addRow("I/O device", self.row_device)
         v.addWidget(self.row_editor)
         return box
 
@@ -928,6 +934,12 @@ class LivePage(Page):
         self.lost_warn.setSuffix(" s")
         self.lost_warn.setSpecialValueText("Never")
         self.lost_warn.valueChanged.connect(self._save_live_settings)
+        self.pause_off = QCheckBox("Switch all outputs off while a test is paused")
+        self.pause_off.setChecked(True)
+        self.pause_off.setToolTip("Pausing a test always stops pulse trains and switches shocks off; with this "
+                                  "option every output and sound goes off too. \"When test paused\" procedures "
+                                  "run at once.")
+        self.pause_off.toggled.connect(self._save_live_settings)
         self.serial = QComboBox()
         self.serial.setEditable(True)
         self.serial_note = QLabel()
@@ -938,6 +950,7 @@ class LivePage(Page):
         f.addRow(self.record)
         f.addRow(self.record_overlay)
         f.addRow("Warn if the animal is lost for", self.lost_warn)
+        f.addRow(self.pause_off)
         f.addRow("Serial port", self.serial)
         f.addRow("", self.serial_note)
         v.addWidget(db)
@@ -1120,8 +1133,30 @@ class LivePage(Page):
             self.start_mode.setCurrentIndex(1 if project.start_mode == "on_detection" else 0)
             self._load_live_settings()
             self._restore_group_layout()
+            self._recover_interrupted(project)
         self._rebuild_session_table()
         self.on_show()
+
+    def _recover_interrupted(self, project):
+        """Live tests interrupted by a crash leave an autosave side file: store what they recorded."""
+        try:
+            rec = recover_autosaves(project)
+        except Exception as e:  # never block opening the experiment
+            self._log(f"Could not recover interrupted live tests: {e}")
+            return
+        if not rec:
+            return
+        ids = ", ".join(str(t.id) for t in rec)
+        self._log(f"Recovered {len(rec)} live test(s) interrupted by a crash: {ids} (see the test notes).")
+        try:  # saved at once: the side files are gone (the other pages are still being set up: no main.save())
+            project.save()
+        except Exception as e:
+            self._log(f"Could not save the recovered tests: {e}")
+            self.main.mark_dirty()
+        try:
+            self.main.status(f"Recovered interrupted live test(s) {ids}.")
+        except Exception:  # pragma: no cover
+            pass
 
     def on_show(self):
         p = self.project
@@ -1279,6 +1314,7 @@ class LivePage(Page):
             self.stop_keys.setText(", ".join(d.get("stop_keys", DEFAULT_STOP_KEYS)))
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
+            self.pause_off.setChecked(bool(d.get("pause_outputs_off", True)))
             hh, mm = (str(d.get("schedule_at", "05:00")) + ":0").split(":")[:2]
             self.sched_time.setTime(QTime(int(hh) % 24, int(mm) % 60))
             self.sched_daily.setChecked(bool(d.get("schedule_daily", False)))
@@ -1293,6 +1329,8 @@ class LivePage(Page):
                "schedule_at": self.sched_time.time().toString("HH:mm"),
                "schedule_daily": self.sched_daily.isChecked()}
         d = self._live_settings()
+        if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
+            new["pause_outputs_off"] = self.pause_off.isChecked()
         if any(d.get(k) != v for k, v in new.items()):
             d.update(new)
             self.main.mark_dirty()
@@ -1764,6 +1802,19 @@ class LivePage(Page):
             self.devices = open_devices(self.project)
         return self.devices
 
+    def _autosave_args(self, test, apparatus: str = "") -> dict:
+        """Crash-recovery side file of a live test (see livegroup.recover_autosaves)."""
+        p = self.project
+        if p is None or p.path is None:
+            return {}
+        try:
+            path = autosave_path_for(p, test)
+        except Exception:
+            return {}
+        return {"autosave_path": path, "autosave_meta": {
+            "test_id": test.id, "animal": test.animal_id, "apparatus": apparatus or test.apparatus,
+            "stage": getattr(test, "stage", ""), "trial": getattr(test, "trial", 1)}}
+
     def _close_devices(self):
         if self.devices is not None and not self.any_active():
             try:
@@ -1826,10 +1877,12 @@ class LivePage(Page):
                               analysis=p.analysis_for(test), devices=self._open_devices(), variables=p.variables,
                               record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
                               name=f"Test {test.id} · {test.animal_id}", zone_overrides=test.zone_overrides,
-                              on_stimulus=touch.handle if touch is not None else None)
+                              on_stimulus=touch.handle if touch is not None else None,
+                              outputs_off_on_pause=self.pause_off.isChecked(),
+                              **self._autosave_args(test))
         if touch is not None:
             touch.clear()
-            touch.connect_engine(session.engine, clock=lambda: session.elapsed)
+            touch.connect_session(session)  # session lock first, like the camera thread (no deadlock)
         if bg is not None:
             session.set_background(bg)
         with self._lock:
@@ -1928,6 +1981,7 @@ class LivePage(Page):
         for t, msg in s.warnings:
             self._log(f"{fmt_time(t)}  warning: {msg}")
         if not save or p is None or test is None or not save_live_test(p, test, s, self._record_path):
+            s.remove_autosave()
             _remove_file(self._record_path)
             if test is not None and self._new_test and p is not None and test in p.tests:
                 p.tests.remove(test)
@@ -2127,7 +2181,7 @@ class LivePage(Page):
         """Show the selected panel's camera / apparatus / animal / stage / trial in the editor below the table."""
         e = self._selected_entry()
         p = self.project
-        eds = (self.row_source, self.row_apparatus, self.row_animal, self.row_stage, self.row_trial)
+        eds = (self.row_source, self.row_apparatus, self.row_animal, self.row_stage, self.row_trial, self.row_device)
         for w in eds:
             w.blockSignals(True)
         try:
@@ -2140,7 +2194,19 @@ class LivePage(Page):
             self.row_animal.addItems([a.id for a in p.animals] if p else [])
             self.row_stage.clear()
             self.row_stage.addItems(p.stages if p else [])
+            self.row_device.clear()
+            self.row_device.addItem("Automatic (only test running)", "")
+            for c in (getattr(p, "io_devices", None) or []) if p else []:
+                if c.get("enabled", True) and c.get("type", "virtual") != "audio" and c.get("name"):
+                    self.row_device.addItem(f"{c['name']} ({c.get('type', 'virtual')})", str(c["name"]))
+            self.row_device.addItem("None (simulated outputs)", "-")
             if e is not None:
+                dv = e.meta.get("device", "") or ""
+                i = self.row_device.findData(dv)
+                if i < 0:  # a device that is no longer configured: kept, shown as missing
+                    self.row_device.addItem(f"{dv} (not configured)", dv)
+                    i = self.row_device.count() - 1
+                self.row_device.setCurrentIndex(i)
                 self.row_source.setCurrentIndex(max(0, self.row_source.findData(e.source_key)))
                 self.row_apparatus.setCurrentText(e.meta.get("apparatus", ""))
                 self.row_animal.setCurrentText(e.meta.get("animal", ""))
@@ -2161,7 +2227,8 @@ class LivePage(Page):
             return
         e.source_key = self.row_source.currentData() or e.source_key
         e.meta.update(apparatus=self.row_apparatus.currentText(), animal=self.row_animal.currentText().strip(),
-                      stage=self.row_stage.currentText().strip(), trial=self.row_trial.value(), test_id=None)
+                      stage=self.row_stage.currentText().strip(), trial=self.row_trial.value(), test_id=None,
+                      device=self.row_device.currentData() or "")
         e.apparatus = self.project.get_apparatus(e.meta["apparatus"]) if self.project else None
         self._relabel(e)
         self._fill_row(self._entries().index(e), e)
@@ -2405,7 +2472,8 @@ class LivePage(Page):
         keys = list(self.group.sources)
         d = {"sources": [self.group.sources[k].to_dict() for k in keys],
              "sessions": [{"source": keys.index(e.source_key), **{k: e.meta.get(k) for k in
-                                                                ("apparatus", "animal", "stage", "trial")}}
+                                                                ("apparatus", "animal", "stage", "trial")},
+                           **({"device": e.meta["device"]} if e.meta.get("device") else {})}
                           for e in self.group.entries if e.source_key in self.group.sources]}
         live = self._live_settings()
         if live.get("multi") != d:
@@ -2426,7 +2494,8 @@ class LivePage(Page):
             if not 0 <= i < len(keys) or keys[i] is None:
                 continue
             meta = {"apparatus": sd.get("apparatus", ""), "animal": sd.get("animal", ""),
-                    "stage": sd.get("stage", ""), "trial": sd.get("trial", 1), "test_id": None}
+                    "stage": sd.get("stage", ""), "trial": sd.get("trial", 1), "test_id": None,
+                    "device": sd.get("device", "") or ""}
             e = self.group.add_entry(keys[i], self.project.get_apparatus(meta["apparatus"]), "", meta)
             self._relabel(e)
 
@@ -2442,6 +2511,11 @@ class LivePage(Page):
         app = p.get_apparatus(m.get("apparatus") or "") if p.apparatus else None
         if app is None or not m.get("animal"):
             self._log(f"{e.label}: choose an apparatus and an animal first.", e)
+            return False
+        plan, msg = self._io_plan(e)
+        if plan is None:
+            self._log(f"{e.label}: not armed. {msg}", e)
+            QMessageBox.warning(self, "Run tests", f"{e.label}: {msg}")
             return False
         if e.source_key not in self.group.runners and not self.start_cameras():
             return False
@@ -2474,13 +2548,23 @@ class LivePage(Page):
         m["record_path"] = recording_path(p, test, size, fps) if self.record.isChecked() else None
         if self._group_outputs is None:
             self._group_outputs = Outputs(self.serial.currentText().strip() or None)
+        try:
+            devices = self._session_devices(plan)
+        except Exception as ex:
+            self._log(f"{e.label}: not armed. I/O devices: {ex}", e)
+            if m.get("new_test") and test in p.tests:
+                p.tests.remove(test)
+            m["test_id"] = None
+            return False
         s = LiveSession(app, settings, duration_s=dur, start_mode=self._session_mode(),
                         procedures=copy.deepcopy(p.procedures), outputs=self._group_outputs,
                         record_path=m["record_path"], fps=fps, analysis=p.analysis_for(test),
-                        devices=self._open_devices(), variables=p.variables,
+                        devices=devices, variables=p.variables,
                         record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
                         name=f"Test {test.id} · {test.animal_id} · {app.name}",
-                        zone_overrides=test.zone_overrides)
+                        zone_overrides=test.zone_overrides, outputs_off_on_pause=self.pause_off.isChecked(),
+                        **self._autosave_args(test, app.name))
+        m["io_plan"] = plan
         if bg is not None:
             s.set_background(bg)
         self.group.arm(e, s)
@@ -2492,18 +2576,47 @@ class LivePage(Page):
         self._log(f"{e.label}: test {test.id} armed ({self.start_mode.currentText().lower()}).", e)
         return True
 
+    def _io_plan(self, e) -> tuple[str | None, str]:
+        """Which I/O devices the test of panel `e` may use (see livegroup.device_plan), given the running tests."""
+        p = self.project
+        others = [x.meta.get("io_plan") or "*" for x in self.group.entries
+                  if x is not e and x.session is not None and x.state in ("waiting", "running", "paused")
+                  and not isinstance(x.session, ObservationSession)]
+        if others and self.serial.currentText().strip():
+            return None, ("the serial port in the test settings is shared by every test: with several tests at "
+                          "once, configure each box as an I/O device instead (Experiment › I/O devices) and clear "
+                          "the serial port.")
+        if not getattr(p, "io_devices", None):
+            return "*", ""
+        return device_plan(p.io_devices, e.meta.get("device", "") or "", others)
+
+    def _session_devices(self, plan: str):
+        """The device manager (plan "*"), or a per-test view of one box ("name") or of no hardware ("-")."""
+        dm = self._open_devices()
+        if plan == "*" or dm is None:
+            return dm
+        from ...core.iodevices import DeviceView
+
+        return DeviceView(dm, None if plan == "-" else plan)
+
     def arm_all(self, entries=None) -> int:
-        """Arm every idle (or finished) row; video files restart so the tests start at their beginning."""
+        """Arm every idle (or finished) row; video files restart so the tests start at their beginning (unless
+        another test already running uses the same video)."""
         ents = [e for e in (entries or self.group.entries) if e.source_key is not None
                 and e.state in ("idle", "finished")]
         if not ents:
             return 0
+        busy = {x.source_key for x in self.group.entries if x not in ents and x.state in ("running", "paused")}
         n = sum(1 for e in ents if self.arm_row(e))
         if not n:
             return 0
         for key in {e.source_key for e in ents if e.session is not None}:
             spec = self.group.sources.get(key)
             if spec is not None and spec.is_file:
+                if key in busy:
+                    self._log(f"{spec.label}: another test is running on this video: the new test starts at the "
+                              f"current position.")
+                    continue
                 self.group.restart_source(key)
         if self.start_mode.currentData() == "scheduled":
             sch = self._new_schedule([e.id for e in ents if e.session is not None])
@@ -2597,6 +2710,8 @@ class LivePage(Page):
             for t, msg in s.warnings:
                 self._log(f"{e.label} · {fmt_time(t)}  warning: {msg}", e)
             if e.aborted or test is None or not save_live_test(p, test, s, m.get("record_path")):
+                if hasattr(s, "remove_autosave"):
+                    s.remove_autosave()
                 _remove_file(m.get("record_path"))
                 if test is not None and m.get("new_test") and test in p.tests:
                     p.tests.remove(test)
@@ -2756,7 +2871,8 @@ class LivePage(Page):
             warns = self.group.all_warnings()
         elif s is not None:
             warns = [f"{fmt_time(t)}  {m}" for t, m in s.warnings]
-        self.monitor.refresh(s, title, self.devices, warns)
+        devs = getattr(s, "devices", None) if s is not None else None
+        self.monitor.refresh(s, title, devs if devs is not None else self.devices, warns)
 
     # ================================================================== keys: scoring, start / stop, remote
     def _update_keys_label(self):

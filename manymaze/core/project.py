@@ -325,7 +325,7 @@ class Project:
             dur = settings.duration_s
             settings.duration_s = 0.0
             raw = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback)[0]
-            raw = [_trim_on_detection(tr, dur) for tr in raw]
+            raw = _trim_all_on_detection(raw, dur)
             tracks = raw
         else:
             tracks = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback)[0]
@@ -418,11 +418,25 @@ class Project:
         return rows
 
 
-def _trim_on_detection(tr: Track, duration: float) -> Track:
-    idx = np.flatnonzero(tr.detected)
-    if len(idx) == 0:
-        return tr
-    t0 = tr.t[idx[0]]
+def _trim_all_on_detection(tracks: list[Track], duration: float) -> list[Track]:
+    """Trim every animal of a test at the earliest first detection of any of them (keeps tracks aligned)."""
+    firsts = [float(tr.t[np.flatnonzero(tr.detected)[0]]) for tr in tracks if len(tr) and tr.detected.any()]
+    if not firsts:
+        return list(tracks)
+    t0 = min(firsts)
+    return [_trim_on_detection(tr, duration, t0) for tr in tracks]
+
+
+def _trim_on_detection(tr: Track, duration: float, t0: float | None = None) -> Track:
+    """Start the test at t0 (default: this track's first detection) and keep `duration` seconds.
+
+    Multi-animal tests pass the earliest first detection of all animals so their tracks stay aligned frame by
+    frame (social measures compare them by index)."""
+    if t0 is None:
+        idx = np.flatnonzero(tr.detected)
+        if len(idx) == 0:
+            return tr
+        t0 = tr.t[idx[0]]
     end = t0 + duration if duration and duration > 0 else math.inf
     out = tr.slice_time(t0, end)
     out.t = out.t - t0

@@ -26,8 +26,12 @@ pyserial is needed on the computer: `pip install pyserial`.
 
 Shockers: use a commercial constant-current shocker with a TTL *enable* input; the box only sends the
 trigger. Every shock action has a safety cut-off (default 2 s, hard limit 60 s) enforced both by
-mANY-MAZE and by the board (`W pin 1 max_ms`), and all outputs go off when a test ends, the port closes
-or (optionally) the heartbeat watchdog fires.
+mANY-MAZE and by the board (`W pin 1 max_ms`). All outputs go off when a test ends or is paused, when
+mANY-MAZE disconnects normally (it sends `R` before closing the port) and when the heartbeat watchdog fires.
+The board cannot notice that the serial port was closed: if mANY-MAZE crashes or the USB cable is pulled,
+only the watchdog switches the outputs off. mANY-MAZE turns the watchdog on (2000 ms) for every board that has
+outputs unless *Watchdog* is set otherwise in the device settings, and sends the heartbeat from a background
+thread, so pausing a test or a stalled camera does not trip it.
 
 Optogenetics: connect the laser/LED driver's TTL modulation input to an output pin. Pulse trains are timed
 on the board with microsecond resolution (e.g. 20 Hz, 5 ms pulses), independently of the video frame rate.
@@ -52,7 +56,7 @@ Computer → board:
 | `E pinA pinB` | quadrature encoder (count reset to 0) |
 | `R` | all outputs off, pulse trains stopped (configuration kept) |
 | `Q` | report all inputs now |
-| `H timeout_ms` | heartbeat watchdog: all outputs off if no line arrives within the timeout (0 = off) |
+| `H timeout_ms` | heartbeat watchdog: all outputs off if no line arrives within the timeout (0 = off; mANY-MAZE sends `H 2000` by default when outputs are configured) |
 | `.` | heartbeat (no reply) |
 
 Board → computer:
@@ -65,7 +69,8 @@ Board → computer:
 | `WATCHDOG` | the watchdog switched all outputs off |
 | `ERR text` | the last command was invalid |
 
-`ms` is the board's `millis()` clock, useful to align with electrophysiology recordings.
+`ms` is the board's `millis()` clock, useful to align with electrophysiology recordings; mANY-MAZE keeps it in
+the I/O log of the test (`board_ms` of each input event).
 
 Any other text device (a commercial controller, a Raspberry Pi script…) can be driven with the *Serial
 port (text commands)* device type instead: each output channel has an "on" and an "off" command string,

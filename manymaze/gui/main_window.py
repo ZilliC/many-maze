@@ -431,6 +431,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("recent", lst[:10])
 
     def set_project(self, project: Project | None):
+        if self.project is not None and project is not self.project:
+            self._hide_current()  # the old project's page flushes against the old project, not the new one
+            self._current_page = None
         self.project = project
         self.dirty = False
         has = project is not None
@@ -449,6 +452,7 @@ class MainWindow(QMainWindow):
             self.show_page(self.pages[0])
         else:
             self._show_backstage()
+        self.dirty = False  # page set-up must not count as user edits
         self.update_title()
         self.project_loaded.emit(project)
 
@@ -599,6 +603,7 @@ class MainWindow(QMainWindow):
             return False
         if r == QMessageBox.Save:
             return self.save()
+        self.dirty = False  # discarded: don't ask again on the way to the next experiment
         return True
 
     def new_project(self):
@@ -627,9 +632,19 @@ class MainWindow(QMainWindow):
     def open_project_dialog(self):
         if not self.maybe_save():
             return
-        d = QFileDialog.getExistingDirectory(self, "Open experiment folder (.mmaze)", str(Path.home()))
+        d = QFileDialog.getExistingDirectory(self, "Open experiment folder (.mmaze)", self._last_dir())
         if d:
+            self._remember_dir(d)
             self.load_project(d)
+
+    def _last_dir(self) -> str:
+        d = self.settings.value("last_dir", "")
+        return d if d and Path(d).exists() else str(Path.home() / "Documents" if (Path.home() / "Documents").exists()
+                                                    else Path.home())
+
+    def _remember_dir(self, path):
+        p = Path(path)
+        self.settings.setValue("last_dir", str(p.parent if p.suffix == ".mmaze" or p.is_file() else p))
 
     def load_project(self, path: str):
         if self.project is not None and not self.maybe_save():
@@ -665,26 +680,48 @@ class MainWindow(QMainWindow):
     def save_as(self):
         if self.project is None:
             return
-        d = QFileDialog.getExistingDirectory(self, "Choose a folder for the copy")
+        d = QFileDialog.getExistingDirectory(self, "Choose a folder for the copy", self._last_dir())
         if not d:
             return
         import shutil
 
-        dest = Path(d) / f"{self.project.name}.mmaze"
+        for page in self.pages:
+            if hasattr(page, "commit"):
+                try:
+                    page.commit()
+                except Exception:
+                    traceback.print_exc()
+        safe = "".join(c for c in self.project.name.strip() if c not in '/\\:*?"<>|') or "experiment"
+        dest = Path(d) / f"{safe}.mmaze"
         old = self.project.path
-        # keep video paths valid: make them absolute before moving
-        for t in self.project.tests:
-            t.video = self.project.abs_path(t.video)
-        if old and (old / "tracks").exists():
-            shutil.copytree(old / "tracks", dest / "tracks", dirs_exist_ok=True)
-        self.project.save(dest)
-        for t in self.project.tests:
-            t.video = self.project.rel_path(t.video)
-        self.project.save()
+        if dest == old:
+            return self.save()
+        if dest.exists() and QMessageBox.question(
+                self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
+            return False
+        videos = [t.video for t in self.project.tests]
+        try:
+            # keep video paths valid from the new location: make them absolute, then relative to the copy
+            for t in self.project.tests:
+                t.video = self.project.abs_path(t.video)
+            if old and (old / "tracks").exists():
+                shutil.copytree(old / "tracks", dest / "tracks", dirs_exist_ok=True)
+            self.project.save(dest)
+            for t in self.project.tests:
+                t.video = self.project.rel_path(t.video)
+            self.project.save()
+        except Exception as e:
+            self.project.path = old
+            for t, v in zip(self.project.tests, videos):
+                t.video = v
+            error_box(self, "Save as", e)
+            return False
+        self._remember_dir(dest)
         self._add_recent(dest)
         self.dirty = False
         self.update_title()
-        self.status(f"Saved copy at {dest}")
+        self.status(f"Saved copy at {dest} (recordings stay in the original folder).")
+        return True
 
     def close_project(self):
         if self.maybe_save():
@@ -720,7 +757,7 @@ class MainWindow(QMainWindow):
         if not self.maybe_save():
             return
         d = QFileDialog.getExistingDirectory(self, "Where should the demo experiment be created?",
-                                             str(Path.home() / "Documents"))
+                                             self._last_dir())
         if not d:
             return
         path = Path(d) / "Demo open field.mmaze"

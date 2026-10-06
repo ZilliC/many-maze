@@ -9,7 +9,8 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, Qt
 
 
-def main(project: str | None = None) -> int:
+def main(project: str | None = None, argv_project: bool = True) -> int:
+    """argv_project: also accept an experiment folder as the last command-line argument (double-click / Finder)."""
     # Qt on macOS: keep the app native and crisp on Retina displays
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     from PySide6.QtGui import QIcon
@@ -35,7 +36,7 @@ def main(project: str | None = None) -> int:
     app.installEventFilter(_FileOpenFilter(w))
     if os.environ.get("MANYMAZE_SMOKE_TEST"):
         return _smoke_test(app, w)
-    if project is None and len(sys.argv) > 1 and Path(sys.argv[-1]).exists():
+    if project is None and argv_project and len(sys.argv) > 1 and (Path(sys.argv[-1]) / "project.json").exists():
         project = sys.argv[-1]
     if project:
         w.load_project(project)

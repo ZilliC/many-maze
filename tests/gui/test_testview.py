@@ -161,7 +161,9 @@ def test_manual_scoring_keys(view):
     view.player.seek_time(3.0)
     QTest.keyClick(vw, Qt.Key_G, Qt.NoModifier)
     view.player.seek_time(4.0)
-    view.commit()
+    view.commit()  # saving must not end a behaviour that is still being scored
+    assert "Grooming" in view._open_states and not any(e["behaviour"] == "Grooming" for e in t.events)
+    QTest.keyClick(vw, Qt.Key_G, Qt.NoModifier)
     assert {"behaviour": "Grooming", "t": 3.0, "t_end": 4.0} in t.events
     # results include the scored behaviour
     view.tabs.setCurrentIndex(0)

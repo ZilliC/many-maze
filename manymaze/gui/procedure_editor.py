@@ -1364,7 +1364,8 @@ class IODevicesDialog(QDialog):
         self.f_watchdog.setSingleStep(500)
         self.f_watchdog.setSuffix(" ms")
         self.f_watchdog.setSpecialValueText("Off")
-        self.f_watchdog.setToolTip("All outputs switch off if the computer stops talking to the board")
+        self.f_watchdog.setToolTip("All outputs switch off if the computer stops talking to the board for this long "
+                                   "(default 2000 ms when the board has outputs; Off = 0)")
         self.f_backend = QComboBox()
         for b in ("auto", "none", "afplay", "paplay", "aplay"):
             self.f_backend.addItem(b, b)
@@ -1504,7 +1505,7 @@ class IODevicesDialog(QDialog):
             self.f_type.setCurrentIndex(max(0, self.f_type.findData(c.get("type", "virtual"))))
             self.f_port.setCurrentText(c.get("port", ""))
             self.f_baud.setCurrentText(str(c.get("baud", 115200)))
-            self.f_watchdog.setValue(int(c.get("watchdog_ms", 0) or 0))
+            self.f_watchdog.setValue(int(c["watchdog_ms"]) if c.get("watchdog_ms") is not None else 2000)  # default on
             self.f_backend.setCurrentIndex(max(0, self.f_backend.findData(c.get("backend", "auto"))))
             self.f_enabled.setChecked(c.get("enabled", True))
             self._fill_channels(c)
@@ -1543,8 +1544,8 @@ class IODevicesDialog(QDialog):
                 c["baud"] = int(self.f_baud.currentText())
             except ValueError:
                 c["baud"] = 115200
-        if c["type"] == "arduino" and self.f_watchdog.value():
-            c["watchdog_ms"] = self.f_watchdog.value()
+        if c["type"] == "arduino":
+            c["watchdog_ms"] = self.f_watchdog.value()  # 0 = Off (a missing key would mean the 2000 ms default)
         if c["type"] == "audio":
             c["backend"] = self.f_backend.currentData()
         it = self.dev_list.currentItem()

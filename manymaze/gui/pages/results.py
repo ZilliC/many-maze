@@ -422,7 +422,7 @@ class ChartsPanel(QWidget):
             for t in p.tests:
                 if p.has_track(t) and t.status not in INACTIVE_STATUSES:
                     a = p.get_animal(t.animal_id)
-                    grp = f" · {a.group}" if a and a.group and not getattr(p, "blind", False) else ""
+                    grp = f" · {a.group}" if a and a.group else ""
                     self.test_combo.addItem(f"Test {t.id} · {t.animal_id}{grp}", t.id)
         i = self.test_combo.findData(cur)
         self.test_combo.setCurrentIndex(i if i >= 0 else (0 if self.test_combo.count() else -1))
@@ -490,7 +490,7 @@ class ChartsPanel(QWidget):
         if self.track is not None and len(self.track):
             try:
                 periods = all_periods(self.track, self.app, p.analysis_for(test), None, test.events,
-                                      test.io_events, test.zone_overrides)
+                                      test.io_events, test.zone_overrides, test.pauses)
             except Exception:
                 periods = []
             for label, a, b in periods:
@@ -2032,7 +2032,7 @@ class ResultsPage(Page):
         """Time bins, custom and event-anchored periods of a test."""
         try:
             return all_periods(track, app, self.project.analysis_for(test), None, test.events, test.io_events,
-                               test.zone_overrides)
+                               test.zone_overrides, test.pauses)
         except Exception:
             return []
 

@@ -56,13 +56,19 @@ if sys.platform == "darwin":
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": True,  # light UI, matching the plots
             "NSCameraUsageDescription": "mANY-MAZE uses the camera to track animals during live tests.",
-            "NSMicrophoneUsageDescription": "mANY-MAZE may record audio together with live test videos.",
             "LSApplicationCategoryType": "public.app-category.education",
+            # a .mmaze experiment is a folder: declared as a package so Finder opens it with the app
+            "UTExportedTypeDeclarations": [{
+                "UTTypeIdentifier": "org.manymaze.mmaze",
+                "UTTypeDescription": "mANY-MAZE experiment",
+                "UTTypeConformsTo": ["com.apple.package"],
+                "UTTypeTagSpecification": {"public.filename-extension": ["mmaze"]},
+            }],
             "CFBundleDocumentTypes": [{
                 "CFBundleTypeName": "mANY-MAZE experiment",
-                "CFBundleTypeExtensions": ["mmaze"],
+                "LSItemContentTypes": ["org.manymaze.mmaze"],
                 "CFBundleTypeRole": "Editor",
-                "LSTypeIsPackage": False,
+                "LSTypeIsPackage": True,
             }],
         },
     )

@@ -3,13 +3,17 @@ statistics.  :class:`ObservationSession` is the camera-less variant (a clock and
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import inspect
+import json
 import math
+import os
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -23,6 +27,117 @@ from .tracking import ArenaTracker, Detection, DetectionSettings, postprocess, t
 from .video import VideoRecorder
 
 START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual")
+AUTOSAVE_SUFFIX = ".autosave.json"
+
+
+class LiveRecorder:
+    """Records a live test. MP4 / MOV files are written as *fragmented* MP4 with PyAV (H.264: VideoToolbox on
+    macOS, else x264; MPEG-4 part 2 as a last resort) so that a crash or power cut leaves a playable file up to
+    the last fragment (a keyframe every 2 s). Other formats, odd frame sizes or a missing encoder fall back to
+    :class:`VideoRecorder`. Frames are written at a constant rate; the session pads gaps (see LiveSession)."""
+
+    CODECS = ("h264_videotoolbox", "libx264", "mpeg4")
+
+    def __init__(self, path: str, fps: float, size: tuple[int, int]):
+        self.path, self.fps, self.size = str(path), float(fps or 25.0), (int(size[0]), int(size[1]))
+        self.frames = 0
+        self.backend = ""
+        self._av = self._stream = None
+        self._rec: VideoRecorder | None = None
+        self._codecs: list[str] = []
+        ext = Path(self.path).suffix.lower()
+        if ext in (".mp4", ".m4v", ".mov") and self.size[0] % 2 == 0 and self.size[1] % 2 == 0:
+            try:
+                import av
+
+                self._codecs = [c for c in self.CODECS if c in av.codecs_available]
+            except Exception:
+                self._codecs = []
+        if not self._open_next():
+            self._rec = VideoRecorder(self.path, self.fps, self.size)
+            self.backend = getattr(self._rec, "backend", "opencv")
+
+    def _open_next(self) -> bool:
+        from fractions import Fraction
+
+        while self._codecs:
+            codec = self._codecs.pop(0)
+            try:
+                import av
+
+                c = av.open(self.path, "w", format="mov" if self.path.lower().endswith(".mov") else "mp4",
+                            options={"movflags": "frag_keyframe+empty_moov+default_base_moof",
+                                     "flush_packets": "1"})
+            except Exception:
+                return False
+            try:
+                st = c.add_stream(codec, rate=Fraction(self.fps).limit_denominator(1001))
+                st.width, st.height = self.size
+                st.pix_fmt = "nv12" if codec == "h264_videotoolbox" else "yuv420p"
+                gop = str(max(1, int(round(self.fps * 2))))
+                if codec == "libx264":
+                    st.options = {"preset": "veryfast", "crf": "20", "g": gop}
+                else:
+                    st.bit_rate = int(self.size[0] * self.size[1] * self.fps * (0.15 if "264" in codec else 0.4))
+                    st.options = {"g": gop}
+            except Exception:
+                c.close()
+                Path(self.path).unlink(missing_ok=True)
+                continue
+            self._av, self._stream, self.backend = c, st, codec
+            return True
+        return False
+
+    def write(self, frame: np.ndarray):
+        if self._rec is not None:
+            self._rec.write(frame)
+            self.frames += 1
+            return
+        import av
+
+        img = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        while True:
+            vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(img), format="bgr24")
+            vf.pts = self.frames
+            try:
+                for pkt in self._stream.encode(vf):
+                    self._av.mux(pkt)
+                break
+            except Exception:
+                if self.frames:
+                    raise
+                # encoders open lazily (e.g. no VideoToolbox in a VM): try the next one
+                try:
+                    self._av.close()
+                except Exception:
+                    pass
+                self._av = None
+                Path(self.path).unlink(missing_ok=True)
+                if not self._open_next():
+                    self._rec = VideoRecorder(self.path, self.fps, self.size)
+                    self.backend = getattr(self._rec, "backend", "opencv")
+                    self._rec.write(frame)
+                    break
+        self.frames += 1
+
+    def close(self):
+        if self._rec is not None:
+            self._rec.close()
+            return
+        if self._av is None:
+            return
+        av_, self._av = self._av, None
+        if not self.frames:  # nothing written: the encoder may never have opened
+            try:
+                av_.close()
+            except Exception:
+                pass
+            return
+        try:
+            for pkt in self._stream.encode():
+                av_.mux(pkt)
+        finally:
+            av_.close()
 
 
 def make_engine(procedures, outputs: Outputs | None = None, devices=None, on_mark=None, on_end=None, on_log=None,
@@ -309,7 +424,17 @@ class LiveSession(_Scoring):
     start_mode: "immediate" | "on_detection" (animal detected inside the arena for start_hold_s) |
     "experimenter_leaves" (a large object — the experimenter's hand — appears and leaves, then the animal is
     detected for start_hold_s) | "manual" (keyboard / remote / scheduled: call :meth:`request_start`).
-    While paused the test clock stops: no track rows, no recording, no procedure updates.
+    While paused the test clock stops: no track rows, no recording and no procedure timing; the "test paused"
+    handlers run at once, pulse trains stop and shocks (by default every output) go off, keys and touches still
+    reach the procedures (e.g. a "resume test" key) and safety tasks keep running in real time.
+
+    Thread safety: every entry point takes ``lock`` before the procedure engine's own lock (frames from the
+    camera thread, :meth:`key` / :meth:`touch` / :meth:`score` / :meth:`pause` from the GUI), so procedure
+    handlers that end or pause the test cannot deadlock.
+
+    Recording: frames are written at ``fps`` with the last frame repeated for dropped / late frames so that the
+    video stays aligned with the track time. With ``autosave_path`` the track, events and I/O log are written
+    to that side file every ``autosave_s`` seconds (see :func:`livegroup.recover_autosaves`).
     """
 
     apparatus: Apparatus
@@ -330,6 +455,10 @@ class LiveSession(_Scoring):
     name: str = ""
     zone_overrides: dict | None = None  # moveable zones of this test (Test.zone_overrides)
     on_stimulus: object = None  # touch-screen window handler (gui.touchscreen.TouchStimulusWindow.handle)
+    outputs_off_on_pause: bool = True  # pausing switches every output off (shocks and pulse trains always stop)
+    autosave_path: str | None = None  # crash-recovery side file (track, events, I/O log), rewritten periodically
+    autosave_s: float = 5.0
+    autosave_meta: dict | None = None  # test id, animal, apparatus … stored in the side file
 
     def __post_init__(self):
         if self.zone_overrides and self.apparatus is not None:
@@ -350,7 +479,8 @@ class LiveSession(_Scoring):
         self.engine = make_engine(self.procedures, self.outputs, self.devices, on_mark=self._mark,
                                   on_end=self._engine_end, on_log=self._engine_log, variables=self.variables,
                                   context=ctx, on_pause=lambda t: self.pause(), on_resume=lambda t: self.resume(),
-                                  on_stimulus=self.on_stimulus)
+                                  on_stimulus=self.on_stimulus, outputs_off_on_pause=bool(self.outputs_off_on_pause),
+                                  commit_kept=False)
         if self.outputs is None:
             self.outputs = getattr(self.engine, "outputs", None)
         self.stats = LiveStats(self.apparatus, self.fps, self.analysis)
@@ -371,8 +501,17 @@ class LiveSession(_Scoring):
         self._band: np.ndarray | None = None
         self._arena_px = 0
         self.frames_dropped = 0
+        self.frames_padded = 0  # frames repeated in the recording for dropped / late camera frames
         self.last_fg: np.ndarray | None = None
         self.started_wall: float | None = None
+        self._frz_state = False
+        self._rec_frames = 0
+        self._last_rec_frame: np.ndarray | None = None
+        self._autosave_last = -1e9
+        self._autosave_lock = threading.Lock()
+        self._autosave_data: dict | None = None
+        self._autosave_thread: threading.Thread | None = None
+        self._autosave_closed = False
 
     # ------------------------------------------------------------------
     def set_background(self, frame: np.ndarray):
@@ -442,11 +581,20 @@ class LiveSession(_Scoring):
             return True
 
     def key(self, key: str, down: bool = True):
-        """Forward a key press to the procedure engine (new API)."""
+        """Forward a key press to the procedure engine (new API); also while paused (e.g. a "resume" key)."""
         with self.lock:
-            if self.state == "running" and hasattr(self.engine, "key"):
+            if self.state in ("running", "paused") and hasattr(self.engine, "key"):
                 try:
                     self.engine.key(self.elapsed, key, down=down)
+                except Exception as e:
+                    self.warn(f"Procedure error: {e}")
+
+    def touch(self, area: str | None, x: float | None = None, y: float | None = None):
+        """A touch on the stimulus screen (any thread): forwarded to the procedures under the session lock."""
+        with self.lock:
+            if self.state in ("running", "paused") and hasattr(self.engine, "touch"):
+                try:
+                    self.engine.touch(self.elapsed, area or None, x, y)
                 except Exception as e:
                     self.warn(f"Procedure error: {e}")
 
@@ -472,6 +620,7 @@ class LiveSession(_Scoring):
             if self.state != "running":
                 return dets
         if self.state == "paused":
+            self._paused_tick()
             return dets
         if self._resume_pending:
             self._resume_pending = False
@@ -499,7 +648,19 @@ class LiveSession(_Scoring):
         self._update_engine(t, d, zones, head_zones, freezing)
         if self.duration_s and t >= self.duration_s:
             self.finish()
+        elif self.autosave_path and t - self._autosave_last >= self.autosave_s:
+            self._autosave_last = t
+            self._queue_autosave()
         return dets
+
+    def _paused_tick(self):
+        fn = getattr(self.engine, "paused_tick", None)
+        if fn is None:
+            return
+        try:
+            fn(time.monotonic() - self._pause_wall)
+        except Exception as e:
+            self.warn(f"Procedure error: {e}")
 
     def _check_start(self, ts, dets, fg):
         detected = any(d.detected for d in dets)
@@ -558,8 +719,22 @@ class LiveSession(_Scoring):
 
     def _record(self, frame, t):
         try:
-            self.recorder.write(annotate_recording(frame, t, self.recent_labels()) if self.record_overlay
-                                else frame)
+            img = annotate_recording(frame, t, self.recent_labels()) if self.record_overlay else frame
+            # constant frame rate: frame k shows test time k / fps. Late / dropped camera frames are padded by
+            # repeating the previous image; frames arriving faster than fps are skipped.
+            target = int(math.floor(t * self.fps + 0.5)) + 1
+            done = self._rec_frames
+            if target <= done:
+                return
+            prev = self._last_rec_frame
+            if prev is not None:
+                for _ in range(target - done - 1):
+                    self.recorder.write(prev)
+                    self.frames_padded += 1
+                self._rec_frames = target - 1
+            self.recorder.write(img)
+            self._rec_frames += 1
+            self._last_rec_frame = img
         except Exception as e:
             self.warn(f"Recording stopped: {e}", t)
             try:
@@ -586,15 +761,24 @@ class LiveSession(_Scoring):
         self._errors_seen = len(errs)
 
     def _freezing_now(self, d: Detection) -> bool:
+        """Freezing with the analysis rules (measures.kinematics): motion below freeze_on_pct starts it, it
+        lasts while motion stays at or below freeze_off_pct (hysteresis), and only after min_freeze_s."""
         if not d.detected or not d.area or math.isnan(d.motion):
+            self._frz_state = False
+            self._still_since = None
             return False
         pct = d.motion / max(d.area, 1) * 100
         self._motion_hist.append(pct)
+        if len(self._motion_hist) > 10000:
+            del self._motion_hist[:5000]
         t = self.cols["t"][-1]
-        if pct < self.analysis.freeze_on_pct:
+        a = self.analysis
+        off = getattr(a, "freeze_off_pct", a.freeze_on_pct)
+        self._frz_state = pct <= max(off, a.freeze_on_pct) if self._frz_state else pct < a.freeze_on_pct
+        if self._frz_state:
             if self._still_since is None:
                 self._still_since = t
-            return t - self._still_since >= self.analysis.min_freeze_s
+            return t - self._still_since >= a.min_freeze_s
         self._still_since = None
         return False
 
@@ -604,8 +788,10 @@ class LiveSession(_Scoring):
         self.t0 = ts
         if self.record_path:
             h, w = self._frame_shape
+            self._rec_frames = 0
+            self._last_rec_frame = None
             try:
-                self.recorder = VideoRecorder(self.record_path, self.fps, (w, h))
+                self.recorder = LiveRecorder(self.record_path, self.fps, (w, h))
             except Exception as e:
                 self.recorder = None
                 self.warn(f"Cannot record: {e}", 0.0)
@@ -633,12 +819,89 @@ class LiveSession(_Scoring):
                 self.events.append({"behaviour": m["behaviour"], "t": m["t"],
                                     "t_end": m["t_end"] if m["t_end"] is not None else round(self.elapsed, 3)})
             self.state = "finished"
+            self._last_rec_frame = None
             if self.recorder is not None:
                 try:
                     self.recorder.close()
                 except Exception as e:
                     self.warn(f"Recording error: {e}")
                 self.recorder = None
+            release = getattr(self.devices, "release", None)  # a per-test DeviceView: its box off, unsubscribed
+            if release is not None:
+                try:
+                    release()
+                except Exception as e:
+                    self.warn(f"I/O error: {e}")
+            if self.autosave_path and self.cols["t"]:
+                self._queue_autosave()  # the final state, until the test is saved or discarded
+
+    # ------------------------------------------------------------------ crash recovery
+    def autosave_snapshot(self) -> dict:
+        """Everything needed to rebuild the test after a crash (JSON-serialisable)."""
+        with self.lock:
+            return {"version": 1, "name": self.name, "meta": dict(self.autosave_meta or {}), "fps": self.fps,
+                    "duration_s": self.duration_s, "state": self.state, "record_path": self.record_path,
+                    "settings": dataclasses.asdict(self.settings) if dataclasses.is_dataclass(self.settings)
+                    else {}, "cols": {c: list(v) for c, v in self.cols.items()},
+                    "events": [dict(e) for e in self.events], "open_states": list(self.open_states),
+                    "pauses": [list(p) for p in self.pauses],
+                    "pause_log": [dict(p) for p in self.pause_log], "io_events": [dict(e) for e in self.io_events],
+                    "log": list(self.log), "warnings": list(self.warnings),
+                    "result_variables": self.result_variables,
+                    "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
+
+    def _queue_autosave(self):
+        if not self.autosave_path or self._autosave_closed:
+            return
+        try:
+            data = self.autosave_snapshot()
+        except Exception as e:  # pragma: no cover - defensive
+            self.warn(f"Autosave failed: {e}")
+            return
+        with self._autosave_lock:
+            self._autosave_data = data
+            if self._autosave_thread is None:
+                self._autosave_thread = threading.Thread(target=self._autosave_worker, name="live-autosave",
+                                                         daemon=True)
+                self._autosave_thread.start()
+
+    def _autosave_worker(self):
+        while True:
+            with self._autosave_lock:
+                data, self._autosave_data = self._autosave_data, None
+                if data is None or self._autosave_closed:
+                    self._autosave_thread = None
+                    return
+            try:  # outside the lock: the frame thread never waits for the disk
+                write_autosave(self.autosave_path, data)
+            except Exception as e:
+                self.warnings.append((round(self.elapsed, 2), f"Autosave failed: {e}"))
+
+    def flush_autosave(self, timeout: float = 10.0):
+        """Write the side file now and wait until it is on disk."""
+        self._queue_autosave()
+        th = self._autosave_thread
+        if th is not None and th is not threading.current_thread():
+            th.join(timeout)
+
+    def remove_autosave(self):
+        """The test was saved or discarded: stop autosaving and delete the side file."""
+        with self._autosave_lock:
+            self._autosave_closed = True
+            self._autosave_data = None
+        th = self._autosave_thread
+        if th is not None and th is not threading.current_thread():
+            th.join(10.0)
+        if self.autosave_path:
+            try:
+                Path(self.autosave_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @property
+    def kept_variables(self) -> dict:
+        """Procedure variables marked "keep" (stored in the project variables when the test is saved)."""
+        return dict(getattr(self.engine, "kept_variables", None) or {})
 
     @property
     def io_events(self) -> list:
@@ -652,6 +915,35 @@ class LiveSession(_Scoring):
         tr = Track(**{c: np.asarray(v) for c, v in self.cols.items()}, fps=self.fps)
         tr.meta["source"] = "live"
         return postprocess(tr, self.settings)
+
+
+def _json_default(o):
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, (set, tuple)):
+        return list(o)
+    return str(o)
+
+
+def write_autosave(path: str, data: dict):
+    """Atomically (write + rename) write a crash-recovery side file."""
+    p = Path(path)
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, default=_json_default)
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:  # pragma: no cover
+            pass
+    os.replace(tmp, p)
+
+
+def read_autosave(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def annotate_recording(frame: np.ndarray, t: float, labels: list[str] = ()) -> np.ndarray:

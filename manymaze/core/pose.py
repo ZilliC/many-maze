@@ -509,11 +509,11 @@ def crop_box(frame: np.ndarray, box, size: tuple[int, int], margin: float = 0,
     cw, ch = max(bx2 - bx1, 0), max(by2 - by1, 0)
     if not context and cw and ch:
         r_out = out_w / out_h
-        if cw / ch > r_out:
-            d = int(cw - ch * r_out) // 2
+        if cw / ch > r_out:  # too wide: pad rows up to cw / r_out
+            d = int(round(cw / r_out - ch)) // 2
             pt, pb = pt + d, pb + d
-        elif cw / ch < r_out:
-            d = int(ch - cw / r_out) // 2
+        elif cw / ch < r_out:  # too tall: pad columns up to ch * r_out
+            d = int(round(ch * r_out - cw)) // 2
             pl, pr = pl + d, pr + d
     canvas = np.zeros((ch + pt + pb, cw + pl + pr) + frame.shape[2:], dtype=frame.dtype)
     canvas[pt:pt + ch, pl:pl + cw] = frame[by1:by2, bx1:bx2]

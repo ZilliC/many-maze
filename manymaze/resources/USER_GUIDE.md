@@ -46,14 +46,15 @@ everything without a camera.
   detected** in the apparatus.
 * **Stages** – e.g. *Habituation, Day 1, Day 2, Probe*. Used for learning curves and repeated-measures
   statistics.
-* **Manually scored behaviours** – name, keyboard key and type (*state* with a duration, e.g. grooming; *point*
+* **Keys** (manually scored behaviours) – name, key stroke and how the key works (*Simple* while pressed, *Toggle*,
+  *Radio*; *Event* for instantaneous events — see §6). Old wording: *state* with a duration, e.g. grooming; *point*
   for instantaneous events, e.g. defecation).
-* **Custom analysis periods** – named time windows (e.g. *Tone 1: 120–150 s*) that override regular time bins;
+* **Analysis ▸ Time periods** – named time windows (e.g. *Tone 1: 120–150 s*) that override regular time bins;
   ideal for fear-conditioning CS periods.
-* **Detection settings** – defaults for all tests (each test can override them, see §5). *Body parts from*
+* **Animal tracking** (detection settings) – defaults for all tests (each test can override them, see §5). *Body parts from*
   chooses how head, body centre and tail base are found: from the animal's shape (fast, no model) or with the
   **pose model** (deep learning, see §5.1).
-* **Analysis settings** – thresholds for mobility, freezing, zone entries, thigmotaxis, object exploration,
+* **Analysis** – thresholds for mobility, freezing, zone entries, thigmotaxis, object exploration,
   social contact and time bins.
 
 ## 2. Experiment tab: treatments and animals
@@ -189,9 +190,9 @@ For zones marked *Moveable* (e.g. the water-maze platform) the **Track editing**
 
 ## 6. Experiment workflow and behaviour scoring
 
-### Manually scored behaviours
+### Keys (manually scored behaviours)
 
-Define behaviours on the **Experiment** page (*Manually scored behaviours*):
+Define keys on the **Protocol** tab (*Keys* element):
 
 | Column | Meaning |
 |---|---|
@@ -289,10 +290,11 @@ skipped).
 
 ### Blind testing
 
-Tick **Blind testing** on the Protocol tab: on the Animals, Tests and Review and score page pages the treatment groups are
+Tick **Blind testing** on the Protocol tab: on the Experiment, Test schedule, Run tests and Review and score pages the treatments are
 replaced by stable random codes (e.g. *Group NJ55*) with a neutral colour, and groups cannot be renamed or
 re-coloured. Results, statistics and exports keep the real groups. Unticking the box (unblinding) asks for
-confirmation.
+confirmation. The **Reveal treatment coding** button on the Experiment tab (and unticking the box) unblinds after a
+confirmation; Results and Statistics always show the real treatments.
 
 ### Animal identification
 
@@ -333,7 +335,12 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
 - **Arm / Start test** arms the test; while it waits the button becomes **Start now**.
 - **Pause** stops the test clock: no tracking data, no recording and no procedure timing while paused. **Resume**
   (or a start key) continues where it stopped. Pauses are saved with the test (`pauses`; the length of each pause
-  is noted in the test notes).
+  is noted in the test notes). For safety, pausing always stops pulse trains and switches shock outputs off, and —
+  with *Switch all outputs off while a test is paused* (on by default) — every output and sound; *when test paused /
+  resumed* procedure handlers run immediately. Keys still reach procedures while paused (e.g. a "resume test" key).
+- **Crash recovery**: during a test the track, events and I/O log are saved every 5 s beside the recording; a test
+  interrupted by a crash is restored (marked in its notes) the next time the experiment is opened. Recordings are
+  fragmented MP4, playable up to the last fragment even if the app did not close them.
 - **Stop** ends the test early (Save keeps the data, Discard deletes the test).
 
 If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
@@ -382,7 +389,7 @@ time and the latest event labels on the recording; leave it off for a clean vide
 
 ### Erasing thin wires and cage bars
 
-**Detection settings ▸ Erase thin wires / bars (px)** removes thin structures up to that width — tethers, tubes,
+**Animal tracking ▸ Erase thin wires / bars (px)** removes thin structures up to that width — tethers, tubes,
 wire lids, cage bars — from the image before detection, so they neither split the animal in two nor are mistaken
 for it. It also removes thin parts of the animal (the tail), so keep it at 0 when nothing crosses the arena. It
 works with infrared cameras like any other camera.
@@ -607,7 +614,10 @@ Variables declared with *Keep the value between tests* are stored in the experim
 
 ### I/O devices
 
-**Experiment ▸ Hardware ▸ I/O devices…** configures the hardware (`Project.io_devices`):
+**Experiment ▸ Hardware ▸ I/O devices…** configures the hardware (`Project.io_devices`). When several tests run at
+once, each test panel chooses its own **I/O device** (box); arming is refused if two tests would share a box. Boards
+with outputs have a **watchdog** (2000 ms by default; *Off* = 0) that switches every output off if the computer stops
+sending heartbeats, e.g. after a crash.
 
 | Type | Use |
 |---|---|

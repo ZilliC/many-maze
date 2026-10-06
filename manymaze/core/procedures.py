@@ -307,6 +307,8 @@ LOCAL_NAMES = ("event_time", "event_value", "event_name", "timed_out")
 CONSTANTS = {"true": True, "false": False, "True": True, "False": False, "pi": math.pi, "e": math.e,
              "inf": math.inf, "nan": math.nan, "none": None, "None": None}
 SHOCK_MAX_S = 60.0  # hard cap on any continuous shock
+STALL_S = 0.25  # a software pulse train later than this (frames stalled) is delayed instead of bursting
+SAFETY_TASKS = ("shock", "audio")  # scheduled tasks that keep running in real time while the test is paused
 STEP_BUDGET = 5000  # statements a thread may run per frame before yielding
 EPS = 1e-6
 
@@ -1233,6 +1235,8 @@ class _Detector:
                 v = None if v in (None, "") else eng._num(th, v, path, what=p["label"])
             elif p["type"] != "expr":
                 v = "" if v is None else str(v).strip()
+            if p["type"] == "device" and v:
+                v = eng._devname(v)
             self.args[p["name"]] = v
         self.cond = st.get("cond")
         self.th, self.path = th, path
@@ -1401,11 +1405,17 @@ class ProcedureEngine:
     """Runs procedures during a live test. Call start(t), update_state(t, state) every frame, stop(t).
 
     The public methods are thread-safe (e.g. frames processed in a worker thread, keys and touches from the GUI);
-    callbacks run in the thread that called the engine."""
+    callbacks run in the thread that called the engine.
+
+    Pausing (:meth:`pause`) runs the "test paused" handlers at once, stops pulse trains, switches shock outputs
+    off and, with ``outputs_off_on_pause`` (default), every output and sound. While paused call
+    :meth:`paused_tick` with the real time since the pause so that safety tasks still run.
+    Variables declared "keep" are copied to ``variables`` at :meth:`stop` unless ``commit_kept`` is False; they
+    are always available in ``kept_variables`` (e.g. to be stored only when the test is saved)."""
 
     def __init__(self, procedures=None, devices=None, on_mark=None, on_end=None, on_log=None, variables=None,
                  context=None, *, on_pause=None, on_resume=None, on_stimulus=None, seed=None,
-                 outputs_off_at_end: bool = True):
+                 outputs_off_at_end: bool = True, outputs_off_on_pause: bool = True, commit_kept: bool = True):
         from .iodevices import DeviceManager
 
         if isinstance(devices, Outputs):
@@ -1421,6 +1431,8 @@ class ProcedureEngine:
         self.context = context or {}
         self.rng = random.Random(seed)
         self.outputs_off_at_end = outputs_off_at_end
+        self.outputs_off_on_pause = outputs_off_on_pause
+        self.commit_kept = commit_kept
         self._lock = threading.RLock()
         self._reset()
 
@@ -1435,6 +1447,7 @@ class ProcedureEngine:
         self._error_keys: set = set()
         self.io_events: list[dict] = []
         self.result_variables: dict = {}
+        self.kept_variables: dict = {}
         self.marks: list[dict] = []
         self.state_events: list[dict] = []
         self.pauses: list[list] = []
@@ -1478,6 +1491,8 @@ class ProcedureEngine:
         self.stimuli: dict[str, dict] = {}
         self._audio_on: dict[tuple, float] = {}
         self._io_last: dict[tuple, tuple] = {}
+        self._shock_keys: set[tuple] = set()
+        self._pause_t: float | None = None
 
     # ------------------------------------------------------------------ public API
     @_locked
@@ -1582,11 +1597,39 @@ class ProcedureEngine:
 
     @_locked
     def pause(self, t: float):
+        """Pause the test now: safety outputs off and the "test paused" handlers run at once."""
         self._pause(t)
 
     @_locked
     def resume(self, t: float):
         self._resume_test(t)
+
+    @_locked
+    def paused_tick(self, wall_s: float):
+        """While paused (the test clock is stopped): run the safety tasks (shock cut-offs, end of sounds) that are
+        due `wall_s` seconds of real time after the pause, logged at the pause time, and read the inputs (changes
+        during a pause update the input states without firing events). Call it regularly while paused."""
+        if not self.paused or not self.started or self.stopped or self._busy:
+            return
+        t = self._pause_t if self._pause_t is not None else self.t
+        self._busy = True
+        try:
+            self._poll_inputs(t, quiet=True)
+            limit = t + max(0.0, float(wall_s))
+            due = [x for x in self._tasks if x[3] is not None and isinstance(x[3], tuple) and x[3]
+                   and x[3][0] in SAFETY_TASKS and x[0] <= limit + EPS]
+            if due:
+                self._tasks = [x for x in self._tasks if x not in due]
+                heapq.heapify(self._tasks)
+                for _due, seq, fn, key in sorted(due, key=lambda x: (x[0], x[1])):
+                    if seq in self._cancelled:
+                        self._cancelled.discard(seq)
+                        continue
+                    if self._task_keys.get(key) == seq:
+                        del self._task_keys[key]
+                    fn(t)
+        finally:
+            self._busy = False
 
     @_locked
     def stop(self, t: float):
@@ -1628,7 +1671,9 @@ class ProcedureEngine:
             for name, flags in self.var_flags.items():
                 v = self.vars.get(name)
                 if flags.get("keep"):
-                    self.variables[name] = copy.deepcopy(v)
+                    self.kept_variables[name] = copy.deepcopy(v)
+                    if self.commit_kept:
+                        self.variables[name] = copy.deepcopy(v)
                 if flags.get("result") and isinstance(v, (int, float)) and not isinstance(v, str):
                     self.result_variables[name] = float(v) if isinstance(v, float) else int(v)
             self.io_events.sort(key=lambda e: e["t"])
@@ -1715,7 +1760,7 @@ class ProcedureEngine:
 
     def _input_key(self, dev, ch):
         if dev:
-            return (dev, ch)
+            return (self._devname(dev), ch)
         for k in self.inputs:
             if k[1] == ch:
                 return k
@@ -1881,23 +1926,49 @@ class ProcedureEngine:
         elif dt > 0:
             self._speed = (self._distance - prev_d) / dt
 
-    def _poll_inputs(self, t):
+    def _devname(self, name):
+        """The device a name used by the procedures refers to (a per-test DeviceView maps box names to its box)."""
+        fn = getattr(self.devices, "resolve_name", None)
+        return fn(name) if fn is not None and name else name
+
+    def _poll_inputs(self, t, quiet=False):
         try:
-            changes = self.devices.read_inputs()
+            if hasattr(self.devices, "read_inputs_ex"):
+                changes = self.devices.read_inputs_ex()
+            else:
+                changes = [tuple(c) + (None,) for c in self.devices.read_inputs()]
         except Exception as e:  # pragma: no cover - hardware dependent
             self._error(None, (), f"I/O: {e}")
             return
-        for dev, ch, kind, value in changes:
-            self._input_changed(t, dev, ch, kind, value)
+        for dev, ch, kind, value, ms in changes:
+            if kind == "watchdog":
+                self._watchdog_fired(t, dev)
+            elif quiet:  # paused: keep the input states, no events
+                self.inputs[(dev, ch)] = value if kind in ("analog", "encoder") else (1 if value else 0)
+            else:
+                self._input_changed(t, dev, ch, kind, value, ms)
         for e in self.devices.errors:
             self._error(None, (), e)
 
-    def _input_changed(self, t, dev, ch, kind, value):
+    def _watchdog_fired(self, t, dev):
+        """The board's watchdog switched all its outputs off: record it (no command is sent to the board)."""
+        for key in [k for k in self._trains if k[0] == dev]:
+            tr = self._trains.pop(key)
+            if tr["on"]:
+                self._set_out(dev, key[1], 0, t, tr["typ"], hw=True, reason="watchdog")
+        for (d, ch), v in list(self.outputs_state.items()):
+            if d == dev and v:
+                self._cancel_task(("shock", d, ch))
+                self._set_out(d, ch, 0, t, "digital", hw=True, reason="watchdog")
+        self._log_line(t, f"{dev}: the watchdog switched all outputs off")
+
+    def _input_changed(self, t, dev, ch, kind, value, ms=None):
         key = (dev, ch)
         old = self.inputs.get(key)
+        extra = {"board_ms": ms} if ms is not None else {}
         if kind in ("analog", "encoder"):
             self.inputs[key] = value
-            self._log_io(t, dev, ch, "input", value, kind)
+            self._log_io(t, dev, ch, "input", value, kind, **extra)
             if old is None or value != old:
                 self._queue.append(("event", "input_changed", {"device": dev, "channel": ch, "value": value}, t, None))
             return
@@ -1908,7 +1979,7 @@ class ProcedureEngine:
             self.inputs[key] = 0
             return
         self.inputs[key] = v
-        self._log_io(t, dev, ch, "input", v, "digital")
+        self._log_io(t, dev, ch, "input", v, "digital", **extra)
         args = {"device": dev, "channel": ch, "value": v}
         self._queue.append(("event", "input_changed", args, t, None))
         self._queue.append(("event", "input_on" if v else "input_off", args, t, None))
@@ -2286,7 +2357,7 @@ class ProcedureEngine:
 
     # -- outputs
     def _resolve(self, th, p, device, channel, kinds=("output", "pwm")):
-        dev = device or self.devices.find_channel(channel, kinds) or ""
+        dev = self._devname(device) or self.devices.find_channel(channel, kinds) or ""
         if not dev:
             dev = "virtual"
         if self.devices.configured and not self.devices.has(dev):
@@ -2327,6 +2398,7 @@ class ProcedureEngine:
         self._set_out(dev, ch, max(0.0, min(1.0, float(value))), self.t, "pwm")
 
     def _a_all_outputs_off(self, th, p, device):
+        device = self._devname(device)
         for key in list(self._trains):
             if not device or key[0] == device:
                 self._stop_train(key, self.t)
@@ -2366,6 +2438,15 @@ class ProcedureEngine:
                     return
                 if on_t > t + EPS:
                     return
+                if not tr["hw"] and t - on_t > STALL_S:
+                    # the frames stalled: deliver the remaining pulses from now instead of a burst of zero-length
+                    # pulses that the device cannot follow (e.g. pellets counted but not dispensed)
+                    lag = t - on_t
+                    tr["t0"] += lag
+                    on_t = t
+                    if not tr.get("delayed"):
+                        self._log_line(t, f"Output {dev}/{ch}: pulses delayed by {lag:.2f} s (the test stalled)")
+                    tr["delayed"] = tr.get("delayed", 0.0) + lag
                 extra = {"train_start": True} if tr["first"] and tr["typ"] == "train" else {}
                 tr["first"] = False
                 self._set_out(dev, ch, 1, on_t, tr["typ"], hw=tr["hw"], **extra)
@@ -2374,6 +2455,9 @@ class ProcedureEngine:
                 off_t = on_t + tr["width"]
                 if off_t > t + EPS:
                     return
+                if not tr["hw"] and t - off_t > STALL_S:
+                    off_t = t  # the output really stayed on until now
+                    tr["t0"] = t - tr["width"] - tr["k"] * tr["period"]
                 self._set_out(dev, ch, 0, off_t, tr["typ"], hw=tr["hw"])
                 tr["on"] = False
                 tr["k"] += 1
@@ -2428,6 +2512,7 @@ class ProcedureEngine:
             self._error(th, p, f"Shock: safety cut-off limited to {SHOCK_MAX_S:g} s")
         self._stop_train((dev, ch), self.t)
         self._set_out(dev, ch, 1, self.t, "shock", max_s=m)
+        self._shock_keys.add((dev, ch))
         due = self.t + m
 
         def cut(tt, dev=dev, ch=ch):
@@ -2446,11 +2531,12 @@ class ProcedureEngine:
         if duration > SHOCK_MAX_S:
             self._error(th, p, f"Shock: duration limited to {SHOCK_MAX_S:g} s")
         dev, ch = self._resolve(th, p, device, channel)
+        self._shock_keys.add((dev, ch))
         self._start_train(th, p, dev, ch, d, d, 1, "shock")
 
     # -- audio
     def _audio_dev(self, device):
-        return device or self.devices.find_type("audio") or "audio"
+        return self._devname(device) or self.devices.find_type("audio") or "audio"
 
     def _audio(self, th, p, device, cmd, channel, value, duration, **kw):
         dev = self._audio_dev(device)
@@ -2499,6 +2585,7 @@ class ProcedureEngine:
 
     # -- communication
     def _a_serial_send(self, th, p, device, text):
+        device = self._devname(device)
         dev = device or self.devices.find_type("serial") or self.devices.find_type("arduino")
         if dev and self.devices.has(dev):
             self.devices.send(dev, text)
@@ -2529,7 +2616,7 @@ class ProcedureEngine:
         self._set_switch(switch, 0 if self.switches.get(switch) else 1, self.t)
 
     def _a_simulate_input(self, th, p, device, channel, value):
-        dev = device or self.devices.find_channel(channel, ("input", "analog", "encoder")) or "virtual"
+        dev = self._devname(device) or self.devices.find_channel(channel, ("input", "analog", "encoder")) or "virtual"
         self.devices.set_input(dev, channel, value)
         self._poll_inputs(self.t)
 
@@ -2642,20 +2729,65 @@ class ProcedureEngine:
         if self.paused:
             return
         self.paused = True
+        self._pause_t = t
         self.pauses.append([t, None])
+        if self.started and not self.stopped:
+            self._pause_safety(t)
         self._queue.append(("event", "test_paused", {}, t, None))
         if self.on_pause:
             self.on_pause(t)
+        self._dispatch_now(t)  # "when test paused" runs now, not after the pause
+
+    def _pause_safety(self, t):
+        """Pulse trains stop and shocks go off (they cannot be timed while the test clock is stopped); with
+        outputs_off_on_pause every output and sound goes off too."""
+        for key in list(self._trains):
+            self._stop_train(key, t)
+        for key in list(self._shock_keys):
+            self._cancel_task(("shock",) + key)
+            if self.outputs_state.get(key):
+                self._set_out(key[0], key[1], 0, t, "shock")
+        if not self.outputs_off_on_pause:
+            return
+        n = 0
+        for (dev, ch), v in list(self.outputs_state.items()):
+            if v:
+                self._set_out(dev, ch, 0, t, "pwm" if isinstance(v, float) and v not in (0.0, 1.0) else "digital")
+                n += 1
+        for dev in {k[0] for k in self._audio_on}:
+            try:
+                if self.devices.has(dev):
+                    self.devices.audio(dev, "stop")
+            except Exception as e:  # pragma: no cover - hardware dependent
+                self._error(None, (), f"audio: {e}")
+        for key in list(self._audio_on):
+            self._audio_off(key, t)
+            n += 1
+        if n:
+            self._log_line(t, "Test paused: outputs switched off")
+
+    def _dispatch_now(self, t):
+        if not self.started or self.stopped or self._busy:
+            return  # inside a frame / handler: the queued event is dispatched by the running loop
+        self._busy = True
+        try:
+            self.t = max(self.t, t)
+            self._run(self.t)
+        finally:
+            self._busy = False
+        self._after()
 
     def _resume_test(self, t):
         if not self.paused:
             return
         self.paused = False
+        self._pause_t = None
         if self.pauses and self.pauses[-1][1] is None:
             self.pauses[-1][1] = t
         self._queue.append(("event", "test_resumed", {}, t, None))
         if self.on_resume:
             self.on_resume(t)
+        self._dispatch_now(t)
 
     def _a_pause_test(self, th, p):
         self._pause(self.t)

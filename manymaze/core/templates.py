@@ -220,6 +220,66 @@ def morris_water_maze(x, y, w, h, pool_diameter_cm=150.0, platform_diameter_cm=1
     return app
 
 
+_WM_QUADS = ("NE", "SE", "SW", "NW")  # clockwise in image coordinates (y down)
+
+
+def align_water_maze(app: Apparatus) -> Apparatus:
+    """Make the water-maze target / opposite quadrant groups and "Platform position X" zones follow the platform.
+
+    After a per-test platform move (``Apparatus.with_overrides``) the target quadrant is the "Quadrant X" zone
+    containing the platform centre, the opposite quadrant is the one across the pool, and the comparison platform
+    positions are the platform rotated by 90°, 180° and 270° about the pool centre. Returns ``app`` unchanged
+    when it is not a water maze, has no platform / quadrants, or already matches; otherwise an adjusted copy.
+    """
+    if app.template != "water_maze":
+        return app
+    plat = app.zone("Platform")
+    quads = {q: app.zone(f"Quadrant {q}") for q in _WM_QUADS}
+    if plat is None or any(z is None for z in quads.values()):
+        return app
+    px, py = plat.shape.centroid()
+    target = next((q for q, z in quads.items() if bool(z.shape.contains(px, py))), None)
+    if target is None:
+        return app
+    opp = _WM_QUADS[(_WM_QUADS.index(target) + 2) % 4]
+    try:
+        cx, cy = app.arena_or_bounds().centroid()
+    except ValueError:
+        return app
+    # comparison positions: the platform rotated about the pool centre, named after the quadrant they fall in
+    positions = {}
+    for k in (1, 2, 3):
+        a = math.radians(90 * k)
+        rx = cx + (px - cx) * math.cos(a) - (py - cy) * math.sin(a)
+        ry = cy + (px - cx) * math.sin(a) + (py - cy) * math.cos(a)
+        q = next((q for q, z in quads.items() if q != target and bool(z.shape.contains(rx, ry))),
+                 _WM_QUADS[(_WM_QUADS.index(target) + k) % 4])
+        positions[q] = (rx, ry)
+    tq, oq = app.group("Target quadrant"), app.group("Opposite quadrant")
+    old_pos = {z.name: z for z in app.zones if z.name.startswith("Platform position")}
+    same_groups = (tq is None or list(tq.zones) == [f"Quadrant {target}"]) and \
+                  (oq is None or list(oq.zones) == [f"Quadrant {opp}"])
+    same_pos = not old_pos or (set(old_pos) == {f"Platform position {q}" for q in positions} and all(
+        math.hypot(old_pos[f"Platform position {q}"].shape.centroid()[0] - x,
+                   old_pos[f"Platform position {q}"].shape.centroid()[1] - y) < 0.5 for q, (x, y) in positions.items()))
+    if same_groups and same_pos:
+        return app
+    app = app.copy()
+    for g, q in ((app.group("Target quadrant"), target), (app.group("Opposite quadrant"), opp)):
+        if g is not None:
+            g.zones = [f"Quadrant {q}"]
+            g.exclude = []
+    if old_pos:
+        colour = next(iter(old_pos.values())).color
+        idx = min(i for i, z in enumerate(app.zones) if z.name.startswith("Platform position"))
+        app.zones = [z for z in app.zones if not z.name.startswith("Platform position")]
+        plat = app.zone("Platform")
+        for j, q in enumerate(q for q in _WM_QUADS if q in positions):
+            x, y = positions[q]
+            app.zones.insert(idx + j, Zone(f"Platform position {q}", plat.shape.translated(x - px, y - py), colour))
+    return app
+
+
 def barnes_maze(x, y, w, h, diameter_cm=122.0, n_holes=20, hole_diameter_cm=5.0, escape_hole=1,
                 hole_ring_fraction=0.9) -> Apparatus:
     app = Apparatus(name="Barnes maze", template="barnes_maze")

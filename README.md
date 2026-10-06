@@ -63,7 +63,8 @@ open dist/mANY-MAZE.app        # or install from dist/mANY-MAZE-<version>-arm64.
 ```
 
 The script builds a native `arm64` bundle with PyInstaller, ad-hoc signs it and wraps it in a DMG. The first time
-you open it, macOS may ask you to confirm (right-click ▸ *Open*) because it is not notarised, and it will ask for
+you open it, macOS blocks it because it is not notarised: allow it in *System Settings ▸ Privacy & Security ▸ Open Anyway*
+(or run `xattr -dr com.apple.quarantine dist/mANY-MAZE.app`), and it will ask for
 camera permission when you start a live test. GitHub Actions builds the same DMG on Apple Silicon runners
 (`.github/workflows/ci.yml`).
 

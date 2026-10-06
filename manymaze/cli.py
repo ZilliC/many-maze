@@ -45,7 +45,10 @@ def cmd_track(a):
 
         app = Apparatus.from_dict(json.loads(Path(a.apparatus).read_text()))
     else:
-        x, y, w, h = map(float, a.bbox.split(",")) if a.bbox else (0, 0, W, H)
+        try:
+            x, y, w, h = map(float, a.bbox.split(",")) if a.bbox else (0, 0, W, H)
+        except ValueError:
+            sys.exit("--bbox must be X,Y,W,H in pixels, e.g. --bbox 18,48,594,412")
         params = {}
         if a.size_cm:
             for key in ("size_cm", "width_cm", "pool_diameter_cm", "diameter_cm", "outer_diameter_cm"):
@@ -70,6 +73,8 @@ def cmd_track(a):
         else:
             write_csv(rows, a.output)
         print(f"Wrote {a.output}")
+    elif not rows:
+        sys.exit("No animal was detected in the video (check --template/--bbox and the detection settings).")
     else:
         for k, v in rows[0].items():
             print(f"{k}: {v}")
@@ -157,7 +162,9 @@ def main(argv=None):
     if a.cmd is None or a.cmd == "gui":
         from .gui.app import main as gui_main
 
-        return gui_main(getattr(a, "project", None))
+        return gui_main(getattr(a, "project", None), argv_project=a.cmd is None)
+    if a.cmd == "project" and not Path(a.dir).exists():
+        sys.exit(f"Experiment folder not found: {a.dir}")
     return {"track": cmd_track, "project": cmd_project, "demo": cmd_demo, "templates": cmd_templates}[a.cmd](a)
 
 

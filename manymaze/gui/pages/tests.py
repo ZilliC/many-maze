@@ -231,8 +231,9 @@ class TestsModel(QAbstractTableModel):
             aid = str(value).strip()
             if aid == t.animal_id:
                 return False
-            if aid:
+            if aid and p.get_animal(aid) is None:
                 p.ensure_animal(aid)
+                self.page.main.status(f"Animal “{aid}” did not exist and was added to the experiment (Experiment tab).")
             t.animal_id = aid
         elif c == C_STAGE:
             st = str(value).strip()

@@ -174,9 +174,103 @@ def test_abort_discards_new_test(win):
         page.feed_frame(f, i / 25)
     src.release()
     rec = page._record_path
+    side = page.session.autosave_path
+    page.session.flush_autosave()
+    assert side and Path(side).exists()  # crash-recovery side file while the test runs
     page.stop_test(save=False)
     assert page.session is None and len(p.tests) == n
-    assert not Path(rec).exists()
+    assert not Path(rec).exists() and not Path(side).exists()
+
+
+def test_touch_window_goes_through_the_session_lock(win):
+    from manymaze.gui.touchscreen import TouchStimulusWindow
+
+    calls = []
+
+    class FakeSession:
+        def touch(self, area, x, y):
+            calls.append((area, round(x, 2), round(y, 2)))
+
+    w = TouchStimulusWindow()
+    w.resize(800, 600)
+    w.connect_session(FakeSession())
+    a = w.areas[0]
+    w._touch((a["x"] + a["w"] / 2) * 800, (a["y"] + a["h"] / 2) * 600)
+    w._touch(2, 2)
+    assert calls == [(a["name"], round(a["x"] + a["w"] / 2, 2), 0.5), (None, 0.0, 0.0)]
+    w.close()
+    # the live page connects the touch window to the session, not straight to its engine
+    p = win.project
+    p.settings_extra["touchscreen"] = {"enabled": True, "areas": w.areas}
+    video = p.abs_path(p.tests[0].video)
+    page = setup_page(win, video)
+    page._on_file_background(compute_background(video, DetectionSettings(background_samples=21)))
+    page.start_preview = lambda: True
+    assert page.arm()
+    assert page._touch is not None and page._touch._session is page.session and page._touch._engine is None
+    page.stop_test(save=False)
+    p.settings_extra.pop("touchscreen", None)
+
+
+def test_several_tests_need_one_io_device_each(win, monkeypatch):
+    from manymaze.core.livegroup import LiveEntry
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]) or QMessageBox.Ok)
+    p = win.project
+    p.io_devices = [{"name": n, "type": "virtual", "channels": [{"name": "lever", "kind": "input"}]}
+                    for n in ("box1", "box2")]
+    page = win.goto("LivePage")
+
+    class Running:
+        state = "running"
+
+    other = LiveEntry(99, "src", Running(), "other", meta={"io_plan": "box1"})
+    me = LiveEntry(100, "src", None, "me", meta={"device": ""})
+    page.group.entries.append(other)
+    try:
+        plan, msg = page._io_plan(me)
+        assert plan is None and "Device" in msg  # automatic is refused while another test runs
+        me.meta["device"] = "box1"
+        assert page._io_plan(me)[0] is None  # box1 is taken
+        me.meta["device"] = "box2"
+        assert page._io_plan(me) == ("box2", "")
+        view = page._session_devices("box2")
+        assert view.alias == "box2" and view.find_channel("lever") == "box2"
+        view.release()
+        # the panel editor offers the configured boxes
+        page._load_row_editor()
+        assert [page.row_device.itemData(i) for i in range(page.row_device.count())] == ["", "box1", "box2", "-"]
+    finally:
+        page.group.entries.remove(other)
+        page._close_devices()
+
+
+def test_interrupted_live_test_is_recovered_when_the_experiment_opens(win, tmp_path):
+    import numpy as np
+
+    from manymaze.core import synthetic as syn
+    from manymaze.core import templates
+    from manymaze.core.live import LiveSession
+    from manymaze.core.livegroup import autosave_path_for
+
+    p = win.project
+    test = p.add_test("", "C9", p.apparatus[0].name)
+    p.save()
+    app_ = templates.build("open_field", 10, 10, 180, 180, size_cm=40)
+    s = LiveSession(app_, DetectionSettings(background="frame"), duration_s=0,
+                    autosave_path=autosave_path_for(p, test), autosave_meta={"test_id": test.id})
+    s.set_background(np.full((200, 200, 3), 200, np.uint8))
+    for i in range(20):
+        img = np.full((200, 200), 200, np.uint8)
+        syn.draw_mouse(img, 60 + i, 100, 0)
+        s.process(np.dstack([img] * 3), i / 25)
+    s.flush_autosave()  # ... and the program crashes here
+    win.set_project(Project.load(p.path))
+    t = win.project.get_test(test.id)
+    assert t.status == "tracked" and "interrupted" in t.notes
+    assert not Path(autosave_path_for(win.project, t)).exists()
+    assert Project.load(p.path).get_test(test.id).status == "tracked"  # saved at once
 
 
 def test_camera_scan_and_missing_camera(win, monkeypatch):

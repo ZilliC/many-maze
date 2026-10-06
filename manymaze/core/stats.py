@@ -544,7 +544,7 @@ def compare_groups(groups: "dict[str, np.ndarray]", parametric: bool = True, pai
         r = sps.kruskal(*data)
         out.update(test="Kruskal-Wallis", statistic=float(r.statistic), p=float(r.pvalue), df=k - 1)
         out["effect_size"] = float((r.statistic - k + 1) / (N - k)) if N > k else math.nan
-        out["effect_size_name"] = "epsilon²"
+        out["effect_size_name"] = "eta²H"  # (H - k + 1) / (N - k), Kruskal-Wallis eta squared
         default_ph = "mw_bonferroni"
     ph = default_ph if posthoc_method in (None, "auto") else posthoc_method
     if ph != "none":

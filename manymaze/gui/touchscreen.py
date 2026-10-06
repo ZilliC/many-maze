@@ -12,9 +12,11 @@ Configuration lives in ``Project.settings_extra["touchscreen"]``::
 Wiring during a live test::
 
     win = TouchStimulusWindow.from_project(project)
-    engine = ProcedureEngine(..., on_stimulus=win.handle)
-    win.connect_engine(engine, clock=lambda: session.elapsed)
+    session = LiveSession(..., on_stimulus=win.handle)
+    win.connect_session(session)   # touches go through session.touch(): session lock first, then the engine
     win.show_on_screen()
+
+(:meth:`TouchStimulusWindow.connect_engine` drives a bare ProcedureEngine without a session.)
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ class TouchStimulusWindow(QWidget):
         self.touches: list[tuple[str, float, float]] = []
         self._pixmaps: dict[str, QPixmap] = {}
         self._engine = None
+        self._session = None
         self._clock: Callable[[], float] | None = None
         self._command.connect(self._run_command)  # queued when the engine runs in another thread
         self.setAttribute(Qt.WA_AcceptTouchEvents, True)
@@ -79,9 +82,16 @@ class TouchStimulusWindow(QWidget):
             self.setGeometry(screens[index].geometry())
         self.showFullScreen()
 
+    def connect_session(self, session):
+        """Forward touches to a live session (``session.touch(area, x, y)``), which takes its own lock before the
+        procedure engine's: the camera thread does the same, so a touch handler that pauses or ends the test
+        cannot deadlock against the frame being processed."""
+        self._session, self._engine, self._clock = session, None, None
+
     def connect_engine(self, engine, clock: Callable[[], float]):
-        """Forward touches to a ProcedureEngine (clock() returns the current test time)."""
-        self._engine, self._clock = engine, clock
+        """Forward touches to a bare ProcedureEngine (no live session; clock() returns the current test time).
+        With a live session use :meth:`connect_session`."""
+        self._session, self._engine, self._clock = None, engine, clock
 
     def handle(self, cmd: str, params: dict):
         """ProcedureEngine on_stimulus callback (safe to call from any thread)."""
@@ -124,7 +134,9 @@ class TouchStimulusWindow(QWidget):
         fx, fy = x / max(1, self.width()), y / max(1, self.height())
         self.touches.append((area, fx, fy))
         self.touched.emit(area, fx, fy)
-        if self._engine is not None:
+        if self._session is not None:
+            self._session.touch(area or None, fx, fy)
+        elif self._engine is not None:
             t = self._clock() if self._clock else self._engine.t
             self._engine.touch(t, area or None, fx, fy)
 

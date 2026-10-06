@@ -767,7 +767,10 @@ class TestViewPage(Page):
         self._close_open_states()
 
     def commit(self):
-        self._close_open_states()
+        """Flush before saving: finished events are already in the test; a behaviour still being scored stays open
+        (Ctrl+S must not end it). It is closed when the test is left (on_hide / load_test / shutdown)."""
+        if self.test is not None:
+            self.test.events.sort(key=lambda e: e["t"])
 
     def shutdown(self):
         self.player.close_video()

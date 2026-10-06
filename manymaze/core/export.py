@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import re
 import datetime as _dt
 import html
 import math
@@ -23,7 +24,8 @@ def _fmt(v):
     if isinstance(v, (float, np.floating)):
         if not math.isfinite(v):
             return ""
-        return f"{float(v):.6g}"
+        f = float(v)
+        return str(int(f)) if f.is_integer() and abs(f) < 1e15 else f"{f:.10g}"
     if isinstance(v, np.integer):
         return int(v)
     return v
@@ -41,6 +43,9 @@ def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimite
 def write_tsv(rows: list[dict], path, columns: list[str] | None = None):
     """Tab-separated text (opens directly in Excel / Prism / R)."""
     write_csv(rows, path, columns, delimiter="\t")
+
+
+_ILLEGAL_XLSX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def write_xlsx(sheets: dict[str, list[dict]], path, columns: dict[str, list[str]] | None = None):
@@ -67,8 +72,15 @@ def write_xlsx(sheets: dict[str, list[dict]], path, columns: dict[str, list[str]
                     v = v.item()
                     if isinstance(v, float) and not math.isfinite(v):
                         v = None
+                if isinstance(v, np.bool_):
+                    v = bool(v)
+                elif isinstance(v, str):
+                    v = _ILLEGAL_XLSX.sub("", v)
                 vals.append(v)
             ws.append(vals)
+            for cell in ws[ws.max_row]:  # text that looks like a formula stays text (no formula injection)
+                if isinstance(cell.value, str) and cell.value[:1] in "=+-@" and cell.value not in ("", "-"):
+                    cell.data_type = "s"
         ws.freeze_panes = "B2"
         for i, c in enumerate(cols, 1):
             ws.column_dimensions[get_column_letter(i)].width = min(40, max(10, len(str(c)) + 2))

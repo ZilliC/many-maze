@@ -792,7 +792,7 @@ class ExperimentPage(Page):
             return
         if not on and p.blind and QMessageBox.question(
                 self, "Unblind", "Reveal the treatment groups? The experimenter will no longer be blind to the "
-                "groups on the Animals, Tests and Test view pages.") != QMessageBox.Yes:
+                "treatments on the Experiment, Test schedule, Run tests and Review and score pages.") != QMessageBox.Yes:
             self._loading = True
             self.blind.setChecked(True)
             self._loading = False

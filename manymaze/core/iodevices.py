@@ -2,7 +2,7 @@
 
 Device configurations live in ``Project.io_devices`` (JSON)::
 
-    {"name": "box1", "type": "arduino", "port": "/dev/cu.usbmodem1101", "baud": 115200, "watchdog_ms": 0,
+    {"name": "box1", "type": "arduino", "port": "/dev/cu.usbmodem1101", "baud": 115200, "watchdog_ms": 2000,
      "channels": [
         {"name": "lever",  "kind": "input",   "pin": 2, "pullup": true, "debounce_ms": 20, "invert": false},
         {"name": "pellet", "kind": "output",  "pin": 8},
@@ -17,7 +17,8 @@ Device types:
   (:meth:`DeviceManager.set_input`). Unknown device names used by procedures become virtual devices.
 * ``arduino`` — an Arduino running ``firmware/manymaze_io`` (line protocol, see ``firmware/README.md``):
   debounced digital inputs, outputs with optional maximum on-time, PWM, hardware-timed pulses and pulse
-  trains (optogenetics, pellet dispensers), analogue inputs, quadrature encoders, heartbeat watchdog.
+  trains (optogenetics, pellet dispensers), analogue inputs, quadrature encoders, heartbeat watchdog (on by
+  default, 2000 ms, when the board has outputs; ``"watchdog_ms": 0`` turns it off).
 * ``serial`` — any device driven by text lines; output channels have ``"on"``/``"off"`` command strings,
   input channels have ``"on"``/``"off"`` strings that are matched against received lines.
 * ``audio`` — the computer's sound output: tones, white noise and sound files (WAV generated with NumPy and
@@ -40,7 +41,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections import deque
 import wave
 from pathlib import Path
 
@@ -96,7 +99,8 @@ class Device:
         self.errors: list[str] = []
         self.connected = False
         self.transport = transport
-        self._pending: list[tuple[str, float]] = []
+        self._pending: list[tuple[str, float, float | None]] = []  # (channel, value, board ms or None)
+        self.watchdog_fired = 0  # times the board's watchdog switched every output off
         for n, c in self.channels.items():
             if c.get("kind", "input") in INPUT_KINDS:
                 self.inputs[n] = 0
@@ -119,16 +123,31 @@ class Device:
         if msg not in self.errors:
             self.errors.append(msg)
 
-    def _changed(self, channel: str, value: float):
+    def _changed(self, channel: str, value: float, ms: float | None = None):
         if self.inputs.get(channel) != value:
             self.inputs[channel] = value
-            self._pending.append((channel, value))
+            self._pending.append((channel, value, ms))
+
+    def _read(self):
+        """Read the hardware (subclasses): input changes go to ``_pending`` through :meth:`_changed`."""
 
     # -- API
-    def poll(self) -> list[tuple[str, float]]:
-        """Input changes since the last call: [(channel, value)]."""
+    def poll_ex(self) -> list[tuple[str, float, float | None]]:
+        """Input changes since the last call: [(channel, value, board time in ms or None)]."""
+        self._read()
         out, self._pending = self._pending, []
         return out
+
+    def poll(self) -> list[tuple[str, float]]:
+        """Input changes since the last call: [(channel, value)]."""
+        return [(c, v) for c, v, _ in self.poll_ex()]
+
+    def keepalive(self):
+        """Heartbeat for devices with a watchdog (called from the manager's keep-alive thread)."""
+
+    def keepalive_period(self) -> float:
+        """Seconds between heartbeats (0 = no heartbeat needed)."""
+        return 0.0
 
     def set_output(self, channel: str, value: float, max_s: float | None = None):
         self.outputs[channel] = value
@@ -182,6 +201,8 @@ class _LineDevice(Device):
         super().__init__(cfg, transport)
         self._buf = b""
         self.sent: list[str] = []
+        self._io_lock = threading.RLock()  # the keep-alive thread writes while a test thread reads / writes
+        self._last_write = 0.0
 
     def open(self):
         if self.transport is None:
@@ -200,39 +221,45 @@ class _LineDevice(Device):
         self.connected = True
 
     def close(self):
-        if self.transport is not None:
-            try:
-                self.transport.close()
-            except Exception:  # pragma: no cover
-                pass
-        self.transport = None
-        self.connected = False
+        with self._io_lock:
+            if self.transport is not None:
+                try:
+                    self.transport.close()
+                except Exception:  # pragma: no cover
+                    pass
+            self.transport = None
+            self.connected = False
 
     def write_line(self, line: str) -> bool:
-        self.sent.append(line)
-        if self.transport is None:
-            return False
-        try:
-            self.transport.write((line + self.cfg.get("eol", "\n")).encode())
-            return True
-        except Exception as e:  # pragma: no cover - hardware dependent
-            self._error(f"{self.name}: write failed: {e}")
-            return False
+        with self._io_lock:
+            self.sent.append(line)
+            if len(self.sent) > 5000:
+                del self.sent[:1000]
+            if self.transport is None:
+                return False
+            try:
+                self.transport.write((line + self.cfg.get("eol", "\n")).encode())
+                self._last_write = time.monotonic()
+                return True
+            except Exception as e:  # pragma: no cover - hardware dependent
+                self._error(f"{self.name}: write failed: {e}")
+                return False
 
     def read_lines(self) -> list[str]:
-        if self.transport is None:
-            return []
-        try:
-            n = getattr(self.transport, "in_waiting", 0)
-            data = self.transport.read(n or 4096) if n is None or n > 0 else b""
-        except Exception as e:  # pragma: no cover - hardware dependent
-            self._error(f"{self.name}: read failed: {e}")
-            return []
-        if not data:
-            return []
-        self._buf += data
-        *lines, self._buf = self._buf.split(b"\n")
-        return [ln.decode(errors="replace").strip() for ln in lines if ln.strip()]
+        with self._io_lock:
+            if self.transport is None:
+                return []
+            try:
+                n = getattr(self.transport, "in_waiting", 0)
+                data = self.transport.read(n or 4096) if n is None or n > 0 else b""
+            except Exception as e:  # pragma: no cover - hardware dependent
+                self._error(f"{self.name}: read failed: {e}")
+                return []
+            if not data:
+                return []
+            self._buf += data
+            *lines, self._buf = self._buf.split(b"\n")
+            return [ln.decode(errors="replace").strip() for ln in lines if ln.strip()]
 
 
 class SerialDevice(_LineDevice):
@@ -253,7 +280,7 @@ class SerialDevice(_LineDevice):
                 else f"{channel} {value:g}"
         self.write_line(str(cmd))
 
-    def poll(self):
+    def _read(self):
         for line in self.read_lines():
             for n, c in self.channels.items():
                 if c.get("kind", "input") != "input":
@@ -262,7 +289,6 @@ class SerialDevice(_LineDevice):
                     self._changed(n, 1)
                 elif c.get("off") and line == c["off"]:
                     self._changed(n, 0)
-        return super().poll()
 
 
 class ArduinoDevice(_LineDevice):
@@ -280,7 +306,6 @@ class ArduinoDevice(_LineDevice):
             tag = {"analog": "A", "encoder": "E"}.get(k, "D")
             if c.get("pin") is not None:
                 self.by_pin[(tag, int(c["pin"]))] = n
-        self._last_ping = 0.0
 
     def open(self, handshake_s: float = 3.0):
         super().open()
@@ -319,10 +344,34 @@ class ArduinoDevice(_LineDevice):
                     self._error(f"{self.name}: encoder '{n}' needs pin B")
                     continue
                 self.write_line(f"E {pin} {int(c['pin_b'])}")
-        wd = int(self.cfg.get("watchdog_ms", 0) or 0)
+        wd = self.watchdog_ms()
         if wd:
             self.write_line(f"H {wd}")
         self.write_line("Q")
+
+    DEFAULT_WATCHDOG_MS = 2000
+
+    def watchdog_ms(self) -> int:
+        """The heartbeat watchdog timeout: the configured ``watchdog_ms`` (0 = off) or, when not set, 2000 ms if
+        the board drives outputs (all outputs go off if mANY-MAZE stops talking to the board)."""
+        v = self.cfg.get("watchdog_ms")
+        if v is None:
+            has_out = any(c.get("kind", "input") in OUTPUT_KINDS for c in self.channels.values())
+            return self.DEFAULT_WATCHDOG_MS if has_out else 0
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+    def keepalive_period(self) -> float:
+        wd = self.watchdog_ms()
+        return wd / 3000.0 if wd and self.connected else 0.0
+
+    def keepalive(self):
+        """Send a heartbeat unless another line was written recently (any line resets the board's watchdog)."""
+        per = self.keepalive_period()
+        if per and time.monotonic() - self._last_write >= per:
+            self.write_line(".")
 
     def _pin(self, channel: str) -> int | None:
         c = self.channels.get(channel)
@@ -353,22 +402,26 @@ class ArduinoDevice(_LineDevice):
                 v = raw * float(c.get("scale", 1.0))
             else:
                 v = int(raw)
-            self._changed(n, v)
+            ms = None
+            if len(parts) >= 4:  # the board's millis() clock
+                try:
+                    ms = int(parts[3])
+                except ValueError:
+                    ms = None
+            self._changed(n, v, ms)
         elif tag == "ERR":
             self._error(f"{self.name}: firmware error: {' '.join(parts[1:])}")
         elif tag == "WATCHDOG":
-            self._error(f"{self.name}: watchdog fired — all outputs switched off")
+            self.watchdog_fired += 1
+            for ch in self.outputs:
+                self.outputs[ch] = 0
+            self.errors.append(f"{self.name}: watchdog fired — all outputs switched off")
         elif tag.startswith(FIRMWARE_ID):
             self.version = line
 
-    def poll(self):
+    def _read(self):
         for line in self.read_lines():
             self._parse(line)
-        wd = int(self.cfg.get("watchdog_ms", 0) or 0)
-        if wd and self.connected and time.monotonic() - self._last_ping > wd / 3000:
-            self._last_ping = time.monotonic()
-            self.write_line(".")
-        return super().poll()
 
     def set_output(self, channel: str, value: float, max_s: float | None = None):
         pin = self._pin(channel)
@@ -553,13 +606,27 @@ DRIVERS = {"virtual": VirtualDevice, "arduino": ArduinoDevice, "serial": SerialD
 class DeviceManager:
     """All the I/O devices of a project. Unknown device names used by procedures become virtual devices.
 
+    Thread-safe: tests run in their own threads, the GUI polls the status and a keep-alive thread sends the
+    watchdog heartbeats of boards that have one (so a paused test or a stalled camera does not trip it).
+
+    Several tests at once each see their own box through a :class:`DeviceView`; input changes are fanned out to
+    every subscriber (:meth:`subscribe`) so that one test never consumes another test's lever presses.
+
     ``transports`` maps device name -> file-like object (write/read/in_waiting) to drive arduino/serial
     devices without hardware (tests)."""
+
+    MAX_QUEUE = 10000
 
     def __init__(self, configs=(), open: bool = True, transports: dict | None = None):
         self.configs = [dict(c) for c in (configs or []) if c.get("enabled", True)]
         self.devices: dict[str, Device] = {}
         self.configured = bool(self.configs)
+        self._lock = threading.RLock()
+        self._subs: dict[int, tuple[set | None, deque]] = {}
+        self._sub_seq = 0
+        self._wd_seen: dict[str, int] = {}
+        self._ka_stop = threading.Event()
+        self._ka_thread: threading.Thread | None = None
         for c in self.configs:
             cls = DRIVERS.get(c.get("type", "virtual"), VirtualDevice)
             dev = cls(c, (transports or {}).get(c.get("name")))
@@ -573,46 +640,84 @@ class DeviceManager:
         return cls(getattr(project, "io_devices", None) or [], open=open)
 
     def open(self):
-        for d in self.devices.values():
-            if not d.connected:
-                try:
-                    d.open()
-                except Exception as e:  # pragma: no cover - hardware dependent
-                    d._error(f"{d.name}: {e}")
+        with self._lock:
+            for d in self.devices.values():
+                if not d.connected:
+                    try:
+                        d.open()
+                    except Exception as e:  # pragma: no cover - hardware dependent
+                        d._error(f"{d.name}: {e}")
+            self._start_keepalive()
+
+    def _start_keepalive(self):
+        if self._ka_thread is not None and self._ka_thread.is_alive():
+            return
+        if not any(d.keepalive_period() for d in self.devices.values()):
+            return
+        self._ka_stop.clear()
+        self._ka_thread = threading.Thread(target=self._keepalive_loop, name="io-keepalive", daemon=True)
+        self._ka_thread.start()
+
+    def _keepalive_loop(self):
+        while not self._ka_stop.is_set():
+            periods = []
+            for d in list(self.devices.values()):
+                per = d.keepalive_period()
+                if per:
+                    periods.append(per)
+                    try:
+                        d.keepalive()
+                    except Exception as e:  # pragma: no cover - hardware dependent
+                        d._error(f"{d.name}: keep-alive failed: {e}")
+            if not periods:
+                return
+            self._ka_stop.wait(max(0.02, min(periods) / 4))
 
     def close(self):
-        for d in self.devices.values():
-            try:
-                d.all_off()
-            except Exception:  # pragma: no cover
-                pass
-            d.close()
+        self._ka_stop.set()
+        th = self._ka_thread
+        if th is not None and th.is_alive() and th is not threading.current_thread():
+            th.join(2.0)
+        self._ka_thread = None
+        with self._lock:
+            for d in self.devices.values():
+                try:
+                    d.all_off()
+                except Exception:  # pragma: no cover
+                    pass
+                d.close()
 
     @property
     def errors(self) -> list[str]:
-        return [e for d in self.devices.values() for e in d.errors]
+        with self._lock:
+            return [e for d in self.devices.values() for e in d.errors]
 
     def has(self, name: str) -> bool:
         return name in self.devices
 
+    def resolve_name(self, name: str) -> str:
+        """The device a name used by procedures refers to (itself; see DeviceView)."""
+        return name
+
     def device(self, name: str, create: bool = True) -> Device | None:
-        d = self.devices.get(name)
-        if d is None and create:
-            d = VirtualDevice({"name": name or "virtual"})
-            d.open()
-            self.devices[d.name] = d
-        return d
+        with self._lock:
+            d = self.devices.get(name)
+            if d is None and create:
+                d = VirtualDevice({"name": name or "virtual"})
+                d.open()
+                self.devices[d.name] = d
+            return d
 
     def find_channel(self, channel: str, kinds=None) -> str | None:
         """Name of the first device that has this channel (optionally of one of these kinds)."""
-        for d in self.devices.values():
+        for d in list(self.devices.values()):
             k = d.kind(channel)
             if k is not None and (kinds is None or k in kinds):
                 return d.name
         return None
 
     def find_type(self, type_: str) -> str | None:
-        return next((d.name for d in self.devices.values() if d.type == type_), None)
+        return next((d.name for d in list(self.devices.values()) if d.type == type_), None)
 
     def channel_kind(self, device: str, channel: str) -> str | None:
         d = self.devices.get(device)
@@ -622,53 +727,247 @@ class DeviceManager:
         d = self.devices.get(device)
         return dict(d.channels.get(channel, {})) if d else {}
 
-    def status(self) -> list[tuple[str, str, str, float]]:
+    def status(self, devices=None) -> list[tuple[str, str, str, float]]:
         out = []
-        for d in self.devices.values():
-            for n, c in d.channels.items():
-                k = c.get("kind", "input")
-                v = d.inputs.get(n, 0) if k in INPUT_KINDS else d.outputs.get(n, 0)
-                out.append((d.name, n, k, v))
+        with self._lock:
+            for d in self.devices.values():
+                if devices is not None and d.name not in devices:
+                    continue
+                for n, c in d.channels.items():
+                    k = c.get("kind", "input")
+                    v = d.inputs.get(n, 0) if k in INPUT_KINDS else d.outputs.get(n, 0)
+                    out.append((d.name, n, k, v))
         return out
 
     def set_output(self, device: str, channel: str, value: float, max_s: float | None = None):
-        self.device(device).set_output(channel, value, max_s=max_s)
+        with self._lock:
+            self.device(device).set_output(channel, value, max_s=max_s)
 
     def pulse_train(self, device, channel, period_s, width_s, count) -> bool:
-        return self.device(device).pulse_train(channel, period_s, width_s, count)
+        with self._lock:
+            return self.device(device).pulse_train(channel, period_s, width_s, count)
 
     def stop_train(self, device, channel) -> bool:
-        return self.device(device).stop_train(channel)
+        with self._lock:
+            return self.device(device).stop_train(channel)
 
     def send(self, device: str, text: str) -> bool:
-        d = self.devices.get(device)
-        return d.send(text) if d else False
+        with self._lock:
+            d = self.devices.get(device)
+            return d.send(text) if d else False
 
     def audio(self, device: str, cmd: str, **kw) -> bool:
-        d = self.devices.get(device)
-        return d.audio(cmd, **kw) if d else False
+        with self._lock:
+            d = self.devices.get(device)
+            return d.audio(cmd, **kw) if d else False
 
     def set_input(self, device: str, channel: str, value: float):
-        d = self.device(device)
-        if isinstance(d, VirtualDevice):
-            d.set_input(channel, value)
+        with self._lock:
+            d = self.device(device)
+            if isinstance(d, VirtualDevice):
+                d.set_input(channel, value)
 
-    def read_inputs(self) -> list[tuple[str, str, str, float]]:
-        """Input changes since the last call: [(device, channel, kind, value)]."""
+    # -- inputs (fanned out to subscribers)
+    def subscribe(self, devices=None) -> int:
+        """A private queue of input changes (of these devices; None = all) for :meth:`read_inputs`."""
+        with self._lock:
+            self._sub_seq += 1
+            self._subs[self._sub_seq] = (set(devices) if devices is not None else None, deque(maxlen=self.MAX_QUEUE))
+            return self._sub_seq
+
+    def unsubscribe(self, sub: int):
+        with self._lock:
+            self._subs.pop(sub, None)
+
+    def _poll_all(self) -> list[tuple]:
         out = []
         for d in list(self.devices.values()):
             try:
-                changes = d.poll()
+                changes = d.poll_ex()
             except Exception as e:  # pragma: no cover - hardware dependent
                 d._error(f"{d.name}: {e}")
                 continue
-            for ch, v in changes:
-                out.append((d.name, ch, d.kind(ch) or "input", v))
+            for ch, v, ms in changes:
+                out.append((d.name, ch, d.kind(ch) or "input", v, ms))
+            n = d.watchdog_fired
+            if n != self._wd_seen.get(d.name, 0):
+                self._wd_seen[d.name] = n
+                out.append((d.name, "", "watchdog", 1, None))
+        for filt, q in self._subs.values():
+            q.extend(c for c in out if filt is None or c[0] in filt)
         return out
 
+    def read_inputs_ex(self, sub: int | None = None) -> list[tuple]:
+        """Like :meth:`read_inputs` with the board time: [(device, channel, kind, value, ms or None)].
+        kind "watchdog" (channel "") reports that the device's watchdog switched its outputs off."""
+        with self._lock:
+            out = self._poll_all()
+            if sub is None:
+                return out
+            q = self._subs.get(sub)
+            if q is None:
+                return []
+            res = list(q[1])
+            q[1].clear()
+            return res
+
+    def read_inputs(self, sub: int | None = None) -> list[tuple[str, str, str, float]]:
+        """Input changes since the last call: [(device, channel, kind, value)] (of subscriber `sub` if given)."""
+        return [c[:4] for c in self.read_inputs_ex(sub)]
+
     def all_off(self):
+        with self._lock:
+            for d in self.devices.values():
+                d.all_off()
+
+
+class DeviceView:
+    """One test's view of a shared :class:`DeviceManager` (several tests at once): the test only sees its own
+    box ``device``. Every configured hardware device name used by the procedures resolves to that box, channel
+    names are looked up in it, and only its input changes are delivered. Other names become virtual devices
+    private to the test. ``device`` None: no hardware at all (simulated outputs). Audio devices (the computer's
+    speakers) stay shared."""
+
+    SHARED_TYPES = ("audio",)
+
+    def __init__(self, manager: DeviceManager, device: str | None):
+        self.manager = manager
+        self.alias = device or None
+        if self.alias is not None and not manager.has(self.alias):
+            raise KeyError(f"I/O device '{self.alias}' is not configured")
+        self.devices: dict[str, Device] = {}  # private virtual devices
+        self._sub = manager.subscribe({self.alias} if self.alias else set())
+        self._released = False
+
+    # -- name resolution
+    @property
+    def configured(self) -> bool:
+        return self.alias is not None
+
+    def _shared(self, name) -> bool:
+        d = self.manager.devices.get(name)
+        return d is not None and d.type in self.SHARED_TYPES
+
+    def _map(self, name: str) -> str:
+        if self.alias is not None and name and self.manager.has(name) and not self._shared(name):
+            return self.alias  # the procedures' box name means "this test's box"
+        return name
+
+    def resolve_name(self, name: str) -> str:
+        return self._map(name)
+
+    def has(self, name: str) -> bool:
+        name = self._map(name)
+        return name == self.alias and name is not None or name in self.devices or self._shared(name)
+
+    def device(self, name: str, create: bool = True) -> Device | None:
+        name = self._map(name)
+        if self.alias is not None and name == self.alias or self._shared(name):
+            return self.manager.device(name, create=False)
+        d = self.devices.get(name)
+        if d is None and create:
+            d = VirtualDevice({"name": name or "virtual"})
+            d.open()
+            self.devices[d.name] = d
+        return d
+
+    def _own(self):
+        return ([self.manager.devices[self.alias]] if self.alias is not None else []) + list(self.devices.values())
+
+    def find_channel(self, channel: str, kinds=None) -> str | None:
+        for d in self._own():
+            k = d.kind(channel)
+            if k is not None and (kinds is None or k in kinds):
+                return d.name
+        return None
+
+    def find_type(self, type_: str) -> str | None:
+        if type_ in self.SHARED_TYPES:
+            return self.manager.find_type(type_)
+        return next((d.name for d in self._own() if d.type == type_), None)
+
+    def channel_kind(self, device: str, channel: str) -> str | None:
+        d = self.device(device, create=False)
+        return d.kind(channel) if d else None
+
+    def channel_config(self, device: str, channel: str) -> dict:
+        d = self.device(device, create=False)
+        return dict(d.channels.get(channel, {})) if d else {}
+
+    @property
+    def errors(self) -> list[str]:
+        return [e for d in self._own() for e in d.errors]
+
+    def status(self) -> list[tuple[str, str, str, float]]:
+        out = self.manager.status({self.alias}) if self.alias is not None else []
         for d in self.devices.values():
-            d.all_off()
+            for n, c in d.channels.items():
+                k = c.get("kind", "input")
+                out.append((d.name, n, k, d.inputs.get(n, 0) if k in INPUT_KINDS else d.outputs.get(n, 0)))
+        return out
+
+    # -- outputs
+    def _call(self, name, fn):
+        name = self._map(name)
+        if self.alias is not None and name == self.alias or self._shared(name):
+            with self.manager._lock:
+                return fn(self.manager.devices[name])
+        return fn(self.device(name))
+
+    def set_output(self, device: str, channel: str, value: float, max_s: float | None = None):
+        self._call(device, lambda d: d.set_output(channel, value, max_s=max_s))
+
+    def pulse_train(self, device, channel, period_s, width_s, count) -> bool:
+        return self._call(device, lambda d: d.pulse_train(channel, period_s, width_s, count))
+
+    def stop_train(self, device, channel) -> bool:
+        return self._call(device, lambda d: d.stop_train(channel))
+
+    def send(self, device: str, text: str) -> bool:
+        return self._call(device, lambda d: d.send(text)) if self.has(device) else False
+
+    def audio(self, device: str, cmd: str, **kw) -> bool:
+        return self._call(device, lambda d: d.audio(cmd, **kw)) if self.has(device) else False
+
+    def set_input(self, device: str, channel: str, value: float):
+        name = self._map(device)
+        if self.alias is not None and name == self.alias:
+            self.manager.set_input(name, channel, value)
+            return
+        d = self.device(name)
+        if isinstance(d, VirtualDevice):
+            d.set_input(channel, value)
+
+    # -- inputs
+    def read_inputs_ex(self) -> list[tuple]:
+        out = self.manager.read_inputs_ex(self._sub) if not self._released else []
+        for d in list(self.devices.values()):
+            out += [(d.name, ch, d.kind(ch) or "input", v, ms) for ch, v, ms in d.poll_ex()]
+        return out
+
+    def read_inputs(self) -> list[tuple[str, str, str, float]]:
+        return [c[:4] for c in self.read_inputs_ex()]
+
+    def all_off(self):
+        for d in self._own():
+            if d.name == self.alias:
+                with self.manager._lock:
+                    d.all_off()
+            else:
+                d.all_off()
+
+    def release(self):
+        """The test is over: its box's outputs off, stop receiving input changes (the manager stays open)."""
+        if self._released:
+            return
+        self._released = True
+        try:
+            self.all_off()
+        except Exception:  # pragma: no cover - hardware dependent
+            pass
+        self.manager.unsubscribe(self._sub)
+
+    close = release
 
 
 # ======================================================================================== measures

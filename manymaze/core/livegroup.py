@@ -4,7 +4,10 @@ start / stop keys and scheduled starts at a clock time."""
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import datetime as _dt
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,7 +18,7 @@ import cv2
 import numpy as np
 
 from .camera import FramePacer, SourceSpec
-from .live import LiveSession, ObservationSession
+from .live import AUTOSAVE_SUFFIX, LiveSession, ObservationSession, read_autosave
 from .tracking import draw_overlay, median_background
 
 DEFAULT_START_KEYS = ["Space", "PageDown", "F5"]
@@ -488,6 +491,11 @@ def save_live_test(project, test, session, record_path: str | None = None) -> bo
     rv = session.result_variables
     if rv:
         test.result_variables = {**test.result_variables, **rv}
+    kept = getattr(session, "kept_variables", None)
+    if kept:  # procedure variables kept between tests: only from tests that are saved
+        if getattr(project, "variables", None) is None:
+            project.variables = {}
+        project.variables.update(copy.deepcopy(kept))
     test.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
     try:
         from .workflow import refresh_status
@@ -503,4 +511,137 @@ def save_live_test(project, test, session, record_path: str | None = None) -> bo
                                             for p in session.pause_log))
     if notes:
         test.notes = (test.notes + "\n" + "\n".join(notes)).strip()
+    remove = getattr(session, "remove_autosave", None)
+    if remove is not None:
+        remove()
     return True
+
+
+# ====================================================================== I/O devices of simultaneous tests
+SHARED_DEVICE_TYPES = ("audio",)
+
+
+def device_plan(configs, choice: str, others) -> tuple[str | None, str]:
+    """Which I/O devices a test may use when several tests run at once.
+
+    configs: ``Project.io_devices``; choice: the test panel's Device choice ("" automatic, "-" none / simulated,
+    or a device name); others: what the tests already running use ("*" = all devices, "-" or a device name).
+    Returns (plan, "") with plan "*" (the whole device manager: the only test, as in one-test mode), "-" (no
+    hardware) or a device name (a :class:`iodevices.DeviceView` of that box), or (None, message) when the tests
+    would share a box's inputs and outputs."""
+    boxes = [str(c.get("name")) for c in configs or [] if c.get("enabled", True)
+             and c.get("type", "virtual") not in SHARED_DEVICE_TYPES]
+    others = [o for o in others or [] if o]
+    choice = (choice or "").strip()
+    if choice == "-":
+        return "-", ""
+    if not boxes:
+        return "*", ""  # nothing that tests could share (no devices, or only the computer's speakers)
+    if "*" in others:
+        return None, ("Another test is running with all the I/O devices. Choose a Device for each test panel so "
+                      "that every box has its own inputs and outputs.")
+    if not choice:
+        if not others:
+            return "*", ""
+        return None, ("Several tests are running at once: choose an I/O Device for each test panel (in the panel "
+                      "settings) so that the tests do not share levers, outputs or shocks.")
+    if choice not in boxes:
+        return None, f"The I/O device '{choice}' is not configured (Experiment › I/O devices)."
+    if choice in others:
+        return None, f"The I/O device '{choice}' is already used by another running test."
+    return choice, ""
+
+
+# ====================================================================== crash recovery
+def autosave_path_for(project, test) -> str:
+    """The crash-recovery side file of a live test (in the recordings folder)."""
+    safe = re.sub(r"[^\w.-]+", "_", getattr(test, "animal_id", "") or "animal")
+    return str(project.recordings_dir() / f"test_{test.id:04d}_{safe}{AUTOSAVE_SUFFIX}")
+
+
+class _RecoveredSession:
+    """A live session rebuilt from its autosave side file (enough for :func:`save_live_test`)."""
+
+    def __init__(self, d: dict):
+        from .tracking import DetectionSettings
+
+        self.d = d
+        self.fps = float(d.get("fps") or 25.0)
+        self.duration_s = float(d.get("duration_s") or 0.0)
+        names = {f.name for f in dataclasses.fields(DetectionSettings)}
+        self.settings = DetectionSettings(**{k: v for k, v in (d.get("settings") or {}).items() if k in names})
+        self.cols = {k: list(v) for k, v in (d.get("cols") or {}).items()}
+        self.events = [dict(e) for e in d.get("events") or []]
+        t_end = round(self.elapsed, 3)
+        open_states = set(d.get("open_states") or [])
+        for e in self.events:  # state events still open at the crash end at the last autosave
+            if e.get("t_end") is None and e.get("behaviour") in open_states:
+                e["t_end"] = t_end
+        self.pauses = [list(p) for p in d.get("pauses") or []]
+        self.pause_log = [dict(p) for p in d.get("pause_log") or []]
+        self.io_events = [dict(e) for e in d.get("io_events") or []]
+        self.result_variables = dict(d.get("result_variables") or {})
+        self.outputs = None
+
+    @property
+    def elapsed(self) -> float:
+        t = self.cols.get("t") or []
+        return float(t[-1]) if t else 0.0
+
+    def track(self):
+        from .track import Track
+        from .tracking import postprocess
+
+        cols = {}
+        for c, v in self.cols.items():
+            a = np.asarray([np.nan if x is None else x for x in v], dtype=bool if c == "detected" else float)
+            cols[c] = a
+        tr = Track(**cols, fps=self.fps)
+        tr.meta["source"] = "live"
+        tr.meta["recovered"] = True
+        return postprocess(tr, self.settings)
+
+
+def recover_autosaves(project) -> list:
+    """Tests interrupted by a crash: rebuild them from the autosave side files left in the recordings folder.
+    Each recovered test gets the track, events, pauses and I/O log written up to the last autosave (and its
+    recording, playable up to the last fragment). Returns the recovered tests; the side files are deleted."""
+    if project is None or getattr(project, "path", None) is None:
+        return []
+    folder = Path(project.path) / "recordings"
+    if not folder.is_dir():
+        return []
+    out = []
+    for f in sorted(folder.glob(f"*{AUTOSAVE_SUFFIX}")):
+        try:
+            d = read_autosave(str(f))
+        except Exception:
+            continue
+        s = _RecoveredSession(d)
+        if not s.cols.get("t"):
+            f.unlink(missing_ok=True)
+            continue
+        m = d.get("meta") or {}
+        test = project.get_test(m["test_id"]) if m.get("test_id") is not None else None
+        if test is not None and (getattr(test, "recorded_at", "") or "") >= str(d.get("saved_at") or "~"):
+            f.unlink(missing_ok=True)  # stale: the test was saved after this side file was written
+            continue
+        if test is None:
+            animal = str(m.get("animal") or "")
+            if animal and project.get_animal(animal) is None:
+                project.ensure_animal(animal)
+            test = project.add_test("", animal, str(m.get("apparatus") or ""), stage=str(m.get("stage") or ""),
+                                    trial=int(m.get("trial") or 1))
+        rec = d.get("record_path")
+        try:
+            ok = save_live_test(project, test, s, rec if rec and Path(rec).exists() else None)
+        except Exception:
+            ok = False
+        if not ok:
+            continue
+        when = d.get("saved_at", "")
+        test.notes = (test.notes + "\n" + f"Recovered after the live test was interrupted (data up to "
+                      f"{s.elapsed:.1f} s, saved {when}).").strip()
+        f.unlink(missing_ok=True)
+        out.append(test)
+    return out
