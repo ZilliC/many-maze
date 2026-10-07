@@ -264,16 +264,34 @@ class FrameReader:
                     return
                 yield i, (cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if self.gray else f)
                 i += 1
+        elif self.backend != "pyav":
+            # VideoToolbox opens streams it can't decode (e.g. H.264 High 4:4:4) and only fails on the
+            # first packet; allow_software_fallback doesn't catch that, so reopen in software
+            frames = self._decode()
+            try:
+                first = next(frames)
+            except StopIteration:
+                return
+            except Exception:
+                self._container.close()
+                self._open_av(_av(), hwaccel=False)
+                yield from self._decode()
+                return
+            yield first
+            yield from frames
         else:
-            expected = None
-            for frame in self._container.decode(self._stream):
-                i = self._index(frame, expected if expected is not None else self.start)
-                if expected is not None and i < expected:  # duplicate / out-of-order timestamps
-                    i = expected
-                expected = i + 1
-                if i < self.start:
-                    continue
-                yield i, self._to_array(frame)
+            yield from self._decode()
+
+    def _decode(self):
+        expected = None
+        for frame in self._container.decode(self._stream):
+            i = self._index(frame, expected if expected is not None else self.start)
+            if expected is not None and i < expected:  # duplicate / out-of-order timestamps
+                i = expected
+            expected = i + 1
+            if i < self.start:
+                continue
+            yield i, self._to_array(frame)
 
     def close(self):
         if self._container is not None:

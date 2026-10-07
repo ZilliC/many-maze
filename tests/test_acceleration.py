@@ -11,7 +11,7 @@ from manymaze.core.batch import default_workers, track_tests, tracking_batches
 from manymaze.core.demo import create_demo_project
 from manymaze.core.synthetic import line_path, make_video
 from manymaze.core.tracking import ArenaJob, ArenaTracker, DetectionSettings, track_video
-from manymaze.core.video import FrameReader, VideoRecorder, VideoSource
+from manymaze.core.video import FrameReader, VideoRecorder, VideoSource, hw_decoder_name
 from test_pose import _tiny_meta, _tiny_state_dict, _write_torch_zip
 
 
@@ -55,6 +55,23 @@ def test_frame_reader_matches_opencv(mp4, start):
     with FrameReader(mp4, start=start, gray=False) as r:
         i, f = next(iter(r))
         assert i == start and f.shape == (240, 320, 3)
+
+
+@pytest.mark.parametrize("start", [0, 7])
+def test_frame_reader_falls_back_when_hardware_decoding_fails(mp4, start, monkeypatch):
+    # VideoToolbox opens some streams (e.g. old H.264 High 4:4:4) and then fails on the first packet
+    if hw_decoder_name() is None:
+        pytest.skip("no hardware decoder")
+    real = FrameReader._decode
+
+    def failing(self):
+        if self.backend != "pyav":
+            raise RuntimeError("avcodec_send_packet()")
+        yield from real(self)
+    monkeypatch.setattr(FrameReader, "_decode", failing)
+    with FrameReader(mp4, start=start) as r:
+        assert [i for i, _ in r] == list(range(start, 50))
+        assert r.backend == "pyav"
 
 
 def test_frame_reader_opencv_fallback(clip, monkeypatch):
