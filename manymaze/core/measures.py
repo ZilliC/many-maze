@@ -22,6 +22,7 @@ import numpy as np
 
 from .apparatus import Apparatus
 from .geometry import body_fraction_inside, segments_intersect
+from .iomeasures import io_measures
 from .track import Track
 
 
@@ -959,7 +960,10 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
 
     # ---- I/O and procedure variables -----------------------------------------
     if P.io_events:
-        res.update(_io_measures(P.io_events, T, (t0, t0 + T), io_devices))
+        try:
+            res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices))
+        except Exception:  # a malformed I/O log must not prevent the other measures
+            pass
     if result_variables:
         for name, v in result_variables.items():
             try:
@@ -1006,25 +1010,6 @@ def _point_arrays(P: _Prepared, p) -> dict:
         diff = _angle_diff(np.arctan2(p.y - hyf, p.x - hxf), np.radians(ffill(tr.angle)))
         out["head_towards"] = diff <= s.exploration_facing_deg
     return out
-
-
-def _io_measures(io_events: list, duration: float, t_range, devices=None) -> dict:
-    """I/O measures from the procedures/I/O module (skipped if it is not available)."""
-    fn = None
-    for mod in ("procedures", "iodevices"):
-        try:
-            m = __import__(f"{__package__}.{mod}", fromlist=["io_measures"])
-            fn = getattr(m, "io_measures", None)
-        except Exception:
-            fn = None
-        if fn is not None:
-            break
-    if fn is None:
-        return {}
-    try:
-        return dict(fn(io_events, duration, t_range, devices) if devices else fn(io_events, duration, t_range))
-    except Exception:
-        return {}
 
 
 def grid_measures(g, memb: dict, t: np.ndarray, dur: np.ndarray, t0: float, T: float,

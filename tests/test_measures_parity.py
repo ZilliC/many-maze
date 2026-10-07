@@ -452,21 +452,20 @@ def test_behaviours_per_zone_and_hold_keys():
 
 
 def test_result_variables_and_io_measures(monkeypatch):
-    import manymaze.core.procedures as procs
+    import manymaze.core.measures as measures
 
     calls = []
 
-    def fake(io_events, duration, t_range):
+    def fake(io_events, duration, t_range, devices=None):
         calls.append((len(io_events), duration, t_range))
         return {"lever: presses": 2}
 
-    monkeypatch.setattr(procs, "io_measures", fake, raising=False)
+    monkeypatch.setattr(measures, "io_measures", fake)
     app = box_app()
     tr = make_track(line((50, 50), (300, 300), 100), head=False)
     io = [{"t": 1.0, "device": "v", "channel": "lever", "kind": "input", "value": 1}]
     res = analyse(tr, app, S, io_events=io, result_variables={"Rewards": 3, "Label": "x"})
     assert res["lever: presses"] == 2 and calls[0][1] == pytest.approx(4.0)
     assert res["Variable: Rewards"] == 3.0 and res["Variable: Label"] == "x"
-    monkeypatch.delattr(procs, "io_measures")
-    res = analyse(tr, app, S, io_events=io)
-    assert "lever: presses" not in res
+    res = analyse(tr, app, S)
+    assert "lever: presses" not in res and len(calls) == 1
