@@ -116,7 +116,6 @@ def test_live_session_with_procedures(tmp_path, of_video):
     sess = LiveSession(app, DetectionSettings(background="adaptive"), duration_s=4, start_mode="on_detection",
                        procedures=rules, record_path=str(rec))
     with VideoSource(path) as v:
-        bg = None
         while sess.state != "finished":
             ok, f = v.read()
             if not ok:

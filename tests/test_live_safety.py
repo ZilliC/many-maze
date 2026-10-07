@@ -8,9 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pytest
 
-from manymaze.core import iodevices as io
 from manymaze.core import synthetic as syn
 from manymaze.core import templates
 from manymaze.core.autosave import recover as recover_autosaves

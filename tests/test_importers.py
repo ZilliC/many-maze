@@ -72,7 +72,7 @@ def test_import_wizard(tmp_path, monkeypatch):
     from manymaze.gui.import_wizard import ImportDialog
     from manymaze.gui.main_window import MainWindow
 
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     p = create_demo_project(tmp_path / "d.mmaze", n_per_group=1, seconds=3)
     f = tmp_path / "animals.csv"
     f.write_text("Animal ID,Treatment,Sex,Animal weight\nZ1,Saline,Male,21\nZ2,Drug,Female,19\n")

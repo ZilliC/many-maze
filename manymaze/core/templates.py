@@ -352,7 +352,7 @@ def fear_conditioning(x, y, w, h, width_cm=30.0) -> Apparatus:
 
 def forced_swim(x, y, w, h, diameter_cm=20.0) -> Apparatus:
     app = Apparatus(name="Forced swim / tail suspension", template="forced_swim")
-    cx, cy, r = x + w / 2, y + h / 2, min(w, h) / 2
+    cx, cy = x + w / 2, y + h / 2
     app.arena = Ellipse(cx, cy, w / 2, h / 2)
     app.zones.append(Zone("Cylinder", Ellipse(cx, cy, w / 2, h / 2), "#64748b"))
     _calibrate_width(app, w, diameter_cm)

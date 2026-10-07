@@ -4,7 +4,7 @@ properties, select all / delete selection, points attract and label decluttering
 import shutil
 
 import pytest
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QMessageBox, QToolBar
 

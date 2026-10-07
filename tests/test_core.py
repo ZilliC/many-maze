@@ -6,7 +6,7 @@ import pytest
 from manymaze.core import synthetic as syn
 from manymaze.core import templates
 from manymaze.core.apparatus import Apparatus, Line, PointOfInterest, Zone, ZoneGroup
-from manymaze.core.geometry import Ellipse, Polygon, circle, rect, segments_intersect, shape_from_dict
+from manymaze.core.geometry import circle, rect, segments_intersect, shape_from_dict
 from manymaze.core.measures import AnalysisSettings, analyse, analyse_segmented, count_rotations, runs
 from manymaze.core.procedures import ProcedureEngine
 from manymaze.core.stats import compare_groups, two_way_anova
