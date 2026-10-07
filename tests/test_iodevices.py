@@ -201,3 +201,14 @@ def test_io_measures():
     assert m["pellet: times on"] == 0 and m["pellet: latency to first on (s)"] == 3.0
     assert m["wheel: encoder counts"] == 0 and m["force: mean"] == 40
     assert io_measures([], 10) == {}
+
+
+def test_new_device_free_pin_and_watchdog_default():
+    assert io.new_device("arduino", ["box"]) == {"name": "box2", "type": "arduino", "enabled": True, "channels": [],
+                                                 "port": "", "baud": 115200}
+    assert io.new_device("audio")["backend"] == "auto" and io.new_device("virtual")["name"] == "sim"
+    cfg = {"channels": [{"name": "a", "pin": 2}, {"name": "b", "pin": "3"}, {"name": "c", "kind": "analog"}]}
+    assert io.next_free_pin(cfg) == 4
+    assert io.watchdog_ms(cfg) == 0  # no outputs: off unless set
+    cfg["channels"].append({"name": "led", "kind": "output", "pin": 13})
+    assert io.watchdog_ms(cfg) == io.DEFAULT_WATCHDOG_MS and io.watchdog_ms({**cfg, "watchdog_ms": 0}) == 0

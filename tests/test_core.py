@@ -303,6 +303,45 @@ def test_remove_grid_drops_sequence_steps():
     assert remove_grid(app, "G") and app.sequences[0].steps == ["Centre"]
 
 
+def test_procedure_edit_operations():
+    from manymaze.core.procedures import edit as pe, new_procedure, new_statement
+
+    def types(stmts):
+        return [s["type"] for s in stmts]
+
+    p = new_procedure()
+    assert pe.add(p, None, new_statement("when")) == (0,)
+    assert pe.add(p, (0,), new_statement("if"), inside=True) == (0, "body", 0)
+    assert pe.add(p, (0, "body", 0), new_statement("set"), inside=True) == (0, "body", 0, "body", 0)
+    assert pe.add(p, (0, "body", 0, "body", 0), new_statement("do"), inside=True) is None  # not a container
+    p["statements"][0]["body"][0]["else"] = []
+    assert pe.add(p, (0, "body", 0, "else"), new_statement("stop")) == (0, "body", 0, "else", 0)
+    assert pe.add(p, (0,), new_statement("wait")) == (1,)
+    assert pe.add(p, (1,), new_statement("repeat")) == (2,)
+    assert pe.add(p, (2,), new_statement("comment")) == (3,)
+    st = p["statements"]
+    assert types(st) == ["when", "wait", "repeat", "comment"]
+    # indent into the repeat above, outdent back out, move, duplicate, toggle, remove
+    assert pe.indent(p, (3,)) == (2, "body", 0) and types(st) == ["when", "wait", "repeat"]
+    assert pe.indent(p, (1,)) == (0, "body", 1) and types(st[0]["body"]) == ["if", "wait"]
+    assert pe.indent(p, (0, "body", 1)) == (0, "body", 0, "else", 1)  # into the If's Else branch
+    assert pe.outdent(p, (0, "body", 0, "else", 1)) == (0, "body", 1)
+    assert pe.outdent(p, (0,)) is None and pe.move(p, (0,), -1) is None
+    assert pe.move(p, (0, "body", 1), -1) == (0, "body", 0) and types(st[0]["body"]) == ["wait", "if"]
+    assert pe.duplicate(p, (1,)) == (2,) and types(st) == ["when", "repeat", "repeat"]
+    assert pe.toggle(p, (2,)) == (2,) and st[2]["enabled"] is False
+    assert pe.toggle(p, (2,)) == (2,) and "enabled" not in st[2]
+    assert pe.remove(p, (2,)) == (1,) and pe.remove(p, (1, "body", 0)) == (1,)
+    assert pe.remove(p, (0, "body", 1, "else")) == (0, "body", 1) and "else" not in st[0]["body"][1]
+    # drag and drop: the destination is resolved before the statement leaves its place
+    pe.add(p, (1,), new_statement("var"))
+    assert types(st) == ["when", "repeat", "var"]
+    assert pe.move_to(p, (0,), (1, "body"), 0) == (0, "body", 0)
+    assert types(st) == ["repeat", "var"] and types(st[0]["body"]) == ["when"]
+    assert pe.move_to(p, (0, "body", 0), (), 2) == (2,) and types(st) == ["repeat", "var", "when"]
+    assert pe.remove(p, (0,)) == (0,) and pe.remove(p, (0,)) == (0,) and pe.remove(p, (0,)) == ()
+
+
 def test_project_rename_moves_zone_overrides():
     from manymaze.core.project import Project
 

@@ -44,6 +44,17 @@ def fmt_time(t: float) -> str:
     return f"{int(m):02d}:{s:05.2f}"
 
 
+def value_text(v) -> str:
+    """A value as an editor shows it: "" for None, 1 / 0 for booleans, whole floats without ".0"."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v)) if abs(v) < 1e15 else str(v)
+    return str(v)
+
+
 def error_box(parent, title: str, exc: BaseException | str):
     msg = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
     QMessageBox.critical(parent, title, msg)

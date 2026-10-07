@@ -611,12 +611,12 @@ class ExperimentPage(Page):
     def edit_io_devices(self):
         if self.project is None:
             return None
-        from ..procedure_editor import IODevicesDialog
+        from ..io_devices_dialog import IODevicesDialog
         dlg = IODevicesDialog(self.project, self)
         dlg.changed.connect(self.main.mark_dirty)
         dlg.exec()
         self._update_hardware()
-        self.proc_editor.set_context(None)
+        self.proc_editor.validate()  # the devices changed
         return dlg
 
     def edit_touchscreen(self):

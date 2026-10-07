@@ -13,7 +13,8 @@ from manymaze.core.workflow import key_mode, mode_to_kind
 from manymaze.gui.main_window import MainWindow
 from manymaze.gui.pages.base import DETECTION_SECTIONS, DETECTION_SPEC, SettingsForm
 from manymaze.gui.pages.experiment import ELEMENTS
-from manymaze.gui.procedure_editor import ELSE, TYPE_ROLE, ProcedureEditor, block_parts
+from manymaze.gui.procedure_editor import ProcedureEditor
+from manymaze.gui.statement_tree import ELSE, TYPE_ROLE, block_parts
 from shots import shot_path
 
 app = QApplication.instance() or QApplication([])

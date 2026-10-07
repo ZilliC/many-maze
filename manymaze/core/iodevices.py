@@ -67,6 +67,35 @@ CHANNEL_KINDS = {
 INPUT_KINDS = ("input", "analog", "encoder")
 OUTPUT_KINDS = ("output", "pwm")
 FIRMWARE_ID = "MANYMAZE_IO"
+AUDIO_BACKENDS = ("auto", "none", "afplay", "paplay", "aplay")
+
+# configuration fields of each device type (besides name, type, enabled and channels), with the defaults of a new
+# device, and the channel fields it uses (besides name, kind and driver options such as pullup or debounce_ms)
+DEVICE_FIELDS = {
+    "virtual": {},
+    "arduino": {"port": "", "baud": 115200, "watchdog_ms": None},  # None: not stored, see watchdog_ms()
+    "serial": {"port": "", "baud": 9600},
+    "audio": {"backend": "auto"},
+}
+CHANNEL_FIELDS = {"virtual": (), "arduino": ("pin", "pin_b", "invert"), "serial": ("on", "off"), "audio": ()}
+_NAME_BASES = {"virtual": "sim", "arduino": "box", "serial": "serial", "audio": "speakers"}
+
+
+def new_device(type_: str, taken=()) -> dict:
+    """Configuration of a new device of a type, named "sim", "box", "serial" or "speakers" (with a number if the
+    name is taken)."""
+    base = _NAME_BASES[type_]
+    name, k = base, 2
+    while name in set(taken):
+        name, k = f"{base}{k}", k + 1
+    fields = {f: v for f, v in DEVICE_FIELDS[type_].items() if v is not None}
+    return {"name": name, "type": type_, "enabled": True, "channels": [], **fields}
+
+
+def next_free_pin(cfg: dict, first: int = 2, last: int = 69) -> int:
+    """The lowest digital pin no channel of a board uses (pins 0 and 1 are the Arduino's serial port)."""
+    used = {int(c["pin"]) for c in cfg.get("channels", []) if str(c.get("pin", "")).isdigit()}
+    return next(p for p in range(first, last + 1) if p not in used)
 
 
 def serial_ports() -> list[str] | None:
