@@ -709,8 +709,7 @@ class StatisticsPage(Page):
         for lbl in self._headlines:
             if lbl is not None:
                 lbl.setText("")
-        for t in (self.desc_table, self.assume_table, self.posthoc_table, self.anova_table, self.grp_table,
-                  self.cat_table):
+        for t in (t for ts in self._tables for t in ts):
             _fill(t, [])
         self.summary_box.setPlainText("")
         for h in self._heads + self._subheads:
