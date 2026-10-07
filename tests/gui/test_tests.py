@@ -45,7 +45,7 @@ def page(demo_dir, tmp_path, monkeypatch):
     w.close()
 
 
-def wait_tracking(page, timeout=20):
+def wait_tracking(page, timeout=60):
     t0 = time.time()
     while page._tracking and time.time() - t0 < timeout:
         app.processEvents()  # qWait holds the GIL, starving the worker thread

@@ -394,14 +394,28 @@ class _WorkerSignals(QObject):
 class Worker(QThread):
     """Run fn(progress_cb, should_stop) in a thread. Connect .signals.done / .failed / .progress."""
 
+    running: set["Worker"] = set()  # started and not finished: kept alive here, stopped when the window closes
+
     def __init__(self, fn: Callable, parent=None):
         super().__init__(parent)
         self.fn = fn
         self.signals = _WorkerSignals()
         self._stop = False
 
+    def start(self, *a):
+        Worker.running.add(self)
+        super().start(*a)
+
     def stop(self):
         self._stop = True
+
+    @classmethod
+    def stop_all(cls, ms: int = 30000):
+        """Ask every running worker to stop and wait for it (Qt aborts if a running QThread is destroyed)."""
+        for w in list(cls.running):
+            w.stop()
+        for w in list(cls.running):
+            w.wait(ms)
 
     def run(self):
         try:
@@ -410,6 +424,8 @@ class Worker(QThread):
         except Exception as e:  # pragma: no cover - surfaced to UI
             traceback.print_exc()
             self.signals.failed.emit(f"{type(e).__name__}: {e}")
+        finally:
+            Worker.running.discard(self)
 
 
 def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callable | None = None,
@@ -441,10 +457,6 @@ def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callab
     w.signals.done.connect(finished)
     w.signals.failed.connect(failed)
     w.finished.connect(w.deleteLater)
-    if not hasattr(parent, "_workers"):
-        parent._workers = []
-    parent._workers.append(w)
-    w.finished.connect(lambda: parent._workers.remove(w) if w in parent._workers else None)
     w.start()
     dlg.show()
     return w

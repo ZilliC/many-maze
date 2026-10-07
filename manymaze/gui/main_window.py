@@ -22,7 +22,7 @@ from ..core.templates import TEMPLATES
 from . import theme
 from .icons import icon
 from .ribbon import Ribbon
-from .widgets import error_box, run_with_progress
+from .widgets import Worker, error_box, run_with_progress
 
 # (module, class) of every page
 PAGES = [
@@ -773,6 +773,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.maybe_save():
             self._for_pages("shutdown")
+            Worker.stop_all()
             e.accept()
         else:
             e.ignore()

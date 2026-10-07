@@ -22,3 +22,23 @@ def test_file_open_event(tmp_path):
         app.removeEventFilter(f)
         w.dirty = False
         w.close()
+
+
+def test_closing_the_window_stops_background_work():
+    # Qt aborts the process if a running QThread is destroyed with its window
+    import time
+
+    from manymaze.gui.widgets import Worker
+
+    w = MainWindow()
+
+    def work(progress, should_stop):
+        while not should_stop():
+            time.sleep(0.01)
+
+    job = Worker(work, w)
+    job.start()
+    assert job in Worker.running
+    w.dirty = False
+    w.close()
+    assert job.isFinished() and job not in Worker.running
