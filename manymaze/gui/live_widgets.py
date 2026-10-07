@@ -20,6 +20,7 @@ from ..core.camera import CameraView, merge_frames
 from ..core.live import LiveStats
 from . import theme
 from .icons import icon
+from .scoring_pad import ScoringPad
 from .widgets import FrameView, cv_to_qpixmap, fmt_time, shape_path
 
 
@@ -1257,13 +1258,8 @@ class ObservationPanel(QFrame):
         kt = QLabel("Keys")
         kt.setObjectName("SectionTitle")
         left.addWidget(kt)
-        try:  # the scoring pad of the test viewer (mouse / touch-screen scoring)
-            from .pages.testview import ScoringPad
-            self.pad = ScoringPad()
-        except Exception:  # pragma: no cover - fallback if the test viewer changes
-            self.pad = None
-        if self.pad is not None:
-            left.addWidget(self.pad)
+        self.pad = ScoringPad()  # mouse / touch-screen scoring
+        left.addWidget(self.pad)
         self.keys = QLabel()
         self.keys.setWordWrap(True)
         self.keys.setObjectName("Hint")
@@ -1279,6 +1275,7 @@ class ObservationPanel(QFrame):
         body.addLayout(right, 2)
         v.addLayout(body, 1)
         self._pill = None
+        self._sig = None
         self._set_pill("idle")
 
     def set_title(self, text: str):
@@ -1305,8 +1302,7 @@ class ObservationPanel(QFrame):
             self.pause_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
             self._set_pill("idle")
-            if self.pad is not None:
-                self.pad.set_active([])
+            self.pad.set_active([])
             return
         el = session.elapsed
         self.clock.setText(fmt_time(el))
@@ -1320,10 +1316,9 @@ class ObservationPanel(QFrame):
         self.start_btn.setEnabled(st in ("waiting", "paused"))
         self.pause_btn.setEnabled(st == "running")
         self.stop_btn.setEnabled(st in ("running", "paused", "waiting"))
-        if self.pad is not None:
-            self.pad.set_active(list(session.open_states))
+        self.pad.set_active(list(session.open_states))
         sig = (len(session.events), sum(1 for e in session.events if e.get("t_end") is not None))
-        if sig != getattr(self, "_sig", None):
+        if sig != self._sig:
             self._sig = sig
             self.events.clear()
             for e in session.events:

@@ -33,10 +33,12 @@ from ...core.procedures import Outputs
 from ...core.session import finish_live_test
 from ...core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras
+from ..confirm_id import confirm_animal_id
 from ..icons import icon
 from ..live_widgets import (LAYOUT_LABELS, LAYOUTS, CameraOptionsDialog, MonitorPanel, ObservationPanel,
                             PanelGrid, PanelSettingsDialog, TestPanel, short_time)
 from ..procedure_editor import ProcedureEditor
+from ..scoring_pad import ScoringPad
 from ..widgets import Worker, cv_to_qpixmap, error_box, fmt_time
 from .base import Page
 
@@ -209,9 +211,8 @@ class LivePage(Page):
         self.obs_panel.pause_clicked.connect(self.obs_pause)
         self.obs_panel.stop_clicked.connect(lambda: self.obs_stop(save=True))
         self.obs_panel.undo_clicked.connect(lambda: self.undo_last_event(self.obs))
-        if self.obs_panel.pad is not None:
-            self.obs_panel.pad.pressed.connect(lambda n: self._pad(n, True))
-            self.obs_panel.pad.released.connect(lambda n: self._pad(n, False))
+        self.obs_panel.pad.pressed.connect(lambda n: self._pad(n, True))
+        self.obs_panel.pad.released.connect(lambda n: self._pad(n, False))
         self.left_stack.addWidget(self.obs_panel)
 
         # ---- the report: a collapsible side panel (ribbon: View ▸ Hide report)
@@ -567,10 +568,9 @@ class LivePage(Page):
         p.menu.addAction(self.panel_settings_act)
         p.view.set_message("Choose a camera — or a video file that simulates one — in Setup, then press ▶ to "
                            "start the test, or turn on the camera image to preview it.")
-        self.score_pad = _scoring_pad()
-        if self.score_pad is not None:
-            self.score_pad.pressed.connect(lambda n: self._pad(n, True))
-            self.score_pad.released.connect(lambda n: self._pad(n, False))
+        self.score_pad = ScoringPad()
+        self.score_pad.pressed.connect(lambda n: self._pad(n, True))
+        self.score_pad.released.connect(lambda n: self._pad(n, False))
         self.keys_lbl = QLabel()
         self.keys_lbl.setObjectName("Hint")
         self.keys_lbl.setWordWrap(True)
@@ -579,8 +579,7 @@ class LivePage(Page):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
         v.addWidget(p, 1)
-        if self.score_pad is not None:
-            v.addWidget(self.score_pad)
+        v.addWidget(self.score_pad)
         v.addWidget(self.keys_lbl)
         return w
 
@@ -991,10 +990,8 @@ class LivePage(Page):
         if sig != self._pad_sig:
             self._pad_sig = sig
             for pad in (self.obs_panel.pad, self.score_pad):
-                if pad is not None:
-                    pad.set_behaviours(p.behaviours)
-        if self.score_pad is not None:
-            self.score_pad.setVisible(bool(p.behaviours))
+                pad.set_behaviours(p.behaviours)
+        self.score_pad.setVisible(bool(p.behaviours))
         self._update_keys_label()
         self._update_single_title()
         self._update_buttons()
@@ -1643,7 +1640,7 @@ class LivePage(Page):
             return False
         self.test = test
         self._new_test = new
-        if not _confirm_id(self, test):
+        if not confirm_animal_id(self, test):
             self._discard_new_test()
             return False
         if self.grabber is None and not self.start_preview():
@@ -2310,7 +2307,7 @@ class LivePage(Page):
                          and t.stage == m.get("stage", "") and t.trial == m.get("trial", 1)), None)
             test = pend or p.add_test("", m["animal"], app.name, stage=m.get("stage", ""), trial=m.get("trial", 1))
             m["new_test"] = pend is None
-        if not _confirm_id(self, test):
+        if not confirm_animal_id(self, test):
             if m.get("new_test") and test in p.tests:
                 p.tests.remove(test)
             return False
@@ -2518,7 +2515,7 @@ class LivePage(Page):
         test, new = self._prepare_test(need_apparatus=False)
         if test is None:
             return False
-        if not _confirm_id(self, test):
+        if not confirm_animal_id(self, test):
             if new and test in self.project.tests:
                 self.project.tests.remove(test)
             return False
@@ -2580,7 +2577,7 @@ class LivePage(Page):
             self._update_single_title()
             if self.obs.state == "finished":
                 self.obs_stop(save=True)
-        if self.score_pad is not None and self.mode == "single":
+        if self.mode == "single":
             self.score_pad.set_active(list(self.session.open_states) if self.session is not None else [])
         s = self.session
         if s is not None and self.mode == "single" and self.single_panel.stack.currentIndex() == 2:
@@ -2929,23 +2926,6 @@ class LivePage(Page):
         self.camera_act.setEnabled(has and cams and single_free)
         self.next_test_act.setEnabled(has and mode != "multi" and not armed and (o is None or o.state == "finished"))
         self.obs_panel.show_session(self.obs, self.obs.duration_s if self.obs else 0.0)
-
-
-def _scoring_pad():
-    try:  # on-screen scoring buttons of the test viewer (mouse / touch screen)
-        from .testview import ScoringPad
-        return ScoringPad()
-    except Exception:  # pragma: no cover
-        return None
-
-
-def _confirm_id(parent, test) -> bool:
-    """Animal ID confirmation before a test starts (no-op unless the experiment requires it)."""
-    try:
-        from ..confirm_id import confirm_animal_id
-    except Exception:  # pragma: no cover
-        return True
-    return bool(confirm_animal_id(parent, test))
 
 
 def _first_frame(path) -> np.ndarray | None:
