@@ -229,11 +229,11 @@ class SingleTestMixin:
         g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
         g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
         sig = g.signals
-        sig.frame_ready.connect(self._on_frame)
-        sig.opened.connect(self._on_opened)
-        sig.background_ready.connect(self._on_file_background)
-        sig.ended.connect(self._on_source_ended)
-        sig.failed.connect(self._on_grab_failed)
+        for signal, slot in ((sig.frame_ready, self._on_frame), (sig.opened, self._on_opened),
+                             (sig.background_ready, self._on_file_background), (sig.ended, self._on_source_ended),
+                             (sig.failed, self._on_grab_failed)):
+            # queued signals of a grabber already stopped (or replaced) are ignored
+            signal.connect(lambda *a, slot=slot, g=g: slot(*a) if g is self.grabber else None)
         self.grabber = g
         g.start()
         self._update_buttons()
