@@ -15,19 +15,35 @@ import numpy as np
 
 from .. import __version__
 from .project import INACTIVE_STATUSES, Project, result_columns
+from .stats import is_number
 
 XML_FORMAT_VERSION = 1
 
 
-def _fmt(v):
+def value_text(v) -> str:
+    """Full-precision text of a value (exports, clipboard): whole numbers as integers, other numbers with 10
+    significant digits, blank for missing and non-finite values."""
+    if v is None:
+        return ""
     if isinstance(v, (float, np.floating)):
         if not math.isfinite(v):
             return ""
         f = float(v)
         return str(int(f)) if f.is_integer() and abs(f) < 1e15 else f"{f:.10g}"
     if isinstance(v, np.integer):
-        return int(v)
-    return v
+        return str(int(v))
+    return str(v)
+
+
+def display_text(v) -> str:
+    """A value as shown in tables: numbers with 3 decimals (blank if not finite)."""
+    if v is None:
+        return ""
+    if is_number(v):
+        if isinstance(v, (int, np.integer)):
+            return str(int(v))
+        return f"{float(v):.3f}" if math.isfinite(v) else ""
+    return str(v)
 
 
 def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimiter=","):
@@ -36,7 +52,7 @@ def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimite
         w = csv.writer(f, delimiter=delimiter)
         w.writerow(cols)
         for r in rows:
-            w.writerow([_fmt(r.get(c, "")) for c in cols])
+            w.writerow([value_text(r.get(c)) for c in cols])
 
 
 def write_tsv(rows: list[dict], path, columns: list[str] | None = None):
@@ -99,15 +115,45 @@ def write_table(rows: list[dict], path, columns: list[str] | None = None, sheet:
     return path
 
 
-def table_text(rows: list[dict], columns: list[str], delimiter: str = "\t", header: bool = True) -> str:
-    """Rows × columns as delimited text (for the clipboard)."""
+def table_text(rows: list[dict], columns: list[str], delimiter: str = "\t", header: bool = True,
+               fmt=value_text) -> str:
+    """Rows × columns as delimited text (for the clipboard); fmt(value) -> text (default: full precision)."""
     out = []
     if header:
         out.append(delimiter.join(str(c) for c in columns))
     for r in rows:
-        out.append(delimiter.join(str(_fmt(r.get(c, ""))).replace(delimiter, " ").replace("\n", " ")
-                                  for c in columns))
+        out.append(delimiter.join(fmt(r.get(c)).replace(delimiter, " ").replace("\n", " ") for c in columns))
     return "\n".join(out) + "\n"
+
+
+def results_workbook(project: Project, rows: list[dict], columns: list[str] | None = None,
+                     segmented: bool = False) -> tuple[dict[str, list[dict]], dict[str, list[str]]]:
+    """Sheets ({name: rows}) and their columns of a results workbook: whole-test results, time periods (segmented),
+    zone visits of the tests in `rows`, animals, tests and settings (with the software version)."""
+    whole = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
+    sheets, cols = {"Results": whole}, {}
+    main = [c for c in columns or [] if c != "Period"]
+    if main:
+        cols["Results"] = main
+    seg = [r for r in rows if r.get("Period", "Whole test") != "Whole test"] if segmented else []
+    if seg:
+        sheets["Time periods"] = seg
+        if main:
+            cols["Time periods"] = columns if "Period" in columns else main[:1] + ["Period"] + main[1:]
+    ids = {r.get("Test") for r in rows}
+    visits = zone_visit_rows(project, [t for t in project.tests if t.id in ids])
+    if visits:
+        sheets["Zone visits"] = visits
+    sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields} for a in project.animals]
+    sheets["Tests"] = [{"Test": t.id, "Animal": t.animal_id, "Stage": t.stage, "Trial": t.trial, "Video": t.video,
+                        "Apparatus": t.apparatus, "Start (s)": t.start_s, "Status": t.status, "Notes": t.notes}
+                       for t in project.tests]
+    sheets["Settings"] = [{"Setting": k, "Value": str(v)} for k, v in
+                          {**{f"detection.{k}": v for k, v in project.detection.to_dict().items()},
+                           **{f"analysis.{k}": v for k, v in project.analysis.to_dict().items()},
+                           "test_duration_s": project.test_duration_s,
+                           "software": f"mANY-MAZE {__version__}"}.items()]
+    return sheets, cols
 
 
 def export_results(project: Project, path, segmented: bool = False, columns: list[str] | None = None) -> Path:
@@ -116,29 +162,11 @@ def export_results(project: Project, path, segmented: bool = False, columns: lis
     ext = path.suffix.lower()
     if ext == ".xml":
         return export_xml(project, path)
-    rows = project.results(segmented=False)
+    rows = project.results(segmented=segmented)
     if ext == ".xlsx":
-        sheets = {"Results": rows}
-        if segmented:
-            seg = [r for r in project.results(segmented=True) if r.get("Period") != "Whole test"]
-            if seg:
-                sheets["Time periods"] = seg
-        visits = zone_visit_rows(project)
-        if visits:
-            sheets["Zone visits"] = visits
-        sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields} for a in project.animals]
-        sheets["Tests"] = [{"Test": t.id, "Animal": t.animal_id, "Stage": t.stage, "Trial": t.trial,
-                            "Video": t.video, "Apparatus": t.apparatus, "Start (s)": t.start_s,
-                            "Status": t.status, "Notes": t.notes} for t in project.tests]
-        sheets["Settings"] = [{"Setting": k, "Value": str(v)} for k, v in
-                              {**{f"detection.{k}": v for k, v in project.detection.to_dict().items()},
-                               **{f"analysis.{k}": v for k, v in project.analysis.to_dict().items()},
-                               "test_duration_s": project.test_duration_s,
-                               "software": f"mANY-MAZE {__version__}"}.items()]
-        write_xlsx(sheets, path, {"Results": columns} if columns else None)
+        sheets, cols = results_workbook(project, rows, columns, segmented)
+        write_xlsx(sheets, path, cols)
     else:
-        if segmented:
-            rows = project.results(segmented=True)
         write_csv(rows, path, columns, delimiter="\t" if ext in (".tsv", ".txt", ".tab") else ",")
     return path
 
@@ -537,7 +565,7 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
                        f"<pre>{html.escape(a.summary_text)}</pre></div>")
     out.append("<h2>Results</h2><table><tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in cols) + "</tr>")
     for r in rows:
-        out.append("<tr>" + "".join(f"<td>{html.escape(str(_fmt(r.get(c, ''))))}</td>" for c in cols) + "</tr>")
+        out.append("<tr>" + "".join(f"<td>{html.escape(value_text(r.get(c)))}</td>" for c in cols) + "</tr>")
     out.append("</table></body></html>")
     path = Path(path)
     path.write_text("\n".join(out), encoding="utf-8")

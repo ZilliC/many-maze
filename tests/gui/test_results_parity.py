@@ -149,15 +149,15 @@ def test_selection_and_experiment_exports(page, tmp_path, monkeypatch):
     assert lines[0] == "\t".join(cols[c0:c1 + 1]) and len(lines) == 3
     page.copy_to_clipboard()
     assert QApplication.clipboard().text().splitlines()[0] == lines[0]
-    out = page.export_selection(str(tmp_path / "sel.tsv"))
+    out = page.save_table(str(tmp_path / "sel.tsv"), selection=True)
     assert open(out).read().splitlines()[0] == lines[0]
-    page.export_selection(str(tmp_path / "sel.xlsx"))
+    page.save_table(str(tmp_path / "sel.xlsx"), selection=True)
     from openpyxl import load_workbook
 
     assert load_workbook(tmp_path / "sel.xlsx").active.max_row == 3
     # whole table as tab-separated text
     page.table.clearSelection()
-    out = page.export_tsv(str(tmp_path / "all.tsv"))
+    out = page.save_table(str(tmp_path / "all.tsv"))
     with open(out) as f:
         data = list(csv.reader(f, delimiter="\t"))
     assert data[0] == page.shown_columns() and len(data) == 3

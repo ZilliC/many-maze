@@ -9,7 +9,7 @@ Pages contribute contextual groups by implementing ``ribbon_groups()``::
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QStackedWidget, QTabBar,
                                QToolButton, QVBoxLayout, QWidget)
@@ -203,3 +203,58 @@ class Ribbon(QWidget):
         self.panels.setCurrentIndex(i)
         self.panels.setVisible(i != 0)  # the File tab shows a full-page backstage instead of a panel
         self.tab_changed.emit(i)
+
+
+class RibbonHost(QWidget):
+    """Ribbon-group widget showing controls owned by the page (filters, plot options…).
+
+    The ribbon discards its contextual groups whenever the page or view changes; the host then gives the controls
+    back to `home` (a hidden holder of the page) so that they, their state and their connections survive."""
+
+    def __init__(self, home: QWidget):
+        super().__init__()
+        self._home = home
+        self._owned: list[QWidget] = []
+        self._group = None
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(4, 2, 4, 0)
+        self.grid.setHorizontalSpacing(6)
+        self.grid.setVerticalSpacing(5)
+
+    def add_row(self, *items):
+        r = self.grid.rowCount()
+        for c, x in enumerate(items):
+            if isinstance(x, str):
+                lbl = QLabel(x)
+                lbl.setObjectName("RibbonLabel")
+                self.grid.addWidget(lbl, r, c)
+            else:
+                self.grid.addWidget(x, r, c, 1, 2 if len(items) == 1 else 1)
+                self._owned.append(x)
+                x.show()
+        return self
+
+    def event(self, e):
+        if e.type() == QEvent.ParentChange:
+            g = self.parentWidget()
+            if g is not None and g is not self._group:
+                if self._group is not None:
+                    self._group.removeEventFilter(self)
+                self._group = g
+                g.installEventFilter(self)
+        return super().event(e)
+
+    def eventFilter(self, obj, e):
+        if obj is self._group and (e.type() == QEvent.DeferredDelete or
+                                   (e.type() == QEvent.ParentChange and obj.parentWidget() is None)):
+            self.release()
+        return False
+
+    def release(self):
+        for w in self._owned:
+            try:
+                if w.parentWidget() is not None and self.isAncestorOf(w):
+                    w.hide()
+                    w.setParent(self._home)
+            except RuntimeError:  # pragma: no cover - already deleted
+                pass

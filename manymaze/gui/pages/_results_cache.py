@@ -42,25 +42,30 @@ def _result_variables(v: dict | None) -> dict:
     return {k: x for k, x in (v or {}).items() if k not in DISPLAY_VARIABLES}
 
 
-def fingerprint(project) -> tuple:
-    tests = []
-    for t in project.tests:
+def _dump(v) -> str:
+    return json.dumps(v, sort_keys=True, default=str)
+
+
+def _mtimes(project, test) -> tuple:
+    """Modification times of the test's track files (one per animal; 0 = missing)."""
+    out = []
+    for i in range(test.n_animals):
         try:
-            p = project.track_path(t)
-            mtime = p.stat().st_mtime_ns if p.exists() else 0
+            p = project.track_path(test, i)
+            out.append(p.stat().st_mtime_ns if p.exists() else 0)
         except (ValueError, OSError):
-            mtime = 0
-        tests.append((t.id, t.status, mtime, len(t.events), t.animal_id, t.stage, t.trial, t.apparatus,
-                      tuple(t.extra_animals), json.dumps(_result_variables(t.variables), sort_keys=True, default=str),
-                      json.dumps(t.events, sort_keys=True, default=str), t.duration_s,
-                      json.dumps(getattr(t, "zone_overrides", None) or {}, sort_keys=True, default=str),
-                      json.dumps(getattr(t, "pauses", None) or [], default=str)))
-    return (str(project.path), tuple(tests), project.test_duration_s,
-            json.dumps(project.analysis.to_dict(), sort_keys=True, default=str),
-            json.dumps([a.to_dict() for a in project.apparatus], sort_keys=True, default=str),
-            json.dumps([asdict(a) for a in project.animals], sort_keys=True, default=str),
-            json.dumps([asdict(b) for b in project.behaviours], sort_keys=True, default=str),
-            tuple(project.animal_fields))
+            out.append(0)
+    return tuple(out)
+
+
+def fingerprint(project) -> tuple:
+    tests = tuple((t.id, t.status, _mtimes(project, t), t.animal_id, t.stage, t.trial, t.apparatus,
+                   tuple(t.extra_animals), _dump(_result_variables(t.variables)), _dump(t.events), t.duration_s,
+                   _dump(t.zone_overrides), _dump(t.pauses), _dump(t.io_events), _dump(t.result_variables))
+                  for t in project.tests)
+    return (str(project.path), tests, project.test_duration_s, _dump(project.analysis.to_dict()),
+            _dump([a.to_dict() for a in project.apparatus]), _dump([asdict(a) for a in project.animals]),
+            _dump([asdict(b) for b in project.behaviours]), _dump(project.io_devices), tuple(project.animal_fields))
 
 
 def cached_rows(project, segmented: bool, fp=None) -> list[dict] | None:

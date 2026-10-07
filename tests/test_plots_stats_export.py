@@ -378,6 +378,11 @@ def test_tables_and_report(demo, tmp_path):
     assert txt.count("\n") == len(rows) + 1
     export_results(demo, tmp_path / "r.tsv")
     assert "\t" in (tmp_path / "r.tsv").read_text().splitlines()[0]
+    from openpyxl import load_workbook
+
+    wb = load_workbook(export_results(demo, tmp_path / "r.xlsx"))
+    assert wb.sheetnames == ["Results", "Zone visits", "Animals", "Tests", "Settings"]
+    assert wb["Results"].max_row == len(rows) + 1
     rep = html_report(demo, tmp_path / "r.html", stats_measures=["Total distance (cm)"], heatmap_norm="fixed",
                       chart_parameters=["Speed", "Centre: in zone"], color_by="speed")
     text = rep.read_text()
