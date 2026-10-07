@@ -491,6 +491,24 @@ def test_touch_marks_pause_and_procedure_enable():
     assert any(m == "marked hit left" for _, m in eng.log_lines)
 
 
+def test_enabling_a_procedure_starts_it_fully():
+    """A procedure disabled at the start gets its variables, results and top-level statements when enabled."""
+    later = proc({"type": "var", "name": "hits", "value": 10, "result": True},
+                 {"type": "var", "name": "kept", "value": 7, "keep": True},
+                 {"type": "set", "var": "hits", "value": "hits + 1"},
+                 DO("mark", name="later started"),
+                 WHEN("every", [DO("increment", var="hits")], interval=1), name="Later")
+    later["enabled"] = False
+    starter = proc(WHEN("time_reached", [DO("enable_procedure", procedure="Later"),
+                                          DO("enable_procedure", procedure="Later")], time=1))
+    variables = {}
+    eng = run([starter, later], 3.5, variables=variables)
+    assert eng.errors == []
+    assert mark_times(eng, "later started") == [1.0]  # top-level statements ran once
+    assert eng.result_variables == {"hits": 11 + 3}  # declared 10, +1 at start, +1 at 1, 2 and 3 s
+    assert variables == {"kept": 7}
+
+
 # ====================================================================== variables persistence & results
 def test_variables_persist_between_tests_and_results():
     pr = proc({"type": "var", "name": "session", "value": 0, "keep": True, "result": True},

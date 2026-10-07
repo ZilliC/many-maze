@@ -1439,7 +1439,6 @@ class ProcedureEngine:
     # ------------------------------------------------------------------ state
     def _reset(self):
         self.started = self.stopped = self.ended = self.paused = False
-        self.started_ok = False
         self.t = 0.0
         self.vars: dict = {}
         self.var_flags: dict[str, dict] = {}
@@ -1456,6 +1455,7 @@ class ProcedureEngine:
         self.handlers: list[_Handler] = []
         self.threads: list[_Thread] = []
         self.proc_enabled = [bool(p.get("enabled", True)) for p in self.procedures]
+        self._started_procs: set[int] = set()
         self._queue: deque = deque()
         self._tasks: list = []
         self._task_seq = 0
@@ -1494,6 +1494,33 @@ class ProcedureEngine:
         self._shock_keys: set[tuple] = set()
         self._pause_t: float | None = None
 
+    def _start_procs(self, pis, t, defer=False):
+        """Start procedures: declare their variables (all of them first), create their handlers, then start their
+        top-level plain statements. defer: started by another thread's action, so the new threads run from the frame
+        loop instead of nested inside that thread."""
+        self._started_procs.update(pis)
+        for pi in pis:
+            for i, st in enumerate(self.procedures[pi].get("statements") or []):
+                if isinstance(st, dict) and st.get("type") == "var" and st.get("enabled", True) is not False:
+                    self._declare(pi, (i,), st)
+        for pi in pis:
+            for i, st in enumerate(self.procedures[pi].get("statements") or []):
+                if isinstance(st, dict) and st.get("type") == "when" and st.get("enabled", True) is not False:
+                    th = _Thread(self, pi, None, t, {}, "when")
+                    det = _Detector(self, st, th, (i,), initial=True)
+                    self.handlers.append(_Handler(pi, (i,), st, det, st.get("event", "?")))
+        for pi in pis:
+            stmts = self.procedures[pi].get("statements") or []
+            if any(isinstance(s, dict) and s.get("type") not in ("when", "var", "comment")
+                   and s.get("enabled", True) is not False for s in stmts):
+                th = _Thread(self, pi, None, t, {}, "start")
+                th.gen = self._thread_main(th, stmts, ())
+                self.threads.append(th)
+                if defer:
+                    th.wait = ("time", t)
+                else:
+                    self._resume(th)
+
     # ------------------------------------------------------------------ public API
     @_locked
     def start(self, t: float = 0.0):
@@ -1505,32 +1532,7 @@ class ProcedureEngine:
         self._have_t = True
         self._busy = True
         try:
-            for pi, proc in enumerate(self.procedures):
-                if not self.proc_enabled[pi]:
-                    continue
-                for i, st in enumerate(proc.get("statements") or []):
-                    if isinstance(st, dict) and st.get("type") == "var" and st.get("enabled", True) is not False:
-                        self._declare(pi, (i,), st)
-            self.started_ok = True
-            for pi, proc in enumerate(self.procedures):
-                if not self.proc_enabled[pi]:
-                    continue
-                stmts = proc.get("statements") or []
-                for i, st in enumerate(stmts):
-                    if isinstance(st, dict) and st.get("type") == "when" and st.get("enabled", True) is not False:
-                        th = _Thread(self, pi, None, t, {}, "when")
-                        det = _Detector(self, st, th, (i,), initial=True)
-                        self.handlers.append(_Handler(pi, (i,), st, det, st.get("event", "?")))
-            for pi, proc in enumerate(self.procedures):
-                if not self.proc_enabled[pi]:
-                    continue
-                stmts = proc.get("statements") or []
-                if any(isinstance(s, dict) and s.get("type") not in ("when", "var", "comment")
-                       and s.get("enabled", True) is not False for s in stmts):
-                    th = _Thread(self, pi, None, t, {}, "start")
-                    th.gen = self._thread_main(th, stmts, ())
-                    self.threads.append(th)
-                    self._resume(th)
+            self._start_procs([pi for pi in range(len(self.procedures)) if self.proc_enabled[pi]], t)
             self._queue.append(("event", "test_start", {}, t, None))
             self._run(t)
         finally:
@@ -2802,13 +2804,10 @@ class ProcedureEngine:
         return idx
 
     def _a_enable_procedure(self, th, p, procedure):
-        for i in self._procs_named(procedure):
+        idx = self._procs_named(procedure)
+        for i in idx:
             self.proc_enabled[i] = True
-            if not any(h.proc_i == i for h in self.handlers):
-                for j, st in enumerate(self.procedures[i].get("statements") or []):
-                    if isinstance(st, dict) and st.get("type") == "when" and st.get("enabled", True) is not False:
-                        det = _Detector(self, st, th, (j,), initial=True)
-                        self.handlers.append(_Handler(i, (j,), st, det, st.get("event")))
+        self._start_procs([i for i in idx if i not in self._started_procs], self.t, defer=True)
 
     def _a_disable_procedure(self, th, p, procedure):
         for i in self._procs_named(procedure):
