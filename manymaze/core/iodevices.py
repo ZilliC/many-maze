@@ -293,6 +293,23 @@ class SerialDevice(_LineDevice):
                     self._changed(n, 0)
 
 
+DEFAULT_WATCHDOG_MS = 2000
+
+
+def watchdog_ms(cfg: dict) -> int:
+    """An Arduino's heartbeat watchdog timeout: the configured ``watchdog_ms`` (0 = off) or, when not set, 2000 ms
+    if the board drives outputs (all outputs go off if mANY-MAZE stops talking to the board)."""
+    v = cfg.get("watchdog_ms")
+    if v is None:
+        has_out = any(c.get("name") and c.get("kind", "input") in OUTPUT_KINDS
+                      for c in cfg.get("channels", []) or [])
+        return DEFAULT_WATCHDOG_MS if has_out else 0
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError):
+        return 0
+
+
 class ArduinoDevice(_LineDevice):
     """Arduino running firmware/manymaze_io (see firmware/README.md for the protocol)."""
 
@@ -351,19 +368,10 @@ class ArduinoDevice(_LineDevice):
             self.write_line(f"H {wd}")
         self.write_line("Q")
 
-    DEFAULT_WATCHDOG_MS = 2000
+    DEFAULT_WATCHDOG_MS = DEFAULT_WATCHDOG_MS
 
     def watchdog_ms(self) -> int:
-        """The heartbeat watchdog timeout: the configured ``watchdog_ms`` (0 = off) or, when not set, 2000 ms if
-        the board drives outputs (all outputs go off if mANY-MAZE stops talking to the board)."""
-        v = self.cfg.get("watchdog_ms")
-        if v is None:
-            has_out = any(c.get("kind", "input") in OUTPUT_KINDS for c in self.channels.values())
-            return self.DEFAULT_WATCHDOG_MS if has_out else 0
-        try:
-            return max(0, int(v))
-        except (TypeError, ValueError):
-            return 0
+        return watchdog_ms(self.cfg)
 
     def keepalive_period(self) -> float:
         wd = self.watchdog_ms()

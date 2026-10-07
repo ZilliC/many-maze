@@ -293,3 +293,42 @@ def test_touchscreen_window_drives_engine():
     m = io_measures(eng.io_events, 2)
     assert m["touch left: activations"] == 1 and m["left: times on"] == 1
     win.close()
+
+
+def test_io_dialog_watchdog_default_and_reserved_options():
+    p = make_project()
+    p.io_devices = []
+    dlg = IODevicesDialog(p)
+    dlg.add_device("arduino")
+    dlg.add_channel({"name": "lever", "kind": "input", "pin": 2})
+    dlg._save_channels()
+    assert dlg.f_watchdog.value() == 0  # input-only board: the core default is off
+    dlg.f_name.setText("box")
+    dlg._save_device()
+    assert "watchdog_ms" not in dlg._cur()
+    dlg.add_channel({"name": "pellet", "kind": "output", "pin": 8})
+    dlg._save_channels()
+    assert dlg.f_watchdog.value() == 2000 and "watchdog_ms" not in dlg._cur()
+    dlg.f_watchdog.setValue(500)
+    assert dlg._cur()["watchdog_ms"] == 500
+    # the Options column cannot override the structured columns
+    dlg.ch_table.item(0, 7).setText("pin=99, kind=output, debounce_ms=5")
+    assert dlg._cur()["channels"][0] == {"name": "lever", "kind": "input", "pin": 2, "debounce_ms": 5}
+    dlg.accept()
+    assert p.io_devices[0]["watchdog_ms"] == 500
+
+
+def test_procedure_list_read_only_and_unique_rename():
+    from PySide6.QtCore import Qt
+
+    p = make_project()
+    ed = ProcedureEditor(p)
+    ed.add_procedure()
+    first = p.procedures[0]["name"]
+    ed.proc_list.item(1).setText(first)
+    assert p.procedures[1]["name"] == f"{first} 2" and ed.proc_list.item(1).text() == f"{first} 2"
+    ed.set_read_only(True)
+    flags = ed.proc_list.item(0).flags()
+    assert not flags & Qt.ItemIsEditable and not flags & Qt.ItemIsUserCheckable
+    ed.set_read_only(False)
+    assert ed.proc_list.item(0).flags() & Qt.ItemIsEditable

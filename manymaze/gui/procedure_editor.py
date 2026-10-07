@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 
 from ..core import iodevices as iod
 from ..core import procedures as pr
+from ..core.apparatus import unique_name
 from .icons import icon as named_icon
 
 ROLE = Qt.UserRole
@@ -381,8 +382,7 @@ class ProcedureEditor(QWidget):
 
     def set_read_only(self, ro: bool):
         self._read_only = ro
-        self._update_buttons()
-        self._build_form()
+        self._refresh_all()
 
     def context(self) -> dict:
         if self._ctx_override is not None:
@@ -422,8 +422,11 @@ class ProcedureEditor(QWidget):
         self.proc_list.clear()
         for p in self.procs:
             it = QListWidgetItem(named_icon("procedure"), str(p.get("name", "Procedure")))
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
             it.setCheckState(Qt.Checked if p.get("enabled", True) else Qt.Unchecked)
+            if not self._read_only:
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            else:
+                it.setFlags(it.flags() & ~(Qt.ItemIsUserCheckable | Qt.ItemIsEditable))
             self.proc_list.addItem(it)
         self._loading = False
         if self.procs:
@@ -438,6 +441,12 @@ class ProcedureEditor(QWidget):
             return
         p = self.procs[i]
         name, on = it.text().strip() or p.get("name", "Procedure"), it.checkState() == Qt.Checked
+        if name != p.get("name"):
+            name = unique_name(name, [q.get("name") for q in self.procs if q is not p])
+        if name != it.text():
+            self._loading = True
+            it.setText(name)
+            self._loading = False
         if name != p.get("name") or on != p.get("enabled", True):
             p["name"], p["enabled"] = name, on
             self._emit()
@@ -451,21 +460,13 @@ class ProcedureEditor(QWidget):
         if self._read_only:
             return
         proc = proc or pr.new_procedure(self._unique_name("Procedure"))
-        names = {p.get("name") for p in self.procs}
-        if proc.get("name") in names:
-            proc["name"] = self._unique_name(proc["name"])
+        proc["name"] = self._unique_name(proc.get("name", "Procedure"))
         self.procs.append(proc)
         self._refresh_all(select=len(self.procs) - 1)
         self._emit()
 
     def _unique_name(self, base):
-        names = {p.get("name") for p in self.procs}
-        if base not in names:
-            return base
-        k = 2
-        while f"{base} {k}" in names:
-            k += 1
-        return f"{base} {k}"
+        return unique_name(base, [p.get("name") for p in self.procs])
 
     def duplicate_procedure(self):
         p = self._cur_proc()
@@ -1385,7 +1386,7 @@ class IODevicesDialog(QDialog):
             w.currentIndexChanged.connect(lambda *_: self._save_device(retype=True))
         self.f_port.currentTextChanged.connect(lambda *_: self._save_device())
         self.f_baud.currentTextChanged.connect(lambda *_: self._save_device())
-        self.f_watchdog.valueChanged.connect(lambda *_: self._save_device())
+        self.f_watchdog.valueChanged.connect(self._watchdog_changed)
         self.f_enabled.toggled.connect(lambda *_: self._save_device())
         rv.addWidget(self.dev_box)
 
@@ -1505,7 +1506,7 @@ class IODevicesDialog(QDialog):
             self.f_type.setCurrentIndex(max(0, self.f_type.findData(c.get("type", "virtual"))))
             self.f_port.setCurrentText(c.get("port", ""))
             self.f_baud.setCurrentText(str(c.get("baud", 115200)))
-            self.f_watchdog.setValue(int(c["watchdog_ms"]) if c.get("watchdog_ms") is not None else 2000)  # default on
+            self.f_watchdog.setValue(iod.watchdog_ms(c))
             self.f_backend.setCurrentIndex(max(0, self.f_backend.findData(c.get("backend", "auto"))))
             self.f_enabled.setChecked(c.get("enabled", True))
             self._fill_channels(c)
@@ -1536,16 +1537,16 @@ class IODevicesDialog(QDialog):
         c["name"] = self.f_name.text().strip() or c.get("name", "device")
         c["type"] = self.f_type.currentData()
         c["enabled"] = self.f_enabled.isChecked()
-        for k in ("port", "baud", "watchdog_ms", "backend"):
+        for k in ("port", "baud", "backend"):
             c.pop(k, None)
+        if c["type"] != "arduino":
+            c.pop("watchdog_ms", None)
         if c["type"] in ("arduino", "serial"):
             c["port"] = self.f_port.currentText().strip()
             try:
                 c["baud"] = int(self.f_baud.currentText())
             except ValueError:
                 c["baud"] = 115200
-        if c["type"] == "arduino":
-            c["watchdog_ms"] = self.f_watchdog.value()  # 0 = Off (a missing key would mean the 2000 ms default)
         if c["type"] == "audio":
             c["backend"] = self.f_backend.currentData()
         it = self.dev_list.currentItem()
@@ -1553,6 +1554,12 @@ class IODevicesDialog(QDialog):
             it.setText(f"{c['name']}  ·  {iod.DEVICE_TYPES.get(c['type'], c['type'])}")
         if retype:
             self._update_visibility()
+
+    def _watchdog_changed(self, v):
+        """Only an explicit change is stored: without the key the core default follows the board's outputs."""
+        c = self._cur()
+        if not self._loading and c is not None:
+            c["watchdog_ms"] = v
 
     # ------------------------------------------------------------------ channels
     def _fill_channels(self, c):
@@ -1624,9 +1631,13 @@ class IODevicesDialog(QDialog):
             for col, key in ((5, "on"), (6, "off")):
                 if txt(col):
                     ch[key] = txt(col)
-            ch.update(_parse_options(txt(7)))
+            ch.update({k: v for k, v in _parse_options(txt(7)).items() if k not in _CH_KEYS})  # columns win
             out.append(ch)
         c["channels"] = out
+        if "watchdog_ms" not in c:  # the default depends on whether the board has outputs
+            self._loading = True
+            self.f_watchdog.setValue(iod.watchdog_ms(c))
+            self._loading = False
 
     # ------------------------------------------------------------------ live status
     def toggle_connection(self):
