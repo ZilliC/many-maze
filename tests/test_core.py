@@ -294,6 +294,15 @@ def test_apparatus_remove_cascades():
     assert [p.name for p in app.points] == ["P"] and app.sequences == [] and app.arena is None
 
 
+def test_remove_grid_drops_sequence_steps():
+    from manymaze.core.apparatus import Sequence, make_grid, remove_grid
+
+    app = templates.build("open_field", 0, 0, 400, 400)
+    make_grid(app, "square", name="G", nx=2, ny=1)
+    app.sequences.append(Sequence("S", ["G A1", "Centre", "G"]))
+    assert remove_grid(app, "G") and app.sequences[0].steps == ["Centre"]
+
+
 def test_project_rename_moves_zone_overrides():
     from manymaze.core.project import Project
 

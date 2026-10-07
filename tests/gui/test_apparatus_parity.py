@@ -145,7 +145,7 @@ def test_sequences_editor(page):
     # renaming / deleting a zone keeps the steps consistent
     zi = [z.name for z in page.app.zones].index(names[0]) if names[0] in [z.name for z in page.app.zones] else None
     if zi is not None:
-        page.rename_zone(zi, "Renamed")
+        page.rename("zone", zi, "Renamed")
         assert q.steps[0] == "Renamed"
         page.delete_item("zone", zi)
         assert "Renamed" not in q.steps

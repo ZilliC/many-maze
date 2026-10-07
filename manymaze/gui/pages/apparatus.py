@@ -390,12 +390,11 @@ class Handle(QGraphicsRectItem):
         self.setCursor(Qt.CrossCursor)
         self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
         self.setVisible(False)
-        self._dragging = False
+        self._before: dict | None = None  # the apparatus when a drag started (undo step if it changes)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self.owner.page.push_undo()
-            self._dragging = True
+            self._before = self.owner.page.app.to_dict()
             e.accept()
         elif e.button() == Qt.RightButton and hasattr(self.owner, "delete_vertex"):
             QTimer.singleShot(0, lambda o=self.owner, i=self.index: o.delete_vertex(i))
@@ -404,14 +403,16 @@ class Handle(QGraphicsRectItem):
             e.ignore()
 
     def mouseMoveEvent(self, e):
-        if self._dragging:
+        if self._before is not None:
             sp = self.owner.page.snap(e.scenePos(), exclude=self.owner)
             self.owner.move_handle(self.index, self.owner.mapFromScene(sp), e.modifiers())
 
     def mouseReleaseEvent(self, e):
-        if self._dragging:
-            self._dragging = False
-            self.owner.page.geometry_edited(self.owner)
+        before, self._before = self._before, None
+        page = self.owner.page
+        if before is not None and before != page.app.to_dict():
+            page.push_undo(before)
+            page.geometry_edited(self.owner)
 
 
 class _HandlesMixin:
@@ -821,7 +822,7 @@ class RulerItem(QGraphicsItem):
             step_units = k
             if unit * k * s >= 5:
                 break
-        major = step_units * (5 if step_units in (1, 10, 100) else 5)
+        major = 10 ** (int(math.log10(step_units)) + 1)  # long ticks at the decade above the step, medium half way
         tp = QPen(QColor(theme.RULER), 1.3)
         tp.setCosmetic(True)
         p.setPen(tp)
@@ -829,7 +830,7 @@ class RulerItem(QGraphicsItem):
         for i in range(n):
             d = i * unit * step_units
             u = i * step_units
-            ln = (9.0 if u % (major * 2) == 0 else 6.5 if u % major == 0 else 4.0) / s
+            ln = (9.0 if u % major == 0 else 6.5 if 2 * u % major == 0 else 4.0) / s
             x, y = self.p1.x() + ux * d, self.p1.y() + uy * d
             p.drawLine(QPointF(x, y), QPointF(x + nx * ln, y + ny * ln))
         ln = 9.0 / s
@@ -1587,6 +1588,7 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self._root: QGraphicsPathItem | None = None
         self._undo: dict[int, list[dict]] = {}
         self._redo: dict[int, list[dict]] = {}
+        self._undo_merge = None  # merge key of the last undo step (see push_undo)
         self._bg_memory: dict[int, tuple[str, float]] = {}
         self._bg_src: VideoSource | None = None
         self._bg_path: str | None = None
@@ -1904,8 +1906,8 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.zone_list.currentRowChanged.connect(lambda r: self._list_row_changed("zone", r))
         zl.addWidget(self.zone_list, 1)
         self.zone_name = QLineEdit()
-        self.zone_name.editingFinished.connect(lambda: self.rename_zone(self.zone_list.currentRow(),
-                                                                        self.zone_name.text()))
+        self.zone_name.editingFinished.connect(
+            lambda: self.rename("zone", self.zone_list.currentRow(), self.zone_name.text()))
         self.zone_color = ColorButton("Zone colour")
         self.zone_color.color_changed.connect(lambda c: self.set_item_color("zone", self.zone_list.currentRow(), c))
         zl.addLayout(_name_row(self.zone_name, self.zone_color))
@@ -1983,8 +1985,8 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.point_list.currentRowChanged.connect(lambda r: self._list_row_changed("point", r))
         pl.addWidget(self.point_list, 1)
         self.point_name = QLineEdit()
-        self.point_name.editingFinished.connect(lambda: self.rename_point(self.point_list.currentRow(),
-                                                                          self.point_name.text()))
+        self.point_name.editingFinished.connect(
+            lambda: self.rename("point", self.point_list.currentRow(), self.point_name.text()))
         self.point_color = ColorButton("Point colour")
         self.point_color.color_changed.connect(lambda c: self.set_item_color("point", self.point_list.currentRow(), c))
         pl.addLayout(_name_row(self.point_name, self.point_color))
@@ -2023,8 +2025,8 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.line_list.currentRowChanged.connect(lambda r: self._list_row_changed("line", r))
         ll.addWidget(self.line_list, 1)
         self.line_name = QLineEdit()
-        self.line_name.editingFinished.connect(lambda: self.rename_line(self.line_list.currentRow(),
-                                                                        self.line_name.text()))
+        self.line_name.editingFinished.connect(
+            lambda: self.rename("line", self.line_list.currentRow(), self.line_name.text()))
         self.line_color = ColorButton("Line colour")
         self.line_color.color_changed.connect(lambda c: self.set_item_color("line", self.line_list.currentRow(), c))
         ll.addLayout(_name_row(self.line_name, self.line_color))
@@ -2050,8 +2052,8 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.btn_group_del.clicked.connect(lambda: self.delete_group(self.group_list.currentRow()))
         gl.addLayout(_button_row(self.btn_group_add, self.btn_group_del))
         self.group_name = QLineEdit()
-        self.group_name.editingFinished.connect(lambda: self.rename_group(self.group_list.currentRow(),
-                                                                         self.group_name.text()))
+        self.group_name.editingFinished.connect(
+            lambda: self.rename("group", self.group_list.currentRow(), self.group_name.text()))
         row = QHBoxLayout()
         row.addWidget(QLabel("Name"))
         row.addWidget(self.group_name, 1)
@@ -2081,8 +2083,8 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.btn_seq_del.clicked.connect(lambda: self.delete_sequence(self.seq_list.currentRow()))
         sl.addLayout(_button_row(self.btn_seq_add, self.btn_seq_del))
         self.seq_name = QLineEdit()
-        self.seq_name.editingFinished.connect(lambda: self.rename_sequence(self.seq_list.currentRow(),
-                                                                          self.seq_name.text()))
+        self.seq_name.editingFinished.connect(
+            lambda: self.rename("sequence", self.seq_list.currentRow(), self.seq_name.text()))
         row = QHBoxLayout()
         row.addWidget(QLabel("Name"))
         row.addWidget(self.seq_name, 1)
@@ -2181,15 +2183,13 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         """Flush half-edited names (e.g. when saving while a name field has focus)."""
         if self.app is None or self._loading:
             return
-        for lst, edit, fn in ((self.zone_list, self.zone_name, self.rename_zone),
-                              (self.point_list, self.point_name, self.rename_point),
-                              (self.line_list, self.line_name, self.rename_line),
-                              (self.group_list, self.group_name, self.rename_group),
-                              (self.seq_list, self.seq_name, self.rename_sequence)):
+        for kind, lst, edit in (("zone", self.zone_list, self.zone_name), ("point", self.point_list, self.point_name),
+                                ("line", self.line_list, self.line_name), ("group", self.group_list, self.group_name),
+                                ("sequence", self.seq_list, self.seq_name)):
             r = lst.currentRow()
             it = lst.item(r) if r >= 0 else None
             if it is not None and edit.text().strip() and edit.text().strip() != it.text():
-                fn(r, edit.text())
+                self.rename(kind, r, edit.text())
 
     def shutdown(self):
         self._close_bg()
@@ -2223,6 +2223,7 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
 
     def _app_selected(self):
         app = self.app
+        self._undo_merge = None
         self.view.cancel_drawing()
         self._set_enabled(app is not None)
         self._show_background()
@@ -2952,7 +2953,7 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
             return False
         self.push_undo()
         for kind, idx in sorted(keys, key=lambda k: -k[1]):
-            self._delete(kind, idx)
+            self.app.remove(kind, idx)
         self._model_changed()
         return True
 
@@ -2965,28 +2966,9 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         if kind != "arena" and index >= len(getattr(app, kind + "s")):
             return False
         self.push_undo()
-        self._delete(kind, index)
+        app.remove(kind, index)
         self._model_changed()
         return True
-
-    def _delete(self, kind: str, idx: int):
-        app = self.app
-        if kind == "arena":
-            app.arena = None
-        elif kind == "zone":
-            name = app.zones.pop(idx).name
-            for g in app.groups:
-                g.zones = [z for z in g.zones if z != name]
-                g.exclude = [z for z in g.exclude if z != name]
-            for q in app.sequences:
-                q.steps = [z for z in q.steps if z != name]
-            for gr in app.grids:
-                gr.zones = [z for z in gr.zones if z != name]
-            app.grids = [gr for gr in app.grids if gr.zones]
-        elif kind == "point":
-            app.points.pop(idx)
-        elif kind == "line":
-            app.lines.pop(idx)
 
     def duplicate_zone(self, index: int) -> Zone | None:
         app = self.app
@@ -3005,47 +2987,19 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
             else Ellipse(**{k: getattr(app.zones[index].shape, k) for k in ("cx", "cy", "rx", "ry")})
         self._model_changed(select=("zone", index))
 
-    def rename_zone(self, index: int, name: str) -> bool:
+    def rename(self, kind: str, index: int, name: str) -> bool:
+        """Rename a zone / point / line / group / sequence; groups, sequences, grids and the per-test positions
+        of moveable zones follow. Names are made unique."""
         app = self.app
-        if app is None or not (0 <= index < len(app.zones)):
-            return False
-        old = app.zones[index].name
+        items = getattr(app, kind + "s", []) if app is not None else []
         name = name.strip()
-        if not name or name == old:
+        if not (0 <= index < len(items)) or not name or name == items[index].name:
             return False
-        taken = [z.name for i, z in enumerate(app.zones) if i != index] + [g.name for g in app.groups]
-        new = unique_name(name, taken)
+        self.push_undo()
+        new = self.project.rename_in_apparatus(app, kind, index, name)
         if new != name:
             self.main.status(f"“{name}” is already used; renamed to “{new}”")
-        self.push_undo()
-        app.zones[index].name = new
-        for g in app.groups:
-            g.zones = [new if z == old else z for z in g.zones]
-            g.exclude = [new if z == old else z for z in g.exclude]
-        self._rename_refs(old, new)
-        self._model_changed(select=("zone", index))
-        return True
-
-    def rename_point(self, index: int, name: str) -> bool:
-        app = self.app
-        if app is None or not (0 <= index < len(app.points)) or not name.strip():
-            return False
-        if name.strip() == app.points[index].name:
-            return False
-        self.push_undo()
-        app.points[index].name = unique_name(name, [p.name for i, p in enumerate(app.points) if i != index])
-        self._model_changed(select=("point", index))
-        return True
-
-    def rename_line(self, index: int, name: str) -> bool:
-        app = self.app
-        if app is None or not (0 <= index < len(app.lines)) or not name.strip():
-            return False
-        if name.strip() == app.lines[index].name:
-            return False
-        self.push_undo()
-        app.lines[index].name = unique_name(name, [l.name for i, l in enumerate(app.lines) if i != index])
-        self._model_changed(select=("line", index))
+        self._model_changed(select=(kind, index) if kind in ("zone", "point", "line") else None)
         return True
 
     def set_item_color(self, kind: str, index: int, color: str):
@@ -3060,9 +3014,9 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
     def _point_radius_changed(self, v):
         app = self.app
         r = self.point_list.currentRow()
-        if self._loading or app is None or not (0 <= r < len(app.points)):
+        if self._loading or app is None or not (0 <= r < len(app.points)) or app.points[r].radius_cm == float(v):
             return
-        self.push_undo()
+        self.push_undo(merge=("radius", r))
         app.points[r].radius_cm = float(v)
         it = self._items.get(("point", r))
         if it is not None:
@@ -3072,11 +3026,11 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
     def _point_xy_changed(self, *_):
         app = self.app
         r = self.point_list.currentRow()
-        if self._loading or app is None or not (0 <= r < len(app.points)):
+        xy = float(self.point_x.value()), float(self.point_y.value())
+        if self._loading or app is None or not (0 <= r < len(app.points)) or (app.points[r].x, app.points[r].y) == xy:
             return
-        self.push_undo()
-        app.points[r].x = float(self.point_x.value())
-        app.points[r].y = float(self.point_y.value())
+        self.push_undo(merge=("xy", r))
+        app.points[r].x, app.points[r].y = xy
         it = self._items.get(("point", r))
         if it is not None:
             it.sync()
@@ -3103,29 +3057,11 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         if app is None or not (0 <= index < len(app.groups)):
             return False
         self.push_undo()
-        name = app.groups.pop(index).name
-        for q in app.sequences:
-            q.steps = [z for z in q.steps if z != name]
+        app.remove("group", index)
         self.main.mark_dirty()
         self._refresh_side_lists()
         self.group_list.setCurrentRow(min(index, len(app.groups) - 1))
         self._refresh_info()
-        return True
-
-    def rename_group(self, index: int, name: str) -> bool:
-        app = self.app
-        if app is None or not (0 <= index < len(app.groups)) or not name.strip():
-            return False
-        if name.strip() == app.groups[index].name:
-            return False
-        self.push_undo()
-        taken = [z.name for z in app.zones] + [g.name for i, g in enumerate(app.groups) if i != index]
-        old = app.groups[index].name
-        app.groups[index].name = unique_name(name, taken)
-        self._rename_refs(old, app.groups[index].name)
-        self.main.mark_dirty()
-        self._refresh_side_lists()
-        self.group_list.setCurrentRow(index)
         return True
 
     def set_group_members(self, index: int, zones, exclude=()):
@@ -3183,13 +3119,6 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
             s += " − " + " − ".join(g.exclude)
         return s
 
-    def _rename_refs(self, old: str, new: str):
-        app = self.app
-        for q in app.sequences:
-            q.steps = [new if z == old else z for z in q.steps]
-        for gr in app.grids:
-            gr.zones = [new if z == old else z for z in gr.zones]
-
     # ---- zone properties -------------------------------------------------------------
     def set_zone_property(self, index: int, attr: str, value) -> bool:
         """Set a zone flag: hidden, moveable, investigation_distance_cm, entry_rule or body_fraction."""
@@ -3199,7 +3128,7 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         z = app.zones[index]
         if getattr(z, attr) == value:
             return False
-        self.push_undo()
+        self.push_undo(merge=("zone", index, attr) if isinstance(value, float) else None)
         setattr(z, attr, value)
         self.main.mark_dirty()
         it = self._items.get(("zone", index))
@@ -3254,8 +3183,6 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
             return False
         self.push_undo()
         remove_grid(app, g.name)
-        for q in app.sequences:
-            q.steps = [z for z in q.steps if app.zone(z) is not None or app.group(z) is not None]
         self._model_changed()
         return True
 
@@ -3339,19 +3266,6 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.seq_list.setCurrentRow(min(index, len(app.sequences) - 1))
         return True
 
-    def rename_sequence(self, index: int, name: str) -> bool:
-        app = self.app
-        if app is None or not (0 <= index < len(app.sequences)) or not name.strip():
-            return False
-        if name.strip() == app.sequences[index].name:
-            return False
-        self.push_undo()
-        app.sequences[index].name = unique_name(name, [q.name for i, q in enumerate(app.sequences) if i != index])
-        self.main.mark_dirty()
-        self._refresh_side_lists()
-        self.seq_list.setCurrentRow(index)
-        return True
-
     def _edit_steps(self, index: int, fn, select: int | None = None) -> bool:
         app = self.app
         if app is None or not (0 <= index < len(app.sequences)):
@@ -3399,7 +3313,7 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         q = app.sequences[index]
         if getattr(q, attr) == value:
             return False
-        self.push_undo()
+        self.push_undo(merge=("sequence", index, attr) if isinstance(value, float) else None)
         setattr(q, attr, value)
         self.main.mark_dirty()
         self._draw_sequence_overlay()
@@ -3568,12 +3482,17 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
         self.main.mark_dirty()
 
     # ================================================================== undo
-    def push_undo(self):
+    def push_undo(self, before: dict | None = None, merge=None):
+        """Save the apparatus (or its state `before` an edit already made) for undo. Consecutive edits with the
+        same `merge` key (e.g. spin box steps of one field) make a single undo step."""
         app = self.app
         if app is None:
             return
+        if merge is not None and merge == self._undo_merge:
+            return
+        self._undo_merge = merge
         st = self._undo.setdefault(id(app), [])
-        d = app.to_dict()
+        d = before if before is not None else app.to_dict()
         if not st or st[-1] != d:
             st.append(d)
             del st[:-200]
@@ -3599,6 +3518,7 @@ QScrollArea#PropScroll, QWidget#PropBody {{ background: {theme.WORK_BG}; }}
             self.main.status(f"Nothing to {what.lower()}")
             return False
         dst.setdefault(id(app), []).append(cur)
+        self._undo_merge = None
         name = app.name
         new = Apparatus.from_dict(st.pop())
         app.__dict__.update(new.__dict__)

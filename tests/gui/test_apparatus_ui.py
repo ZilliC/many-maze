@@ -14,7 +14,7 @@ from manymaze.gui import theme
 from manymaze.gui.main_window import MainWindow
 from manymaze.gui.pages.apparatus import RulerItem
 from shots import shot_path
-from test_apparatus import approx, drag
+from test_apparatus import approx, drag, mouse
 
 app = QApplication.instance() or QApplication([])
 
@@ -158,6 +158,37 @@ def test_select_all_delete_selection_and_points_attract(page):
     assert approx(a.zones[-1].shape.bounds()[:2], (cx0, cy0), 1e-6)
     page.snap_act.setChecked(False)
     assert page.snap(QPointF(cx0 + 1.5, cy0)) == QPointF(cx0 + 1.5, cy0)
+
+
+def test_rename_moves_per_test_positions(page):
+    a = page.app
+    t = page.project.tests_using(a.name)[0]
+    ci = [z.name for z in a.zones].index("Centre")
+    t.zone_overrides["Centre"] = a.zones[ci].shape.translated(5, 5).to_dict()
+    page.add_point(100, 100, "Object")
+    t.zone_overrides["Object"] = {"x": 120.0, "y": 90.0}
+    assert page.rename("zone", ci, "Middle") and page.rename("point", len(a.points) - 1, "Toy")
+    assert set(t.zone_overrides) == {"Middle", "Toy"}
+    assert a.zones[ci].name == "Middle" and page.zone_list.item(ci).text() == "Middle"
+    assert not page.rename("zone", ci, "  ")  # blank: unchanged
+
+
+def test_undo_steps_only_for_real_changes(page):
+    a = page.app
+    page.add_point(100, 100, "P")
+    assert page.undo() and page.redo()
+    # clicking a vertex handle without dragging is not an edit: redo survives
+    page.select_item("zone", 0)
+    h = page.item("zone", 0).handles[0].scenePos()
+    mouse(page.view, "press", h.x(), h.y())
+    mouse(page.view, "release", h.x(), h.y())
+    assert page.undo() and page.redo()
+    # spin box steps of one field make one undo step
+    page.select_item("point", len(a.points) - 1)
+    for x in (101, 102, 103):
+        page.point_x.setValue(x)
+    assert a.points[-1].x == 103
+    assert page.undo() and a.points[-1].x == 100
 
 
 def test_test_video_menu_and_labels_declutter(page):
