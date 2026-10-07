@@ -123,6 +123,19 @@ def test_skip_resume_reperform_clear(tmp_path):
     wf.resume_test(p, t)
     assert t.status == "tracked" and len(p.results()) == 1
     assert wf.clear_tracks(p, t) == 1 and t.status == "scored" and not p.has_track(t)
+    # duplicating keeps the set-up (video, animal, apparatus, variables) but none of the recorded data
+    t.video, t.variables, t.notes = "v.mp4", {"dose": 1}, "odd"
+    t.io_events, t.result_variables, t.pauses = [{"t": 1.0}], {"x": 1}, [[1.0, 2.0]]
+    t.zone_overrides = {"Centre": {"type": "polygon", "points": [[0, 0], [1, 0], [1, 1]]}}
+    dup = wf.duplicate_test(p, t)
+    assert p.tests[-1] is dup and dup.id == max(x.id for x in p.tests) and dup.status == "pending"
+    assert (dup.video, dup.animal_id, dup.apparatus, dup.variables) == (t.video, t.animal_id, t.apparatus,
+                                                                         t.variables)
+    assert (dup.events, dup.notes, dup.io_events, dup.result_variables, dup.pauses, dup.zone_overrides,
+            dup.attempt, dup.replaces) == ([], "", [], {}, [], {}, 1, 0)
+    # deleting removes the test and its tracks
+    p.save_tracks(dup, [tr])
+    assert wf.delete_test(p, dup) == 1 and dup not in p.tests and not p.track_path(dup).exists()
 
 
 def test_scored_only_results():
@@ -179,6 +192,22 @@ def test_evaluate_and_apply_criteria():
     assert wf.apply_criteria(p)["retired"] == []
     assert wf.reinstate_animal(p, p.get_animal("M2")) == 2
     assert not p.get_animal("M2").retired
+
+
+def test_retire_animal_skips_tests_it_takes_part_in():
+    p = make_project(3)
+    solo = p.add_test("", "M1")
+    pair = p.add_test("", "M2", extra_animals=["M1"])
+    other = p.add_test("", "M3", extra_animals=["M2"])
+    assert wf.retire_animal(p, p.get_animal("M1"), "ill") == 2
+    assert solo.status == pair.status == "skipped" and other.status == "pending"
+    wf.retire_animal(p, p.get_animal("M2"))
+    assert other.status == "skipped"
+    # reinstating M1 resumes only its tests whose other animals are not retired
+    assert wf.reinstate_animal(p, p.get_animal("M1")) == 1
+    assert solo.status == "pending" and pair.status == "skipped"
+    assert wf.reinstate_animal(p, p.get_animal("M2")) == 2
+    assert pair.status == other.status == "pending"
 
 
 def test_criteria_normalisation_and_ops():

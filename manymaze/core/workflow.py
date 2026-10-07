@@ -90,15 +90,28 @@ def resume_test(project: Project, test: Test):
     test.status = data_status(project, test)
 
 
-def reperform_test(project: Project, test: Test) -> Test:
-    """A new attempt of `test` (same animal, stage, trial, apparatus, variables); the old one is superseded."""
+def _fresh_copy(project: Project, test: Test, **changes) -> Test:
+    """A pending copy of `test` with a new id and none of its recorded data (scoring, I/O log, results, pauses)."""
     d = asdict(test)
-    d.update(id=project.next_test_id(), video="", events=[], status="pending", recorded_at="", notes="",
-             io_events=[], result_variables={}, pauses=[], attempt=test.attempt + 1, replaces=test.id,
-             zone_overrides=dict(test.zone_overrides))
-    new = Test.from_dict(d)
+    d.update(id=project.next_test_id(), events=[], status="pending", recorded_at="", notes="", io_events=[],
+             result_variables={}, pauses=[], **changes)
+    return Test.from_dict(d)
+
+
+def reperform_test(project: Project, test: Test) -> Test:
+    """A new attempt of `test` (same animal, stage, trial, apparatus, variables, zone positions); the old one is
+    superseded."""
+    new = _fresh_copy(project, test, video="", attempt=test.attempt + 1, replaces=test.id)
     project.tests.insert(project.tests.index(test) + 1, new)
     test.status = "superseded"
+    return new
+
+
+def duplicate_test(project: Project, test: Test) -> Test:
+    """A new pending test like `test` (same video, animal, stage, apparatus, variables), appended to the project;
+    per-test zone positions and the attempt history are not copied."""
+    new = _fresh_copy(project, test, zone_overrides={}, attempt=1, replaces=0)
+    project.tests.append(new)
     return new
 
 
@@ -112,6 +125,13 @@ def clear_tracks(project: Project, test: Test) -> int:
                 p.unlink()
                 n += 1
     refresh_status(project, test)
+    return n
+
+
+def delete_test(project: Project, test: Test) -> int:
+    """Remove the test and its track files (videos are kept). Returns the number of track files removed."""
+    n = clear_tracks(project, test)
+    project.tests.remove(test)
     return n
 
 
@@ -303,31 +323,36 @@ def apply_criteria(project: Project, report: dict | None = None) -> dict:
         a = project.get_animal(aid)
         if a is None or a.retired:
             continue
-        a.retired, a.retired_reason = True, reason
         retired.append(aid)
-        for t in project.tests:
-            if aid in [t.animal_id] + list(t.extra_animals) and t.status == "pending":
-                skip_test(t, "animal retired")
-                skipped += 1
+        skipped += retire_animal(project, a, reason)
     return {"completed": n_completed, "retired": retired, "skipped": skipped}
 
 
+def _animals(test: Test) -> list[str]:
+    return [test.animal_id, *test.extra_animals]
+
+
 def retire_animal(project: Project, animal: Animal, reason: str = "", skip_pending: bool = True) -> int:
+    """Retire the animal and (by default) skip its pending tests, including those it takes part in as a further
+    animal. Returns the number of tests skipped."""
     animal.retired, animal.retired_reason = True, reason
     n = 0
     if skip_pending:
         for t in project.tests:
-            if t.animal_id == animal.id and t.status == "pending":
+            if animal.id in _animals(t) and t.status == "pending":
                 skip_test(t, "animal retired")
                 n += 1
     return n
 
 
 def reinstate_animal(project: Project, animal: Animal) -> int:
+    """Undo retire_animal: resume the tests it skipped unless another of their animals is still retired."""
     animal.retired, animal.retired_reason = False, ""
+    retired = {a.id for a in project.animals if a.retired}
     n = 0
     for t in project.tests:
-        if t.animal_id == animal.id and t.status == "skipped" and "animal retired" in t.notes:
+        if animal.id in _animals(t) and t.status == "skipped" and "animal retired" in t.notes \
+                and not retired.intersection(_animals(t)):
             t.notes = "; ".join(x for x in t.notes.split("; ") if x != "animal retired")
             resume_test(project, t)
             n += 1
