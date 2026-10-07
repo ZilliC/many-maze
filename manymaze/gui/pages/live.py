@@ -297,7 +297,7 @@ class LivePage(Page):
         self._last_frame: np.ndarray | None = None
         self._frame_size: tuple[int, int] | None = None
         self._fps = 25.0
-        self._log_seen = 0
+        self._outputs_seen = self._proc_log_seen = 0
         self._fired_seen = 0
         self._shortcuts: list[QShortcut] = []
         self.last_results: list[dict] = []
@@ -324,6 +324,11 @@ class LivePage(Page):
         self._obs_new = False
         self._key_filter = False
         self._undo: list[tuple] = []  # (session, [(kind, event, behaviour), ...]) per scoring key press
+        self._touch = None  # touch-screen stimulus window (gui.touchscreen) and the settings it was built with
+        self._touch_cfg: dict | None = None
+        self._pad_sig = None
+        self._btn_state = None
+        self._zone_names: list[str] = []
         self.prefs = self._load_view_prefs()
 
         self._build_actions()
@@ -1212,7 +1217,7 @@ class LivePage(Page):
         self._load_single_view()
         self._refresh_row_choices()
         sig = [(b.name, b.key, b.kind, b.group, b.color) for b in p.behaviours]
-        if sig != getattr(self, "_pad_sig", None):
+        if sig != self._pad_sig:
             self._pad_sig = sig
             for pad in (self.obs_panel.pad, self.score_pad):
                 if pad is not None:
@@ -1234,19 +1239,22 @@ class LivePage(Page):
     def _touch_window(self):
         """The touch-screen stimulus window when enabled for this experiment (shown full screen on its display)."""
         cfg = (self.project.settings_extra.get("touchscreen") or {}) if self.project is not None else {}
-        if not cfg.get("enabled"):
+        if not cfg.get("enabled") or cfg != self._touch_cfg:  # off, or its settings changed: rebuilt below
             self._close_touch()
+        if not cfg.get("enabled"):
             return None
-        if getattr(self, "_touch", None) is None:
+        if self._touch is None:
             from ..touchscreen import TouchStimulusWindow
             self._touch = TouchStimulusWindow.from_project(self.project)
+            self._touch_cfg = copy.deepcopy(cfg)
             self._touch.show_on_screen()
         return self._touch
 
     def _close_touch(self):
-        if getattr(self, "_touch", None) is not None:
+        if self._touch is not None:
             self._touch.close()
             self._touch = None
+            self._touch_cfg = None
 
     def shutdown(self):
         self._close_touch()
@@ -1261,6 +1269,7 @@ class LivePage(Page):
         self._save_finished_entries()
         self.stop_preview()
         self._close_devices()
+        self._enable_shortcuts(False)  # the application-wide key filter goes with the page
         self._ui_timer.stop()
         self._mosaic_timer.stop()
         if self._scan_worker is not None:
@@ -1623,7 +1632,8 @@ class LivePage(Page):
                 n = 250
                 trail = list(zip(s.cols["x"][-n:], s.cols["y"][-n:]))
                 elapsed = s.elapsed if state != "waiting" else 0.0
-                info = {"state": state, "elapsed": elapsed, "duration": s.duration_s, "events": len(s.events),
+                info = {"session": s, "state": state, "elapsed": elapsed, "duration": s.duration_s,
+                        "events": len(s.events),
                         "fired": list(getattr(s.engine, "fired", [])),
                         "outputs": list(s.outputs.log) if s.outputs is not None else [],
                         "proc_log": list(s.log), "phase": s.start_phase}
@@ -1673,12 +1683,13 @@ class LivePage(Page):
         state = info["state"]
         if self.session is not None or not self._hold_finished:
             self._set_state_display(state)
-        if state != getattr(self, "_btn_state", None):
+        if state != self._btn_state:
             self._btn_state = state
             self._update_buttons()
         self.vals["zone"].setText(", ".join(info["zones"]) if info["zones"] else
                                   ("—" if info["detected"] else "not detected"))
-        if self.session is not None and "elapsed" in info:  # (a preview frame may arrive just after arming)
+        # a preview frame, or a stale one of the previous test, may arrive just after arming
+        if info.get("session") is not None and info["session"] is self.session:
             el = info["elapsed"]
             dur = info["duration"]
             self.single_panel.set_state(state, el, dur)
@@ -1689,10 +1700,12 @@ class LivePage(Page):
             for t, trig, act, payload in fired[self._fired_seen:]:
                 self._log(f"{fmt_time(t)}  rule: {trig} → {act} {payload}".rstrip())
             self._fired_seen = len(fired)
-            outs = info["outputs"] + [f"{fmt_time(t)} {m}" for t, m in info["proc_log"]]
-            for line in outs[self._log_seen:]:
+            for line in info["outputs"][self._outputs_seen:]:
                 self._log(f"  {line}")
-            self._log_seen = len(outs)
+            self._outputs_seen = len(info["outputs"])
+            for t, m in info["proc_log"][self._proc_log_seen:]:
+                self._log(f"  {fmt_time(t)} {m}")
+            self._proc_log_seen = len(info["proc_log"])
             if state == "finished":
                 self._finalise(save=True)
 
@@ -1888,7 +1901,7 @@ class LivePage(Page):
         with self._lock:
             self._apparatus = session.apparatus
             self._fired_seen = 0
-            self._log_seen = len(outputs.log)
+            self._outputs_seen, self._proc_log_seen = len(outputs.log), 0
             self.session = session
         self._schedule = self._new_schedule() if self.start_mode.currentData() == "scheduled" else None
         if self.grabber is not None:
@@ -2618,8 +2631,11 @@ class LivePage(Page):
                               f"current position.")
                     continue
                 self.group.restart_source(key)
-        if self.start_mode.currentData() == "scheduled":
-            sch = self._new_schedule([e.id for e in ents if e.session is not None])
+        # a daily schedule re-arms its tests when it fires: they keep that schedule rather than get another one
+        scheduled = {i for sch in self.group.schedules if sch.entry_ids is not None for i in sch.entry_ids}
+        ids = [e.id for e in ents if e.session is not None and e.id not in scheduled]
+        if self.start_mode.currentData() == "scheduled" and ids:
+            sch = self._new_schedule(ids)
             self.group.on_schedule = self._on_group_schedule
             self._log(f"Scheduled start {sch.describe()}.")
         self._enable_shortcuts(True)
@@ -2990,37 +3006,36 @@ class LivePage(Page):
             return False
         e = self._entry_of(s)
         done = []  # what this key press did, for Undo: (kind, event, behaviour)
+
+        def score(name: str, kind: str) -> bool:
+            """kind: "point", "start" or "end". False when the test ended meanwhile (nothing scored)."""
+            ev = s.score(name, "point" if kind == "point" else "state")
+            if ev is None:
+                return False
+            what = {"point": "", "start": " starts", "end": " ends"}[kind]
+            self._log(f"{fmt_time(ev['t_end'] if kind == 'end' else ev['t'])}  {name}{what}", e)
+            done.append((kind, ev, name))
+            return True
+
         if not down:
             if b.kind != "hold" or b.name not in s.open_states:
                 return False
-            ev = s.score(b.name, "state")
-            self._log(f"{fmt_time(ev['t_end'])}  {b.name} ends", e)
-            self._push_undo(s, [("end", ev, b.name)])
-            return True
-        s.key(b.key)
-        if b.kind == "point":
-            ev = s.score(b.name, "point")
-            self._log(f"{fmt_time(ev['t'])}  {b.name}", e)
-            done.append(("point", ev, b.name))
-        elif b.name in s.open_states:
-            if b.kind == "hold":
-                return True
-            ev = s.score(b.name, "state")
-            self._log(f"{fmt_time(ev['t_end'])}  {b.name} ends", e)
-            done.append(("end", ev, b.name))
+            score(b.name, "end")
         else:
-            for o in wf.exclusive_partners(self.project.behaviours, b):
-                if o.name in s.open_states:
-                    end = s.score(o.name, "state")
-                    self._log(f"{fmt_time(end['t_end'])}  {o.name} ends", e)
-                    done.append(("end", end, o.name))
-            ev = s.score(b.name, "state")
-            self._log(f"{fmt_time(ev['t'])}  {b.name} starts", e)
-            done.append(("start", ev, b.name))
+            s.key(b.key)
+            if b.kind == "point":
+                score(b.name, "point")
+            elif b.name in s.open_states:
+                if b.kind == "hold":
+                    return True
+                score(b.name, "end")
+            elif all(score(o.name, "end") for o in wf.exclusive_partners(self.project.behaviours, b)
+                     if o.name in s.open_states):
+                score(b.name, "start")
         self._push_undo(s, done)
         if s is self.session:
             self.vals["events"].setText(str(len(s.events)))
-        return True
+        return bool(done)
 
     def _entry_of(self, session):
         if session is None or session is self.session or session is self.obs:
@@ -3124,7 +3139,7 @@ class LivePage(Page):
         self._loading = True
         try:
             self.r_zone.clear()
-            self.r_zone.addItems([""] + getattr(self, "_zone_names", []))
+            self.r_zone.addItems([""] + self._zone_names)
             if ok:
                 rule = rules[r]
                 self.r_trigger.setCurrentIndex(max(0, self.r_trigger.findData(rule.get("trigger", "time"))))

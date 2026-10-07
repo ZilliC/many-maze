@@ -186,3 +186,99 @@ def test_observation_panel(win):
     assert o.state == "paused"
     page.stop_all_act.trigger()
     assert page.obs is None and p.tests[-1].status == "scored" and len(p.tests[-1].events) == 1
+
+
+def _arm_single(win, duration=2.0):
+    p = win.project
+    video = p.abs_path(p.tests[0].video)
+    page = win.goto("LivePage")
+    page.set_simulation_file(video)
+    page.duration.setValue(duration)
+    page.start_mode.setCurrentIndex(page.start_mode.findData("immediate"))
+    page.test_combo.setCurrentIndex(0)
+    page.animal.setCurrentText("C1")
+    page.start_preview = lambda: True
+    page._on_file_background(compute_background(video, DetectionSettings(background_samples=21)))
+    page._on_opened(400, 400, 25.0)
+    assert page.arm()
+    return page, video
+
+
+def test_stale_finished_frame_does_not_finalise_a_new_test(win):
+    import numpy as np
+
+    page, _ = _arm_single(win)
+    s = page.session
+    stale = {"session": object(), "state": "finished", "elapsed": 1.0, "duration": 2.0, "events": 0, "fired": [],
+             "outputs": [], "proc_log": [], "phase": "", "distance": 0.0, "unit": "cm", "detected": False,
+             "zones": []}
+    page._on_frame(np.zeros((400, 400, 3), np.uint8), stale)
+    assert page.session is s
+    page.stop_test(save=False)
+
+
+def test_procedure_log_lines_are_shown_once(win):
+    page, video = _arm_single(win, duration=0)
+    page.session.outputs.log.append("serial: A")
+    src = VideoSource(video)
+    for i in range(3):
+        ok, f = src.read()
+        page.feed_frame(f, i / 25)
+        page.session.log.append((i / 25, f"line {i}"))
+    src.release()
+    lines = [page.log.item(i).text() for i in range(page.log.count())]
+    assert sum("serial: A" in x for x in lines) == 1
+    assert [sum(f"line {i}" in x for x in lines) for i in range(2)] == [1, 1]
+    page.stop_test(save=False)
+
+
+def test_scoring_when_the_test_ends_meanwhile(win):
+    p = win.project
+    p.behaviours = [Behaviour("Grooming", "g", "state", group="g1"), Behaviour("Rearing", "r", "state", group="g1")]
+    page = win.goto("LivePage")
+    page.set_mode("observe")
+    page.start_mode.setCurrentIndex(page.start_mode.findData("immediate"))
+    page.test_combo.setCurrentIndex(0)
+    page.animal.setCurrentText("A1")
+    page.start_all_act.trigger()
+    assert page.score_key("g")
+    page.obs.score = lambda *a, **k: None  # the test ended between the state check and the scoring
+    assert not page.score_key("r")
+    page.obs_stop(save=False)
+
+
+def test_daily_schedule_does_not_pile_up(win):
+    p = win.project
+    page = win.goto("LivePage")
+    page.set_mode("multi")
+    page.add_source(p.abs_path(p.tests[0].video))
+    page.add_session_row()
+    page.start_mode.setCurrentIndex(page.start_mode.findData("scheduled"))
+    page.sched_daily.setChecked(True)
+    assert page.arm_all() == 1
+    assert len(page.group.schedules) == 1
+    sch, ents = page.group.schedules[0], list(page._entries())
+    for e in ents:
+        page.group.stop(e, save=False)
+    page._on_group_schedule(sch, ents)  # the next day: the finished tests are armed again and started
+    assert len(page.group.schedules) == 1
+    assert all(e.session is not None and e.state != "finished" for e in ents)
+    page.stop_all_clicked()  # Discard
+    assert all(e.state == "finished" for e in ents)
+
+
+def test_touch_window_follows_its_settings(win):
+    p = win.project
+    page = win.goto("LivePage")
+    p.settings_extra["touchscreen"] = {"enabled": True, "areas": [{"name": "a", "x": 0, "y": 0, "w": 0.5, "h": 1}]}
+    try:
+        w1 = page._touch_window()
+        assert page._touch_window() is w1
+        p.settings_extra["touchscreen"]["areas"][0]["name"] = "b"  # edited on the Experiment page
+        w2 = page._touch_window()
+        assert w2 is not w1 and [a["name"] for a in w2.areas] == ["b"]
+        p.settings_extra["touchscreen"]["enabled"] = False
+        assert page._touch_window() is None and page._touch is None
+    finally:
+        p.settings_extra.pop("touchscreen", None)
+        page._close_touch()
