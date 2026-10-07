@@ -15,7 +15,93 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv", ".mpg", ".mpeg", ".webm", ".mts")
+# a test filmed in several consecutive files (a recording split every N minutes, a camera that starts a new file
+# every 4 GB…) uses an M3U playlist listing the parts in order; it plays and tracks as one video
+PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
+VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv", ".mpg", ".mpeg", ".webm", ".mts") + \
+    PLAYLIST_EXTENSIONS
+
+
+def is_playlist(path) -> bool:
+    return isinstance(path, (str, os.PathLike)) and Path(path).suffix.lower() in PLAYLIST_EXTENSIONS
+
+
+def playlist_parts(path) -> list[str]:
+    """Video files of an M3U playlist in order (relative entries are relative to the playlist; # lines ignored)."""
+    p = Path(path)
+    parts = []
+    for line in p.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        q = Path(line).expanduser()
+        parts.append(str(q if q.is_absolute() else p.parent / q))
+    if not parts:
+        raise IOError(f"The playlist {p.name} lists no video files")
+    return parts
+
+
+def write_playlist(path, parts) -> Path:
+    """Write an M3U playlist of video files (paths relative to the playlist where possible)."""
+    p = Path(path)
+    lines = ["#EXTM3U"]
+    for part in parts:
+        q = Path(part).resolve()
+        try:
+            lines.append(os.path.relpath(q, p.parent.resolve()))
+        except ValueError:  # another drive (Windows)
+            lines.append(str(q))
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+class _PlaylistCapture:
+    """The parts of a playlist behind the cv2.VideoCapture interface VideoSource uses: frames are numbered
+    continuously across the files (frame rate and size are those of the first file)."""
+
+    def __init__(self, parts: list[str]):
+        self.caps, self.offsets = [], [0]
+        for part in parts:
+            if not Path(part).exists():
+                self.release()
+                raise FileNotFoundError(part)
+            cap = cv2.VideoCapture(str(part))
+            if not cap.isOpened():
+                self.release()
+                raise IOError(f"Cannot open video {part!r}")
+            self.caps.append(cap)
+            self.offsets.append(self.offsets[-1] + max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT))))
+        self.cur = 0
+
+    def isOpened(self) -> bool:
+        return bool(self.caps)
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return float(self.offsets[-1])
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            return float(self.offsets[self.cur] + self.caps[self.cur].get(cv2.CAP_PROP_POS_FRAMES))
+        return self.caps[0].get(prop)
+
+    def set(self, prop, value):
+        if prop != cv2.CAP_PROP_POS_FRAMES:
+            return self.caps[0].set(prop, value)
+        i = int(value)
+        k = max(0, min(len(self.caps) - 1, int(np.searchsorted(self.offsets, i, side="right")) - 1))
+        self.cur = k
+        return self.caps[k].set(cv2.CAP_PROP_POS_FRAMES, i - self.offsets[k])
+
+    def read(self):
+        while True:
+            ok, f = self.caps[self.cur].read()
+            if ok or self.cur >= len(self.caps) - 1:
+                return ok, f
+            self.cur += 1
+            self.caps[self.cur].set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    def release(self):
+        for c in self.caps:
+            c.release()
 
 
 def camera_backend() -> int:
@@ -62,7 +148,8 @@ class VideoSource:
         else:
             if not Path(source).exists():
                 raise FileNotFoundError(source)
-            self.cap = cv2.VideoCapture(str(source))
+            self.cap = _PlaylistCapture(playlist_parts(source)) if is_playlist(source) else \
+                cv2.VideoCapture(str(source))
         if not self.cap.isOpened():
             raise IOError(f"Cannot open video source {source!r}")
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS)) or 0.0
@@ -185,9 +272,25 @@ class FrameReader:
         self.start = max(0, int(start))
         self.gray = gray
         self.threads = threads or default_threads()
+        self.hwaccel = hwaccel
         self.backend = "opencv"
         self._container = None
         self._cap = None
+        self._parts = None
+        if is_playlist(self.path):  # decode the parts one after the other, numbering frames continuously
+            self._parts = playlist_parts(self.path)
+            counts = []
+            for part in self._parts:
+                with VideoSource(part) as v:
+                    counts.append(v.frame_count)
+                    if len(counts) == 1:
+                        self.fps, self.width, self.height = v.fps, v.width, v.height
+            self._offsets = np.concatenate([[0], np.cumsum(counts)]).astype(int)
+            k = max(0, min(len(self._parts) - 1, int(np.searchsorted(self._offsets, self.start, side="right")) - 1))
+            self._part = k
+            self._reader = FrameReader(self._parts[k], self.start - int(self._offsets[k]), gray, threads, hwaccel)
+            self.backend = self._reader.backend
+            return
         av = _av()
         if av is not None:
             try:
@@ -256,6 +359,16 @@ class FrameReader:
         return frame.to_ndarray(format="gray")
 
     def __iter__(self):
+        if self._parts is not None:
+            while True:
+                off = int(self._offsets[self._part])
+                for i, f in self._reader:
+                    yield off + i, f
+                self._reader.close()
+                if self._part >= len(self._parts) - 1:
+                    return
+                self._part += 1
+                self._reader = FrameReader(self._parts[self._part], 0, self.gray, self.threads, self.hwaccel)
         if self._cap is not None:
             i = self.start
             while True:
@@ -276,6 +389,8 @@ class FrameReader:
                 yield i, self._to_array(frame)
 
     def close(self):
+        if self._parts is not None and self._reader is not None:
+            self._reader.close()
         if self._container is not None:
             self._container.close()
             self._container = None

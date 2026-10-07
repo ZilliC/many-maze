@@ -10,7 +10,8 @@ can start right away — **Protocol → Experiment → Test → Results**.
   grouped like in ANY-maze (e.g. *Apparatus map*, *Navigation*, *Clipboard*, *Spreadsheet*, *All apparatus*). The
   commands change with the page you are on. The save button is at the top right (⌘S / Ctrl+S).
 * **File** (the blue tab) — new / open / demo experiment, save, close, recent experiments, *Import from ANY-maze*
-  (animals, treatments and test schedules from spreadsheets saved by ANY-maze), user guide.
+  (animals, treatments and test schedules from spreadsheets saved by ANY-maze), *Protocol report*, *Restore a
+  backup*, *Archive experiment* / *Open archive*, user guide.
 * **Explorer** — the list on the left of each tab: the protocol elements (Protocol, Animal tracking, Stages, Keys,
   Procedures, Analysis, Hardware), each apparatus, the treatments and animals, the test schedule / run tests /
   review pages, the result views (Spreadsheet, Track plots, Heat maps, Charts, Video export) and the statistical
@@ -36,6 +37,26 @@ fear conditioning, forced swim / tail suspension, or custom). The experiment is 
 `Name.mmaze/` containing `project.json`, `tracks/`, `recordings/` and `exports/`. Videos are referenced by
 relative path when they live inside the experiment folder, so the folder can be moved or shared.
 
+**Based on another experiment**: choose an existing experiment under *Based on* and the new one gets its protocol —
+apparatus, stages, keys, test duration and start, animal tracking and analysis settings, procedures, I/O devices,
+training criteria, blind testing and animal ID options, animal columns and (optionally) the treatments. Animals,
+tests and results are not copied. Use it for a new cohort or a replication.
+
+**Protocol report** (*File ▸ Protocol report*) saves a printable HTML description of the protocol: the experiment
+options, stages, keys, a map of each apparatus with its zones, zone groups, points, lines and sequences (shape,
+area, entry rule, options), the animal tracking and analysis settings (changed values are marked), the procedures
+statement by statement, the I/O devices and the training criteria — for lab notebooks, methods sections and SOPs.
+
+**Backups**: each time the experiment is saved, the previous experiment file is kept in `backups/` (at most one
+backup every 10 minutes, the 30 newest are kept). *File ▸ Restore a backup* lists them by date and time and goes
+back to the chosen one (the current state is backed up first). Tracks are not part of the backups.
+
+**Archive experiment** (File tab) writes the whole experiment to one zip file: the experiment file, tracks,
+recordings, exports and the video of every test — also videos stored outside the experiment folder, which are copied
+into `videos/external/` (the tests in the archive point to the copies). Use it to move an experiment to another
+computer or to keep it with a publication. **Open archive** unpacks an archive into a folder and opens it.
+Automatic backups are not archived.
+
 *File ▸ Create demo experiment* builds a complete open-field experiment from synthetic videos so you can try
 everything without a camera.
 
@@ -56,12 +77,20 @@ everything without a camera.
   **pose model** (deep learning, see §5.1).
 * **Analysis** – thresholds for mobility, freezing, zone entries, thigmotaxis, object exploration,
   social contact and time bins.
+* **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
+  `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
+  every measure, including the test duration, stops there.
 
 ## 2. Experiment tab: treatments and animals
 
 Add animals one by one or in bulk, assign **treatments** (groups/genotypes, each with a colour used in all
 graphs), sex and any number of custom columns (age, weight, litter…). Animals can be imported from / exported
 to CSV (`ID, Group, Sex, …`).
+
+**Randomise treatments** allocates the animals (all, or the selected ones) to the ticked treatments at random, in
+numbers that differ by at most one. *Balance within* spreads each sex — or each value of a column such as litter or
+cage — evenly over the treatments (stratified block randomisation). Enter a *seed* to reproduce an allocation.
+Retired animals are left out. Combine it with blind testing so the experimenter never sees the allocation.
 
 Retirement, the dose calculator and blind testing are described in §6.
 
@@ -79,6 +108,10 @@ from the real size you enter — or draw your own:
 | Line | crossings in each direction |
 | Calibrate | draw a line of known length (cm) |
 | Zone groups | unions of zones minus excluded zones (e.g. *Open arms*, *Periphery = Arena − Centre*) |
+
+**Import… / Export…** (Apparatus group) copy apparatus maps between experiments: *Import…* reads the apparatus
+of another experiment (choose its `project.json`) or an apparatus file; *Export…* writes the current
+apparatus (zones, points, lines, groups, sequences, grids and calibration) to a `.json` file you can share.
 
 Several apparatus can share one video (e.g. four open fields filmed together) — tests that share a video and
 start time are tracked in a single pass.
@@ -127,6 +160,16 @@ done elsewhere.
 
 **Track selected / Track all untracked** runs the tracker in the background.
 
+**Add tests from videos ▾ Join video files into one test…** is for a test filmed in several consecutive files (a split
+recording, a camera that starts a new file every 4 GB): choose the files and they are listed, in name order, in an M3U
+playlist in the experiment's `videos` folder. The playlist becomes the selected test's video (or a new test's) and
+plays, tracks and exports as one continuous video. You can also write a playlist yourself (one file per line, relative
+to the playlist) and add it with *Add tests from videos*.
+
+**Schedule… ▾ Print schedule… / Save schedule… / Copy schedule** (also in the right-click menu) output the schedule as
+shown (sorted as in the table, with blind codes when blind testing is on): the printout has an empty *Done* column to
+tick off tests in the testing room; *Save…* writes CSV, tab-separated text or Excel; *Copy* puts it on the clipboard.
+
 **Variables…** (toolbar or right-click) sets per-test variables that change the analysis: which point of
 interest is the *novel object* (novel object recognition) and the *social stimulus side* (three-chamber).
 
@@ -141,6 +184,13 @@ interest is the *novel object* (novel object recognition) and the *social stimul
 * **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges.
 * **Results / plots** for the test: track plot, occupancy heat map, speed and freezing trace.
 
+### Swapping identities (several animals)
+
+When two animals tracked in the same arena touch, the tracker can exchange their identities. In **Track editing ▸
+Swap identities**, choose the animal being edited (*Animal*) and the one to swap it *With*, then press **Swap**: their
+positions (centre, head, tail, area, motion) are exchanged over the time range, or from the current time to the end
+when no range is set. *Undo* reverts the swap.
+
 ### How tracking works
 
 1. A **background** model of the empty arena is built: the median of frames sampled through the test (the
@@ -154,6 +204,19 @@ interest is the *novel object* (novel object recognition) and the *social stimul
    is found by PCA, and the end that the animal moves towards is the head (with frame-to-frame consistency).
 5. **Motion** (changed pixels between frames, normalised by body area) is stored for freezing / immobility.
 6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
+
+### Tracking by colour
+
+With a colour camera, *Detect the animal using: Its colour* finds the pixels of a chosen colour (*Colour of the
+animal or mark*, with a hue *tolerance* and a minimum *saturation* so white, grey and black are never taken for a
+colour). Use it for coloured animals, dye or paint marks, coloured collars or LEDs, or when the floor and the animal
+have similar brightness but different colours. No background model is needed.
+
+**Identifying several animals by colour marks**: with several animals in an arena, enter one colour per animal in
+*Identify several animals by colour marks* (e.g. `#ff0000, #0000ff`: the first animal has a red mark, the second a
+blue one). The animals are still detected as usual (background, threshold or colour), but each one is then the blob
+carrying most of its colour, so identities cannot swap when the animals touch or cross. When no mark is visible in a
+frame, identities follow the positions.
 
 ### 5.1 Pose model (AI body parts)
 
@@ -183,6 +246,15 @@ confidence* fall back to the shape estimate.
   OpenCV only.
 * **Hardware recording** – live tests are recorded with VideoToolbox's H.264 encoder (MP4), leaving the CPU for
   tracking.
+
+### Apparatus position in a test
+
+If the camera or the apparatus moved between recordings, the apparatus map no longer fits some videos. In
+**Review and score ▸ Track editing ▸ Apparatus position in this test**, move the whole map right / down (pixels),
+rotate it (degrees, clockwise) and scale it about the arena centre until it fits the video again. The position is
+saved with the test and used everywhere: tracking (the arena mask), results, plots, live tests, exports. The scale
+also adjusts the calibration, so distances in cm stay right. *Reset* returns to the map as drawn. Track the test
+again if the arena moved so much that the animal was cut off by the old arena outline.
 
 ### Moveable zones
 
@@ -386,6 +458,10 @@ page shows what the camera delivers); changing the options later moves the image
 **Record video of the test** saves one file per test in the experiment's `recordings` folder and links it to the
 test, so it can be re-analysed or reviewed. **Burn time and events into the video** writes the test time, the clock
 time and the latest event labels on the recording; leave it off for a clean video.
+
+**Start a new video file every … min** is for long tests (24-hour home cage, circadian activity): the recording is
+written as consecutive files (`test_0001_part001.mp4`, `…part002.mp4`, …) listed in a playlist `test_0001.m3u`,
+which is the test's video. A crash or power cut loses at most the end of the current file.
 
 ### Erasing thin wires and cage bars
 
@@ -700,7 +776,8 @@ maps, group heat maps, results and statistics.
   zone transitions, grid crossings.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
-  time / latency, time facing the zone.
+  time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean
+  distance from the zone (0 while inside).
 * **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
   and distance moving towards / away, head oriented towards / away, mean head angle, head turns towards.
 * **Lines**: crossings in each direction, latency.
@@ -846,6 +923,13 @@ From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", O
 - **Export → Experiment as XML (with raw tracks)…**: the whole experiment in one file, described below.
 - **Export → Raw data per test (CSV)…**: one file per test and animal, with time, the raw track columns (pixels) and
   every per-frame parameter from the Charts view in calibrated units.
+- **Export → One row per animal…**: the shown measures with one row per animal and one column per measure × stage /
+  trial (and time period), e.g. `Total distance (cm) [Day 2 · 1]` — the layout Prism, SPSS or Excel need for
+  repeated measures.
+- **Export → Mean of each animal's trials per stage…**: one row per animal and stage with the mean of its trials
+  (e.g. the four water-maze trials of each day) and the number of trials averaged.
+- **Export → Event log of the shown tests…**: every test's events in time order — zone (and zone group) entries and
+  exits, key presses (on / off), I/O inputs and outputs, pauses — with the test, stage, trial and animal.
 - **HTML report…**: you can also set the heat-map scale (including one scale for all tests) and add charts of the
   parameters ticked in the Charts view.
 
@@ -922,7 +1006,11 @@ values can be shown or hidden.
   Repeated-measures effects also get Greenhouse-Geisser corrected p-values. The graph can be a line, column, points,
   box or violin plot.
 - **Correlation**: Pearson, Spearman or Kendall, with a least-squares line and its 95 % confidence band. It also
-  reports the regression slope (with its CI), intercept and R². Points can be coloured by any factor.
+  reports the regression slope (with its CI), intercept and R². Points can be coloured by any factor; the levels
+  of that factor are then also compared by **ANCOVA** (analysis of covariance): the Y measure adjusted for the X
+  measure as covariate (e.g. distance travelled adjusted for body weight). It reports F and p for the factor and
+  the covariate, the common slope, the covariate-adjusted means ± SE and the homogeneity-of-slopes test (if the
+  slopes differ between groups, the ANCOVA assumption is violated).
 - **Grouped (3 levels)**: descriptive statistics for every combination of up to three factors (for example group ×
   stage × period) and a clustered graph:
   - factor 1 on the X axis;
@@ -936,7 +1024,7 @@ values can be shown or hidden.
 
 **Copy summary**, **Save figure…** and **Copy figure** work on every tab.
 
-#### Supported procedures (42)
+#### Supported procedures (43)
 
 | Category | Procedures |
 |---|---|
@@ -944,7 +1032,7 @@ values can be shown or hidden.
 | One sample (2) | One-sample t-test, Wilcoxon signed-rank against a value |
 | Several groups (5) | One-way ANOVA, Welch's ANOVA, Alexander-Govern, Kruskal-Wallis, Mood's median test |
 | Repeated measures (2) | Repeated-measures ANOVA (+ Greenhouse-Geisser), Friedman |
-| Two factors (4) | Two-way ANOVA, mixed two-way ANOVA, Scheirer-Ray-Hare, aligned rank transform ANOVA |
+| Two factors (5) | Two-way ANOVA, mixed two-way ANOVA, Scheirer-Ray-Hare, aligned rank transform ANOVA, ANCOVA |
 | Post-hoc (8) | Tukey HSD, Bonferroni, Holm, Šidák, Benjamini-Hochberg FDR, Dunnett, Games-Howell, Dunn |
 | Categorical (4) | Chi-square independence, Fisher's exact, G-test, chi-square goodness of fit |
 | Correlation (4) | Pearson, Spearman, Kendall's tau, linear regression with confidence intervals |
@@ -958,7 +1046,11 @@ manymaze demo ~/Desktop/demo.mmaze        # demo experiment
 manymaze track video.mp4 --template epm --bbox 100,40,520,520 --size-cm 75 -o results.csv
 manymaze project ~/exp.mmaze track        # batch-track untracked tests in parallel (--workers N)
 manymaze project ~/exp.mmaze results -o results.xlsx --bins
+manymaze project ~/exp.mmaze results --wide -o by_animal.xlsx   # one row per animal
 manymaze project ~/exp.mmaze report -o report.html
+manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
+manymaze project ~/exp.mmaze protocol -o protocol.html
+manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file
 manymaze templates                        # list apparatus templates
 ```
 

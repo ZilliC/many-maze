@@ -334,7 +334,7 @@ class StatisticsPage(Page):
             ("Select the 1st independent variable", self.f1, {G}),
             ("Optionally select a 2nd independent variable", self.f2, {G}),
             ("Optionally select a 3rd independent variable", self.f3, {G}),
-            ("Optionally colour the points by", self.corr_by, {R}),
+            ("Optionally colour the points by (and compare with ANCOVA)", self.corr_by, {R}),
             ("Select the variable to group the tests by", self.cat_rows, {K}),
             ("head", "Tests to include", {C, T, G, R, K}),
             ("Select the time period to analyse", self.period, {C, T, G, R, K}),
@@ -830,7 +830,7 @@ class StatisticsPage(Page):
 
     # ------------------------------------------------------------------ compute
     def _clear_outputs(self):
-        self.result = self.anova = self.corr = self.reg = self.grouped = self.cat = None
+        self.result = self.anova = self.corr = self.reg = self.grouped = self.cat = self.ancova = None
         for c in (self.cmp_canvas, self.tc_canvas, self.corr_canvas, self.grp_canvas, self.cat_canvas):
             c.set_figure(_message_figure("No data"))
         self.test_lbl.setText("")
@@ -1082,9 +1082,29 @@ class StatisticsPage(Page):
             reg = (f"<br><b>Linear regression</b><div>y = {g['slope']:.4g}·x + {g['intercept']:.4g}</div>"
                    f"<div>slope 95% CI {g['slope_ci'][0]:.4g} to {g['slope_ci'][1]:.4g}</div>"
                    f"<div>R² = {g['r2']:.3f}, {escape(format_p(g['p']))}</div>")
+        # ANCOVA: compare the levels of the colouring factor on Y, adjusted for X as the covariate
+        self.ancova = None
+        anc = ""
+        if factor and factor != NONE and len(set(groups)) >= 2:
+            a = st.ancova(rows, my, mx, factor)
+            if "error" in a:
+                anc = f"<br><b>ANCOVA</b><div>{escape(str(a['error']))}</div>"
+            else:
+                self.ancova = a
+                eff = a["effects"][0]
+                anc = (f"<br><b>ANCOVA</b> ({escape(_label(factor))} adjusted for {escape(mx)})"
+                       f"<div>F({eff['df']}, {eff['df_error']}) = {eff['F']:.3f}, {escape(format_p(eff['p']))} "
+                       f"{stars(eff['p'])}</div>"
+                       + "".join(f"<div>{escape(_label(lv))}: adjusted mean {d['adjusted_mean']:.4g} ± "
+                                 f"{d['adjusted_se']:.3g} SE</div>" for lv, d in a["adjusted_means"].items()))
+                sl = a.get("slopes")
+                if sl:
+                    anc += (f"<div>Homogeneity of slopes: {escape(format_p(sl['p']))}"
+                            + (" — <span style='color:#dc2626'>slopes differ</span>" if sl["p"] < 0.05 else "")
+                            + "</div>")
         self.corr_lbl.setText(f"<div style='font-size:16px'><b>{name} = {_fmt(r)}</b></div>"
                               f"<div style='font-size:14px'>{escape(_p_text(p))}, n = {res.get('n', 0)}</div>"
-                              f"{ci}<div>{strength}</div>{reg}")
+                              f"{ci}<div>{strength}</div>{reg}{anc}")
 
     def grouping_factors(self) -> list[str]:
         out = []
@@ -1201,6 +1221,8 @@ class StatisticsPage(Page):
                 s += (f"\n  Linear regression: slope = {g['slope']:.4g} (95% CI {g['slope_ci'][0]:.4g} to "
                       f"{g['slope_ci'][1]:.4g}), intercept = {g['intercept']:.4g}, R² = {g['r2']:.3f}, "
                       f"{format_p(g['p'])}")
+            if self.ancova:
+                s += "\n" + st.ancova_text(self.ancova, my)
             return s
         if i == 3 and self.grouped:
             lines = [f"{self.grouped_measure} by {' > '.join(self.grouped_factors)}"]

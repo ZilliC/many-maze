@@ -24,7 +24,7 @@ from .measures import AnalysisSettings
 from .procedures import Outputs, ProcedureEngine
 from .track import Track
 from .tracking import ArenaTracker, Detection, DetectionSettings, postprocess, to_gray
-from .video import VideoRecorder
+from .video import VideoRecorder, write_playlist
 
 START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual")
 AUTOSAVE_SUFFIX = ".autosave.json"
@@ -450,6 +450,7 @@ class LiveSession(_Scoring):
     devices: object = None  # core.iodevices.DeviceManager (new procedure engine)
     variables: dict | None = None  # procedure variables shared between tests (project.variables)
     record_overlay: bool = False  # burn the test time and event labels into the recording
+    split_minutes: float = 0.0  # start a new video file every N minutes (long tests; 0 = one file)
     experimenter_area_px: int = 0  # foreground area counted as the experimenter; 0 = auto
     lost_warning_s: float = 3.0  # warn when the animal is not detected for this long (0 = never)
     name: str = ""
@@ -791,7 +792,11 @@ class LiveSession(_Scoring):
             self._rec_frames = 0
             self._last_rec_frame = None
             try:
-                self.recorder = LiveRecorder(self.record_path, self.fps, (w, h))
+                if self.split_minutes and self.split_minutes > 0:
+                    self.recorder = SplitRecorder(self.record_path, self.fps, (w, h),
+                                                  int(round(self.split_minutes * 60 * self.fps)))
+                else:
+                    self.recorder = LiveRecorder(self.record_path, self.fps, (w, h))
             except Exception as e:
                 self.recorder = None
                 self.warn(f"Cannot record: {e}", 0.0)
@@ -944,6 +949,60 @@ def write_autosave(path: str, data: dict):
 def read_autosave(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+class SplitRecorder:
+    """Records a long live test as consecutive files of ``part_frames`` frames each (``<name>_part001.mp4``, …) and
+    keeps an M3U playlist ``<name>.m3u`` listing them, which plays and tracks as one video. A crash loses at most
+    the end of the current part."""
+
+    def __init__(self, path: str, fps: float, size: tuple[int, int], part_frames: int):
+        self.base = Path(path)
+        self.fps, self.size = fps, size
+        self.part_frames = max(1, int(part_frames))
+        self.playlist = self.base.with_suffix(".m3u")
+        self.parts: list[str] = []
+        self.frames = 0
+        self._n = 0
+        self._rec: LiveRecorder | None = None
+        self.backend = ""
+        self._next_part()
+
+    @property
+    def path(self) -> str:
+        return str(self.playlist)
+
+    def _next_part(self):
+        if self._rec is not None:
+            self._rec.close()
+        part = self.base.with_name(f"{self.base.stem}_part{len(self.parts) + 1:03d}{self.base.suffix}")
+        self._rec = LiveRecorder(str(part), self.fps, self.size)
+        self.backend = self._rec.backend
+        self.parts.append(str(part))
+        write_playlist(self.playlist, self.parts)
+        self._n = 0
+
+    def write(self, frame: np.ndarray):
+        if self._n >= self.part_frames:
+            self._next_part()
+        self._rec.write(frame)
+        self._n += 1
+        self.frames += 1
+
+    def close(self):
+        if self._rec is not None:
+            self._rec.close()
+            self._rec = None
+
+
+def recorded_video(record_path: str | None) -> str | None:
+    """The video a live test was recorded to: the file itself, or the playlist of a split recording."""
+    if not record_path:
+        return None
+    if Path(record_path).exists():
+        return record_path
+    pl = Path(record_path).with_suffix(".m3u")
+    return str(pl) if pl.exists() else None
 
 
 def annotate_recording(frame: np.ndarray, t: float, labels: list[str] = ()) -> np.ndarray:

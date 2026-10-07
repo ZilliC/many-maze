@@ -34,8 +34,9 @@ from ...core.live import LiveSession, ObservationSession, open_devices
 from ...core.livegroup import (DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, autosave_path_for,
                                device_plan, recover_autosaves, save_live_test)
 from ...core.procedures import Outputs
+from ...core.project import INFO_COLUMNS
 from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, median_background
-from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras
+from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras, playlist_parts
 from ..icons import icon
 from ..live_widgets import (LAYOUT_LABELS, LAYOUTS, CameraOptionsDialog, MonitorPanel, ObservationPanel,
                             PanelGrid, PanelSettingsDialog, TestPanel, draw_tracking, short_time)
@@ -927,6 +928,15 @@ class LivePage(Page):
         self.record_overlay.setToolTip("Write the test time, the clock time and the latest event labels on the "
                                        "recorded video (otherwise the recording is clean).")
         self.record_overlay.toggled.connect(self._save_live_settings)
+        self.split_min = QDoubleSpinBox()
+        self.split_min.setRange(0, 24 * 60)
+        self.split_min.setDecimals(0)
+        self.split_min.setSuffix(" min")
+        self.split_min.setSpecialValueText("Never (one file)")
+        self.split_min.setToolTip("For long tests (e.g. 24 h home cage): record consecutive files of this length, "
+                                  "listed in a playlist that plays and tracks as one video. A crash loses at most "
+                                  "the end of the current file.")
+        self.split_min.valueChanged.connect(self._save_live_settings)
         self.lost_warn = QDoubleSpinBox()
         self.lost_warn.setRange(0, 3600)
         self.lost_warn.setDecimals(1)
@@ -949,6 +959,7 @@ class LivePage(Page):
         f.addRow("", self.bg_status)
         f.addRow(self.record)
         f.addRow(self.record_overlay)
+        f.addRow("Start a new video file every", self.split_min)
         f.addRow("Warn if the animal is lost for", self.lost_warn)
         f.addRow(self.pause_off)
         f.addRow("Serial port", self.serial)
@@ -1313,6 +1324,7 @@ class LivePage(Page):
             self.start_keys.setText(", ".join(d.get("start_keys", DEFAULT_START_KEYS)))
             self.stop_keys.setText(", ".join(d.get("stop_keys", DEFAULT_STOP_KEYS)))
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
+            self.split_min.setValue(float(d.get("split_minutes", 0.0)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
             self.pause_off.setChecked(bool(d.get("pause_outputs_off", True)))
             hh, mm = (str(d.get("schedule_at", "05:00")) + ":0").split(":")[:2]
@@ -1326,7 +1338,7 @@ class LivePage(Page):
             return
         new = {"start_keys": parse_keys(self.start_keys.text()), "stop_keys": parse_keys(self.stop_keys.text()),
                "record_overlay": self.record_overlay.isChecked(), "lost_warning_s": self.lost_warn.value(),
-               "schedule_at": self.sched_time.time().toString("HH:mm"),
+               "split_minutes": self.split_min.value(), "schedule_at": self.sched_time.time().toString("HH:mm"),
                "schedule_daily": self.sched_daily.isChecked()}
         d = self._live_settings()
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
@@ -1876,6 +1888,7 @@ class LivePage(Page):
                               outputs=outputs, record_path=self._record_path, fps=self._fps,
                               analysis=p.analysis_for(test), devices=self._open_devices(), variables=p.variables,
                               record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
+                              split_minutes=self.split_min.value(),
                               name=f"Test {test.id} · {test.animal_id}", zone_overrides=test.zone_overrides,
                               on_stimulus=touch.handle if touch is not None else None,
                               outputs_off_on_pause=self.pause_off.isChecked(),
@@ -2021,7 +2034,7 @@ class LivePage(Page):
                                    f"{test.trial}")
         self.results.setRowCount(0)
         if rows:
-            skip = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"}
+            skip = set(INFO_COLUMNS) | set(self.project.animal_fields if self.project else [])
             for k, v in rows[0].items():
                 if k in skip:
                     continue
@@ -2561,6 +2574,7 @@ class LivePage(Page):
                         record_path=m["record_path"], fps=fps, analysis=p.analysis_for(test),
                         devices=devices, variables=p.variables,
                         record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
+                        split_minutes=self.split_min.value(),
                         name=f"Test {test.id} · {test.animal_id} · {app.name}",
                         zone_overrides=test.zone_overrides, outputs_off_on_pause=self.pause_off.isChecked(),
                         **self._autosave_args(test, app.name))
@@ -3299,11 +3313,22 @@ def _confirm_id(parent, test) -> bool:
 
 
 def _remove_file(path):
-    if path and Path(path).exists():
+    """Delete a discarded recording (with the parts of a split recording and their playlist)."""
+    if not path:
+        return
+    files = [path]
+    pl = Path(path).with_suffix(".m3u")
+    if pl.exists():
         try:
-            os.remove(path)
+            files += playlist_parts(pl) + [str(pl)]
         except OSError:
-            pass
+            files.append(str(pl))
+    for f in files:
+        if Path(f).exists():
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 def _first_frame(path) -> np.ndarray | None:

@@ -43,7 +43,12 @@ def cmd_track(a):
 
         from .core.apparatus import Apparatus
 
-        app = Apparatus.from_dict(json.loads(Path(a.apparatus).read_text()))
+        d = json.loads(Path(a.apparatus).read_text())
+        if isinstance(d, dict) and isinstance(d.get("apparatus"), list):  # apparatus file or experiment
+            if not d["apparatus"]:
+                sys.exit(f"{a.apparatus} contains no apparatus")
+            d = d["apparatus"][0]
+        app = Apparatus.from_dict(d)
     else:
         try:
             x, y, w, h = map(float, a.bbox.split(",")) if a.bbox else (0, 0, W, H)
@@ -97,8 +102,38 @@ def cmd_project(a):
     elif a.action == "results":
         from .core.export import export_results
 
-        out = a.output or str(p.exports_dir() / "results.xlsx")
-        export_results(p, out, segmented=a.bins)
+        out = a.output or str(p.exports_dir() / ("results by animal.xlsx" if a.wide else "results.xlsx"))
+        if a.wide:
+            from .core.export import wide_rows, write_table
+            from .core.project import result_columns
+
+            rows = p.results(segmented=a.bins)
+            info = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period", *p.animal_fields}
+            wide = wide_rows(rows, [c for c in result_columns(rows) if c not in info])
+            write_table(wide, out, result_columns(wide), sheet="By animal")
+        else:
+            export_results(p, out, segmented=a.bins)
+        print(f"Wrote {out}")
+    elif a.action == "events":
+        from .core.export import event_log_rows, write_table
+        from .core.project import INACTIVE_STATUSES
+
+        out = a.output or str(p.exports_dir() / "event log.csv")
+        rows = [{"Test": t.id, "Stage": t.stage, "Trial": t.trial, **r} for t in p.tests
+                if t.status not in INACTIVE_STATUSES for r in event_log_rows(p, t)]
+        write_table(rows, out, sheet="Event log")
+        print(f"Wrote {out} ({len(rows)} events)")
+    elif a.action == "protocol":
+        from .core.export import protocol_report
+
+        out = a.output or str(p.exports_dir() / "protocol.html")
+        protocol_report(p, out)
+        print(f"Wrote {out}")
+    elif a.action == "archive":
+        from .core.archive import archive_project
+
+        out = a.output or str(Path(a.dir).resolve().parent / f"{Path(a.dir).stem} archive.zip")
+        archive_project(p, out, progress=_progress("archiving"))
         print(f"Wrote {out}")
     elif a.action == "report":
         from .core.export import html_report
@@ -150,10 +185,11 @@ def main(argv=None):
     t.add_argument("-o", "--output")
     pr = sub.add_parser("project", help="batch operations on a project")
     pr.add_argument("dir")
-    pr.add_argument("action", choices=["info", "track", "results", "report"])
+    pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive"])
     pr.add_argument("--all", action="store_true", help="re-track tests that already have tracks")
     pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")
+    pr.add_argument("--wide", action="store_true", help="results: one row per animal, stages / trials as columns")
     pr.add_argument("-o", "--output")
     d = sub.add_parser("demo", help="create a demo project with synthetic videos")
     d.add_argument("dir")

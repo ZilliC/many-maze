@@ -11,7 +11,8 @@ from PySide6.QtCore import QEvent, QRect, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
-                               QInputDialog, QLabel, QLineEdit, QMessageBox, QSpinBox, QStackedWidget,
+                               QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QSpinBox,
+                               QStackedWidget,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
@@ -274,6 +275,54 @@ class DoseDialog(QDialog):
                 "dose_mg_kg": self.dose.value(), "conc_mg_ml": self.conc.value()}
 
 
+class RandomiseDialog(QDialog):
+    """Random allocation of animals to treatments, balanced overall and within an optional stratum (sex, …)."""
+
+    def __init__(self, project, n_selected: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Randomise treatments")
+        f = QFormLayout(self)
+        info = QLabel("Animals are allocated to the ticked treatments at random, in numbers that differ by at most "
+                      "one. Their current treatments are replaced; retired animals are left out.")
+        info.setWordWrap(True)
+        f.addRow(info)
+        self.groups = QListWidget()
+        for g in project.groups:
+            it = QListWidgetItem(swatch(g.color), treatment_text(project, g.name))
+            it.setData(Qt.UserRole, g.name)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked)
+            self.groups.addItem(it)
+        self.groups.setMaximumHeight(140)
+        self.strata = QComboBox()
+        self.strata.addItem("- Nothing -", "")
+        self.strata.addItem("Sex", "Sex")
+        for fld in project.animal_fields:
+            self.strata.addItem(fld, fld)
+        self.strata.setToolTip("Spread each sex (or each value of a column such as litter or cage) evenly over the "
+                               "treatments")
+        self.seed = QSpinBox()
+        self.seed.setRange(0, 999_999)
+        self.seed.setSpecialValueText("New random order")
+        self.seed.setToolTip("Enter a number to reproduce an allocation")
+        self.only_sel = QCheckBox(f"Only the {n_selected} selected animal{'s' if n_selected != 1 else ''}")
+        self.only_sel.setEnabled(n_selected > 0)
+        self.only_sel.setChecked(n_selected > 1)
+        f.addRow("Treatments", self.groups)
+        f.addRow("Balance within", self.strata)
+        f.addRow("Seed", self.seed)
+        f.addRow("", self.only_sel)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Allocate")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def chosen_groups(self) -> list[str]:
+        return [self.groups.item(i).data(Qt.UserRole) for i in range(self.groups.count())
+                if self.groups.item(i).checkState() == Qt.Checked]
+
+
 class CriteriaDialog(QDialog):
     """Result of evaluating the training criteria; Apply retires animals / completes stages."""
 
@@ -352,6 +401,9 @@ class AnimalsPage(Page):
                               "and new schedules leave them out), or reinstate retired animals")
         self.a_dose = act("Dose calculator", "calculator", self.dose_dialog,
                           "Injection volume from body weight, dose and concentration")
+        self.a_random = act("Randomise treatments", "shuffle", lambda: self.randomise_dialog(),
+                            "Allocate the animals to the treatments at random, balanced (optionally within sex or "
+                            "another column)")
         self.a_criteria = act("Training criteria", "criteria", self.criteria_dialog,
                               "Evaluate the training criteria (Protocol) against the results: complete stages and "
                               "retire animals that failed")
@@ -457,7 +509,7 @@ class AnimalsPage(Page):
             return [exp, ("Treatments", [self.a_treat_add, (self.a_treat_rename, "small"),
                                          (self.a_treat_color, "small"), (self.a_treat_delete, "small")])]
         return [exp,
-                ("Animals", [self.retire_btn, self.a_dose, self.a_criteria, self.a_export,
+                ("Animals", [self.retire_btn, self.a_random, self.a_dose, self.a_criteria, self.a_export,
                              (self.a_add_one, "small"), (self.a_dup, "small")]),
                 ("Fields", [(self.a_field_add, "small"), (self.a_field_rename, "small"),
                             (self.a_field_remove, "small")])]
@@ -930,6 +982,34 @@ class AnimalsPage(Page):
         if dlg.exec() != QDialog.Accepted:
             return None
         return self.calculate_doses(dlg.settings(), sel if dlg.only_sel.isChecked() else None)
+
+    def randomise_dialog(self):
+        p = self.project
+        if p is None:
+            return None
+        if len(p.groups) < 2:
+            QMessageBox.information(self, "Randomise treatments", "Add at least two treatments first.")
+            return None
+        sel = self.selected_animals()
+        dlg = RandomiseDialog(p, len(sel), self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return self.randomise(dlg.chosen_groups(), dlg.strata.currentData(), dlg.seed.value() or None,
+                              sel if dlg.only_sel.isChecked() else None)
+
+    def randomise(self, groups: list[str] | None = None, stratify_by: str = "", seed: int | None = None,
+                  animals: list[Animal] | None = None) -> dict:
+        p = self.project
+        try:
+            res = wf.randomise_treatments(p, animals, groups, stratify_by, seed)
+        except ValueError as e:
+            error_box(self, "Randomise treatments", e)
+            return {}
+        self._changed()
+        self.refresh()
+        self.main.status(f"Allocated {len(res)} animals at random to {len(set(res.values()))} treatments"
+                         + (f", balanced within {stratify_by}" if stratify_by else "") + ".")
+        return res
 
     def calculate_doses(self, settings: dict | None = None, animals: list[Animal] | None = None) -> dict:
         p = self.project

@@ -182,6 +182,23 @@ class Track:
         return cls(t=z, x=z, y=z, fps=fps)
 
 
+def swap_identities(a: Track, b: Track, t0: float, t1: float | None = None) -> int:
+    """Exchange two animals' positions (all per-frame columns except time) from t0 to t1 (None = the end), in
+    place, to correct an identity swap made by the tracker when animals touched. Returns the number of samples
+    exchanged. Both tracks must come from the same test (the same frames)."""
+    if len(a) != len(b) or not np.allclose(a.t, b.t, atol=1e-6):
+        raise ValueError("The tracks do not have the same frames")
+    m = a.t >= t0 - 1e-6
+    if t1 is not None:
+        m &= a.t <= t1 + 1e-6
+    for c in COLUMNS:
+        if c == "t":
+            continue
+        va, vb = getattr(a, c), getattr(b, c)
+        va[m], vb[m] = vb[m].copy(), va[m].copy()
+    return int(m.sum())
+
+
 def _fill_gaps(t: np.ndarray, v: np.ndarray, max_gap_s: float):
     ok = np.isfinite(v)
     if ok.sum() < 2 or ok.all():

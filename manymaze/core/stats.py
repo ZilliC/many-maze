@@ -26,6 +26,7 @@ TESTS = OrderedDict([
     ("Repeated-measures ANOVA", "repeated measures"), ("Friedman", "repeated measures"),
     ("Two-way ANOVA", "two factors"), ("Mixed two-way ANOVA", "two factors"),
     ("Scheirer-Ray-Hare", "two factors"), ("Aligned rank transform ANOVA", "two factors"),
+    ("ANCOVA (analysis of covariance)", "two factors"),
     ("Tukey HSD", "post-hoc"), ("Bonferroni", "post-hoc"), ("Holm", "post-hoc"), ("Šidák", "post-hoc"),
     ("Benjamini-Hochberg (FDR)", "post-hoc"), ("Dunnett (vs control)", "post-hoc"), ("Games-Howell", "post-hoc"),
     ("Dunn", "post-hoc"), ("Duncan's multiple range test", "post-hoc"), ("Fisher's LSD", "post-hoc"),
@@ -649,6 +650,79 @@ def two_way_anova(rows: list[dict], measure: str, factor_a: str = "Group", facto
         out["effects"].append({"effect": names[key], "SS": ss, "df": df, "F": F, "p": p, "df_error": df_res,
                                "partial_eta2": ss / (ss + rss_full) if ss + rss_full > 0 else math.nan})
     return out
+
+
+@_quiet
+def ancova(rows: list[dict], measure: str, covariate: str, factor: str = "Group") -> dict:
+    """One-way analysis of covariance: ``measure`` ~ ``factor`` + ``covariate`` (Type II sums of squares), with
+    covariate-adjusted group means and the homogeneity-of-regression-slopes test (factor × covariate)."""
+    recs = []
+    for r in rows:
+        y, c = r.get(measure), r.get(covariate)
+        if _num(y) and _num(c):
+            recs.append((str(r.get(factor, "")), float(c), float(y)))
+    levels = sorted({r[0] for r in recs})
+    if len(levels) < 2:
+        return {"error": f"Need at least 2 levels of {factor}"}
+    if len(recs) < len(levels) + 2:
+        return {"error": "Not enough data"}
+    g = [r[0] for r in recs]
+    x = np.array([r[1] for r in recs])
+    y = np.array([r[2] for r in recs])
+    one = np.ones((len(y), 1))
+    d = np.column_stack([(np.array(g) == lv).astype(float) for lv in levels[1:]])
+    xc = (x - x.mean())[:, None]
+
+    def fit(X):
+        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+        e = y - X @ beta
+        return float(e @ e), int(np.linalg.matrix_rank(X)), beta
+
+    rss_full, rank_full, beta = fit(np.hstack([one, d, xc]))
+    rss_f, rank_f, _ = fit(np.hstack([one, d]))
+    rss_c, rank_c, _ = fit(np.hstack([one, xc]))
+    rss_int, rank_int, _ = fit(np.hstack([one, d, xc, d * xc]))
+    df_res = len(y) - rank_full
+    if df_res <= 0 or rank_full - rank_f < 1:
+        return {"error": "Not enough residual degrees of freedom (or the covariate does not vary)"}
+    ms_res = rss_full / df_res
+    out = {"factors": [factor], "df_residual": df_res, "effects": [], "design": "between",
+           "test": f"ANCOVA, covariate {covariate}", "covariate": covariate}
+    for name, ss, df in ((factor, rss_c - rss_full, rank_full - rank_c),
+                         (covariate, rss_f - rss_full, rank_full - rank_f)):
+        F = (ss / df) / ms_res if ms_res > 0 and df > 0 else math.nan
+        p = float(sps.f.sf(F, df, df_res)) if math.isfinite(F) else math.nan
+        out["effects"].append({"effect": name, "SS": ss, "df": df, "F": F, "p": p, "df_error": df_res,
+                               "partial_eta2": ss / (ss + rss_full) if ss + rss_full > 0 else math.nan})
+    df_int, df_int_res = rank_int - rank_full, len(y) - rank_int
+    if df_int > 0 and df_int_res > 0 and rss_int > 0:
+        F = ((rss_full - rss_int) / df_int) / (rss_int / df_int_res)
+        out["slopes"] = {"F": F, "df": df_int, "df_error": df_int_res, "p": float(sps.f.sf(F, df_int, df_int_res))}
+    slope = float(beta[-1])
+    out["slope"] = slope
+    masks = {lv: np.array(g) == lv for lv in levels}
+    ss_within_x = sum(float(((x[m] - x[m].mean()) ** 2).sum()) for m in masks.values())
+    adj = OrderedDict()
+    for lv, m in masks.items():
+        se = math.sqrt(ms_res * (1.0 / m.sum() + (x[m].mean() - x.mean()) ** 2 / max(1e-300, ss_within_x)))
+        adj[lv] = {"n": int(m.sum()), "mean": float(y[m].mean()), "covariate_mean": float(x[m].mean()),
+                   "adjusted_mean": float(y[m].mean() - slope * (x[m].mean() - x.mean())), "adjusted_se": se}
+    out["adjusted_means"] = adj
+    return out
+
+
+def ancova_text(res: dict, measure: str) -> str:
+    if "error" in res:
+        return f"{measure}: {res['error']}"
+    lines = [anova_text(res, measure), f"  Common slope ({res['covariate']}): {res['slope']:.4g}"]
+    if "slopes" in res:
+        sl = res["slopes"]
+        lines.append(f"  Homogeneity of slopes: F({sl['df']}, {sl['df_error']}) = {sl['F']:.3f}, {format_p(sl['p'])}"
+                     + ("  — slopes differ, ANCOVA assumption violated" if sl["p"] < 0.05 else ""))
+    for lv, a in res["adjusted_means"].items():
+        lines.append(f"  {lv}: n={a['n']}, mean={a['mean']:.3f}, adjusted mean={a['adjusted_mean']:.3f} ± "
+                     f"{a['adjusted_se']:.3f} SE (covariate mean {a['covariate_mean']:.3f})")
+    return "\n".join(lines)
 
 
 @_quiet

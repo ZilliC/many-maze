@@ -14,9 +14,8 @@ from dataclasses import asdict
 
 from PySide6.QtCore import QObject, Signal
 
+from ...core.project import INFO_COLUMNS
 from ..widgets import Worker
-
-INFO_COLUMNS = ["Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"]
 
 _lock = threading.Lock()
 _cache: dict[tuple[int, bool], tuple[object, list[dict]]] = {}

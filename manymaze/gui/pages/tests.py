@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QModelIndex, QRect,
                             QSortFilterProxyModel, Qt)
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QSpinBox, QStyledItemDelegate, QTableView,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 from ...core import workflow as wf
 from ...core.batch import TrackingCancelled, track_tests, tracking_batches  # noqa: F401 (re-exported)
 from ...core.track import Track, import_deeplabcut_csv
-from ...core.video import VIDEO_EXTENSIONS, VideoSource
+from ...core.video import VIDEO_EXTENSIONS, VideoSource, is_playlist, write_playlist
 from .. import theme
 from ..icons import icon
 from ..widgets import error_box, run_with_progress
@@ -705,6 +705,15 @@ class TestsPage(Page):
                               "Create a test schedule: tests without video for animals × stages × trials, in a "
                               "chosen running order")
         self.a_dup = act("Duplicate", "copy", self.duplicate_selected, "Copy the selected tests", large=False)
+        self.a_join = act("Join video files into one test…", "video_file", lambda: self.join_videos(),
+                          "One test from a video recorded in several consecutive files: the files are played and "
+                          "tracked one after the other as a single video", large=False)
+        self.a_add_files = act("Add tests from videos…", "video_file", self.add_from_videos,
+                               self.a_add.toolTip(), large=False)
+        add_menu = QMenu(self)
+        add_menu.addAction(self.a_add_files)
+        add_menu.addAction(self.a_join)
+        self.a_add.setMenu(add_menu)
         self.a_video = act("Set video file…", "video", self.set_video, "Choose the video of the selected tests",
                            large=False)
         self.a_del = act("Delete", "delete", lambda: self.delete_selected(),
@@ -733,6 +742,19 @@ class TestsPage(Page):
                           "statistics", large=False)
         self.a_clear = act("Clear tracks", "eraser", lambda: self.clear_selected_tracks(),
                            "Delete the tracks of the selected tests (scored events are kept)", large=False)
+        # schedule output (menu of the Schedule… button and of the table)
+        self.a_print = act("Print schedule…", "print", lambda: self.print_schedule(),
+                           "Print the test schedule (in the order shown) to take to the testing room", large=False)
+        self.a_save = act("Save schedule…", "save", lambda: self.save_schedule(),
+                          "Save the test schedule as CSV, tab-separated text or Excel", large=False)
+        self.a_copy = act("Copy schedule", "copy", self.copy_schedule,
+                          "Copy the test schedule as tab-separated text for Excel", large=False)
+        self.a_create = act("Create schedule…", "schedule", self.create_schedule, self.a_schedule.toolTip(),
+                            large=False)
+        sched_menu = QMenu(self)
+        for a in (self.a_create, self.a_print, self.a_save, self.a_copy):
+            sched_menu.addAction(a)
+        self.a_schedule.setMenu(sched_menu)
         # Variables
         self.a_vars = act("Test variables", "variable", self.edit_variables,
                           "Per-test variables: novel object (NOR), social stimulus side (three-chamber)")
@@ -804,6 +826,83 @@ class TestsPage(Page):
         self.summary.setText(txt)
 
     # ------------------------------------------------------------------ selection
+    # ------------------------------------------------------------------ schedule output
+    def schedule_rows(self) -> tuple[list[str], list[list[str]]]:
+        """The schedule as shown (sort order, blind codes, display texts): headers and rows."""
+        cols = list(range(len(COLUMNS)))
+        headers = [str(self.model.headerData(c, Qt.Horizontal)) for c in cols]
+        rows = []
+        for r in range(self.proxy.rowCount()):
+            row = []
+            for c in cols:
+                v = self.proxy.data(self.proxy.index(r, c), Qt.DisplayRole)
+                row.append("" if v is None else str(v))
+            rows.append(row)
+        return headers, rows
+
+    def schedule_html(self) -> str:
+        import html as _html
+
+        headers, rows = self.schedule_rows()
+        p = self.project
+        cell = "border:1px solid #999;padding:2px 5px;"
+        out = [f"<h3>{_html.escape(p.name if p else '')} — test schedule</h3><table cellspacing='0' "
+               f"style='border-collapse:collapse;font-size:9pt'><tr>"]
+        out += [f"<th style='{cell}background:#eee'>{_html.escape(h)}</th>" for h in headers + ["Done"]]
+        out.append("</tr>")
+        for r in rows:
+            out.append("<tr>" + "".join(f"<td style='{cell}'>{_html.escape(v)}</td>" for v in r + [""]) + "</tr>")
+        out.append("</table>")
+        return "".join(out)
+
+    def print_schedule(self, printer=None):
+        from PySide6.QtGui import QPageLayout, QTextDocument
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+        if self.project is None:
+            return None
+        if printer is None:
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setPageOrientation(QPageLayout.Landscape)
+            if QPrintDialog(printer, self).exec() != QDialog.Accepted:
+                return None
+        doc = QTextDocument()
+        doc.setHtml(self.schedule_html())
+        doc.print_(printer)
+        self.main.status("Test schedule sent to the printer")
+        return printer
+
+    def save_schedule(self, path: str | None = None):
+        from ...core.export import write_table
+
+        p = self.project
+        if p is None:
+            return None
+        if path is None:
+            base = str(p.exports_dir() / f"{p.name} test schedule.xlsx") if p.path else ""
+            path, _ = QFileDialog.getSaveFileName(self, "Save test schedule", base,
+                                                  "Excel workbook (*.xlsx);;CSV file (*.csv);;"
+                                                  "Tab-separated text (*.tsv *.txt)")
+            if not path:
+                return None
+        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+            path += ".xlsx"
+        headers, rows = self.schedule_rows()
+        try:
+            write_table([dict(zip(headers, r)) for r in rows], path, headers, sheet="Test schedule")
+        except Exception as e:
+            error_box(self, "Save test schedule", e)
+            return None
+        self.main.status(f"Saved the test schedule ({len(rows)} tests) to {path}")
+        return path
+
+    def copy_schedule(self):
+        headers, rows = self.schedule_rows()
+        text = "\n".join("\t".join(v.replace("\t", " ") for v in r) for r in [headers] + rows) + "\n"
+        QGuiApplication.clipboard().setText(text)
+        self.main.status(f"Copied {len(rows)} tests")
+        return text
+
     def selected_ids(self) -> list[int]:
         rows = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
         return [self.model.tests[r].id for r in rows if r < len(self.model.tests)]
@@ -857,6 +956,9 @@ class TestsPage(Page):
         for a in (self.a_video, self.a_vars, self.a_dup, self.a_skip, self.a_resume, self.a_redo, self.a_clear,
                   self.a_excl, self.a_del):
             m.addAction(a)
+        m.addSeparator()
+        for a in (self.a_print, self.a_save, self.a_copy):
+            m.addAction(a)
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def status_menu(self, index, global_pos):
@@ -895,6 +997,44 @@ class TestsPage(Page):
         if dlg.exec() != QDialog.Accepted:
             return
         self.add_tests(dlg.rows())
+
+    def join_videos(self, files: list[str] | None = None):
+        """Create a playlist of consecutive video files (in name order) and use it as the selected test's video, or
+        add a test with it when no test is selected."""
+        p = self.project
+        if p is None:
+            return None
+        if files is None:
+            files, _ = QFileDialog.getOpenFileNames(self, "Video files recorded one after the other",
+                                                    self._start_dir(), self._video_filter())
+            if not files:
+                return None
+        files = sorted(f for f in files if not is_playlist(f))
+        if len(files) < 2:
+            QMessageBox.information(self, "Join video files", "Choose at least two video files.")
+            return None
+        base = Path(p.path) / "videos" if p.path else Path(files[0]).parent
+        base.mkdir(parents=True, exist_ok=True)
+        stem = Path(files[0]).stem
+        dest = base / f"{stem} (+{len(files) - 1}).m3u"
+        try:
+            write_playlist(dest, files)
+            with VideoSource(str(dest)) as v:
+                n = v.frame_count
+        except Exception as e:
+            error_box(self, "Join video files", e)
+            return None
+        sel = self.selected_tests()
+        if len(sel) == 1:
+            sel[0].video = p.rel_path(str(dest))
+            self.main.mark_dirty()
+            self.refresh()
+            self.select_ids({sel[0].id})
+            test = sel[0]
+        else:
+            (test,) = self.add_tests([{"video": str(dest)}])
+        self.main.status(f"Test {test.id}: {len(files)} video files joined ({n} frames).")
+        return test
 
     def add_tests(self, rows: list[dict]) -> list:
         """Create tests from dicts with keys video, animal_id, apparatus, stage, trial."""

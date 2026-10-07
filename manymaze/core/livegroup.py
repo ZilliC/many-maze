@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 from .camera import FramePacer, SourceSpec
-from .live import AUTOSAVE_SUFFIX, LiveSession, ObservationSession, read_autosave
+from .live import AUTOSAVE_SUFFIX, LiveSession, ObservationSession, read_autosave, recorded_video
 from .tracking import draw_overlay, median_background
 
 DEFAULT_START_KEYS = ["Space", "PageDown", "F5"]
@@ -482,7 +482,8 @@ def save_live_test(project, test, session, record_path: str | None = None) -> bo
         test.status = "scored"
         if session.duration_s and session.elapsed < session.duration_s - 0.05:
             test.duration_s = round(session.elapsed, 3)
-    if record_path and Path(record_path).exists():
+    record_path = recorded_video(record_path)
+    if record_path:
         test.video = project.rel_path(record_path)
         test.start_s = 0.0
     test.events = sorted(list(test.events) + [dict(e) for e in session.events], key=lambda e: e.get("t", 0))
@@ -634,7 +635,7 @@ def recover_autosaves(project) -> list:
                                     trial=int(m.get("trial") or 1))
         rec = d.get("record_path")
         try:
-            ok = save_live_test(project, test, s, rec if rec and Path(rec).exists() else None)
+            ok = save_live_test(project, test, s, recorded_video(rec))
         except Exception:
             ok = False
         if not ok:
