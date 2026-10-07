@@ -20,6 +20,18 @@ ENTRY_RULES = {
 }
 
 
+def unique_name(name: str, taken) -> str:
+    """`name` (stripped; "Unnamed" if blank), or "name 2", "name 3"… if it is already taken."""
+    taken = set(taken)
+    name = name.strip() or "Unnamed"
+    if name not in taken:
+        return name
+    i = 2
+    while f"{name} {i}" in taken:
+        i += 1
+    return f"{name} {i}"
+
+
 @dataclass
 class Zone:
     """A zone (an 'area' in ANY-maze terms; zone groups combine several areas).
@@ -213,6 +225,56 @@ class Apparatus:
 
     def grid(self, name: str) -> Grid | None:
         return next((g for g in self.grids if g.name == name), None)
+
+    # ---- editing ---------------------------------------------------------
+    def rename(self, kind: str, index: int, new_name: str) -> str:
+        """Rename the index-th zone / point / line / group / sequence, updating the zone groups, sequences and grids
+        that refer to it. Zones and groups share one namespace. Returns the name given (made unique), or the old
+        name if `new_name` is blank or unchanged."""
+        items = getattr(self, kind + "s")
+        old, name = items[index].name, new_name.strip()
+        if not name or name == old:
+            return old
+        taken = [x.name for i, x in enumerate(items) if i != index]
+        if kind == "zone":
+            taken += [g.name for g in self.groups]
+        elif kind == "group":
+            taken += [z.name for z in self.zones]
+        new = items[index].name = unique_name(name, taken)
+
+        def ren(names):
+            return [new if n == old else n for n in names]
+
+        if kind == "zone":
+            for g in self.groups:
+                g.zones, g.exclude = ren(g.zones), ren(g.exclude)
+        if kind in ("zone", "group"):
+            for q in self.sequences:
+                q.steps = ren(q.steps)
+            for gr in self.grids:
+                gr.zones = ren(gr.zones)
+        return new
+
+    def remove(self, kind: str, index: int = 0):
+        """Delete the arena or the index-th zone / point / line / group / sequence, and the references to it (a grid
+        left without zones is removed)."""
+        if kind == "arena":
+            self.arena = None
+            return
+        name = getattr(self, kind + "s").pop(index).name
+
+        def drop(names):
+            return [n for n in names if n != name]
+
+        if kind == "zone":
+            for g in self.groups:
+                g.zones, g.exclude = drop(g.zones), drop(g.exclude)
+            for gr in self.grids:
+                gr.zones = drop(gr.zones)
+            self.grids = [gr for gr in self.grids if gr.zones]
+        if kind in ("zone", "group"):
+            for q in self.sequences:
+                q.steps = drop(q.steps)
 
     def zone_membership(self, x, y) -> dict[str, np.ndarray]:
         """Boolean in-zone arrays for every zone and zone group."""

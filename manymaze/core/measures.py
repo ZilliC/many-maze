@@ -1254,8 +1254,8 @@ def _template_measures(res, track, app, s, k, memb, head_memb, seq=None, initial
     elif tpl == "y_maze":
         arms = [z.name for z in app.zones if z.name.startswith("Arm")]
         seq = [e[0] for e in _seq(arms)]
-        # collapse consecutive duplicates (re-entering the same arm without a centre visit is impossible
-        # in occupancy terms, but small gaps can split visits)
+        # consecutive entries into the same arm are kept (a short gap can split a visit): they break an alternation
+        # triplet and are counted as same arm returns
         res["Arm entry sequence"] = "".join(a.split()[-1] for a in seq)
         n = len(seq)
         alt = sum(1 for i in range(n - 2) if len({seq[i], seq[i + 1], seq[i + 2]}) == 3)

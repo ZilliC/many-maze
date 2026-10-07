@@ -195,7 +195,7 @@ class Project:
         p = cls(
             name=d.get("name", pdir.stem if pdir else ""),
             description=d.get("description", ""),
-            protocol=d.get("protocol", "custom"),
+            protocol=d.get("protocol", "open_field"),
             test_duration_s=d.get("test_duration_s", 300.0),
             start_mode=d.get("start_mode", "manual"),
             detection=DetectionSettings.from_dict(d.get("detection")),
@@ -221,6 +221,20 @@ class Project:
     # ---- lookup -----------------------------------------------------------
     def get_apparatus(self, name: str) -> Apparatus | None:
         return next((a for a in self.apparatus if a.name == name), self.apparatus[0] if self.apparatus else None)
+
+    def tests_using(self, apparatus_name: str) -> list[Test]:
+        """Tests analysed with this apparatus (their apparatus name resolved as get_apparatus does)."""
+        return [t for t in self.tests if getattr(self.get_apparatus(t.apparatus), "name", None) == apparatus_name]
+
+    def rename_in_apparatus(self, app: Apparatus, kind: str, index: int, new_name: str) -> str:
+        """Apparatus.rename, also moving the per-test positions (Test.zone_overrides) of a renamed zone or point."""
+        old = getattr(app, kind + "s")[index].name
+        new = app.rename(kind, index, new_name)
+        if new != old and kind in ("zone", "point"):
+            for t in self.tests_using(app.name):
+                if old in t.zone_overrides:
+                    t.zone_overrides[new] = t.zone_overrides.pop(old)
+        return new
 
     def get_animal(self, aid: str) -> Animal | None:
         return next((a for a in self.animals if a.id == aid), None)

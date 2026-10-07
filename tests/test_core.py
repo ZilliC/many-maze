@@ -244,3 +244,69 @@ def test_grid_crossings():
     pos = syn.line_path((20, 50), (380, 50), 50)
     r = analyse(make_track(pos), app, AnalysisSettings())
     assert r["Grid crossings (4×4)"] == 3
+
+
+# --------------------------------------------------------------- editing apparatus and projects
+def _editable_app():
+    from manymaze.core.apparatus import Grid, Sequence
+
+    app = Apparatus(name="Box", arena=rect(0, 0, 100, 100))
+    app.zones = [Zone(n, rect(i * 10, 0, 10, 10)) for i, n in enumerate(["A", "B", "C", "G 1", "G 2"])]
+    app.points = [PointOfInterest("P", 5, 5), PointOfInterest("Q", 6, 6)]
+    app.groups = [ZoneGroup("AB", ["A", "B"], ["C"]), ZoneGroup("Grp", ["A"])]
+    app.sequences = [Sequence("S", ["A", "AB", "C"])]
+    app.grids = [Grid("G", "square", ["G 1", "G 2"])]
+    return app
+
+
+def test_unique_name():
+    from manymaze.core.apparatus import unique_name
+
+    assert unique_name(" A ", ["B"]) == "A" and unique_name("A", ["A", "A 2"]) == "A 3"
+    assert unique_name("  ", []) == "Unnamed"
+
+
+def test_apparatus_rename_updates_references():
+    app = _editable_app()
+    assert app.rename("zone", 0, "Alpha") == "Alpha"
+    assert app.groups[0].zones == ["Alpha", "B"] and app.groups[1].zones == ["Alpha"]
+    assert app.sequences[0].steps == ["Alpha", "AB", "C"]
+    assert app.rename("zone", 2, "AB") == "AB 2"  # zones and groups share names
+    assert app.groups[0].exclude == ["AB 2"] and app.sequences[0].steps[2] == "AB 2"
+    assert app.rename("zone", 3, "Cell") == "Cell" and app.grids[0].zones == ["Cell", "G 2"]
+    assert app.rename("group", 0, "Pair") == "Pair" and app.sequences[0].steps == ["Alpha", "Pair", "AB 2"]
+    assert app.rename("point", 0, "Q") == "Q 2" and app.rename("point", 1, " ") == "Q"
+    assert app.rename("sequence", 0, "Path") == "Path"
+
+
+def test_apparatus_remove_cascades():
+    app = _editable_app()
+    app.remove("zone", 0)
+    assert app.groups[0].zones == ["B"] and app.groups[1].zones == [] and app.sequences[0].steps == ["AB", "C"]
+    app.remove("group", 0)
+    assert [g.name for g in app.groups] == ["Grp"] and app.sequences[0].steps == ["C"]
+    app.remove("zone", app.zones.index(app.zone("G 1")))
+    app.remove("zone", app.zones.index(app.zone("G 2")))
+    assert app.grids == []
+    app.remove("point", 1)
+    app.remove("sequence", 0)
+    app.remove("arena")
+    assert [p.name for p in app.points] == ["P"] and app.sequences == [] and app.arena is None
+
+
+def test_project_rename_moves_zone_overrides():
+    from manymaze.core.project import Project
+
+    p = Project()
+    app, other = _editable_app(), Apparatus(name="Other")
+    p.apparatus = [app, other]
+    ov = {"A": {"type": "polygon", "points": [[0, 0], [1, 0], [1, 1]]}, "P": {"x": 1, "y": 2}}
+    t1 = p.add_test(apparatus="Box", zone_overrides=dict(ov))
+    t2 = p.add_test(apparatus="Missing", zone_overrides=dict(ov))  # resolves to the first apparatus
+    t3 = p.add_test(apparatus="Other", zone_overrides=dict(ov))
+    assert p.tests_using("Box") == [t1, t2]
+    assert p.rename_in_apparatus(app, "zone", 0, "Alpha") == "Alpha"
+    assert p.rename_in_apparatus(app, "point", 0, "Pt") == "Pt"
+    assert set(t1.zone_overrides) == set(t2.zone_overrides) == {"Alpha", "Pt"} and t3.zone_overrides == ov
+    assert app.with_overrides(t1.zone_overrides).point("Pt").x == 1
+    assert Project.from_dict({}).protocol == Project().protocol
