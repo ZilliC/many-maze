@@ -55,7 +55,7 @@ Evaluated by a safe interpreter built on ``ast`` (never ``eval``): numbers, stri
 functions listed in ``FUNCTIONS`` (maths, random numbers, and live state such as ``zone("Centre")``,
 ``input("box", "lever")``, ``timer("iti")``, ``time()``). Variables are global to all procedures; arrays are lists.
 
-Events (``EVENT_SPECS``) and actions (``ACTION_SPECS``) are catalogued below with their parameters.
+Events (``EVENT_SPECS``) and actions (``ACTION_SPECS``) are catalogued with their parameters in ``catalog``.
 
 Engine
 ======
