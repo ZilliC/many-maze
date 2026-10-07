@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
-                               QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ...core import pose
 from ...core import workflow as wf
@@ -21,10 +21,10 @@ from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
 from ..pose_model import PoseModelBox
+from ..widgets import ColorButton, RecordTable, button_row, hint, loading, separator, style_table
 from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, Page, SettingsForm,
                    property_form)
-from .protocol_pages import (ColorButton, ElementPage, KeyEditor, button_row, hint, key_mode, mode_to_kind,
-                             separator, small_button)
+from .protocol_pages import ElementPage, KeyEditor, small_button
 
 # protocol elements: (key, explorer label, icon)
 ELEMENTS = [("protocol", "Protocol", "protocol"), ("tracking", "Animal tracking", "tracking"),
@@ -40,16 +40,20 @@ MET_ACTIONS = [("complete_stage", "Stage completed: skip remaining trials"), ("r
 FORM_WIDTH = 900  # property pages with only settings stay at a readable width
 
 
-def _table(cols: list[str], stretch=(0,)) -> QTableWidget:
-    t = QTableWidget(0, len(cols))
-    t.setHorizontalHeaderLabels(cols)
-    for c in stretch:
-        t.horizontalHeader().setSectionResizeMode(c, QHeaderView.Stretch)
-    t.verticalHeader().hide()
-    t.verticalHeader().setDefaultSectionSize(32)
-    t.setSelectionBehavior(QAbstractItemView.SelectRows)
-    t.setSelectionMode(QAbstractItemView.SingleSelection)
-    return t
+# record tables (see RecordTable): training criteria, time periods, event-anchored time periods
+CRITERIA_COLS = [("stage", "Stage", "text_choice", None),  # options: the stages, given by the page
+                 ("measure", "Measure", "text", None), ("op", "Is", "choice", [(o, o) for o in ("<", "<=", ">", ">=")]),
+                 ("value", "Value", "number", None),
+                 ("consecutive_trials", "Consecutive trials", "spin", (1, wf.MAX_TRIALS)),
+                 ("action_met", "When met", "choice", MET_ACTIONS),
+                 ("after", "Retire after", "spin", (0, wf.MAX_TRIALS, "never", " trials"))]
+PERIOD_COLS = [("label", "Time period", "text", None), ("start", "Starts at (s)", "number", None),
+               ("end", "Ends at (s)", "number", None)]
+EVENT_PERIOD_COLS = [("label", "Time period", "text", None),
+                     ("anchor", "The period starts at", "choice", list(ANCHORS.items())),
+                     ("target", "Zone / key / input", "text", None), ("offset_s", "Offset (s)", "number", None),
+                     ("duration_s", "Duration (s)", "number", None), ("occurrence", "Occurrence", "int", None)]
+_TARGET_KEY = {"first_entry": "zone", "first_exit": "zone", "mark": "behaviour", "input": "channel"}
 
 
 class ExperimentPage(Page):
@@ -186,16 +190,18 @@ class ExperimentPage(Page):
         pg.add(hint("A stage is completed when a result measure meets the condition on N consecutive trials; "
                     "animals that have not met it after the given number of trials can be retired. Apply the "
                     "criteria on the Animals page."))
-        self.crit = _table(["Stage", "Measure", "Is", "Value", "Consecutive trials", "When met", "Retire after"],
-                           stretch=(1,))
+        cols = [c if c[0] != "stage" else c[:3] + (lambda: self.project.stages if self.project else [],)
+                for c in CRITERIA_COLS]
+        self.crit = RecordTable(cols, stretch=(1,))
         for c, wd in ((0, 140), (2, 60), (3, 80), (4, 130), (5, 250), (6, 110)):
             self.crit.setColumnWidth(c, wd)
+        self.crit.horizontalHeaderItem(6).setToolTip("Retire animals that have not met the criterion after this many "
+                                                     "trials of the stage")
         self.crit.setMinimumHeight(170)
-        self.crit.itemChanged.connect(self._store_criteria)
+        self.crit.edited.connect(self._store_criteria)
         pg.add(self.crit)
         pg.add(button_row(small_button("Add criterion", "add", slot=self._add_criterion),
-                          small_button("Remove", "delete",
-                                       slot=lambda: self._remove_row(self.crit, self._store_criteria))))
+                          small_button("Remove", "delete", slot=self.crit.remove_current)))
         pg.finish()
 
     def _build_keys(self):
@@ -204,7 +210,8 @@ class ExperimentPage(Page):
         row = QHBoxLayout()
         row.setSpacing(28)
         left = QVBoxLayout()
-        self.beh = _table(["Key name", "Key stroke", "How it works", "Radio set", "Colour"])
+        self.beh = QTableWidget()
+        style_table(self.beh, ["Key name", "Key stroke", "How it works", "Radio set", "Colour"])
         self.beh.setColumnWidth(1, 84)
         self.beh.setColumnWidth(2, 110)
         self.beh.setColumnWidth(3, 96)
@@ -251,33 +258,30 @@ class ExperimentPage(Page):
         pg.section("Time periods")
         pg.add(hint("Analyse each test in custom periods (they replace the time bins), e.g. the first and the "
                     "last minute."))
-        self.periods = _table(["Time period", "Starts at (s)", "Ends at (s)"])
+        self.periods = RecordTable(PERIOD_COLS)
         self.periods.setColumnWidth(1, 140)
         self.periods.setColumnWidth(2, 140)
         self.periods.setMinimumHeight(130)
         self.periods.setMaximumHeight(190)
-        self.periods.itemChanged.connect(self._store_periods)
+        self.periods.edited.connect(self._store_periods)
         pg.add(self.periods)
         pg.add(button_row(small_button("New time period", "add", slot=self._add_period),
-                          small_button("Remove", "delete",
-                                       slot=lambda: self._remove_row(self.periods, self._store_periods))))
+                          small_button("Remove", "delete", slot=self.periods.remove_current)))
 
         pg.section("Time periods based on a time marker")
         pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box. "
                     "Duration 0 = until the end of the test. Occurrence: 1 = first, 2 = second…, 0 = one period "
                     "for every occurrence. Periods whose event never happens are left out."))
-        self.ev_periods = _table(["Time period", "The period starts at", "Zone / key / input", "Offset (s)",
-                                  "Duration (s)", "Occurrence"], stretch=(0, 2))
+        self.ev_periods = RecordTable(EVENT_PERIOD_COLS, stretch=(0, 2))
         self.ev_periods.setColumnWidth(1, 230)
         for c in (3, 4, 5):
             self.ev_periods.setColumnWidth(c, 100)
         self.ev_periods.setMinimumHeight(130)
         self.ev_periods.setMaximumHeight(190)
-        self.ev_periods.itemChanged.connect(self._store_event_periods)
+        self.ev_periods.edited.connect(self._store_event_periods)
         pg.add(self.ev_periods)
         pg.add(button_row(small_button("New event period", "add", slot=self._add_event_period),
-                          small_button("Remove", "delete",
-                                       slot=lambda: self._remove_row(self.ev_periods, self._store_event_periods))))
+                          small_button("Remove", "delete", slot=self.ev_periods.remove_current)))
         pg.finish()
 
     def _build_hardware(self):
@@ -345,8 +349,7 @@ class ExperimentPage(Page):
                          A("Restore defaults", "refresh", self.restore_detection_defaults,
                            "Restore the default animal tracking settings")],
             "stages": [A("New stage", "stages", self.new_stage), A("New criterion", "check", self.new_criterion),
-                       ("small", A("Delete criterion", "delete",
-                                   lambda: self._remove_row(self.crit, self._store_criteria)))],
+                       ("small", A("Delete criterion", "delete", self.crit.remove_current))],
             "keys": [A("New key", "key", self.new_key), A("Delete key", "delete", self._remove_behaviour),
                      ("small", A("Duplicate key", "copy", self.duplicate_key))],
             "procedures": [A("New procedure", "procedure", self.new_procedure),
@@ -410,7 +413,14 @@ class ExperimentPage(Page):
         self.proc_editor.set_project(p)
         if p is None:
             return
-        self._loading = True
+        with loading(self):
+            self._load(p)
+        self._show_key()
+        self._update_mode()
+        self._update_summary()
+        self.main.select_explorer(self, self.element)
+
+    def _load(self, p):
         self.name.setText(p.name)
         self.desc.setPlainText(p.description)
         self.protocol.setCurrentIndex(max(0, self.protocol.findData(p.protocol)))
@@ -422,28 +432,17 @@ class ExperimentPage(Page):
         self.beh.setRowCount(0)
         for b in p.behaviours:
             self._append_behaviour_row(b)
-        self._loading = True
         if self.beh.rowCount():
             self.beh.setCurrentCell(min(row, self.beh.rowCount() - 1), 0)
         self._validate_behaviours()
         self.blind.setChecked(p.blind)
         self.confirm_id.setChecked(wf.confirm_id_enabled(p))
-        self.crit.setRowCount(0)
-        for c in p.training_criteria:
-            self._append_criterion_row(c)
-        self.periods.setRowCount(0)
-        for lbl, a, b in p.analysis.custom_periods:
-            self._append_period_row(lbl, a, b)
-        self.ev_periods.setRowCount(0)
-        for d in p.analysis.event_periods:
-            self._append_event_period_row(d)
+        self.crit.set_records(self._criterion_row(c) for c in p.training_criteria)
+        self.periods.set_records({"label": lbl, "start": a, "end": b} for lbl, a, b in p.analysis.custom_periods)
+        self.ev_periods.set_records({**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), "")}
+                                    for d in p.analysis.event_periods)
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
-        self._loading = False
-        self._show_key()
-        self._update_mode()
-        self._update_summary()
-        self.main.select_explorer(self, self.element)
 
     def _update_summary(self):
         p = self.project
@@ -569,9 +568,9 @@ class ExperimentPage(Page):
 
     def delete_time_period(self):
         if self.ev_periods.hasFocus() or (self.ev_periods.currentRow() >= 0 and self.periods.currentRow() < 0):
-            self._remove_row(self.ev_periods, self._store_event_periods)
+            self.ev_periods.remove_current()
         else:
-            self._remove_row(self.periods, self._store_periods)
+            self.periods.remove_current()
 
     def apply_template(self, key: str):
         """Use a test type's settings: protocol type and default test duration."""
@@ -611,12 +610,12 @@ class ExperimentPage(Page):
     def edit_io_devices(self):
         if self.project is None:
             return None
-        from ..procedure_editor import IODevicesDialog
+        from ..io_devices_dialog import IODevicesDialog
         dlg = IODevicesDialog(self.project, self)
         dlg.changed.connect(self.main.mark_dirty)
         dlg.exec()
         self._update_hardware()
-        self.proc_editor.set_context(None)
+        self.proc_editor.validate()  # the devices changed
         return dlg
 
     def edit_touchscreen(self):
@@ -656,7 +655,10 @@ class ExperimentPage(Page):
 
     # ================================================================== keys (manually scored behaviours)
     def _append_behaviour_row(self, b: Behaviour):
-        self._loading = True
+        with loading(self):
+            self._add_behaviour_cells(b)
+
+    def _add_behaviour_cells(self, b: Behaviour):
         r = self.beh.rowCount()
         self.beh.insertRow(r)
         self.beh.setItem(r, 0, QTableWidgetItem(b.name))
@@ -685,11 +687,10 @@ class ExperimentPage(Page):
         holder.button = col
         col.color_changed.connect(lambda c, h=holder: h.setProperty("color", c))
         self.beh.setCellWidget(r, 4, holder)
-        self._loading = False
 
     @staticmethod
     def _kind_index(kind: str, group: str) -> int:
-        mode = key_mode(kind, group)
+        mode = wf.key_mode(kind, group)
         return {"simple": 0, "toggle": 1, "radio": 2, "event": 3}[mode]
 
     def _kind_changed(self, combo: QComboBox):
@@ -702,11 +703,10 @@ class ExperimentPage(Page):
         it = self.beh.item(r, 3)
         group = it.text().strip() if it else ""
         mode = ("simple", "toggle", "radio", "event")[combo.currentIndex()]
-        _kind, new_group = mode_to_kind(mode, group)
+        _kind, new_group = wf.mode_to_kind(mode, group)
         if new_group != group:
-            self._loading = True
-            self.beh.setItem(r, 3, QTableWidgetItem(new_group))
-            self._loading = False
+            with loading(self):
+                self.beh.setItem(r, 3, QTableWidgetItem(new_group))
         self._store_behaviours()
 
     def _add_behaviour(self):
@@ -718,13 +718,10 @@ class ExperimentPage(Page):
         self._store_behaviours()
 
     def _remove_behaviour(self):
-        self._remove_row(self.beh, self._store_behaviours)
-
-    def _remove_row(self, table, after):
-        r = table.currentRow()
+        r = self.beh.currentRow()
         if r >= 0:
-            table.removeRow(r)
-            after()
+            self.beh.removeRow(r)
+            self._store_behaviours()
 
     def _row_behaviour(self, r) -> Behaviour | None:
         name = self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else ""
@@ -741,12 +738,11 @@ class ExperimentPage(Page):
             return
         out = [b for b in (self._row_behaviour(r) for r in range(self.beh.rowCount())) if b is not None]
         self.project.behaviours = out
-        self._loading = True
-        for r in range(self.beh.rowCount()):  # Toggle ⇄ Radio follows the radio set
-            combo, b = self.beh.cellWidget(r, 2), self._row_behaviour(r)
-            if combo is not None and b is not None:
-                combo.setCurrentIndex(self._kind_index(b.kind, b.group))
-        self._loading = False
+        with loading(self):
+            for r in range(self.beh.rowCount()):  # Toggle ⇄ Radio follows the radio set
+                combo, b = self.beh.cellWidget(r, 2), self._row_behaviour(r)
+                if combo is not None and b is not None:
+                    combo.setCurrentIndex(self._kind_index(b.kind, b.group))
         self._validate_behaviours()
         self._show_key()
         self._update_summary()
@@ -771,18 +767,17 @@ class ExperimentPage(Page):
         r = self.beh.currentRow()
         if not 0 <= r < self.beh.rowCount():
             return
-        self._loading = True
-        if v["name"]:
-            self.beh.item(r, 0).setText(v["name"])
-        key = v["key"]
-        self.beh.item(r, 1).setText(key.upper() if len(key) == 1 else key)
-        self.beh.cellWidget(r, 2).setCurrentIndex(self._kind_index(v["kind"], v["group"]))
-        self.beh.setItem(r, 3, QTableWidgetItem(v["group"]))
-        holder = self.beh.cellWidget(r, 4)
-        if holder is not None and v["color"]:
-            holder.setProperty("color", v["color"])
-            holder.button.set_color(v["color"])
-        self._loading = False
+        with loading(self):
+            if v["name"]:
+                self.beh.item(r, 0).setText(v["name"])
+            key = v["key"]
+            self.beh.item(r, 1).setText(key.upper() if len(key) == 1 else key)
+            self.beh.cellWidget(r, 2).setCurrentIndex(self._kind_index(v["kind"], v["group"]))
+            self.beh.setItem(r, 3, QTableWidgetItem(v["group"]))
+            holder = self.beh.cellWidget(r, 4)
+            if holder is not None and v["color"]:
+                holder.setProperty("color", v["color"])
+                holder.button.set_color(v["color"])
         self._store_behaviours()
 
     # ================================================================== workflow
@@ -793,9 +788,8 @@ class ExperimentPage(Page):
         if not on and p.blind and QMessageBox.question(
                 self, "Unblind", "Reveal the treatment groups? The experimenter will no longer be blind to the "
                 "treatments on the Experiment, Test schedule, Run tests and Review and score pages.") != QMessageBox.Yes:
-            self._loading = True
-            self.blind.setChecked(True)
-            self._loading = False
+            with loading(self):
+                self.blind.setChecked(True)
             return
         p.blind = on
         if on:
@@ -808,96 +802,31 @@ class ExperimentPage(Page):
         self.project.settings_extra["confirm_id"] = self.confirm_id.isChecked()
         self.main.mark_dirty()
 
-    # ================================================================== training criteria
-    def _append_criterion_row(self, c: dict):
+    # ================================================================== training criteria, time periods
+    @staticmethod
+    def _criterion_row(c: dict) -> dict:
         c = wf.normalize_criterion(c)
-        self._loading = True
-        r = self.crit.rowCount()
-        self.crit.insertRow(r)
-        stage = QComboBox()
-        stage.setEditable(True)
-        stage.addItems(self.project.stages if self.project else [])
-        stage.setCurrentText(c["stage"])
-        stage.currentTextChanged.connect(self._store_criteria)
-        self.crit.setCellWidget(r, 0, stage)
-        self.crit.setItem(r, 1, QTableWidgetItem(c["measure"]))
-        op = QComboBox()
-        op.addItems(["<", "<=", ">", ">="])
-        op.setCurrentText(c["op"])
-        op.currentIndexChanged.connect(self._store_criteria)
-        self.crit.setCellWidget(r, 2, op)
-        it = QTableWidgetItem(f"{c['value']:g}")
-        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.crit.setItem(r, 3, it)
-        cons = QSpinBox()
-        cons.setRange(1, wf.MAX_TRIALS)
-        cons.setValue(c["consecutive_trials"])
-        cons.valueChanged.connect(self._store_criteria)
-        self.crit.setCellWidget(r, 4, cons)
-        met = QComboBox()
-        for v, label in MET_ACTIONS:
-            met.addItem(label, v)
-        met.setCurrentIndex(max(0, met.findData("complete_stage" if c["action_met"] == "advance" else c["action_met"])))
-        met.currentIndexChanged.connect(self._store_criteria)
-        self.crit.setCellWidget(r, 5, met)
-        after = QSpinBox()
-        after.setRange(0, wf.MAX_TRIALS)
-        after.setSpecialValueText("never")
-        after.setSuffix(" trials")
-        after.setValue(c["action_fail"]["after_trials"] if c["action_fail"]["action"] == "retire" else 0)
-        after.setToolTip("Retire animals that have not met the criterion after this many trials of the stage")
-        after.valueChanged.connect(self._store_criteria)
-        self.crit.setCellWidget(r, 6, after)
-        self._loading = False
+        fail = c["action_fail"]
+        return {**c, "action_met": "complete_stage" if c["action_met"] == "advance" else c["action_met"],
+                "after": fail["after_trials"] if fail["action"] == "retire" else 0}
 
     def _add_criterion(self):
         if self.project is None:
             return
         stage = self.project.stages[0] if self.project.stages else ""
-        self._append_criterion_row({"stage": stage, "measure": "Latency to first entry (s)", "op": "<", "value": 10,
-                                    "consecutive_trials": 3})
+        self.crit.add_record(self._criterion_row({"stage": stage, "measure": "Latency to first entry (s)", "op": "<",
+                                                  "value": 10, "consecutive_trials": 3}))
         self._store_criteria()
 
     def _store_criteria(self, *_):
         if self._loading or self.project is None:
             return
-        out = []
-        for r in range(self.crit.rowCount()):
-            w = self.crit.cellWidget
-            try:
-                value = float(self.crit.item(r, 3).text().replace(",", "."))
-            except (ValueError, AttributeError):
-                value = 0.0
-            after = w(r, 6).value()
-            out.append({"stage": w(r, 0).currentText().strip(),
-                        "measure": self.crit.item(r, 1).text().strip() if self.crit.item(r, 1) else "",
-                        "op": w(r, 2).currentText(), "value": value, "consecutive_trials": w(r, 4).value(),
-                        "action_met": w(r, 5).currentData(),
-                        "action_fail": {"after_trials": after, "action": "retire" if after else "none"}})
-        self.project.training_criteria = out
+        self.project.training_criteria = [
+            {"stage": c["stage"], "measure": c["measure"], "op": c["op"], "value": c["value"] or 0.0,
+             "consecutive_trials": c["consecutive_trials"], "action_met": c["action_met"],
+             "action_fail": {"after_trials": c["after"], "action": "retire" if c["after"] else "none"}}
+            for c in self.crit.records()]
         self.main.mark_dirty()
-
-    # ================================================================== event-anchored periods
-    _TARGET_KEY = {"first_entry": "zone", "first_exit": "zone", "mark": "behaviour", "input": "channel"}
-
-    def _append_event_period_row(self, d: dict):
-        self._loading = True
-        r = self.ev_periods.rowCount()
-        self.ev_periods.insertRow(r)
-        anchor = QComboBox()
-        for key, title in ANCHORS.items():
-            anchor.addItem(title, key)
-        anchor.setCurrentIndex(max(0, anchor.findData(d.get("anchor", "start"))))
-        anchor.currentIndexChanged.connect(self._store_event_periods)
-        self.ev_periods.setCellWidget(r, 1, anchor)
-        target = d.get(self._TARGET_KEY.get(d.get("anchor", ""), "zone"), "")
-        for c, v in ((0, d.get("label", "")), (2, target), (3, d.get("offset_s", 0)), (4, d.get("duration_s", 0)),
-                     (5, d.get("occurrence", 1))):
-            it = QTableWidgetItem(str(v))
-            if c >= 3:
-                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.ev_periods.setItem(r, c, it)
-        self._loading = False
 
     def _add_event_period(self):
         zone = ""
@@ -905,65 +834,33 @@ class ExperimentPage(Page):
         if p is not None and p.apparatus and p.apparatus[0].zones:
             zone = p.apparatus[0].zones[-1].name
         n = self.ev_periods.rowCount() + 1
-        self._append_event_period_row({"label": f"Event period {n}", "anchor": "first_exit", "zone": zone,
-                                       "offset_s": 0, "duration_s": 30, "occurrence": 1})
+        self.ev_periods.add_record({"label": f"Event period {n}", "anchor": "first_exit", "target": zone,
+                                    "offset_s": 0, "duration_s": 30, "occurrence": 1})
         self._store_event_periods()
 
     def _store_event_periods(self, *_):
         if self._loading or self.project is None:
             return
         out = []
-        for r in range(self.ev_periods.rowCount()):
-            try:
-                anchor = self.ev_periods.cellWidget(r, 1).currentData()
-                d = {"label": self.ev_periods.item(r, 0).text().strip() or f"Event period {r + 1}",
-                     "anchor": anchor, "offset_s": float(self.ev_periods.item(r, 3).text()),
-                     "duration_s": float(self.ev_periods.item(r, 4).text()),
-                     "occurrence": int(float(self.ev_periods.item(r, 5).text()))}
-            except (ValueError, AttributeError):
+        for r, d in enumerate(self.ev_periods.records()):
+            if None in (d["offset_s"], d["duration_s"], d["occurrence"]):
                 continue
-            target = self.ev_periods.item(r, 2).text().strip()
-            if anchor in self._TARGET_KEY:
-                d[self._TARGET_KEY[anchor]] = target
-            out.append(d)
+            target = d.pop("target")
+            if d["anchor"] in _TARGET_KEY:
+                d[_TARGET_KEY[d["anchor"]]] = target
+            out.append({**d, "label": d["label"] or f"Event period {r + 1}"})
         self.project.analysis.event_periods = out
         self.main.mark_dirty()
 
-    # ================================================================== time periods
-    def _append_period_row(self, lbl, a, b):
-        self._loading = True
-        r = self.periods.rowCount()
-        self.periods.insertRow(r)
-        for c, v in enumerate((lbl, a, b)):
-            it = QTableWidgetItem(str(v))
-            if c:
-                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.periods.setItem(r, c, it)
-        self._loading = False
-
     def _add_period(self):
-        n = self.periods.rowCount()
-        last_end = 0.0
-        if n:
-            try:
-                last_end = float(self.periods.item(n - 1, 2).text())
-            except (ValueError, AttributeError):
-                pass
-        self._append_period_row(f"Period {n + 1}", last_end, last_end + 60)
+        ends = [p["end"] for p in self.periods.records()[-1:] if p["end"] is not None]
+        start = ends[0] if ends else 0.0
+        self.periods.add_record({"label": f"Period {self.periods.rowCount() + 1}", "start": start, "end": start + 60})
         self._store_periods()
 
     def _store_periods(self, *_):
         if self._loading or self.project is None:
             return
-        out = []
-        for r in range(self.periods.rowCount()):
-            try:
-                lbl = self.periods.item(r, 0).text()
-                a = float(self.periods.item(r, 1).text())
-                b = float(self.periods.item(r, 2).text())
-            except (ValueError, AttributeError):
-                continue
-            if b > a:
-                out.append([lbl, a, b])
-        self.project.analysis.custom_periods = out
+        self.project.analysis.custom_periods = [[p["label"], p["start"], p["end"]] for p in self.periods.records()
+                                                if None not in (p["start"], p["end"]) and p["end"] > p["start"]]
         self.main.mark_dirty()

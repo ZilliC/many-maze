@@ -51,7 +51,7 @@ def test_grid_tool_square_rings_sectors(page, monkeypatch):
     n0 = len(page.app.zones)
     g = page.add_grid("square", "arena", "Cells", nx=3, ny=2)
     assert g.zones == [f"Cells {c}" for c in ("A1", "A2", "A3", "B1", "B2", "B3")]
-    assert len(page.app.zones) == n0 + 6 and page.item("zone", n0) is not None
+    assert len(page.app.zones) == n0 + 6 and page.view.item("zone", n0) is not None
     assert page.app.group("Cells").zones == g.zones
     # via the dialog: concentric rings
     def fake_exec(dlg):
@@ -67,8 +67,8 @@ def test_grid_tool_square_rings_sectors(page, monkeypatch):
     assert len(g3.zones) == 6
     # deleting the grid removes all its zones and its group; undo brings them back
     idx = zone_names(page).index("Pie Sector 2")
-    page.zone_list.setCurrentRow(idx)
-    assert page.btn_grid_del.isVisibleTo(page)
+    page.panel.zone.list.setCurrentRow(idx)
+    assert page.panel.btn_grid_del.isVisibleTo(page)
     assert page.delete_grid_of(idx)
     assert not any(n.startswith("Pie ") for n in zone_names(page)) and page.app.grid("Pie") is None
     assert page.undo() and page.app.grid("Pie") is not None
@@ -77,18 +77,18 @@ def test_grid_tool_square_rings_sectors(page, monkeypatch):
 def test_zone_properties_and_undo(page):
     page.add_grid("square", "arena", "G", nx=2, ny=1)
     i = zone_names(page).index("G A1")
-    page.zone_list.setCurrentRow(i)
+    page.panel.zone.list.setCurrentRow(i)
     app.processEvents()
-    page.zone_hidden.setChecked(True)
-    page.zone_moveable.setChecked(True)
-    page.zone_inv.setValue(2.0)
-    page.zone_rule.setCurrentIndex(page.zone_rule.findData("body"))
-    assert page.zone_frac.isEnabled()
-    page.zone_frac.setValue(60)
+    page.panel.zone_hidden.setChecked(True)
+    page.panel.zone_moveable.setChecked(True)
+    page.panel.zone_inv.setValue(2.0)
+    page.panel.zone_rule.setCurrentIndex(page.panel.zone_rule.findData("body"))
+    assert page.panel.zone_frac.isEnabled()
+    page.panel.zone_frac.setValue(60)
     z = page.app.zones[i]
     assert (z.hidden, z.moveable, z.investigation_distance_cm, z.entry_rule, z.body_fraction) == \
         (True, True, 2.0, "body", 0.6)
-    it = page.item("zone", i)
+    it = page.view.item("zone", i)
     assert it.halo is not None and it.halo.isVisible()
     assert "hidden" in it.label.text
     page.undo()
@@ -113,7 +113,7 @@ def test_copy_paste_between_apparatus(page):
     assert len(src.zones) == n0 + 1 and src.zones[-1].name == f"{name0} copy"
     c1 = src.zones[-1].shape.centroid()
     assert c1[0] - c0[0] == pytest.approx(12) and c1[1] - c0[1] == pytest.approx(12)
-    assert page.selected_key() == ("zone", n0)
+    assert page.view.selected_key() == ("zone", n0)
     # paste into another apparatus at the same position
     page.add_apparatus("Other")
     assert page.paste() == 1
@@ -125,31 +125,31 @@ def test_sequences_editor(page):
     names = page.app.names()
     assert len(names) >= 3
     q = page.add_sequence("Route")
-    assert page.tabs.currentIndex() == 4 and page.seq_list.currentRow() == 0
+    assert page.panel.tabs.currentIndex() == 4 and page.panel.sequence.list.currentRow() == 0
     for n in names[:3]:
-        page.seq_zone.setCurrentText(n)
-        page.btn_step_add.click()
+        page.panel.seq_zone.setCurrentText(n)
+        page.panel.btn_step_add.click()
     assert q.steps == names[:3]
-    assert page.seq_steps.count() == 3 and page.seq_steps.item(0).text() == f"1. {names[0]}"
-    page.seq_steps.setCurrentRow(2)
-    page.btn_step_up.click()
+    assert page.panel.seq_steps.count() == 3 and page.panel.seq_steps.item(0).text() == f"1. {names[0]}"
+    page.panel.seq_steps.setCurrentRow(2)
+    page.panel.btn_step_up.click()
     assert q.steps == [names[0], names[2], names[1]]
-    page.seq_bidir.setChecked(True)
-    page.seq_from_start.setChecked(False)
-    page.seq_end.setCurrentIndex(page.seq_end.findData("exit"))
-    page.seq_max.setValue(30)
+    page.panel.seq_bidir.setChecked(True)
+    page.panel.seq_from_start.setChecked(False)
+    page.panel.seq_end.setCurrentIndex(page.panel.seq_end.findData("exit"))
+    page.panel.seq_max.setValue(30)
     assert (q.bidirectional, q.from_start, q.end, q.max_duration_s) == (True, False, "exit", 30.0)
-    assert page._seq_overlay is not None and page._seq_overlay.scene() is page.view.scene()
-    page.tabs.setCurrentIndex(0)
-    assert page._seq_overlay is None
+    assert page.view.seq_overlay is not None and page.view.seq_overlay.scene() is page.view.scene()
+    page.panel.tabs.setCurrentIndex(0)
+    assert page.view.seq_overlay is None
     # renaming / deleting a zone keeps the steps consistent
     zi = [z.name for z in page.app.zones].index(names[0]) if names[0] in [z.name for z in page.app.zones] else None
     if zi is not None:
-        page.rename_zone(zi, "Renamed")
+        page.rename("zone", zi, "Renamed")
         assert q.steps[0] == "Renamed"
         page.delete_item("zone", zi)
         assert "Renamed" not in q.steps
-    page.seq_name.setText("Path")
+    page.panel.sequence.name.setText("Path")
     page.commit()
     assert page.app.sequences[0].name == "Path"
     # sequence measures appear in the analysis of the apparatus
@@ -158,12 +158,12 @@ def test_sequences_editor(page):
     tr = p.load_tracks(t)[0]
     res = analyse(tr, page.app, AnalysisSettings())
     assert "Path: completed" in res
-    assert page.delete_sequence(0) and not page.app.sequences
+    assert page.delete_item("sequence", 0) and not page.app.sequences
 
 
 def test_template_dialog_choices_and_multi_well(page):
     dlg = TemplateDialog(None, "multi_well")
-    w, _ = dlg._editors["n_wells"]
+    w = dlg.form.editors["n_wells"]
     assert isinstance(w, QComboBox) and [w.itemData(i) for i in range(w.count())] == [6, 12, 24, 48, 96]
     dlg.set_param("n_wells", 6)
     assert dlg.params()["n_wells"] == 6
@@ -184,13 +184,13 @@ def test_screenshot_polar_grid_and_sequence(page):
     page.add_grid("polar", "arena", "Polar", rings=3, sectors=8)
     q = page.add_sequence("Inward", ["Polar R3 S2", "Polar R2 S2", "Polar R1", "Polar R2 S6", "Polar R3 S6"])
     q.bidirectional = True
-    page.seq_list.setCurrentRow(0)
-    page._load_seq_editor()
-    page._draw_sequence_overlay()
+    page.panel.sequence.list.setCurrentRow(0)
+    page.panel.load_seq_editor()
+    page.show_sequence_overlay()
     page.view.fit()
     for _ in range(5):
         app.processEvents()
-    assert page._seq_overlay is not None
+    assert page.view.seq_overlay is not None
     os.makedirs(os.path.dirname(SHOT), exist_ok=True)
     assert page.main.grab().save(SHOT)
     assert os.path.getsize(SHOT) > 10_000

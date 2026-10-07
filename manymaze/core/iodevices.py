@@ -30,8 +30,9 @@ light, pellet dispenser, door, shocker trigger, laser), ``pwm`` (analogue / PWM 
 
 pyserial is optional (only needed for ``arduino`` and ``serial`` devices).
 
-:func:`io_measures` (in :mod:`.iomeasures`, re-exported here) turns a test's I/O log (``Test.io_events``) into
-ANY-maze-style result measures.
+Device types, channel kinds and the configuration rules (new_device, watchdog_ms...) are in :mod:`.ioconfig`,
+re-exported here. :func:`io_measures` (in :mod:`.iomeasures`, re-exported here) turns a test's I/O log
+(``Test.io_events``) into ANY-maze-style result measures.
 """
 
 from __future__ import annotations
@@ -49,23 +50,10 @@ from pathlib import Path
 
 import numpy as np
 
+from .ioconfig import (AUDIO_BACKENDS, CHANNEL_FIELDS, CHANNEL_KINDS, DEFAULT_WATCHDOG_MS,  # noqa: F401
+                       DEVICE_FIELDS, DEVICE_TYPES, INPUT_KINDS, OUTPUT_KINDS, new_device, next_free_pin, watchdog_ms)
 from .iomeasures import io_measures  # noqa: F401  (re-exported)
 
-DEVICE_TYPES = {
-    "virtual": "Simulated device",
-    "arduino": "Arduino (mANY-MAZE I/O firmware)",
-    "serial": "Serial port (text commands)",
-    "audio": "Audio output (speakers)",
-}
-CHANNEL_KINDS = {
-    "input": "Digital input",
-    "output": "Digital output",
-    "pwm": "PWM / analogue output",
-    "analog": "Analogue input",
-    "encoder": "Rotary encoder",
-}
-INPUT_KINDS = ("input", "analog", "encoder")
-OUTPUT_KINDS = ("output", "pwm")
 FIRMWARE_ID = "MANYMAZE_IO"
 
 
@@ -351,19 +339,8 @@ class ArduinoDevice(_LineDevice):
             self.write_line(f"H {wd}")
         self.write_line("Q")
 
-    DEFAULT_WATCHDOG_MS = 2000
-
     def watchdog_ms(self) -> int:
-        """The heartbeat watchdog timeout: the configured ``watchdog_ms`` (0 = off) or, when not set, 2000 ms if
-        the board drives outputs (all outputs go off if mANY-MAZE stops talking to the board)."""
-        v = self.cfg.get("watchdog_ms")
-        if v is None:
-            has_out = any(c.get("kind", "input") in OUTPUT_KINDS for c in self.channels.values())
-            return self.DEFAULT_WATCHDOG_MS if has_out else 0
-        try:
-            return max(0, int(v))
-        except (TypeError, ValueError):
-            return 0
+        return watchdog_ms(self.cfg)
 
     def keepalive_period(self) -> float:
         wd = self.watchdog_ms()

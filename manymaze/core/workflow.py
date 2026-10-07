@@ -64,6 +64,31 @@ def exclusive_partners(behaviours: list, b: Behaviour) -> list[Behaviour]:
     return [o for o in behaviours if o is not b and o.group == b.group and o.has_duration]
 
 
+# how a scoring key works, as in ANY-maze: "simple" (active while pressed), "toggle" (first press starts, second
+# ends), "radio" (a toggle that also ends when another key of its exclusive set is pressed) or "event"
+# (instantaneous). Stored as a behaviour's kind ("hold" / "state" / "point") plus its exclusive set.
+RADIO_SET = "radio"  # exclusive set given to a key made a radio key
+
+
+def key_mode(kind: str, group: str) -> str:
+    if kind == "hold":
+        return "simple"
+    if kind == "point":
+        return "event"
+    return "radio" if group else "toggle"
+
+
+def mode_to_kind(mode: str, group: str) -> tuple[str, str]:
+    """(kind, exclusive set) of a key working in `mode`."""
+    if mode == "simple":
+        return "hold", group
+    if mode == "event":
+        return "point", group
+    if mode == "radio":
+        return "state", group or RADIO_SET
+    return "state", ""
+
+
 # ---------------------------------------------------------------- test status
 def data_status(project: Project, test: Test) -> str:
     """Status implied by the test's data: tracked > scored > pending."""

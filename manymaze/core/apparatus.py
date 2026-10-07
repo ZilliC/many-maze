@@ -487,5 +487,7 @@ def remove_grid(app: Apparatus, name: str) -> bool:
     for gr in app.groups:
         gr.zones = [z for z in gr.zones if z not in cells]
         gr.exclude = [z for z in gr.exclude if z not in cells]
+    for q in app.sequences:
+        q.steps = [s for s in q.steps if s not in cells and s != name]
     app.grids.remove(g)
     return True

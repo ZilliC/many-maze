@@ -1,22 +1,27 @@
-"""Shared Qt widgets and helpers: frame display, video player, background workers, plot canvas."""
+"""Shared Qt widgets and helpers: frame display, video player, background workers, plot canvas, small property-page
+helpers and record tables."""
 
 from __future__ import annotations
 
 import traceback
+from contextlib import contextmanager
 from typing import Callable
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
-from PySide6.QtWidgets import (QFormLayout, QGraphicsEllipseItem, QGraphicsItemGroup, QGraphicsLineItem,
-                               QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem,
-                               QGraphicsView, QHBoxLayout, QLabel, QMessageBox, QProgressDialog, QPushButton,
-                               QSizePolicy, QSlider, QStyle, QVBoxLayout, QWidget)
+from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+                           QTransform)
+from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QFrame, QGraphicsEllipseItem,
+                               QGraphicsItemGroup, QGraphicsLineItem, QGraphicsPathItem, QGraphicsPixmapItem,
+                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel,
+                               QMessageBox, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.apparatus import Apparatus
 from ..core.geometry import Ellipse
 from ..core.video import VideoSource
+from . import theme
 
 
 # ---------------------------------------------------------------- conversion
@@ -39,6 +44,17 @@ def fmt_time(t: float) -> str:
         return "--:--"
     m, s = divmod(max(0.0, t), 60)
     return f"{int(m):02d}:{s:05.2f}"
+
+
+def value_text(v) -> str:
+    """A value as an editor shows it: "" for None, 1 / 0 for booleans, whole floats without ".0"."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v)) if abs(v) < 1e15 else str(v)
+    return str(v)
 
 
 def error_box(parent, title: str, exc: BaseException | str):
@@ -65,6 +81,7 @@ class FrameView(QGraphicsView):
         self.pixmap_item.setZValue(-100)
         self.scene().addItem(self.pixmap_item)
         self._auto_fit = True
+        self._fitting = False
         self.frame_size: tuple[int, int] | None = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumSize(320, 240)
@@ -80,7 +97,7 @@ class FrameView(QGraphicsView):
             self.fit()
 
     def fit(self):
-        if self.frame_size and not getattr(self, "_fitting", False):
+        if self.frame_size and not self._fitting:
             # fit the whole scene rect (frame + margin) so scrollbars never toggle and re-trigger resizes
             self._fitting = True
             try:
@@ -132,8 +149,6 @@ def draw_apparatus(scene: QGraphicsScene, app: Apparatus | None, labels: bool = 
                    fill_alpha: int = 40) -> QGraphicsItemGroup:
     """Add a read-only rendering of an apparatus to a scene in the style of ANY-maze — thin orange outlines,
     zones lightly tinted with their colour, small dark labels — and return the item group."""
-    from . import theme
-
     orange = QColor(theme.APPARATUS)
     group = QGraphicsItemGroup()
     scene.addItem(group)
@@ -464,17 +479,195 @@ class PlotCanvas(QWidget):
             self.figure.savefig(path, dpi=dpi, bbox_inches="tight")
 
 
-def form_row_widget(*widgets) -> QWidget:
-    w = QWidget()
-    lay = QHBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    for x in widgets:
-        lay.addWidget(x)
-    return w
+# ---------------------------------------------------------------- small helpers
+@contextmanager
+def loading(obj, attr: str = "_loading"):
+    """Set the flag ``obj._loading`` (by default) while widgets are filled from the model, so their change
+    signals are ignored; restores the previous value (nesting is fine)."""
+    was = getattr(obj, attr)
+    setattr(obj, attr, True)
+    try:
+        yield
+    finally:
+        setattr(obj, attr, was)
 
 
-def compact_form() -> QFormLayout:
-    f = QFormLayout()
-    f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    f.setLabelAlignment(Qt.AlignRight)
-    return f
+def hint(text: str = "", wrap: bool = True) -> QLabel:
+    """A muted explanatory label."""
+    lbl = QLabel(text)
+    lbl.setObjectName("Hint")
+    lbl.setWordWrap(wrap)
+    return lbl
+
+
+def separator() -> QFrame:
+    """Thin horizontal line between blocks of a panel or property page."""
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine)
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background:{theme.BORDER};border:none;margin:0;")
+    return line
+
+
+def button_row(*buttons, stretch: bool = True) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    for b in buttons:
+        row.addWidget(b)
+    if stretch:
+        row.addStretch()
+    return row
+
+
+def color_icon(color: str, size: int = 12) -> QIcon:
+    """A small rounded colour swatch."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(QPen(QColor(color).darker(130), 1))
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), 2, 2)
+    p.end()
+    return QIcon(pm)
+
+
+class ColorButton(QPushButton):
+    """A colour swatch; click to choose a colour (``color_changed`` is emitted with the new colour name)."""
+
+    color_changed = Signal(str)
+
+    def __init__(self, color: str = "#3b82f6", title: str = "Colour", parent=None, width: int = 30):
+        super().__init__(parent)
+        self.title = title
+        self._color = color
+        self.setFixedSize(width, 26)
+        self.clicked.connect(self.pick)
+        self.set_color(color)
+
+    def color(self) -> str:
+        return self._color
+
+    def set_color(self, c: str):
+        self._color = c
+        self.setToolTip(f"{self.title}: {c} (click to change)")
+        self.setStyleSheet(f"QPushButton{{background:{c};border:1px solid #9ca3af;border-radius:2px;padding:0;}}"
+                           f"QPushButton:hover{{border-color:{theme.ACCENT};}}"
+                           "QPushButton:disabled{background:#e5e7eb;border-color:#d1d5db;}")
+
+    def pick(self):
+        c = QColorDialog.getColor(QColor(self._color), self, self.title)
+        if c.isValid():
+            self.set_color(c.name())
+            self.color_changed.emit(c.name())
+
+
+# ---------------------------------------------------------------- record tables
+def style_table(t: QTableWidget, headers: list[str], stretch=(0,)):
+    """Columns, stretching columns and the row look of the property pages' tables (one selected row)."""
+    t.setColumnCount(len(headers))
+    t.setHorizontalHeaderLabels(headers)
+    for c in stretch:
+        t.horizontalHeader().setSectionResizeMode(c, QHeaderView.Stretch)
+    t.verticalHeader().hide()
+    t.verticalHeader().setDefaultSectionSize(32)
+    t.setSelectionBehavior(QAbstractItemView.SelectRows)
+    t.setSelectionMode(QAbstractItemView.SingleSelection)
+
+
+class RecordTable(QTableWidget):
+    """A table editing a list of records (dicts), one row each. Columns are specs (key, header, kind, options):
+
+    - "text": an editable cell (value: the stripped text)
+    - "number" / "int": an editable right-aligned cell (value: the number, None if the text is not one)
+    - "choice": a combo box of (value, label) options (value: the chosen value)
+    - "text_choice": an editable combo box suggesting the options (value: the stripped text)
+    - "spin": a spin box, options (minimum, maximum, special value text, suffix) (value: the number)
+
+    Options may be a callable (evaluated for each new row). ``edited`` is emitted when the user changes a cell."""
+
+    edited = Signal()
+
+    def __init__(self, columns: list[tuple], stretch=(0,)):
+        super().__init__(0, len(columns))
+        self.columns = columns
+        self._loading = False
+        style_table(self, [c[1] for c in columns], stretch)
+        self.itemChanged.connect(self._changed)
+
+    def _changed(self, *_):
+        if not self._loading:
+            self.edited.emit()
+
+    def set_records(self, records):
+        with loading(self):
+            self.setRowCount(0)
+            for rec in records:
+                self.add_record(rec)
+
+    def add_record(self, rec: dict):
+        """Append a row showing a record (missing keys show empty / default cells)."""
+        with loading(self):
+            r = self.rowCount()
+            self.insertRow(r)
+            for c, (key, _header, kind, opts) in enumerate(self.columns):
+                opts = opts() if callable(opts) else opts
+                v = rec.get(key)
+                if kind in ("text", "number", "int"):
+                    it = QTableWidgetItem(value_text(v))
+                    if kind != "text":
+                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.setItem(r, c, it)
+                    continue
+                if kind == "spin":
+                    w = QSpinBox()
+                    w.setRange(opts[0], opts[1])
+                    w.setSpecialValueText(opts[2] if len(opts) > 2 else "")
+                    w.setSuffix(opts[3] if len(opts) > 3 else "")
+                    w.setValue(int(v or 0))
+                    w.valueChanged.connect(self._changed)
+                else:
+                    w = QComboBox()
+                    if kind == "text_choice":
+                        w.setEditable(True)
+                        w.addItems(list(opts))
+                        w.setCurrentText(v or "")
+                        w.currentTextChanged.connect(self._changed)
+                    else:
+                        for value, label in opts:
+                            w.addItem(label, value)
+                        w.setCurrentIndex(max(0, w.findData(v)))
+                        w.currentIndexChanged.connect(self._changed)
+                self.setCellWidget(r, c, w)
+
+    def records(self) -> list[dict]:
+        out = []
+        for r in range(self.rowCount()):
+            rec = {}
+            for c, (key, _header, kind, _opts) in enumerate(self.columns):
+                w, it = self.cellWidget(r, c), self.item(r, c)
+                if kind == "spin":
+                    rec[key] = w.value()
+                elif kind == "choice":
+                    rec[key] = w.currentData()
+                elif kind == "text_choice":
+                    rec[key] = w.currentText().strip()
+                else:
+                    text = it.text().strip() if it is not None else ""
+                    rec[key] = text if kind == "text" else _number(text, kind == "int")
+            out.append(rec)
+        return out
+
+    def remove_current(self):
+        r = self.currentRow()
+        if r >= 0:
+            self.removeRow(r)
+            self.edited.emit()
+
+
+def _number(text: str, integer: bool):
+    try:
+        v = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    return int(v) if integer else v

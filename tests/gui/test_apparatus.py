@@ -86,18 +86,18 @@ def test_layout_and_auto_background(page):
     a = page.app
     assert a is not None and a.name == "Open field"
     # background auto-loaded from the first test using this apparatus
-    assert page._bg_real and page.view.frame_size == (400, 400)
+    assert page.bg.real and page.view.frame_size == (400, 400)
     first = next(t for t in page.project.tests if t.apparatus == a.name)
-    assert page._bg_path == page.project.abs_path(first.video)
+    assert page.bg.path == page.project.abs_path(first.video)
     assert a.frame_size == (400, 400)
-    assert len(page._items) == 1 + len(a.zones)  # arena + zones
-    assert page.zone_list.count() == len(a.zones)
+    assert len(page.view.map_items) == 1 + len(a.zones)  # arena + zones
+    assert page.panel.zone.list.count() == len(a.zones)
     assert "1 cm = 7.50 px" in page.cal_label.text()
 
 
 def test_template_dialog_params():
     dlg = TemplateDialog(None, "water_maze", "Pool", ["Pool"])
-    w, _ = dlg._editors["platform_quadrant"]
+    w = dlg.form.editors["platform_quadrant"]
     assert isinstance(w, QComboBox) and [w.itemText(i) for i in range(w.count())] == ["NE", "NW", "SE", "SW"]
     dlg.set_param("platform_quadrant", "SW")
     assert dlg.params()["platform_quadrant"] == "SW"
@@ -130,7 +130,7 @@ def test_templates_fit_and_drag(page, monkeypatch):
     assert epm.group("Open arms").zones == ["Open arm W", "Open arm E"]
     assert epm.px_per_cm == pytest.approx(400 / 65)  # fitted to the 400×400 frame
     assert epm.frame_size == (400, 400)
-    assert page._bg_real  # inherited the background of the apparatus it was created from
+    assert page.bg.real  # inherited the background of the apparatus it was created from
 
     # replace it with an open field placed by dragging on the image
     def fake_of(self):
@@ -166,7 +166,7 @@ def test_draw_move_and_edit_zones(page, monkeypatch):
     rect = a.zones[-1]
     assert rect.name == f"Zone {nz + 1}" and isinstance(rect.shape, Polygon)
     assert approx(bounds(rect.shape), (60, 60, 160, 120))
-    assert page.zone_list.currentRow() == nz and page.zone_name.text() == rect.name
+    assert page.panel.zone.list.currentRow() == nz and page.panel.zone.name.text() == rect.name
     assert page.main.dirty
 
     # polygon tool: clicks + Enter
@@ -182,7 +182,7 @@ def test_draw_move_and_edit_zones(page, monkeypatch):
     page.set_tool("select")
     ri = a.zones.index(rect)
     page.select_item("zone", ri)
-    it = page.item("zone", ri)
+    it = page.view.item("zone", ri)
     assert it.isSelected() and all(h.isVisible() for h in it.handles)
     drag(v, (160, 120), (180, 140))
     assert approx(rect.shape.points[2], (180, 140))
@@ -192,7 +192,7 @@ def test_draw_move_and_edit_zones(page, monkeypatch):
     before = list(rect.shape.points)
     drag(v, (145, 100), (155, 105))
     assert all(approx((p[0] - 10, p[1] - 5), q) for p, q in zip(rect.shape.points, before))
-    assert page.item("zone", ri).pos() == QPointF(0, 0)
+    assert page.view.item("zone", ri).pos() == QPointF(0, 0)
 
     # ellipse tool + resize with a handle
     page.set_tool("ellipse")
@@ -215,28 +215,28 @@ def test_draw_move_and_edit_zones(page, monkeypatch):
     assert len(a.zones) == nz + 3 and isinstance(a.zones[-1].shape, Ellipse)
 
     # list <-> canvas selection
-    page.zone_list.setCurrentRow(0)
-    assert page.item("zone", 0).isSelected()
+    page.panel.zone.list.setCurrentRow(0)
+    assert page.view.item("zone", 0).isSelected()
     page.select_item("zone", 1)
-    assert page.zone_list.currentRow() == 1 and page.tabs.currentIndex() == 0
+    assert page.panel.zone.list.currentRow() == 1 and page.panel.tabs.currentIndex() == 0
 
     # rename a zone used by a group; groups follow
     ci = a.zones.index(a.zone("Centre"))
-    page.zone_list.setCurrentRow(ci)
-    page.zone_name.setText("Middle")
-    page.zone_name.editingFinished.emit()
+    page.panel.zone.list.setCurrentRow(ci)
+    page.panel.zone.name.setText("Middle")
+    page.panel.zone.name.editingFinished.emit()
     assert a.zones[ci].name == "Middle" and a.group("Periphery").exclude == ["Middle"]
-    assert page.item("zone", ci).label.text == "Middle"
+    assert page.view.item("zone", ci).label.text == "Middle"
     # duplicate names are made unique
-    page.zone_list.setCurrentRow(ri)
-    page.zone_name.setText("Middle")
-    page.zone_name.editingFinished.emit()
+    page.panel.zone.list.setCurrentRow(ri)
+    page.panel.zone.name.setText("Middle")
+    page.panel.zone.name.editingFinished.emit()
     assert a.zones[ri].name == "Middle 2"
 
     # colour
     monkeypatch.setattr(QColorDialog, "getColor", lambda *a, **k: QColor("#123456"))
-    page.zone_list.setCurrentRow(ri)
-    page.zone_color.click()
+    page.panel.zone.list.setCurrentRow(ri)
+    page.panel.zone.color.click()
     assert a.zones[ri].color == "#123456"
 
     # double-click on a polygon edge inserts a vertex
@@ -256,13 +256,13 @@ def test_points_lines_arena_calibration_groups(page, monkeypatch):
     page.set_tool("point")
     click(v, 100, 300)
     pt = a.points[-1]
-    assert approx((pt.x, pt.y), (100, 300)) and page.tabs.currentIndex() == 1
-    page.point_radius.setValue(3.0)
+    assert approx((pt.x, pt.y), (100, 300)) and page.panel.tabs.currentIndex() == 1
+    page.panel.point_radius.setValue(3.0)
     assert pt.radius_cm == 3.0
-    ring = page.item("point", len(a.points) - 1).ring
+    ring = page.view.item("point", len(a.points) - 1).ring
     assert ring.isVisible() and ring.rect().width() == pytest.approx(2 * 3.0 * a.px_per_cm)
-    page.point_name.setText("Object A")
-    page.point_name.editingFinished.emit()
+    page.panel.point.name.setText("Object A")
+    page.panel.point.name.editingFinished.emit()
     assert pt.name == "Object A"
     # move the point by dragging it
     page.set_tool("select")
@@ -273,9 +273,9 @@ def test_points_lines_arena_calibration_groups(page, monkeypatch):
     page.set_tool("line")
     drag(v, (60, 330), (340, 330))
     ln = a.lines[-1]
-    assert approx((ln.x1, ln.y1, ln.x2, ln.y2), (60, 330, 340, 330)) and page.tabs.currentIndex() == 2
-    page.line_name.setText("Midline")
-    page.line_name.editingFinished.emit()
+    assert approx((ln.x1, ln.y1, ln.x2, ln.y2), (60, 330, 340, 330)) and page.panel.tabs.currentIndex() == 2
+    page.panel.line.name.setText("Midline")
+    page.panel.line.name.editingFinished.emit()
     assert ln.name == "Midline"
 
     # arena as polygon (double-click closes)
@@ -304,14 +304,14 @@ def test_points_lines_arena_calibration_groups(page, monkeypatch):
 
     # zone groups
     g = page.add_group()
-    assert page.tabs.currentIndex() == 3 and g.name == "Group 3"
-    names = [page.group_inc.item(i).text() for i in range(page.group_inc.count())]
-    page.group_inc.item(names.index("Arena")).setCheckState(Qt.Checked)
-    page.group_inc.item(names.index("Corner 1")).setCheckState(Qt.Checked)
-    page.group_exc.item(names.index("Centre")).setCheckState(Qt.Checked)
+    assert page.panel.tabs.currentIndex() == 3 and g.name == "Group 3"
+    names = [page.panel.group_inc.item(i).text() for i in range(page.panel.group_inc.count())]
+    page.panel.group_inc.item(names.index("Arena")).setCheckState(Qt.Checked)
+    page.panel.group_inc.item(names.index("Corner 1")).setCheckState(Qt.Checked)
+    page.panel.group_exc.item(names.index("Centre")).setCheckState(Qt.Checked)
     assert g.zones == ["Arena", "Corner 1"] and g.exclude == ["Centre"]
-    page.group_name.setText("Outer")
-    page.group_name.editingFinished.emit()
+    page.panel.group.name.setText("Outer")
+    page.panel.group.name.editingFinished.emit()
     assert g.name == "Outer"
     memb = a.zone_membership([200.0, 60.0], [200.0, 60.0])
     assert list(memb["Outer"]) == [False, True]
@@ -332,7 +332,7 @@ def test_apparatus_list_and_background(page, monkeypatch, tmp_path):
 
     dup = page.duplicate_apparatus()
     assert dup.name == "Box A copy" and len(dup.zones) == len(a.zones) and dup is page.app
-    assert page._bg_real  # duplicate keeps the background
+    assert page.bg.real  # duplicate keeps the background
     assert not page.rename_apparatus("Box A")  # duplicate name refused
     assert dup.name == "Box A copy"
     new = page.add_apparatus()
@@ -349,17 +349,17 @@ def test_apparatus_list_and_background(page, monkeypatch, tmp_path):
     # backgrounds: from a test video at a given time, and from a file dialog
     t = users[-1]
     t.start_s = 2.0
-    page._refresh_test_combo()
-    assert page.test_combo.count() == 1 + len([x for x in p.tests if x.video])
-    assert page.use_test_video(t.id)
-    assert page._bg_path == p.abs_path(t.video) and page.time_spin.value() == pytest.approx(2.0)
-    page.time_spin.setValue(4.0)
-    page._seek_background()
-    assert page._bg_memory[id(page.app)][1] == pytest.approx(4.0)
+    page.bg.refresh_tests()
+    assert page.bg.test_combo.count() == 1 + len([x for x in p.tests if x.video])
+    assert page.bg.use_test_video(t.id)
+    assert page.bg.path == p.abs_path(t.video) and page.bg.time_spin.value() == pytest.approx(2.0)
+    page.bg.time_spin.setValue(4.0)
+    page.bg.seek()
+    assert page.bg.memory[id(page.app)][1] == pytest.approx(4.0)
     vid = p.abs_path(p.tests[0].video)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (vid, ""))
-    page.load_background_dialog()
-    assert page._bg_path == vid and page.time_slider.value() == 0
+    page.bg.load_dialog()
+    assert page.bg.path == vid and page.bg.time_slider.value() == 0
 
     # persisted
     page.main.save()

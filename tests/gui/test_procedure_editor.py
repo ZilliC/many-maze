@@ -64,14 +64,14 @@ def test_editor_builds_edits_nests_validates_and_round_trips():
     act.setCurrentIndex(act.findData("pellet"))
     app.processEvents()
     set_line(field(ed, "channel"), "pellet")
-    ed.tree.setCurrentItem(ed._item_for((0, "body", 0)))
+    ed.tree.setCurrentItem(ed.tree.item_for((0, "body", 0)))
     ed._toggle_else(True)
-    ed.tree.setCurrentItem(ed._item_for((0, "body", 0, "else")))
+    ed.tree.setCurrentItem(ed.tree.item_for((0, "body", 0, "else")))
     ed.add_statement("set")
     set_line(field(ed, "var"), "misses")
     set_line(field(ed, "value"), "misses + 1")
     # top-level variable, a wait and a repeat; then indent/outdent/move
-    ed.tree.setCurrentItem(ed._item_for((0,)))
+    ed.tree.setCurrentItem(ed.tree.item_for((0,)))
     ed.add_statement("var")
     set_line(field(ed, "name"), "misses")
     ed.add_statement("wait")
@@ -100,10 +100,10 @@ def test_editor_builds_edits_nests_validates_and_round_trips():
     assert ed.issues == [] and "No problems" in ed.issue_list.item(0).text()
 
     # validation errors are shown inline and in the list
-    ed.tree.setCurrentItem(ed._item_for((2,)))
+    ed.tree.setCurrentItem(ed.tree.item_for((2,)))
     set_line(field(ed, "seconds"), "2 +")
     assert any(path == (2,) for _i, path, _m in ed.issues)
-    item = ed._item_for((2,))
+    item = ed.tree.item_for((2,))
     assert "syntax error" in item.toolTip(0)
     assert ed._issue_lbl is not None and ed._issue_lbl.isVisibleTo(ed) or ed._issue_lbl.text()
     ed.issue_list.itemClicked.emit(ed.issue_list.item(0))
@@ -156,7 +156,7 @@ def test_editor_builds_edits_nests_validates_and_round_trips():
 def test_every_statement_event_and_action_form_builds():
     from PySide6.QtWidgets import QWidget
     host = QWidget()
-    ed = ProcedureEditor(host)  # a parent widget as the only argument
+    ed = ProcedureEditor(parent=host)
     assert ed.parent() is host and ed.project is None
     p = make_project()
     ed = ProcedureEditor(p)
@@ -164,14 +164,14 @@ def test_every_statement_event_and_action_form_builds():
     for t in ("when", "wait", "if", "repeat", "set", "do", "stop", "comment", "var"):
         ed.add_statement(t)
         assert ed._form_widgets or t == "if"
-    ed.tree.setCurrentItem(ed._item_for((0,)))
+    ed.tree.setCurrentItem(ed.tree.item_for((0,)))
     ev = field(ed, "event")
     for i in range(ev.count()):
         if ev.itemData(i):
             ev.setCurrentIndex(i)
             app.processEvents()
             ev = field(ed, "event")
-    ed.tree.setCurrentItem(ed._item_for((5,)))
+    ed.tree.setCurrentItem(ed.tree.item_for((5,)))
     act = field(ed, "action")
     for i in range(act.count()):
         if act.itemData(i):
@@ -180,7 +180,7 @@ def test_every_statement_event_and_action_form_builds():
             act = field(ed, "action")
             assert ed.tree.currentItem().text(0).startswith("Do: ")
     for mode in ("until", "event", "seconds"):
-        ed.tree.setCurrentItem(ed._item_for((1,)))
+        ed.tree.setCurrentItem(ed.tree.item_for((1,)))
         m = field(ed, "mode")
         m.setCurrentIndex(m.findData(mode))
         app.processEvents()
@@ -232,7 +232,7 @@ def test_screenshot(tmp_path):
     ed = ProcedureEditor(p)
     ed.resize(1100, 560)
     ed.proc_list.setCurrentRow(1)
-    ed.tree.setCurrentItem(ed._item_for((2, "body", 1, "body", 0)))
+    ed.tree.setCurrentItem(ed.tree.item_for((2, "body", 1, "body", 0)))
     ed.show()
     app.processEvents()
     dlg = IODevicesDialog(p)
@@ -293,3 +293,42 @@ def test_touchscreen_window_drives_engine():
     m = io_measures(eng.io_events, 2)
     assert m["touch left: activations"] == 1 and m["left: times on"] == 1
     win.close()
+
+
+def test_io_dialog_watchdog_default_and_reserved_options():
+    p = make_project()
+    p.io_devices = []
+    dlg = IODevicesDialog(p)
+    dlg.add_device("arduino")
+    dlg.add_channel({"name": "lever", "kind": "input", "pin": 2})
+    dlg._save_channels()
+    assert dlg.f_watchdog.value() == 0  # input-only board: the core default is off
+    dlg.f_name.setText("box")
+    dlg._save_device()
+    assert "watchdog_ms" not in dlg._cur()
+    dlg.add_channel({"name": "pellet", "kind": "output", "pin": 8})
+    dlg._save_channels()
+    assert dlg.f_watchdog.value() == 2000 and "watchdog_ms" not in dlg._cur()
+    dlg.f_watchdog.setValue(500)
+    assert dlg._cur()["watchdog_ms"] == 500
+    # the Options column cannot override the structured columns
+    dlg.ch_table.item(0, 7).setText("pin=99, kind=output, debounce_ms=5")
+    assert dlg._cur()["channels"][0] == {"name": "lever", "kind": "input", "pin": 2, "debounce_ms": 5}
+    dlg.accept()
+    assert p.io_devices[0]["watchdog_ms"] == 500
+
+
+def test_procedure_list_read_only_and_unique_rename():
+    from PySide6.QtCore import Qt
+
+    p = make_project()
+    ed = ProcedureEditor(p)
+    ed.add_procedure()
+    first = p.procedures[0]["name"]
+    ed.proc_list.item(1).setText(first)
+    assert p.procedures[1]["name"] == f"{first} 2" and ed.proc_list.item(1).text() == f"{first} 2"
+    ed.set_read_only(True)
+    flags = ed.proc_list.item(0).flags()
+    assert not flags & Qt.ItemIsEditable and not flags & Qt.ItemIsUserCheckable
+    ed.set_read_only(False)
+    assert ed.proc_list.item(0).flags() & Qt.ItemIsEditable
