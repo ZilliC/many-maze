@@ -14,6 +14,7 @@ on Apple Silicon through Core ML (Neural Engine / GPU).
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Sequence
 
@@ -89,6 +90,7 @@ def to_gray(frame: np.ndarray) -> np.ndarray:
 
 
 _POSE_CACHE: dict[tuple, object] = {}
+_POSE_LOCK = threading.Lock()
 
 
 def pose_estimator(settings: DetectionSettings, threads: int = 0):
@@ -97,13 +99,14 @@ def pose_estimator(settings: DetectionSettings, threads: int = 0):
     from .video import default_threads
     threads = threads or default_threads()
     key = (settings.pose_model, settings.pose_device, threads)
-    if key not in _POSE_CACHE:
-        model = settings.pose_model
-        if model in pose.MODELS and not pose.is_installed(model):
-            raise RuntimeError(f"The pose model “{pose.MODELS[model]['title']}” is not installed. Install it in "
-                               "Experiment ▸ Default detection settings ▸ Body parts.")
-        _POSE_CACHE[key] = pose.PoseEstimator(model, device=settings.pose_device, threads=threads)
-    return _POSE_CACHE[key]
+    with _POSE_LOCK:  # live sources build their trackers from several threads
+        if key not in _POSE_CACHE:
+            model = settings.pose_model
+            if model in pose.MODELS and not pose.is_installed(model):
+                raise RuntimeError(f"The pose model “{pose.MODELS[model]['title']}” is not installed. Install it "
+                                   "in Experiment ▸ Default detection settings ▸ Body parts.")
+            _POSE_CACHE[key] = pose.PoseEstimator(model, device=settings.pose_device, threads=threads)
+        return _POSE_CACHE[key]
 
 
 def median_background(frames: Sequence[np.ndarray]) -> np.ndarray:
@@ -162,8 +165,8 @@ class ArenaTracker:
         self._single_area: float | None = None
         if arena_mask is not None:
             ys, xs = np.nonzero(arena_mask)
+            m = settings.arena_margin_px
             if len(xs):
-                m = settings.arena_margin_px
                 h, w = arena_mask.shape
                 self.roi = (max(0, xs.min() - m), max(0, ys.min() - m), min(w, xs.max() + m + 1), min(h, ys.max() + m + 1))
             else:
