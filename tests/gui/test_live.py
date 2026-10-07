@@ -290,7 +290,7 @@ def test_interrupted_live_test_is_recovered_when_the_experiment_opens(win, tmp_p
 
 
 def test_camera_scan_and_missing_camera(win, monkeypatch):
-    import manymaze.gui.pages.live as live_mod
+    import manymaze.gui.pages.live.single as live_mod
 
     page = win.goto("LivePage")
     monkeypatch.setattr(live_mod, "list_cameras", lambda: [0, 2])

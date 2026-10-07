@@ -1,0 +1,789 @@
+"""One test: its source and preview, frame processing, test setup and run control."""
+
+from __future__ import annotations
+
+import copy
+import datetime as _dt
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
+
+from ....core import autosave
+from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
+from ....core.live import LiveSession, open_devices
+from ....core.livegroup import ClockSchedule
+from ....core.procedures import Outputs
+from ....core.session import finish_live_test
+from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
+from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
+from ...confirm_id import confirm_animal_id
+from ...live_widgets import CameraOptionsDialog, short_time
+from ...widgets import Worker, error_box, fmt_time
+from .common import TRAIL_LEN, describe_view, peek_frame, recording_path
+
+
+class _GrabberSignals(QObject):
+    frame_ready = Signal(object, object)
+    opened = Signal(int, int, float)
+    background_ready = Signal(object)
+    ended = Signal()
+    failed = Signal(str)
+
+
+class FrameGrabber(SourceReader):
+    """The single test's source: `handler(frame, t)` tracks every frame in the reader thread and returns
+    (display frame, info).  frame_ready is only emitted when the UI took the previous display (call ack()), so a
+    slow UI drops display frames but never tracking frames.  Video files loop while `loop` is True."""
+
+    def __init__(self, spec: SourceSpec, handler, opener=None):
+        super().__init__(spec, opener, name="live-single")
+        self.signals = _GrabberSignals()
+        self.handler = handler
+        self.loop = True
+        self._busy = False
+
+    def ack(self):
+        self._busy = False
+
+    def keep_looping(self) -> bool:
+        return self.loop
+
+    def on_opened(self):
+        self.signals.opened.emit(*self.size, self.fps)
+        if self.background is not None:
+            self.signals.background_ready.emit(self.background)
+
+    def on_frame(self, frame, ts):
+        out = self.handler(frame, ts)
+        if not self._busy:
+            self._busy = True
+            self.signals.frame_ready.emit(*out)
+
+    def on_ended(self):
+        self.signals.ended.emit()
+
+    def on_failed(self, msg: str):
+        self.signals.failed.emit(msg)
+
+
+
+class SingleTestMixin:
+    """One test: its source and preview, frame processing, test setup and run control."""
+
+    def _source_mode_changed(self, *_):
+        cam = self.cam_radio.isChecked()
+        for w in (self.camera, self.scan_btn, self.resolution, self.cam_fps):
+            w.setEnabled(cam)
+        for w in (self.sim_path, self.sim_browse, self.sim_speed):
+            w.setEnabled(not cam)
+        self._load_single_view()
+
+    def _camera_changed(self, *_):
+        self._load_single_view()
+
+    def _speed_changed(self):
+        sp = self.sim_speed.currentData() or 1.0
+        if self.grabber is not None:
+            self.grabber.speed = sp
+        self.group.set_speed(sp)
+
+    def scan_cameras(self):
+        if self._scan_worker is not None:
+            return
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setText("Scanning…")
+        self.main.status("Looking for cameras…")
+        w = Worker(lambda progress, stop: list_cameras(), self)
+        w.signals.done.connect(self._cameras_found)
+        w.signals.failed.connect(lambda msg: self._cameras_found([]))
+        w.finished.connect(w.deleteLater)
+        self._scan_worker = w
+        w.start()
+
+    def _cameras_found(self, cams):
+        self._scan_worker = None
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText("Scan cameras")
+        cur = self.camera.currentData()
+        self.camera.clear()
+        for i in cams:
+            self.camera.addItem(f"Camera {i}", i)
+        if not cams:
+            self.camera.addItem("Camera 0", 0)
+            self.main.status("No camera found. You can simulate one with a video file.")
+        else:
+            self.main.status(f"Found {len(cams)} camera{'s' if len(cams) > 1 else ''}")
+        self.camera.setCurrentIndex(max(0, self.camera.findData(cur)))
+
+    def set_simulation_file(self, path: str):
+        self.sim_path.setText(path)
+        self.sim_radio.setChecked(True)
+        self._file_background = None
+        self._source_is_file = True
+        self._load_single_view()
+        if self.grabber is None and self._second is None:  # show the first image until the preview starts
+            f = peek_frame(path)
+            if f is not None:
+                try:
+                    self.view.set_frame(self._view.apply(f))
+                except Exception:
+                    pass
+
+    def _choose_sim_file(self):
+        start = str(self.project.path) if self.project and self.project.path else str(Path.home())
+        exts = " ".join(f"*{e}" for e in VIDEO_EXTENSIONS)
+        path, _ = QFileDialog.getOpenFileName(self, "Video file to simulate a camera", start,
+                                              f"Videos ({exts});;All files (*)")
+        if path:
+            restart = self.grabber is not None
+            self.stop_preview()
+            self.set_simulation_file(path)
+            if restart:
+                self.start_preview()
+
+    def _source(self):
+        if self.sim_radio.isChecked():
+            p = self.sim_path.text().strip()
+            return p or None
+        return int(self.camera.currentData() or 0)
+
+    @property
+    def simulating(self) -> bool:
+        return self.sim_radio.isChecked()
+
+    def _single_key(self) -> str | None:
+        src = self._source()
+        return SourceSpec(src).key if src is not None else None
+
+    def _load_single_view(self):
+        key = self._single_key()
+        d = camera_settings(self.project, key) if key else {}
+        self._view = CameraView.from_dict(d.get("view"))
+        self._second = d.get("second")
+        self._merge_layout = d.get("layout", "side")
+        self.view_lbl.setText(describe_view(self._view, self._second, self._merge_layout))
+        self._update_single_title()
+
+    def _merge_choices(self, exclude=None) -> list[tuple[str, object]]:
+        out = [(self.camera.itemText(i), self.camera.itemData(i)) for i in range(self.camera.count())]
+        files = [self.sim_path.text().strip()] + [s.source for s in self.group.sources.values() if s.is_file]
+        for f in dict.fromkeys(x for x in files if x):
+            out.append((Path(f).name, f))
+        return [(lbl, s) for lbl, s in out if s != exclude]
+
+    def camera_options(self) -> bool:
+        """Region / zoom / rotation / flip / merge options of the single-test source."""
+        src = self._source()
+        if src is None:
+            QMessageBox.information(self, "Camera options", "Choose a camera or a video file first.")
+            return False
+        raw, raw2 = self.grabber.raw_frames() if self.grabber is not None else (None, None)
+        if raw is None:
+            raw = self._last_frame if (self._view.is_identity and self._second is None) else None
+        if raw is None and isinstance(src, str):
+            raw = peek_frame(src)
+        if raw2 is None and isinstance(self._second, str):
+            raw2 = peek_frame(self._second)
+        dlg = CameraOptionsDialog(raw, self._view, self._second, self._merge_layout, self._merge_choices(src),
+                                  raw2, self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self._apply_single_view(dlg.result())
+        return True
+
+    def _apply_single_view(self, res: dict):
+        key = self._single_key()
+        view = CameraView.from_dict(res.get("view"))
+        second = res.get("second")
+        layout = res.get("layout", "side")
+        settings = {}
+        if not view.is_identity:
+            settings["view"] = view.to_dict()
+        if second is not None:
+            settings.update(second=second, layout=layout)
+        set_camera_settings(self.project, key, settings)
+        self.main.mark_dirty()
+        self._view, self._second, self._merge_layout = view, second, layout
+        self.view_lbl.setText(describe_view(view, second, layout))
+        self._file_background = None
+        self._background = None
+        self.bg_status.setText("No background captured")
+        if self.grabber is not None and self.session is None:
+            self.stop_preview()
+            self.start_preview()
+
+    def start_preview(self) -> bool:
+        if self.grabber is not None:
+            return True
+        src = self._source()
+        if src is None:
+            QMessageBox.information(self, "Run tests", "Choose a video file to simulate a camera first.")
+            return False
+        size = self.resolution.currentData() if not self.simulating else None
+        fps = self.cam_fps.value() if not self.simulating else None
+        self._source_is_file = self.simulating
+        spec = SourceSpec(src, self._second, self._merge_layout, self._view, size, fps or None)
+        g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
+        g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
+        sig = g.signals
+        sig.frame_ready.connect(self._on_frame)
+        sig.opened.connect(self._on_opened)
+        sig.background_ready.connect(self._on_file_background)
+        sig.ended.connect(self._on_source_ended)
+        sig.failed.connect(self._on_grab_failed)
+        self.grabber = g
+        g.start()
+        self._update_buttons()
+        if self.session is None:
+            self._set_state_display("preview")
+        return True
+
+    def stop_preview(self):
+        g = self.grabber
+        if g is None:
+            return
+        self.grabber = None
+        g.stop()
+        self._update_buttons()
+        if self.session is None:
+            self._set_state_display("idle")
+
+    def _toggle_preview(self):
+        if self.grabber is None:
+            self.start_preview()
+        else:
+            if self.session is not None:
+                QMessageBox.information(self, "Run tests", "Stop the test before stopping the camera.")
+                return
+            self.stop_preview()
+
+    def _on_opened(self, w, h, fps):
+        self._fps = fps
+        self._frame_size = (w, h)
+        kind = "Video" if self.simulating else "Camera"
+        self.main.status(f"{kind} opened: {w}×{h} at {fps:.1f} fps")
+        app = self._apparatus
+        if app is not None and app.frame_size and tuple(app.frame_size) != (w, h):
+            self._log(f"Note: apparatus “{app.name}” was drawn on a {app.frame_size[0]}×{app.frame_size[1]} "
+                      f"image but the source is {w}×{h}.")
+
+    def _on_file_background(self, bg):
+        self._file_background = bg
+        if self._background is None:
+            self.bg_status.setText("Using the median of the video file (simulation)")
+            self._reset_preview_tracker()
+
+    def _on_grab_failed(self, msg):
+        self._log(f"Error: {msg}")
+        if self.session is not None:
+            self.stop_test(save=len(self.session.cols["t"]) > 0, quiet=True)
+        self.stop_preview()
+        error_box(self, "Run tests", msg)
+
+    def _on_source_ended(self):
+        if self.session is None:
+            return
+        if self.session.state in ("running", "paused"):
+            self._log("End of the video file — test finished.")
+            self.stop_test(save=True, quiet=True)
+        else:
+            self._log("End of the video file before the test started.")
+            self.stop_test(save=False, quiet=True)
+
+    # ================================================================== frame processing (one test)
+    def _bg_mode_changed(self, *_):
+        self._bg_mode_value = self.bg_mode.currentData() or "frame"
+        self._reset_preview_tracker()
+
+    def _reset_preview_tracker(self, *_):
+        with self._lock:
+            self._preview_tracker = None
+
+    def _apparatus_changed(self, *_):
+        if self._loading or self.project is None:
+            return
+        app = self.project.get_apparatus(self.apparatus.currentText()) if self.project.apparatus else None
+        if self.session is not None:  # the armed test keeps its apparatus (with its moved zones)
+            return
+        with self._lock:
+            self._apparatus = app
+            self._preview_tracker = None
+        self.single_panel.view.set_apparatus(app)
+        self._update_single_title()
+
+    def _detection_settings(self, test=None) -> DetectionSettings:
+        s = DetectionSettings.from_dict(self.project.detection.to_dict())
+        test = test if test is not None else self.test
+        if test is not None and test.detection:
+            s = DetectionSettings.from_dict({**s.to_dict(), **test.detection})
+        s.n_animals = 1
+        s.start_time_s = 0.0
+        s.duration_s = 0.0
+        s.frame_step = 1
+        s.background = self._bg_mode_value
+        return s
+
+    def _current_background(self):
+        return self._background if self._background is not None else (
+            self._file_background if self._source_is_file else None)
+
+    def process_frame(self, frame: np.ndarray, ts: float):
+        """Track one frame (called from the grabber thread). Returns (display frame, info dict)."""
+        with self._lock:
+            self._last_frame = frame
+            app = self._apparatus
+            s = self.session
+            trail = None
+            if s is not None:
+                dets = s.process(frame, ts)
+                state = s.state
+                d = dets[0] if dets else None
+                trail = s.trail(TRAIL_LEN) if self._show_trail else None
+                elapsed = s.elapsed if state != "waiting" else 0.0
+                info = {"session": s, "state": state, "elapsed": elapsed, "duration": s.duration_s,
+                        "events": len(s.events), "fired": list(s.engine.fired),
+                        "outputs": list(s.outputs.log) if s.outputs is not None else [],
+                        "proc_log": list(s.log), "phase": s.start_phase}
+                info["distance"] = s.stats.distance
+                info["unit"] = s.stats.unit
+            else:
+                if self._preview_tracker is None:
+                    self._preview_tracker = self._make_preview_tracker(frame, app)
+                dets, _fg = self._preview_tracker.process(frame) if self._preview_tracker else ([], None)
+                d = dets[0] if dets else None
+                info = {"state": "preview", "distance": 0.0, "unit": app.unit if app else "px"}
+            info["detected"] = bool(d is not None and d.detected)
+            zones = []
+            if s is not None and s.state in ("running", "paused"):
+                zones = s.stats.current_zones() if info["detected"] else []
+            elif app is not None and d is not None and d.detected:
+                zm = app.zone_membership(np.array([d.x]), np.array([d.y]))
+                zones = [k for k, v in zm.items() if bool(np.asarray(v).ravel()[0])]
+            info["zones"] = zones
+        disp = draw_tracking(frame, [d] if d is not None else [], trail)
+        return disp, info
+
+    def _make_preview_tracker(self, frame, app):
+        if self.project is None:
+            return None
+        s = self._detection_settings()
+        h, w = frame.shape[:2]
+        try:
+            mask = app.arena_or_bounds().mask((h, w)) if app else None
+        except ValueError:
+            mask = None
+        tr = ArenaTracker(s, mask)
+        bg = self._current_background()
+        if bg is not None and bg.shape[:2] == (h, w):
+            tr.set_background(bg if bg.ndim == 2 else cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY))
+        return tr
+
+    def feed_frame(self, frame: np.ndarray, ts: float):
+        """Process and display a frame synchronously (used when driving the page without a grabber)."""
+        self._on_frame(*self.process_frame(frame, ts))
+
+    def _on_frame(self, disp, info):
+        if self.grabber is not None:
+            self.grabber.ack()
+        self.view.set_frame(disp)
+        self.view.set_active_zones(info["zones"])
+        state = info["state"]
+        if self.session is not None or not self._hold_finished:
+            self._set_state_display(state)
+        if state != self._btn_state:
+            self._btn_state = state
+            self._update_buttons()
+        self.vals["zone"].setText(", ".join(info["zones"]) if info["zones"] else
+                                  ("—" if info["detected"] else "not detected"))
+        # a preview frame, or a stale one of the previous test, may arrive just after arming
+        if info.get("session") is not None and info["session"] is self.session:
+            el = info["elapsed"]
+            dur = info["duration"]
+            self.single_panel.set_state(state, el, dur)
+            self._update_single_title(el)
+            self.vals["distance"].setText(f"{info['distance']:.1f} {info['unit']}")
+            self.vals["events"].setText(str(info["events"]))
+            fired = info["fired"]
+            for t, trig, act, payload in fired[self._fired_seen:]:
+                self._log(f"{fmt_time(t)}  rule: {trig} → {act} {payload}".rstrip())
+            self._fired_seen = len(fired)
+            for line in info["outputs"][self._outputs_seen:]:
+                self._log(f"  {line}")
+            self._outputs_seen = len(info["outputs"])
+            for t, m in info["proc_log"][self._proc_log_seen:]:
+                self._log(f"  {fmt_time(t)} {m}")
+            self._proc_log_seen = len(info["proc_log"])
+            if state == "finished":
+                self._finalise(save=True)
+
+    # ================================================================== test setup
+    def _test_selected(self, *_):
+        if self._loading or self.project is None:
+            return
+        tid = self.test_combo.currentData()
+        t = self.project.get_test(tid) if tid is not None else None
+        if t is not None:
+            self.animal.setCurrentText(t.animal_id)
+            self.stage.setCurrentText(t.stage)
+            self.trial.setValue(t.trial)
+            if t.apparatus:
+                self.apparatus.setCurrentText(t.apparatus)
+            self.duration.setValue(t.duration_s or self.project.test_duration_s)
+        self._update_single_title()
+
+    def _update_single_title(self, elapsed: float | None = None):
+        """Title of the single-test / observation panel ("Open field: Animal C1, Day 1 trial 2 - 0:38") and the
+        video source shown next to it."""
+        if not hasattr(self, "apparatus") or not hasattr(self, "obs_panel"):
+            return
+        s = self.session if self.mode == "single" else self.obs
+        t = self.test if self.mode == "single" else self.obs_test
+        if t is not None:
+            animal, stage, trial, app = t.animal_id, t.stage, t.trial, t.apparatus
+        else:
+            animal, stage = self.animal.currentText().strip(), self.stage.currentText().strip()
+            trial, app = self.trial.value(), self.apparatus.currentText()
+        what = f"Animal {animal or '?'}, {(stage + ' ') if stage else ''}trial {trial}"
+        if s is not None and elapsed is None:
+            elapsed = s.elapsed if s.state != "waiting" else 0.0
+        clock = f" - {short_time(elapsed)}" if s is not None else ""
+        if self.mode == "observe":
+            self.obs_panel.set_title(f"Observation: {what}{clock}")
+            return
+        title = f"{app}: {what}{clock}" if app else f"{what}{clock}"
+        if self.single_panel.title.text() != title:
+            self.single_panel.set_title(title)
+        if self.simulating:
+            path = self.sim_path.text().strip()
+            src, tip = (path or "No video file chosen"), path
+        else:
+            src = self.camera.currentText() or "Camera"
+            if self.resolution.currentData():
+                src += f" · {self.resolution.currentText()}"
+            tip = src
+        desc = self.view_lbl.text()
+        if desc and desc != "Whole image":
+            tip += f" ({desc})"
+        self.single_panel.set_source(src, tip)
+
+    def capture_background(self) -> bool:
+        with self._lock:
+            f = self._last_frame
+        if f is None:
+            QMessageBox.information(self, "Background", "Start the preview first, with the arena empty.")
+            return False
+        self._background = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f.copy()
+        self.bg_status.setText(f"Captured at {_dt.datetime.now():%H:%M:%S} ({f.shape[1]}×{f.shape[0]})")
+        idx = self.bg_mode.findData("frame")
+        self.bg_mode.setCurrentIndex(idx)
+        self._reset_preview_tracker()
+        self.main.status("Empty-arena background captured")
+        return True
+
+    def _prepare_test(self, need_apparatus: bool = True):
+        """Create / update the test described by the Test group. Returns (test, is_new) or (None, False)."""
+        p = self.project
+        if p is None:
+            return None, False
+        if p.path is None:
+            QMessageBox.information(self, "Run tests", "Save the experiment first.")
+            return None, False
+        if need_apparatus and not p.apparatus:
+            QMessageBox.information(self, "Run tests", "Draw an apparatus first (Apparatus page).")
+            return None, False
+        aid = self.animal.currentText().strip()
+        if not aid:
+            QMessageBox.information(self, "Run tests", "Choose or type the animal ID.")
+            return None, False
+        tid = self.test_combo.currentData()
+        test = p.get_test(tid) if tid is not None else None
+        new = test is None
+        if p.get_animal(aid) is None:
+            p.ensure_animal(aid)
+        app_name = self.apparatus.currentText() or (p.apparatus[0].name if p.apparatus else "")
+        if test is None:
+            test = p.add_test("", aid, app_name, stage=self.stage.currentText().strip(), trial=self.trial.value())
+        else:
+            test.animal_id = aid
+            test.apparatus = app_name
+            test.stage = self.stage.currentText().strip()
+            test.trial = self.trial.value()
+        dur = self.duration.value()
+        test.duration_s = 0.0 if abs(dur - p.test_duration_s) < 1e-9 else dur
+        self.main.mark_dirty()
+        return test, new
+
+    def _open_devices(self):
+        if self.devices is None:
+            self.devices = open_devices(self.project)
+        return self.devices
+
+    def _autosave_args(self, test) -> dict:
+        """Crash-recovery side file of a live test (see core.autosave)."""
+        p = self.project
+        if p is None or p.path is None:
+            return {}
+        try:
+            path = autosave.path_for(p, test)
+        except Exception:
+            return {}
+        return {"autosave_path": path, "autosave_meta": {
+            "test_id": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
+            "trial": test.trial}}
+
+    def _make_session(self, test, app, bg, size, fps: float, outputs, devices, name: str, entry=None,
+                      on_stimulus=None) -> LiveSession:
+        """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
+        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
+        p = self.project
+        settings = self._detection_settings(test)
+        if settings.background == "frame" and bg is None:
+            settings.background = "adaptive"
+            self._log("No empty-arena background: using an adaptive background.", entry)
+        s = LiveSession(app, settings, duration_s=self.duration.value(), start_mode=self._session_mode(),
+                        procedures=copy.deepcopy(p.procedures), outputs=outputs,
+                        record_path=recording_path(p, test, size, fps) if self.record.isChecked() else None,
+                        fps=fps, analysis=p.analysis_for(test), devices=devices, variables=p.variables,
+                        record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
+                        name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
+                        outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test))
+        if bg is not None:
+            s.set_background(bg)
+        return s
+
+    def _close_devices(self):
+        if self.devices is not None and not self.any_active():
+            try:
+                self.devices.close()
+            except Exception:
+                pass
+            self.devices = None
+
+    def _session_mode(self) -> str:
+        m = self.start_mode.currentData()
+        return "manual" if m == "scheduled" else m
+
+    def _new_schedule(self, entry_ids=None):
+        at = self.sched_time.time().toString("HH:mm")
+        if entry_ids is None:
+            return ClockSchedule(at, False)
+        return self.group.schedule(at, self.sched_daily.isChecked(), entry_ids)
+
+    # ================================================================== run control (one test)
+    def _arm_clicked(self):
+        s = self.session
+        if s is not None and s.state == "waiting":
+            s.request_start()  # armed: the button now starts the test immediately
+            self._log("Start requested.")
+            return
+        self.arm()
+
+    def arm(self) -> bool:
+        p = self.project
+        if p is None or self.session is not None:
+            return False
+        test, new = self._prepare_test()
+        if test is None:
+            return False
+        self.test = test
+        self._new_test = new
+        if not confirm_animal_id(self, test):
+            self._discard_new_test()
+            return False
+        if self.grabber is None and not self.start_preview():
+            self._discard_new_test()
+            return False
+        outputs = Outputs(self.serial.currentText().strip() or None)
+        self._outputs = outputs
+        for line in outputs.log:
+            self._log(line)
+        dur = self.duration.value()
+        touch = self._touch_window()
+        session = self._make_session(test, p.get_apparatus(test.apparatus), self._current_background(),
+                                     self._frame_size or (640, 480), self._fps, outputs, self._open_devices(),
+                                     f"Test {test.id} · {test.animal_id}",
+                                     on_stimulus=touch.handle if touch is not None else None)
+        self._record_path = session.record_path
+        if touch is not None:
+            touch.clear()
+            touch.connect_session(session)  # session lock first, like the camera thread (no deadlock)
+        with self._lock:
+            self._apparatus = session.apparatus
+            self._fired_seen = 0
+            self._outputs_seen, self._proc_log_seen = len(outputs.log), 0
+            self.session = session
+        self._schedule = self._new_schedule() if self.start_mode.currentData() == "scheduled" else None
+        if self.grabber is not None:
+            self.grabber.loop = False
+            if self.simulating:
+                self.grabber.restart()
+        self._enable_shortcuts(True)
+        self._hold_finished = False
+        self.tabs.setCurrentWidget(self.log_tab)
+        when = self.start_mode.currentText().lower()
+        if self._schedule is not None:
+            when = f"at {self._schedule.next_fire:%H:%M} ({self._schedule.next_fire:%a %d %b})"
+        self.single_panel.log.clear()
+        self.single_panel.view.set_apparatus(session.apparatus)
+        self._log(f"Test {test.id} armed — animal {test.animal_id}, {'until stopped' if not dur else f'{dur:g} s'}, "
+                  f"start {when}")
+        self._set_state_display("waiting")
+        self._update_single_title(0.0)
+        self._update_buttons()
+        return True
+
+    def start_now(self) -> bool:
+        """▶ ▾ Start now: arm the test if needed and start it without waiting for its start condition."""
+        if self.session is None and not self.arm():
+            return False
+        s = self.session
+        if s is not None and s.state == "waiting":
+            s.request_start()
+            self._log("Start requested.")
+        self._update_buttons()
+        return s is not None
+
+    def toggle_pause(self) -> bool:
+        if self.mode == "observe":
+            return self.obs_pause()
+        s = self.session
+        if s is None:
+            return False
+        if s.state == "running":
+            s.pause()
+            self._log(f"{fmt_time(s.elapsed)}  test paused")
+        elif s.state == "paused":
+            s.resume()
+            self._log(f"{fmt_time(s.elapsed)}  test resumed")
+        else:
+            return False
+        self._set_state_display(s.state)
+        self._update_buttons()
+        return True
+
+    def _stop_clicked(self):
+        s = self.session
+        if s is None:
+            return
+        if s.state not in ("running", "paused"):
+            self.stop_test(save=False)
+            return
+        r = QMessageBox.question(self, "Stop test", "Stop the test now?\n\nSave keeps the data recorded so far; "
+                                 "Discard throws the test away.",
+                                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+        if r == QMessageBox.Save:
+            self.stop_test(save=True)
+        elif r == QMessageBox.Discard:
+            self.stop_test(save=False)
+
+    def stop_test(self, save: bool = True, quiet: bool = False):
+        if self.session is None:
+            return
+        with self._lock:
+            self.session.finish()
+        self._finalise(save=save and len(self.session.cols["t"]) > 0, quiet=quiet)
+
+    def _finalise(self, save: bool = True, quiet: bool = False):
+        with self._lock:
+            s = self.session
+            if s is None:
+                return
+            s.finish()
+            self.session = None
+        self._schedule = None
+        self._enable_shortcuts(False)
+        if self._outputs is not None:
+            self._outputs.close()
+            self._outputs = None
+        if self.grabber is not None:
+            self.grabber.loop = True
+        test = self.test
+        self.test = None
+        el = s.elapsed
+        if not self._store(test, s, self._record_path, save, self._new_test):
+            self._log("Test discarded.")
+            self._set_state_display("preview" if self.grabber else "idle")
+            self._update_buttons()
+            self._close_devices()
+            self.on_show()
+            return
+        self._log(f"Test {test.id} finished after {fmt_time(el)} and saved.")
+        self._set_state_display("finished")
+        self._hold_finished = True
+        self._show_results(test)
+        self._update_buttons()
+        self._close_devices()
+        self.on_show()
+        self.single_panel.set_title(f"{self.single_panel.title.text()} - {short_time(el)}")
+        if not quiet:
+            self.main.status(f"Test {test.id} saved. Press “Next test” to continue.")
+
+    def _store(self, test, session, record_path: str | None, save: bool, new_test: bool, entry=None) -> bool:
+        """A test is over (any mode): its warnings go to the log, then it is stored and the experiment saved, or
+        it is discarded (see session.finish_live_test).  Returns True when stored."""
+        prefix = f"{entry.label} · " if entry is not None else ""
+        for t, msg in session.warnings:
+            self._log(f"{prefix}{fmt_time(t)}  warning: {msg}", entry)
+        if not finish_live_test(self.project, test, session, record_path, save, new_test):
+            return False
+        self.main.mark_dirty()
+        if self.main.save():
+            session.remove_autosave()
+        self.last_test_id = test.id
+        return True
+
+    def _discard_new_test(self):
+        if self._new_test and self.test is not None and self.test in self.project.tests:
+            self.project.tests.remove(self.test)
+        self.test = None
+
+    def _show_results(self, test, switch: bool = True):
+        try:
+            rows = self.project.analyse_test(test)
+        except Exception as e:
+            self._log(f"Analysis failed: {e}")
+            rows = []
+        self.last_results = rows
+        self.results_title.setText(f"Test {test.id} · animal {test.animal_id} · {test.stage or ''} trial "
+                                   f"{test.trial}")
+        self.results.setRowCount(0)
+        if rows:
+            skip = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"}
+            for k, v in rows[0].items():
+                if k in skip:
+                    continue
+                r = self.results.rowCount()
+                self.results.insertRow(r)
+                self.results.setItem(r, 0, QTableWidgetItem(str(k)))
+                vi = QTableWidgetItem("" if v is None else (f"{v:g}" if isinstance(v, float) else str(v)))
+                vi.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.results.setItem(r, 1, vi)
+        self.results.resizeColumnToContents(1)
+        self.open_test_btn.setEnabled(self.main.page("TestViewPage") is not None)
+        if switch:
+            self.tabs.setCurrentWidget(self.results_tab)
+
+    def next_test(self):
+        p = self.project
+        if p is None or self.session is not None:
+            return
+        pending = [t for t in p.tests if t.status == "pending"]
+        last = self.last_test_id or 0
+        nxt = next((t for t in pending if t.id > last), pending[0] if pending else None)
+        if nxt is not None:
+            self.test_combo.setCurrentIndex(max(0, self.test_combo.findData(nxt.id)))
+        else:
+            self.test_combo.setCurrentIndex(0)
+            ids = [a.id for a in p.animals]
+            cur = self.animal.currentText()
+            if cur in ids and ids.index(cur) + 1 < len(ids):
+                self.animal.setCurrentText(ids[ids.index(cur) + 1])
+        self.tabs.setCurrentWidget(self.setup_tab)
+        self._hold_finished = False
+        self._set_state_display("preview" if self.grabber else "idle")
+        self._update_buttons()
+        if self.simulating and self.grabber is not None:
+            self.grabber.restart()
