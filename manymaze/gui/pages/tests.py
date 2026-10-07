@@ -19,10 +19,11 @@ from ...core.batch import track_tests, tracking_batches
 from ...core.importers import dlc_bodyparts, trim_to_test
 from ...core.track import Track, import_deeplabcut_csv
 from ...core.video import VIDEO_EXTENSIONS, VideoSource
-from .. import theme
+from ...core.workflow import treatment_code, treatment_text
+from .. import ribbon, theme
 from ..icons import icon
 from ..widgets import error_box, run_with_progress
-from .animals import ribbon_action, swatch, treatment_code, treatment_text
+from .animals import swatch
 from .base import Page
 
 COLUMNS = ["Test", "Animal", "Code", "Stage", "Trial", "Apparatus", "Video", "Testing status", "Start (s)",
@@ -674,7 +675,7 @@ class TestsPage(Page):
         self.table.customContextMenuRequested.connect(self._context_menu)
 
         def act(text, ic, fn, tip="", large=True):
-            return ribbon_action(self, text, ic, fn, tip, large=large)
+            return ribbon.action(self, text, ic, fn, tip, large=large)
 
         # Tests
         self.a_add = act("Add tests from videos", "video_file", self.add_from_videos,

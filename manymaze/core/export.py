@@ -166,6 +166,15 @@ def zone_visit_rows(project: Project, tests=None) -> list[dict]:
     return rows
 
 
+def export_animals(project: Project, path):
+    """The animal list as CSV: ID, treatment, sex and the custom fields."""
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields))
+        for a in project.animals:
+            w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in project.animal_fields])
+
+
 def export_track(track, path):
     track.to_csv(path)
 

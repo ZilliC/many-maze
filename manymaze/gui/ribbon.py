@@ -14,9 +14,38 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QStackedWidget, QTabBar,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .icons import icon
+
 LARGE_ICON = QSize(32, 32)
 SMALL_ICON = QSize(16, 16)
 PANEL_HEIGHT = 92
+
+
+def two_lines(text: str) -> str:
+    """Split a large button's label over two balanced lines, like the ribbon of ANY-maze."""
+    if " " not in text or len(text) <= 9 or "\n" in text:
+        return text
+    words = text.split(" ")
+    best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+    return " ".join(words[:best]) + "\n" + " ".join(words[best:])
+
+
+def action(parent, text: str, icon_name: str, fn=None, tip: str = "", checkable: bool = False,
+           large: bool = True) -> QAction:
+    """A ribbon command calling fn() (fn(checked) when checkable). Large buttons keep their two-line label when the
+    action changes (enabled, checked…): the ribbon button re-reads the action's iconText, so the break is stored
+    there."""
+    a = QAction(icon(icon_name), text, parent)
+    a.setToolTip(tip or text)
+    a.setCheckable(checkable)
+    if large:
+        a.setIconText(two_lines(text))
+    if fn is not None:
+        if checkable:
+            a.toggled.connect(fn)
+        else:
+            a.triggered.connect(lambda _=False: fn())
+    return a
 
 
 class RibbonGroup(QFrame):
@@ -55,12 +84,8 @@ class RibbonGroup(QFrame):
             b.setIconSize(LARGE_ICON)
             b.setMinimumWidth(52)
             b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-            text = action.iconText().replace("&", "")
-            if " " in text and len(text) > 9 and "\n" not in text:  # two lines, like the ribbon of ANY-maze
-                words = text.split(" ")
-                best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
-                # stored on the action so the button keeps it when the action changes (enabled, checked…)
-                action.setIconText(" ".join(words[:best]) + "\n" + " ".join(words[best:]))
+            # stored on the action so the button keeps it when the action changes (enabled, checked…)
+            action.setIconText(two_lines(action.iconText().replace("&", "")))
         else:
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             b.setIconSize(SMALL_ICON)
