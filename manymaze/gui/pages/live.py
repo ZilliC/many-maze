@@ -14,7 +14,6 @@ import os
 import re
 import threading
 import time
-import traceback
 from pathlib import Path
 
 import cv2
@@ -27,11 +26,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTabWidget, QTimeEdit, QToolButton, QVBoxLayout, QWidget)
 
-from ...core import procedures as procs
+from ...core import autosave
 from ...core import workflow as wf
 from ...core.camera import CameraView, SourceSpec, TransformedSource, camera_settings, set_camera_settings
 from ...core.live import LiveSession, ObservationSession, open_devices
-from ...core import autosave
 from ...core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, device_plan
 from ...core.procedures import Outputs
 from ...core.session import save_live_test
@@ -40,18 +38,12 @@ from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cam
 from ..icons import icon
 from ..live_widgets import (LAYOUT_LABELS, LAYOUTS, CameraOptionsDialog, MonitorPanel, ObservationPanel,
                             PanelGrid, PanelSettingsDialog, TestPanel, short_time)
+from ..procedure_editor import ProcedureEditor
 from ..widgets import Worker, cv_to_qpixmap, error_box, fmt_time
 from .base import Page
 
 RESOLUTIONS = [("Camera default", None), ("640 × 480", (640, 480)), ("800 × 600", (800, 600)),
                ("1280 × 720", (1280, 720)), ("1920 × 1080", (1920, 1080))]
-TRIGGER_LABELS = {
-    "start": "Test starts", "end": "Test ends", "time": "At a time", "zone_enter": "Enters zone",
-    "zone_exit": "Leaves zone", "freezing_start": "Freezing starts", "freezing_end": "Freezing ends",
-    "immobile_start": "Immobility starts", "immobile_end": "Immobility ends", "not_detected": "Animal lost",
-}
-ACTION_LABELS = {"serial": "Serial command", "ttl": "TTL output", "beep": "Beep", "mark": "Mark event",
-                 "end_test": "End the test", "log": "Log message"}
 START_MODES = [("immediate", "Immediately when armed"), ("on_detection", "When the animal is detected"),
                ("experimenter_leaves", "When the experimenter leaves the view"),
                ("manual", "On a start key (keyboard / remote)"), ("scheduled", "At a clock time")]
@@ -309,7 +301,6 @@ class LivePage(Page):
         self._touch_cfg: dict | None = None
         self._pad_sig = None
         self._btn_state = None
-        self._zone_names: list[str] = []
         self.prefs = self._load_view_prefs()
 
         self._build_actions()
@@ -956,96 +947,9 @@ class LivePage(Page):
         return scroll
 
     def _build_procedures(self) -> QWidget:
-        legacy = self._build_rules()
-        # the full procedure editor; the simple trigger → action rules stay available in a second tab
-        self.proc_editor = None
-        try:
-            from ..procedure_editor import ProcedureEditor
-            self.proc_editor = ProcedureEditor()
-            self.proc_editor.changed.connect(self.main.mark_dirty)
-        except Exception:
-            traceback.print_exc()
-        if self.proc_editor is None:
-            return legacy
-        tabs = QTabWidget()
-        tabs.addTab(self.proc_editor, "Procedures")
-        tabs.addTab(legacy, "Simple rules")
-        return tabs
-
-    def _build_rules(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        info = QLabel("Rules run during live tests: when something happens (a time, a zone entry, freezing…) the "
-                      "action is performed — e.g. send a command to an Arduino over the serial port, beep, or "
-                      "mark an event in the test.")
-        info.setWordWrap(True)
-        info.setObjectName("Hint")
-        v.addWidget(info)
-        self.proc_table = QTableWidget(0, 3)
-        self.proc_table.setHorizontalHeaderLabels(["When", "Action", "Description"])
-        self.proc_table.verticalHeader().hide()
-        self.proc_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.proc_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.proc_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.proc_table.setWordWrap(True)
-        self.proc_table.setShowGrid(False)
-        hh = self.proc_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.proc_table.currentCellChanged.connect(lambda *_: self._load_rule_editor())
-        v.addWidget(self.proc_table, 1)
-        bb = QHBoxLayout()
-        add = QPushButton(icon("add"), "Add rule")
-        add.clicked.connect(lambda: self.add_rule())
-        rm = QPushButton(icon("delete"), "Remove")
-        rm.clicked.connect(self.remove_rule)
-        bb.addWidget(add)
-        bb.addWidget(rm)
-        bb.addStretch()
-        v.addLayout(bb)
-        self._proc_buttons = [add, rm]
-
-        ed = QGroupBox("Selected rule")
-        f = QFormLayout(ed)
-        f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.r_trigger = QComboBox()
-        for k in procs.TRIGGERS:
-            self.r_trigger.addItem(TRIGGER_LABELS.get(k, k), k)
-        self.r_zone = QComboBox()
-        self.r_zone.setEditable(True)
-        self.r_time = QDoubleSpinBox()
-        self.r_time.setRange(0, 1e6)
-        self.r_time.setDecimals(2)
-        self.r_time.setSuffix(" s")
-        self.r_delay = QDoubleSpinBox()
-        self.r_delay.setRange(0, 1e6)
-        self.r_delay.setDecimals(2)
-        self.r_delay.setSuffix(" s")
-        self.r_delay.setSpecialValueText("No delay")
-        self.r_action = QComboBox()
-        for k in procs.ACTIONS:
-            self.r_action.addItem(ACTION_LABELS.get(k, k), k)
-        self.r_payload = QLineEdit()
-        for wdg in (self.r_trigger, self.r_action):
-            wdg.currentIndexChanged.connect(self._rule_edited)
-        self.r_zone.currentTextChanged.connect(self._rule_edited)
-        self.r_time.valueChanged.connect(self._rule_edited)
-        self.r_delay.valueChanged.connect(self._rule_edited)
-        self.r_payload.textChanged.connect(self._rule_edited)
-        f.addRow("When", self.r_trigger)
-        f.addRow("Zone", self.r_zone)
-        f.addRow("Time", self.r_time)
-        f.addRow("Delay", self.r_delay)
-        f.addRow("Action", self.r_action)
-        f.addRow("Payload", self.r_payload)
-        self.rule_desc = QLabel()
-        self.rule_desc.setWordWrap(True)
-        self.rule_desc.setStyleSheet("font-style:italic")
-        f.addRow(self.rule_desc)
-        self.rule_editor = ed
-        v.addWidget(ed)
-        return w
+        self.proc_editor = ProcedureEditor()  # it also converts the trigger → action rules of older experiments
+        self.proc_editor.changed.connect(self.main.mark_dirty)
+        return self.proc_editor
 
     def _build_results(self) -> QWidget:
         w = QWidget()
@@ -1185,14 +1089,9 @@ class LivePage(Page):
         if not armed:
             self._test_selected()
         self._apparatus_changed()
-        self._load_procedures()
-        if self.proc_editor is not None and hasattr(self.proc_editor, "set_project"):
-            try:
-                self.proc_editor.set_project(p)
-            except Exception:
-                pass
         self._load_single_view()
         self._refresh_row_choices()
+        self.proc_editor.set_project(p)
         sig = [(b.name, b.key, b.kind, b.group, b.color) for b in p.behaviours]
         if sig != self._pad_sig:
             self._pad_sig = sig
@@ -1579,7 +1478,6 @@ class LivePage(Page):
             self._apparatus = app
             self._preview_tracker = None
         self.single_panel.view.set_apparatus(app)
-        self._refresh_zone_choices()
         self._update_single_title()
 
     def _detection_settings(self, test=None) -> DetectionSettings:
@@ -1736,10 +1634,6 @@ class LivePage(Page):
         if desc and desc != "Whole image":
             tip += f" ({desc})"
         self.single_panel.set_source(src, tip)
-
-    def _refresh_zone_choices(self):
-        app = self._apparatus
-        self._zone_names = ([z.name for z in app.zones] + [g.name for g in app.groups]) if app else []
 
     def capture_background(self) -> bool:
         with self._lock:
@@ -2891,7 +2785,7 @@ class LivePage(Page):
             sc.setEnabled(False)
             sc.deleteLater()
         self._shortcuts = []
-        for w in self.setup_widgets + [self.rule_editor] + self._proc_buttons:
+        for w in self.setup_widgets:
             w.setEnabled(not on)
         app = QApplication.instance()
         if on and not self._key_filter:
@@ -3080,114 +2974,6 @@ class LivePage(Page):
                     self._score(b, t == QEvent.KeyPress)
                 return True
         return super().eventFilter(obj, e)
-
-    # ================================================================== procedures editor
-    def _load_procedures(self):
-        p = self.project
-        cur = self.proc_table.currentRow()
-        self.proc_table.setRowCount(0)
-        for r in (p.procedures if p else []):
-            if isinstance(r, dict) and "trigger" in r:
-                self._append_rule_row(r)
-        if self.proc_table.rowCount():
-            self.proc_table.selectRow(min(max(cur, 0), self.proc_table.rowCount() - 1))
-        self._load_rule_editor()
-
-    def _append_rule_row(self, rule: dict):
-        r = self.proc_table.rowCount()
-        self.proc_table.insertRow(r)
-        self._fill_rule_row(r, rule)
-
-    def _fill_rule_row(self, r: int, rule: dict):
-        t = self.proc_table
-        t.setItem(r, 0, QTableWidgetItem(TRIGGER_LABELS.get(rule.get("trigger"), rule.get("trigger", "?"))))
-        t.setItem(r, 1, QTableWidgetItem(ACTION_LABELS.get(rule.get("action"), rule.get("action", "?"))))
-        d = procs.describe(rule)
-        it = QTableWidgetItem(d)
-        it.setToolTip(d)
-        t.setItem(r, 2, it)
-        t.resizeRowToContents(r)
-
-    def _load_rule_editor(self):
-        p = self.project
-        r = self.proc_table.currentRow()
-        rules = p.procedures if p else []
-        ok = 0 <= r < len(rules)
-        self.rule_editor.setEnabled(ok and self.session is None)
-        self._loading = True
-        try:
-            self.r_zone.clear()
-            self.r_zone.addItems([""] + self._zone_names)
-            if ok:
-                rule = rules[r]
-                self.r_trigger.setCurrentIndex(max(0, self.r_trigger.findData(rule.get("trigger", "time"))))
-                self.r_zone.setCurrentText(rule.get("zone", ""))
-                self.r_time.setValue(float(rule.get("time_s", 0) or 0))
-                self.r_delay.setValue(float(rule.get("delay_s", 0) or 0))
-                self.r_action.setCurrentIndex(max(0, self.r_action.findData(rule.get("action", "mark"))))
-                self.r_payload.setText(str(rule.get("payload", "")))
-                self.rule_desc.setText(procs.describe(rule))
-            else:
-                self.rule_desc.setText(f"{len(rules)} rule(s). Add a rule or select one to edit it.")
-        finally:
-            self._loading = False
-        self._update_rule_fields()
-
-    def _update_rule_fields(self):
-        trig = self.r_trigger.currentData()
-        self.r_zone.setEnabled(trig in ("zone_enter", "zone_exit"))
-        self.r_time.setEnabled(trig == "time")
-        act = self.r_action.currentData()
-        self.r_payload.setEnabled(act not in ("beep", "end_test"))
-        self.r_payload.setPlaceholderText({"serial": "Text sent to the serial port, e.g. LED1 ON",
-                                           "ttl": "Command for the I/O board, e.g. PIN3 HIGH",
-                                           "mark": "Event name, e.g. Tone",
-                                           "log": "Message written to the log"}.get(act, ""))
-
-    def _editor_rule(self) -> dict:
-        rule = {"trigger": self.r_trigger.currentData(), "action": self.r_action.currentData()}
-        if rule["trigger"] in ("zone_enter", "zone_exit"):
-            rule["zone"] = self.r_zone.currentText().strip()
-        if rule["trigger"] == "time":
-            rule["time_s"] = round(self.r_time.value(), 3)
-        if self.r_delay.value():
-            rule["delay_s"] = round(self.r_delay.value(), 3)
-        payload = self.r_payload.text()
-        if payload and rule["action"] not in ("beep", "end_test"):
-            rule["payload"] = payload
-        return rule
-
-    def _rule_edited(self, *_):
-        self._update_rule_fields()
-        if self._loading or self.project is None:
-            return
-        r = self.proc_table.currentRow()
-        if not 0 <= r < len(self.project.procedures):
-            return
-        rule = self._editor_rule()
-        if rule != self.project.procedures[r]:
-            self.project.procedures[r] = rule
-            self.main.mark_dirty()
-        self._fill_rule_row(r, rule)
-        self.rule_desc.setText(procs.describe(rule))
-
-    def add_rule(self, rule: dict | None = None):
-        if self.project is None:
-            return
-        rule = dict(rule or {"trigger": "time", "time_s": 60, "action": "mark", "payload": "Mark"})
-        self.project.procedures.append(rule)
-        self.main.mark_dirty()
-        self._append_rule_row(rule)
-        self.proc_table.selectRow(self.proc_table.rowCount() - 1)
-        self._load_rule_editor()
-
-    def remove_rule(self):
-        r = self.proc_table.currentRow()
-        if self.project is not None and 0 <= r < len(self.project.procedures):
-            del self.project.procedures[r]
-            self.main.mark_dirty()
-            self.proc_table.removeRow(r)
-            self._load_rule_editor()
 
     # ================================================================== helpers
     def _log(self, msg: str, entry=None):

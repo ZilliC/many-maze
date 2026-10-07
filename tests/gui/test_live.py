@@ -57,8 +57,10 @@ def setup_page(w, video, duration=3.0):
     page.animal.setCurrentText("C1")
     page.stage.setCurrentText("Day 1")
     page.trial.setValue(2)
-    page.add_rule({"trigger": "time", "time_s": 1.0, "action": "mark", "payload": "Tone"})
-    page.add_rule({"trigger": "zone_enter", "zone": "Centre", "action": "serial", "payload": "LED ON"})
+    # rules of older experiments: the procedure editor converts them to procedures
+    w.project.procedures = [{"trigger": "time", "time_s": 1.0, "action": "mark", "payload": "Tone"},
+                            {"trigger": "zone_enter", "zone": "Centre", "action": "serial", "payload": "LED ON"}]
+    page.on_show()
     return page
 
 
@@ -66,16 +68,7 @@ def test_simulated_live_test_synchronous(win, monkeypatch):
     p = win.project
     video = p.abs_path(p.tests[0].video)
     page = setup_page(win, video)
-    assert p.procedures[0] == {"trigger": "time", "time_s": 1.0, "action": "mark", "payload": "Tone"}
-    assert "Tone" in page.proc_table.item(0, 2).text()
-    # edit the selected rule through the editor
-    page.proc_table.selectRow(1)
-    page.r_delay.setValue(0.5)
-    assert p.procedures[1]["delay_s"] == 0.5 and "after 0.5 s" in page.proc_table.item(1, 2).text()
-    page.add_rule()
-    assert len(p.procedures) == 3
-    page.remove_rule()
-    assert len(p.procedures) == 2
+    assert len(p.procedures) == 2 and all("statements" in pr for pr in p.procedures)
     n_tests = len(p.tests)
     # drive frames ourselves: no grabber thread
     monkeypatch.setattr(page, "start_preview", lambda: True)
