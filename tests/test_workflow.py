@@ -224,6 +224,29 @@ def test_criteria_normalisation_and_ops():
     assert rep["rows"][0]["met_at_trial"] == 2
 
 
+def test_criteria_analyse_each_test_once():
+    p = make_project(1)
+    for k in range(3):
+        t = p.add_test("", "M1", stage="T", trial=k + 1, status="scored")
+        t.events = [{"behaviour": "Bolus", "t": 1.0, "t_end": None}]
+    calls = []
+
+    def analyse_test(test):
+        calls.append(test.id)
+        return [{"Bolus: count": test.trial}]
+
+    p.analyse_test = analyse_test
+    p.training_criteria = [{"stage": "T", "measure": "Bolus: count", "op": ">=", "value": 2},
+                           {"stage": "T", "measure": "Bolus: count", "op": ">", "value": 5, "fail_after_trials": 3}]
+    rep = wf.evaluate_criteria(p)
+    assert sorted(calls) == [1, 2, 3]
+    assert rep["rows"][0]["met_at_trial"] == 2 and rep["rows"][1]["failed"] and rep["retire"] == {
+        "M1": "did not reach “T: Bolus: count > 5 on 1 consecutive trial; retire if not met after 3 trials” "
+              "within 3 trials"}
+    assert wf.Criterion.from_dict(wf.normalize_criterion(p.training_criteria[1])) == \
+        wf.Criterion.from_dict(p.training_criteria[1])
+
+
 # ---------------------------------------------------------------- blind, ID, doses
 def test_blind_codes_stable():
     p = make_project()

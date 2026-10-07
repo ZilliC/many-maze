@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 import random
 import string
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 
 from .project import INACTIVE_STATUSES, Animal, Behaviour, Project, Test
 
@@ -220,36 +220,58 @@ OPS = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a >
        "=": lambda a, b: a == b}
 
 
+@dataclass
+class Criterion:
+    """A training criterion (stored in ``Project.training_criteria`` as the dict of :meth:`to_dict`): met when the
+    measure satisfies `op value` on `consecutive_trials` consecutive trials of the stage; it fails when
+    `fail_after_trials` trials were done without meeting it (then `fail_action`: "retire" or "none")."""
+
+    stage: str = ""
+    measure: str = ""
+    op: str = "<"
+    value: float = 0.0
+    consecutive_trials: int = 1
+    action_met: str = "complete_stage"
+    fail_after_trials: int = 0
+    fail_action: str = "none"
+
+    @classmethod
+    def from_dict(cls, c: dict) -> "Criterion":
+        """From a stored criterion, including the older flat form ({"fail_after_trials": n, "action_fail": "..."})."""
+        fail = c.get("action_fail") or {}
+        if isinstance(fail, str):
+            fail = {"action": fail}
+        after = int(fail.get("after_trials", c.get("fail_after_trials", 0)) or 0)
+        return cls(c.get("stage", ""), c.get("measure", ""), c.get("op", "<"), float(c.get("value", 0) or 0),
+                   max(1, int(c.get("consecutive_trials", 1) or 1)), c.get("action_met", "complete_stage"), after,
+                   fail.get("action", "retire" if after else "none"))
+
+    def to_dict(self) -> dict:
+        return {"stage": self.stage, "measure": self.measure, "op": self.op, "value": self.value,
+                "consecutive_trials": self.consecutive_trials, "action_met": self.action_met,
+                "action_fail": {"after_trials": self.fail_after_trials, "action": self.fail_action}}
+
+    def met_by(self, v) -> bool:
+        return v is not None and OPS.get(self.op, OPS["<"])(v, self.value)
+
+    def text(self) -> str:
+        n = self.consecutive_trials
+        s = f"{self.stage or 'any stage'}: {self.measure} {self.op} {self.value:g} on {n} consecutive " \
+            f"trial{'s' if n != 1 else ''}"
+        if self.fail_after_trials and self.fail_action == "retire":
+            s += f"; retire if not met after {self.fail_after_trials} trials"
+        return s
+
+
 def normalize_criterion(c: dict) -> dict:
-    fail = c.get("action_fail") or {}
-    if isinstance(fail, str):
-        fail = {"action": fail}
-    after = int(fail.get("after_trials", c.get("fail_after_trials", 0)) or 0)
-    return {"stage": c.get("stage", ""), "measure": c.get("measure", ""), "op": c.get("op", "<"),
-            "value": float(c.get("value", 0) or 0), "consecutive_trials": max(1, int(c.get("consecutive_trials", 1) or 1)),
-            "action_met": c.get("action_met", "complete_stage"),
-            "action_fail": {"after_trials": after, "action": fail.get("action", "retire" if after else "none")}}
+    return Criterion.from_dict(c).to_dict()
 
 
 def criterion_text(c: dict) -> str:
-    c = normalize_criterion(c)
-    s = f"{c['stage'] or 'any stage'}: {c['measure']} {c['op']} {c['value']:g} on {c['consecutive_trials']} " \
-        f"consecutive trial{'s' if c['consecutive_trials'] != 1 else ''}"
-    if c["action_fail"]["after_trials"] and c["action_fail"]["action"] == "retire":
-        s += f"; retire if not met after {c['action_fail']['after_trials']} trials"
-    return s
+    return Criterion.from_dict(c).text()
 
 
-def measure_value(project: Project, test: Test, measure: str):
-    """Value of a result measure (whole test, first animal) for a test, or None."""
-    v = (test.result_variables or {}).get(measure)
-    if v is None and project.has_results(test):
-        try:
-            rows = project.analyse_test(test)
-        except Exception:
-            rows = []
-        if rows:
-            v = rows[0].get(measure)
+def _number(v):
     try:
         v = float(v)
     except (TypeError, ValueError):
@@ -257,50 +279,74 @@ def measure_value(project: Project, test: Test, measure: str):
     return v if math.isfinite(v) else None
 
 
+def _first_row(project: Project, test: Test) -> dict:
+    """Whole-test results of the test's first animal ({} without results or with unreadable tracks)."""
+    if not project.has_results(test):
+        return {}
+    try:
+        rows = project.analyse_test(test)
+    except (OSError, ValueError, KeyError, IndexError, StopIteration):  # unreadable or malformed track files
+        return {}
+    return rows[0] if rows else {}
+
+
+def measure_value(project: Project, test: Test, measure: str, rows: dict | None = None):
+    """Value of a result measure (a saved procedure variable, else whole test, first animal) for a test, or None.
+    rows: a cache {test id: first results row} shared between calls."""
+    v = (test.result_variables or {}).get(measure)
+    if v is None:
+        row = rows.get(test.id) if rows is not None else None
+        if row is None:
+            row = _first_row(project, test)
+            if rows is not None:
+                rows[test.id] = row
+        v = row.get(measure)
+    return _number(v)
+
+
 def evaluate_criteria(project: Project, value_fn=None) -> dict:
-    """Evaluate the project's training criteria against the results.
+    """Evaluate the project's training criteria (see :class:`Criterion`) against the results.
 
     Returns {"rows": [per animal × criterion dict], "completed": {animal: [stages]}, "retire": {animal: reason}}.
-    A criterion is met when the measure satisfies `op value` on `consecutive_trials` consecutive trials of the
-    stage (ordered by trial). It fails when `action_fail.after_trials` trials were done without meeting it.
+    Trials of a stage are taken in trial order. value_fn(test, measure) -> value (default: measure_value, each
+    test analysed at most once).
     """
-    value_fn = value_fn or (lambda t, m: measure_value(project, t, m))
+    rows_cache: dict = {}
+    value_fn = value_fn or (lambda t, m: measure_value(project, t, m, rows_cache))
     out = {"rows": [], "completed": {}, "retire": {}}
     for raw in project.training_criteria:
-        c = normalize_criterion(raw)
-        if not c["measure"]:
+        c = Criterion.from_dict(raw)
+        if not c.measure:
             continue
-        op = OPS.get(c["op"], OPS["<"])
         by_animal: dict[str, list[Test]] = {}
         for t in project.tests:
             if t.status in INACTIVE_STATUSES or t.status == "pending" or not t.animal_id:
                 continue
-            if c["stage"] and t.stage != c["stage"]:
+            if c.stage and t.stage != c.stage:
                 continue
             by_animal.setdefault(t.animal_id, []).append(t)
         for aid, tests in by_animal.items():
             tests.sort(key=lambda t: (t.trial, t.id))
             run, met_at, values = 0, None, []
             for t in tests:
-                v = value_fn(t, c["measure"])
+                v = value_fn(t, c.measure)
                 values.append(v)
-                run = run + 1 if v is not None and op(v, c["value"]) else 0
-                if run >= c["consecutive_trials"] and met_at is None:
+                run = run + 1 if c.met_by(v) else 0
+                if run >= c.consecutive_trials:
                     met_at = t.trial
                     break
             n = len(values)
-            after = c["action_fail"]["after_trials"]
-            failed = met_at is None and after > 0 and n >= after
-            row = {"animal": aid, "stage": c["stage"], "criterion": criterion_text(c), "trials": n,
-                   "values": values, "met": met_at is not None, "met_at_trial": met_at, "failed": failed,
-                   "action": c["action_met"] if met_at is not None else (c["action_fail"]["action"] if failed else "")}
+            failed = met_at is None and c.fail_after_trials > 0 and n >= c.fail_after_trials
+            row = {"animal": aid, "stage": c.stage, "criterion": c.text(), "trials": n, "values": values,
+                   "met": met_at is not None, "met_at_trial": met_at, "failed": failed,
+                   "action": c.action_met if met_at is not None else (c.fail_action if failed else "")}
             out["rows"].append(row)
-            if met_at is not None and c["action_met"] in ("complete_stage", "advance"):
+            if met_at is not None and c.action_met in ("complete_stage", "advance"):
                 st = out["completed"].setdefault(aid, [])
-                if c["stage"] not in st:
-                    st.append(c["stage"])
-            if failed and c["action_fail"]["action"] == "retire":
-                out["retire"].setdefault(aid, f"did not reach “{criterion_text(c)}” within {after} trials")
+                if c.stage not in st:
+                    st.append(c.stage)
+            if failed and c.fail_action == "retire":
+                out["retire"].setdefault(aid, f"did not reach “{c.text()}” within {c.fail_after_trials} trials")
     return out
 
 
