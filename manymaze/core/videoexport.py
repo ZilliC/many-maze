@@ -84,7 +84,7 @@ class OverlayRenderer:
                 fin = sp[np.isfinite(sp)]
                 col = _cmap_bgr(sp, 0.0, float(np.percentile(fin, 95)) if len(fin) else 1.0)
             else:
-                col = np.tile(np.array(ANIMAL_COLORS[len(self.colors) % 4], np.uint8), (len(tr), 1))
+                col = np.tile(np.array(ANIMAL_COLORS[len(self.colors) % len(ANIMAL_COLORS)], np.uint8), (len(tr), 1))
             self.colors.append(col)
             try:
                 self.freezing.append(kinematics(tr, app, s).freezing if app is not None else np.zeros(len(tr), bool))
@@ -160,7 +160,7 @@ class OverlayRenderer:
             j = min(j, len(tr) - 1)
             self._draw_trail(img, ai, tr, j)
             if o.body_points and np.isfinite(tr.x[j]):
-                col = ANIMAL_COLORS[ai % 4]
+                col = ANIMAL_COLORS[ai % len(ANIMAL_COLORS)]
                 c = tuple(self._scaled_pts([tr.x[j], tr.y[j]]))
                 cv2.circle(img, c, 5, col, -1, cv2.LINE_AA)
                 cv2.circle(img, c, 5, (0, 0, 0), 1, cv2.LINE_AA)

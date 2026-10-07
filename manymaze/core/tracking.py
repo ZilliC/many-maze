@@ -630,7 +630,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
 
 
 APPARATUS_BGR = (31, 138, 255)  # ANY-maze style orange apparatus outlines
-ANIMAL_COLORS = [(0, 200, 255), (255, 0, 200), (0, 255, 0), (255, 255, 0)]  # BGR, one per animal
+ANIMAL_COLORS = [(0, 200, 255), (255, 0, 200), (0, 255, 0), (255, 255, 0), (0, 128, 255), (200, 120, 255)]  # BGR, one per animal
 TRAIL_BGR = (214, 120, 37)  # live images: blue trail, green centre, orange head
 CENTRE_BGR = (60, 200, 60)
 HEAD_BGR = (31, 138, 255)
