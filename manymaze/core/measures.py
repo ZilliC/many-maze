@@ -7,8 +7,7 @@ Measures are grouped into:
 * per zone / zone group (time, entries, latency, distance, head entries, ...)
 * per point of interest (distance to, time near, time exploring / facing)
 * per line (crossings in each direction)
-* test-specific measures chosen from the apparatus template (EPM, Y maze,
-  water maze, Barnes maze, NOR, light/dark, three-chamber, radial arm, T maze)
+* test-specific measures chosen from the apparatus template (template_measures.py)
 * manually scored behaviours
 """
 
@@ -16,13 +15,20 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
+from functools import cached_property
 
 import numpy as np
 
 from .apparatus import Apparatus
-from .geometry import body_fraction_inside, segments_intersect
+from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures
+from .occupancy import occupancy, zone_sequence, zone_visits  # noqa: F401  (zone_sequence, zone_visits re-exported)
+from .pauses import drop_pauses, shift_events
+from .series import moving_average  # noqa: F401  (re-exported)
+from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs, seg_moving_average, segments
+from .template_measures import TemplateData, template_measures
+from .templates import apply_overrides
 from .track import Track
 
 
@@ -70,93 +76,6 @@ class AnalysisSettings:
 # ---------------------------------------------------------------------------
 # helpers
 
-def runs(mask: np.ndarray) -> list[tuple[int, int]]:
-    """Return [start, end) index pairs of consecutive True runs."""
-    m = np.asarray(mask, bool)
-    if m.size == 0:
-        return []
-    d = np.diff(np.concatenate([[0], m.astype(np.int8), [0]]))
-    starts = np.flatnonzero(d == 1)
-    ends = np.flatnonzero(d == -1)
-    return list(zip(starts.tolist(), ends.tolist()))
-
-
-def drop_short_runs(mask: np.ndarray, t: np.ndarray, dur: np.ndarray, min_s: float, value: bool = True) -> np.ndarray:
-    """Remove runs of `value` shorter than min_s (they are set to the opposite value)."""
-    if min_s <= 0:
-        return mask
-    m = np.asarray(mask, bool).copy()
-    target = m if value else ~m
-    for s, e in runs(target):
-        if dur[s:e].sum() < min_s - 1e-9:
-            m[s:e] = not value
-    return m
-
-
-def ffill(v: np.ndarray) -> np.ndarray:
-    """Forward-fill NaNs (then back-fill leading NaNs)."""
-    v = np.asarray(v, float).copy()
-    ok = np.isfinite(v)
-    if not ok.any():
-        return v
-    idx = np.where(ok, np.arange(len(v)), 0)
-    np.maximum.accumulate(idx, out=idx)
-    v = v[idx]
-    first = np.flatnonzero(ok)[0]
-    v[:first] = v[first]
-    return v
-
-
-def moving_average(v: np.ndarray, window: int) -> np.ndarray:
-    if window < 2 or len(v) < 2:
-        return v.copy()
-    window = int(window) | 1
-    ok = np.isfinite(v)
-    vv = np.where(ok, v, 0.0)
-    k = np.ones(window)
-    num = np.convolve(vv, k, mode="same")
-    den = np.convolve(ok.astype(float), k, mode="same")
-    with np.errstate(invalid="ignore", divide="ignore"):
-        out = num / den
-    out[~ok] = np.nan
-    return out
-
-
-def _segments(n: int, breaks: np.ndarray | None) -> list[tuple[int, int]]:
-    """[start, end) index ranges of the stretches of track between pauses (breaks mark a segment's first frame)."""
-    if breaks is None or not np.any(breaks):
-        return [(0, n)]
-    b = np.flatnonzero(breaks)
-    edges = [0] + b[b > 0].tolist() + [n]
-    return list(zip(edges[:-1], edges[1:]))
-
-
-def _seg_moving_average(v: np.ndarray, window: int, breaks: np.ndarray | None) -> np.ndarray:
-    """moving_average applied separately to each stretch between pauses (no smoothing across a pause)."""
-    if breaks is None or not np.any(breaks):
-        return moving_average(v, window)
-    out = np.empty(len(v))
-    for a, b in _segments(len(v), breaks):
-        out[a:b] = moving_average(v[a:b], window)
-    return out
-
-
-def _latency(t, mask, t0, duration, settings) -> float:
-    idx = np.flatnonzero(mask)
-    if len(idx):
-        return float(t[idx[0]] - t0)
-    return float(duration) if settings.latency_if_never == "duration" else math.nan
-
-
-def _r(v, nd=3):
-    if v is None:
-        return math.nan
-    if isinstance(v, (int, np.integer)):
-        return int(v)
-    v = float(v)
-    return round(v, nd) if math.isfinite(v) else math.nan
-
-
 @dataclass
 class Kinematics:
     t: np.ndarray
@@ -177,6 +96,11 @@ class Kinematics:
     unit: str
     breaks: np.ndarray | None = None  # frames that follow a pause
 
+    def slice(self, sl: slice, t0: float, duration: float) -> "Kinematics":
+        """The frames sl, as a period starting at t0 that lasts `duration`."""
+        arrays = {f.name: v[sl] for f in fields(self) if isinstance(v := getattr(self, f.name), np.ndarray)}
+        return replace(self, t0=t0, duration=duration, **arrays)
+
 
 def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | None = None,
                duration: float | None = None, breaks: np.ndarray | None = None) -> Kinematics:
@@ -194,8 +118,8 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     x = ffill(track.x)
     y = ffill(track.y)
     win = max(1, int(round(s.speed_smoothing_s / max(track.dt, 1e-6))))
-    ux = _seg_moving_average(x, win, breaks) * scale
-    uy = _seg_moving_average(y, win, breaks) * scale
+    ux = seg_moving_average(x, win, breaks) * scale
+    uy = seg_moving_average(y, win, breaks) * scale
     step = np.zeros(len(t))
     if len(t) > 1:
         d = np.hypot(np.diff(ux), np.diff(uy))
@@ -206,7 +130,7 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     dts = np.where(dts <= 0, track.dt, dts)
     speed = step / dts
     # mobility: smoothed speed over ~0.5 s
-    sp_s = _seg_moving_average(speed, max(1, int(round(0.5 / max(track.dt, 1e-6)))), breaks)
+    sp_s = seg_moving_average(speed, max(1, int(round(0.5 / max(track.dt, 1e-6)))), breaks)
     mobile = np.nan_to_num(sp_s) >= s.mobility_threshold
     mobile = drop_short_runs(mobile, t, dur, s.min_immobile_s, value=False)
     # freezing from pixel change normalised by body area
@@ -241,300 +165,6 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
         duration = float(dur.sum())
     return Kinematics(t, dur, x, y, ux, uy, step, speed, mobile, freezing, motion_pct, heading, t0, duration,
                       scale, unit, breaks)
-
-
-def count_rotations(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[int, int]:
-    """Count full 360° rotations (clockwise, anticlockwise) of an orientation series.
-
-    A rotation is counted when the cumulative turn since the last reference reaches 360°
-    in one direction; the reference is reset if the animal turns back by more than reset_deg.
-    In image coordinates (y down) a positive angle change is clockwise.
-    """
-    a = np.asarray(angle_deg, float)
-    a = a[np.isfinite(a)]
-    if len(a) < 2:
-        return 0, 0
-    u = np.degrees(np.unwrap(np.radians(a)))
-    cw = acw = 0
-    ref = u[0]
-    hi = lo = u[0]
-    for v in u[1:]:
-        hi = max(hi, v)
-        lo = min(lo, v)
-        if v - ref >= 360:
-            cw += 1
-            ref = v
-            hi = lo = v
-        elif ref - v >= 360:
-            acw += 1
-            ref = v
-            hi = lo = v
-        elif hi - v > reset_deg and hi > ref:
-            ref = v
-            hi = lo = v
-        elif v - lo > reset_deg and lo < ref:
-            ref = v
-            hi = lo = v
-    return cw, acw
-
-
-def zone_visits(t: np.ndarray, dur: np.ndarray, inside: np.ndarray, s: AnalysisSettings,
-                all_runs: bool = False) -> list[tuple[int, int]]:
-    """[start, end) visits of a zone (runs shorter than s.entry_min_duration_s are ignored).
-
-    By default these are the *entries*: with s.count_initial_entry False a visit the animal starts the test in is
-    not one. all_runs=True returns every visit (use it for time in the zone, which includes the initial visit).
-    """
-    m = drop_short_runs(inside, t, dur, s.entry_min_duration_s, value=True)
-    v = runs(m)
-    if not all_runs and not s.count_initial_entry and v and v[0][0] == 0:
-        v = v[1:]
-    return v
-
-
-def body_axes(track: Track) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-frame body ellipse (semi-major a, semi-minor b in px; orientation in degrees).
-
-    The long axis is the head–tail distance (or, without head/tail, derived from the blob area assuming a 2:1
-    body); the short axis follows from the blob area (ellipse area = π a b).
-    """
-    n = len(track)
-    L = np.hypot(track.hx - track.tx, track.hy - track.ty)
-    area = track.area
-    if np.isfinite(L).any():
-        a = ffill(np.where(L > 0, L / 2, np.nan))
-    elif np.isfinite(area).any():
-        a = np.sqrt(2 * ffill(area) / math.pi)
-    else:
-        a = np.full(n, np.nan)
-    if np.isfinite(area).any():
-        b = ffill(area) / (math.pi * np.where(a > 0, a, np.nan))
-        b = np.minimum(np.where(np.isfinite(b), b, a / 2), a)
-    else:
-        b = a / 2
-    ang = track.angle.copy()
-    if not np.isfinite(ang).any():
-        x, y = ffill(track.x), ffill(track.y)
-        ang = np.full(n, np.nan)
-        if n > 1:
-            ang[1:] = np.degrees(np.arctan2(np.diff(y), np.diff(x)))
-            ang[1:][np.hypot(np.diff(x), np.diff(y)) < 1e-6] = np.nan
-    ang = ffill(ang)
-    if not np.isfinite(ang).any():
-        ang = np.zeros(n)
-    return a, b, ang
-
-
-def _entry_hysteresis(frac: np.ndarray, enter: float) -> np.ndarray:
-    """In-zone state from the fraction of the body inside: enters at >= enter, leaves below min(enter, 1-enter)."""
-    leave = min(enter, 1.0 - enter)
-    out = np.zeros(len(frac), bool)
-    state = False
-    for i, f in enumerate(frac):
-        if np.isfinite(f):
-            state = f >= enter if not state else f >= leave and f > 0
-        out[i] = state
-    return out
-
-
-def occupancy(track: Track, app: Apparatus, s: AnalysisSettings, part: str | None = None
-              ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray] | None, dict[str, np.ndarray]]:
-    """Zone occupancy per frame honouring each zone's entry rule, investigation distance and hidden flag.
-
-    Returns (membership of zones and groups, head membership (None without head), hidden: {hidden zone:
-    frames the animal is hidden in it}). `part` forces one body part for every zone (e.g. "head").
-    """
-    n = len(track)
-    scale = app.scale
-    cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    has_head = track.has_head()
-
-    def pos(bp):
-        if bp in ("head", "tail") and not (has_head if bp == "head" else np.isfinite(track.tx).any()):
-            bp = "centre"
-        if bp not in cache:
-            px, py = track.bodypart(bp)
-            cache[bp] = (ffill(px), ffill(py))
-        return cache[bp]
-
-    axes = None
-    zones: dict[str, np.ndarray] = {}
-    excl = []
-    for z in app.zones:
-        rule = part or z.entry_rule or s.zone_body_part or "centre"
-        if z.investigation_distance_cm and z.investigation_distance_cm > 0 and not part:
-            hx, hy = pos("head")
-            d_px = z.investigation_distance_cm / scale
-            m = z.shape.contains(hx, hy)
-            near = z.shape.distance_to_edge(hx, hy) <= d_px
-            zones[z.name] = m | (near & np.isfinite(hx))
-        elif rule == "body":
-            if axes is None:
-                axes = body_axes(track)
-            x, y = pos("centre")
-            frac = body_fraction_inside(z.shape, x, y, axes[2], axes[0], axes[1])
-            thr = (z.body_fraction if z.entry_rule == "body" else s.body_proportion_pct / 100.0)
-            zones[z.name] = _entry_hysteresis(frac, float(min(max(thr, 0.01), 1.0)))
-        elif rule == "exclusion":
-            excl.append(z)
-            zones[z.name] = z.shape.contains(*pos("centre"))
-        else:
-            zones[z.name] = z.shape.contains(*pos(rule))
-    for z in excl:
-        others = [o for o in app.zones if o is not z and o not in excl and not o.hidden
-                  and o.shape.area() < z.shape.area()]
-        m = zones[z.name].copy()
-        for o in others:
-            m &= ~zones[o.name]
-        zones[z.name] = m
-    hidden = _hidden_frames(track, app, s, n)
-    for hz, hm in hidden.items():
-        for zn in zones:
-            zones[zn] = zones[zn] & ~hm
-        zones[hz] = zones[hz] | hm
-    memb = app.combine_groups(zones, (n,))
-    head_memb = None
-    if has_head and part is None:
-        hx, hy = pos("head")
-        hz_ = {z.name: z.shape.contains(hx, hy) for z in app.zones}
-        for hzn, hm in hidden.items():
-            for zn in hz_:
-                hz_[zn] = hz_[zn] & ~hm
-        head_memb = app.combine_groups(hz_, (n,))
-    return memb, head_memb, hidden
-
-
-def _hidden_frames(track: Track, app: Apparatus, s: AnalysisSettings, n: int) -> dict[str, np.ndarray]:
-    """Undetected frames attributed to hidden zones (animal last seen, or next seen, in or near the zone)."""
-    hz = [z for z in app.zones if z.hidden]
-    if not hz or n == 0:
-        return {}
-    out = {z.name: np.zeros(n, bool) for z in hz}
-    det = track.detected
-    x, y = track.x, track.y
-    for a, b in runs(~det):
-        for idx in (a - 1, b):
-            if not (0 <= idx < n) or not (math.isfinite(x[idx]) and math.isfinite(y[idx])):
-                continue
-            best = None
-            for z in hz:
-                if s.hidden_zone_margin and s.hidden_zone_margin > 0:
-                    margin = s.hidden_zone_margin / app.scale
-                else:
-                    margin = 0.5 * math.sqrt(max(z.shape.area(), 1.0))
-                if bool(z.shape.contains(x[idx], y[idx])):
-                    d = 0.0
-                else:
-                    d = float(z.shape.distance_to_edge(np.array([x[idx]]), np.array([y[idx]]))[0])
-                if d <= margin and (best is None or d < best[0]):
-                    best = (d, z.name)
-            if best is not None:
-                out[best[1]][a:b] = True
-                break
-    return {k: v for k, v in out.items() if v.any()}
-
-
-def zone_sequence(track: Track, app: Apparatus, zone_names: list[str], s: AnalysisSettings,
-                  part: str | None = None) -> list[tuple[str, float, float]]:
-    """Ordered list of (zone, t_enter, t_exit) entries into any of the given zones."""
-    t, dur = track.t, track.frame_durations()
-    memb = occupancy(track, app, s, part=part)[0]
-    seq = []
-    for zn in zone_names:
-        if zn not in memb:
-            continue
-        for a, b in zone_visits(t, dur, memb[zn], s):
-            seq.append((zn, float(t[a]), float(t[b - 1] + dur[b - 1])))
-    seq.sort(key=lambda e: e[1])
-    return seq
-
-
-# ---------------------------------------------------------------------------
-
-def _merged_pauses(pauses) -> list[tuple[float, float]]:
-    """Sorted, merged pause intervals [(a, b)]: b == a for a live pause marker (the clock was stopped, nothing to
-    remove), b = inf for a pause that never ended."""
-    iv = []
-    for p in pauses or []:
-        try:
-            a = float(p[0])
-            b = float(p[1]) if len(p) > 1 and p[1] is not None else math.inf
-        except (TypeError, ValueError, IndexError):
-            continue
-        if math.isfinite(a):
-            iv.append((a, max(a, b)))
-    iv.sort()
-    out: list[list[float]] = []
-    for a, b in iv:
-        if out and a <= out[-1][1]:
-            out[-1][1] = max(out[-1][1], b)
-        else:
-            out.append([a, b])
-    return [(a, b) for a, b in out]
-
-
-def to_test_time(times, pauses) -> np.ndarray:
-    """Map recording (video) times to test time: paused time is removed, i.e. times after a pause [a, b] move back
-    by b - a and times inside it map to a. Live pause markers [t, t] (the clock was stopped) change nothing."""
-    v = np.asarray(times, float)
-    out = v.copy()
-    for a, b in _merged_pauses(pauses):
-        if b > a:
-            out = out - np.clip(v - a, 0.0, b - a)
-    return out
-
-
-def _shift_events(evs, pauses, keys=("t", "t_end")):
-    """Copies of event dicts with their times converted to test time (see to_test_time)."""
-    iv = [p for p in _merged_pauses(pauses) if p[1] > p[0]]
-    if not evs or not iv:
-        return evs
-    out = []
-    for e in evs:
-        e2 = dict(e)
-        for key in keys:
-            v = e2.get(key)
-            if isinstance(v, (int, float, np.floating, np.integer)) and not isinstance(v, bool):
-                e2[key] = float(to_test_time([float(v)], iv)[0])
-        out.append(e2)
-    return out
-
-
-def _drop_pauses(track: Track, pauses) -> tuple[Track, np.ndarray]:
-    """Remove frames inside paused intervals and convert times to test time (see to_test_time).
-
-    Returns the track and the frames that follow a pause ("breaks": the first frame at or after each pause start,
-    including zero-length live pause markers [t, t] where no frame is removed but the animal may have moved).
-    """
-    iv = _merged_pauses(pauses)
-    n = len(track)
-    if not iv or n == 0:
-        return track, np.zeros(n, bool)
-    t = track.t
-    keep = np.ones(n, bool)
-    for a, b in iv:
-        if b > a:
-            keep &= ~((t >= a) & (t < b))
-    kt = t[keep]
-    breaks = np.zeros(len(kt), bool)
-    for a, _b in iv:
-        j = int(np.searchsorted(kt, a, "left"))
-        if 0 < j < len(kt):
-            breaks[j] = True
-    if keep.all() and not any(b > a for a, b in iv):
-        return track, breaks
-    from .track import COLUMNS
-
-    cols = {c: getattr(track, c)[keep] for c in COLUMNS}
-    cols["t"] = to_test_time(cols["t"], iv)
-    return Track(**cols, fps=track.fps, meta=dict(track.meta)), breaks
-
-
-def _pause_overlap(pauses, a: float, b: float) -> float:
-    tot = 0.0
-    for p in _merged_pauses(pauses):
-        tot += max(0.0, min(b, float(p[1])) - max(a, float(p[0])))
-    return tot
 
 
 def _mask(visits, n) -> np.ndarray:
@@ -590,15 +220,11 @@ class _Prepared:
 
 def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_events=None, other_tracks=None,
              zone_overrides=None, pauses=None, duration=None) -> _Prepared:
-    app = app.with_overrides(zone_overrides)
-    if zone_overrides and app.template == "water_maze":
-        from .templates import align_water_maze
-
-        app = align_water_maze(app)
-    track, breaks = _drop_pauses(track, pauses)
-    events = _shift_events(events, pauses)
-    io_events = _shift_events(io_events, pauses)
-    others = [_drop_pauses(o, pauses)[0] for o in (other_tracks or [])]
+    app = apply_overrides(app, zone_overrides)
+    track, breaks = drop_pauses(track, pauses)
+    events = shift_events(events, pauses)
+    io_events = shift_events(io_events, pauses)
+    others = [drop_pauses(o, pauses)[0] for o in (other_tracks or [])]
     clean = track
     n = len(track)
     if n == 0:
@@ -655,85 +281,130 @@ def _results(P: _Prepared, t_range, behaviours=None, result_variables=None, io_d
     return _period_results(P, i0, i1, a, end - a, (a, b), behaviours, result_variables, io_devices)
 
 
-def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range, behaviours, result_variables,
-                    io_devices) -> "OrderedDict[str, object]":
-    """Measures for frames [i0, i1) of a prepared test (t0: period start, T: period length)."""
-    s, app, K = P.s, P.app, P.k
-    N = len(K.t)
-    whole = i0 == 0 and i1 == N
-    sl = slice(i0, i1)
-    k = replace(K, t=K.t[sl], dur=K.dur[sl], x=K.x[sl], y=K.y[sl], ux=K.ux[sl], uy=K.uy[sl], step=K.step[sl],
-                speed=K.speed[sl], mobile=K.mobile[sl], freezing=K.freezing[sl], motion_pct=K.motion_pct[sl],
-                heading=K.heading[sl], t0=t0, duration=T, breaks=P.breaks[sl])
-    track = P.track if whole else P.track.slice_index(i0, i1)
-    memb = P.memb if whole else {zn: m[sl] for zn, m in P.memb.items()}
-    head_memb = P.head_memb if whole or P.head_memb is None else {zn: m[sl] for zn, m in P.head_memb.items()}
-    hidden = {hz: m[sl] for hz, m in P.hidden.items()}
-    hid_any = P.hid_any[sl]
-    brk = P.breaks
-    t, dur = k.t, k.dur
-    n = len(t)
-    never = float(T) if s.latency_if_never == "duration" else math.nan
+@dataclass
+class _Period:
+    """Frames [i0, i1) of a prepared test: t0 the period start, T its length; per-frame arrays restricted to it."""
 
-    def eps(mask_full: np.ndarray, entries: bool = False) -> list[tuple[int, int]]:
+    P: _Prepared
+    i0: int
+    i1: int
+    t0: float
+    T: float
+    t_range: tuple | None
+
+    def __post_init__(self):
+        P, sl = self.P, slice(self.i0, self.i1)
+        self.sl = sl
+        self.whole = self.i0 == 0 and self.i1 == len(P.k.t)
+        self.k = replace(P.k.slice(sl, self.t0, self.T), breaks=P.breaks[sl])
+        self.t, self.dur, self.n = self.k.t, self.k.dur, len(self.k.t)
+        self.track = P.track if self.whole else P.track.slice_index(self.i0, self.i1)
+        self.memb = P.memb if self.whole else {zn: m[sl] for zn, m in P.memb.items()}
+        self.head_memb = P.head_memb if self.whole or P.head_memb is None else \
+            {zn: m[sl] for zn, m in P.head_memb.items()}
+        self.hidden = {hz: m[sl] for hz, m in P.hidden.items()}
+        self.hid_any = P.hid_any[sl]
+        self.never = float(self.T) if P.s.latency_if_never == "duration" else math.nan
+
+    def eps(self, mask_full: np.ndarray, entries: bool = False) -> list[tuple[int, int]]:
         """Episodes (runs) of a whole-test mask that start inside the period, as local [start, end) indices.
         entries: zone entries (the initial visit only counts with count_initial_entry; none across a pause)."""
         out = []
         for a, b in runs(mask_full):
-            if a >= i1:
+            if a >= self.i1:
                 break
-            if a < i0:
+            if a < self.i0:
                 continue
-            if entries and ((a == 0 and not s.count_initial_entry) or (a > 0 and brk[a])):
+            if entries and ((a == 0 and not self.P.s.count_initial_entry) or (a > 0 and self.P.breaks[a])):
                 continue
-            out.append((a - i0, min(b, i1) - i0))
+            out.append((a - self.i0, min(b, self.i1) - self.i0))
         return out
 
-    def lat(ep) -> float:
-        return float(t[ep[0][0]] - t0) if ep else never
+    def lat(self, ep) -> float:
+        return float(self.t[ep[0][0]] - self.t0) if ep else self.never
 
-    def ep_time(ep) -> float:
-        return float(dur[_mask(ep, n)].sum())
+    def ep_time(self, ep) -> float:
+        return float(self.dur[_mask(ep, self.n)].sum())
 
-    res: OrderedDict[str, object] = OrderedDict()
-    u = app.unit
-    res["Test duration (s)"] = _r(T)
-    res["Detection (%)"] = _r(100.0 * track.detected.mean(), 1)
-    res["Time not detected (s)"] = _r(dur[~track.detected & ~hid_any].sum())
-    if hidden:
-        res["Time hidden (s)"] = _r(dur[hid_any].sum())
+    def pct(self, mask) -> float:
+        """Time in the frames of mask, as % of the period."""
+        return _r(100 * self.dur[mask].sum() / self.T if self.T > 0 else math.nan, 2)
 
-    # ---- locomotion ---------------------------------------------------------
+    @cached_property
+    def sp(self) -> np.ndarray:
+        """Speed smoothed over 0.2 s."""
+        P = self.P
+        return P.cached("sp", lambda: seg_moving_average(P.k.speed, max(1, int(round(0.2 / max(P.track.dt, 1e-6)))),
+                                                         P.k.breaks))[self.sl]
+
+    @cached_property
+    def facing(self) -> tuple | None:
+        """(head x, head y, body angle in radians), forward filled, if the head and orientation are tracked."""
+        tr = self.track
+        if not (tr.has_head() and np.isfinite(tr.angle).any()):
+            return None
+        return ffill(tr.hx), ffill(tr.hy), np.radians(ffill(tr.angle))
+
+    def seq(self, names, part=None) -> list[tuple[str, float, float]]:
+        """Entries (zone, t_enter, t_exit) into the given zones in the period, in order, from the occupancy of the
+        analysed (hidden-blanked) track as zone_sequence() computes it."""
+        P, t, dur = self.P, self.t, self.dur
+        m_all = P.cached(("occ", part), lambda: occupancy(P.track, P.app, P.s, part=part)[0])
+        out = []
+        for zn in names:
+            if zn not in m_all:
+                continue
+            fm = P.visits_mask(("seq", part, zn), m_all[zn])
+            for a, b in self.eps(fm, entries=True):
+                out.append((zn, float(t[a]), float(t[b - 1] + dur[b - 1])))
+        out.sort(key=lambda e: e[1])
+        return out
+
+
+def _detection(res, p: _Period):
+    dur, det = p.dur, p.track.detected
+    res["Test duration (s)"] = _r(p.T)
+    res["Detection (%)"] = _r(100.0 * det.mean(), 1)
+    res["Time not detected (s)"] = _r(dur[~det & ~p.hid_any].sum())
+    if p.hidden:
+        res["Time hidden (s)"] = _r(dur[p.hid_any].sum())
+
+
+def _locomotion(res, p: _Period):
+    k, K, T, dur, u = p.k, p.P.k, p.T, p.dur, p.P.app.unit
     total = float(k.step.sum())
     res[f"Total distance ({u})"] = _r(total, 2)
     res[f"Mean speed ({u}/s)"] = _r(total / T if T > 0 else math.nan)
-    sp = P.cached("sp", lambda: _seg_moving_average(K.speed, max(1, int(round(0.2 / max(P.track.dt, 1e-6)))),
-                                                    K.breaks))[sl]
-    res[f"Max speed ({u}/s)"] = _r(np.nanmax(sp) if np.isfinite(sp).any() else math.nan)
+    res[f"Max speed ({u}/s)"] = _r(np.nanmax(p.sp) if np.isfinite(p.sp).any() else math.nan)
     t_mob = float(dur[k.mobile].sum())
     res["Time mobile (s)"] = _r(t_mob)
     res["Time immobile (s)"] = _r(T - t_mob)
-    imm = eps(~K.mobile)
-    mob = eps(K.mobile)
+    imm = p.eps(~K.mobile)
+    mob = p.eps(K.mobile)
     res["Immobile episodes"] = len(imm)
-    res["Latency to first immobility (s)"] = _r(lat(imm))
+    res["Latency to first immobility (s)"] = _r(p.lat(imm))
     res[f"Mean speed while mobile ({u}/s)"] = _r(k.step[k.mobile].sum() / t_mob if t_mob > 0 else math.nan)
     res["Mobile episodes"] = len(mob)
-    res["Mean mobile episode (s)"] = _r(ep_time(mob) / len(mob) if mob else 0.0)
-    imm_time = (T - t_mob) if whole else ep_time(imm)
+    res["Mean mobile episode (s)"] = _r(p.ep_time(mob) / len(mob) if mob else 0.0)
+    imm_time = (T - t_mob) if p.whole else p.ep_time(imm)
     res["Mean immobile episode (s)"] = _r(imm_time / len(imm) if imm else 0.0)
     res["Longest immobile episode (s)"] = _r(max((dur[a:b].sum() for a, b in imm), default=0.0))
     if np.isfinite(k.motion_pct).any():
-        fr = eps(K.freezing)
+        fr = p.eps(K.freezing)
         t_fr = float(dur[k.freezing].sum())
         res["Time freezing (s)"] = _r(t_fr)
         res["Freezing (%)"] = _r(100 * t_fr / T if T > 0 else math.nan, 2)
         res["Freezing episodes"] = len(fr)
-        res["Latency to first freezing (s)"] = _r(lat(fr))
-        res["Mean freezing episode (s)"] = _r(ep_time(fr) / len(fr) if fr else 0.0)
+        res["Latency to first freezing (s)"] = _r(p.lat(fr))
+        res["Mean freezing episode (s)"] = _r(p.ep_time(fr) / len(fr) if fr else 0.0)
         res["Mean motion (% body)"] = _r(np.nanmean(k.motion_pct), 2)
         res["Longest freezing episode (s)"] = _r(max((dur[a:b].sum() for a, b in fr), default=0.0))
-    # path shape
+    _path_shape(res, p, total, t_mob)
+
+
+def _path_shape(res, p: _Period, total: float, t_mob: float):
+    """Path efficiency, turning and rotations (no turn or rotation across a pause)."""
+    s, k, n, u = p.P.s, p.k, p.n, p.P.app.unit
     ok = np.isfinite(k.ux)
     if ok.sum() >= 2:
         j0, j1 = np.flatnonzero(ok)[[0, -1]]
@@ -746,7 +417,7 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
     mi = np.flatnonzero(moving)
     if len(mi) > 1:
         dturn = np.abs((np.diff(h[mi]) + 180) % 360 - 180)
-        dturn = dturn[seg_id[mi[1:]] == seg_id[mi[:-1]]]  # no turn across a pause
+        dturn = dturn[seg_id[mi[1:]] == seg_id[mi[:-1]]]
         abs_turn = float(dturn.sum())
     else:
         dturn = np.zeros(0)
@@ -758,222 +429,220 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
 
     def rotations(angle):
         cw = acw = 0
-        for a, b in _segments(n, k.breaks):
+        for a, b in segments(n, k.breaks):
             c1, c2 = count_rotations(angle[a:b], s.rotation_reset_deg)
             cw, acw = cw + c1, acw + c2
         return cw, acw
 
-    orient = track.angle if np.isfinite(track.angle).sum() > 2 else h
-    cw, acw = rotations(orient)
-    res["Rotations clockwise"] = cw
-    res["Rotations anticlockwise"] = acw
-    if np.isfinite(track.angle).sum() > 2 and np.isfinite(h).sum() > 2:
+    angle = p.track.angle
+    res["Rotations clockwise"], res["Rotations anticlockwise"] = rotations(angle if np.isfinite(angle).sum() > 2
+                                                                           else h)
+    if np.isfinite(angle).sum() > 2 and np.isfinite(h).sum() > 2:
         # rotations of the direction of travel (the rotations above follow the body / head orientation)
-        pcw, pacw = rotations(h)
-        res["Path rotations clockwise"] = pcw
-        res["Path rotations anticlockwise"] = pacw
-    # thigmotaxis / position in the arena
+        res["Path rotations clockwise"], res["Path rotations anticlockwise"] = rotations(h)
+
+
+def _arena_position(res, p: _Period):
+    """Thigmotaxis and position in the arena."""
+    s, k, app, u = p.P.s, p.k, p.P.app, p.P.app.unit
     try:
         arena = app.arena_or_bounds()
     except ValueError:
-        arena = None
-    if arena is not None:
-        dwall = arena.distance_to_edge(k.x, k.y) * k.scale
-        thr = s.thigmotaxis_distance
-        if not thr or thr <= 0:
-            x0, y0, x1, y1 = arena.bounds()
-            thr = 0.25 * min(x1 - x0, y1 - y0) / 2 * k.scale
-        inside_arena = arena.contains(k.x, k.y)
-        near = (dwall <= thr) & inside_arena
-        res[f"Mean distance from wall ({u})"] = _r(np.nanmean(np.where(inside_arena, dwall, np.nan)), 2)
-        res["Thigmotaxis (%)"] = _r(100 * dur[near].sum() / T if T > 0 else math.nan, 2)
-        res["Time outside arena (s)"] = _r(dur[~inside_arena].sum())
-        acx, acy = arena.centroid()
-        dc = np.hypot(k.x - acx, k.y - acy) * k.scale
-        res[f"Mean distance from centre ({u})"] = _r(np.nanmean(dc), 2)
-        res[f"Max distance from centre ({u})"] = _r(np.nanmax(dc) if np.isfinite(dc).any() else math.nan, 2)
-        if s.arena_quadrants:
-            east, south = k.x >= acx, k.y >= acy
-            for q, m in (("NE", east & ~south), ("SE", east & south), ("SW", ~east & south), ("NW", ~east & ~south)):
-                res[f"Arena quadrant {q}: time (%)"] = _r(100 * dur[m].sum() / T if T > 0 else math.nan, 2)
+        return
+    dwall = arena.distance_to_edge(k.x, k.y) * k.scale
+    thr = s.thigmotaxis_distance
+    if not thr or thr <= 0:
+        x0, y0, x1, y1 = arena.bounds()
+        thr = 0.25 * min(x1 - x0, y1 - y0) / 2 * k.scale
+    inside_arena = arena.contains(k.x, k.y)
+    res[f"Mean distance from wall ({u})"] = _r(np.nanmean(np.where(inside_arena, dwall, np.nan)), 2)
+    res["Thigmotaxis (%)"] = p.pct((dwall <= thr) & inside_arena)
+    res["Time outside arena (s)"] = _r(p.dur[~inside_arena].sum())
+    acx, acy = arena.centroid()
+    dc = np.hypot(k.x - acx, k.y - acy) * k.scale
+    res[f"Mean distance from centre ({u})"] = _r(np.nanmean(dc), 2)
+    res[f"Max distance from centre ({u})"] = _r(np.nanmax(dc) if np.isfinite(dc).any() else math.nan, 2)
+    if s.arena_quadrants:
+        east, south = k.x >= acx, k.y >= acy
+        for q, m in (("NE", east & ~south), ("SE", east & south), ("SW", ~east & south), ("NW", ~east & ~south)):
+            res[f"Arena quadrant {q}: time (%)"] = p.pct(m)
 
-    # ---- zones ----------------------------------------------------------------
-    facing_ok = track.has_head() and np.isfinite(track.angle).any()
-    if facing_ok:
-        hxf, hyf = ffill(track.hx), ffill(track.hy)
-        ang_body = np.radians(ffill(track.angle))
+
+def _zones(res, p: _Period):
+    P, s, k, K, app, t, dur, T, u = p.P, p.P.s, p.k, p.P.k, p.P.app, p.t, p.dur, p.T, p.P.app.unit
     has_motion = np.isfinite(k.motion_pct).any()
-    for zn in memb:
+    for zn in p.memb:
         fm = P.visits_mask(zn, P.memb[zn])  # whole test, short visits removed
-        vm = fm[sl]  # time in the zone: every visit, including the initial one and one carried into the period
-        visits = eps(fm, entries=True)  # entries
+        vm = fm[p.sl]  # time in the zone: every visit, including the initial one and one carried into the period
+        visits = p.eps(fm, entries=True)  # entries
         tz = float(dur[vm].sum())
-        vdur = [float(dur[a:b].sum()) for a, b in visits]
         res[f"{zn}: time (s)"] = _r(tz)
         res[f"{zn}: time (%)"] = _r(100 * tz / T if T > 0 else math.nan, 2)
         res[f"{zn}: entries"] = len(visits)
-        res[f"{zn}: latency to first entry (s)"] = _r(lat(visits))
+        res[f"{zn}: latency to first entry (s)"] = _r(p.lat(visits))
         dz = float(k.step[vm].sum())
         res[f"{zn}: distance ({u})"] = _r(dz, 2)
         res[f"{zn}: mean speed ({u}/s)"] = _r(dz / tz if tz > 0 else math.nan)
-        res[f"{zn}: mean visit (s)"] = _r(ep_time(visits) / len(visits) if visits else 0.0)
+        res[f"{zn}: mean visit (s)"] = _r(p.ep_time(visits) / len(visits) if visits else 0.0)
         res[f"{zn}: time immobile (s)"] = _r(dur[vm & ~k.mobile].sum())
         if has_motion:
             res[f"{zn}: time freezing (s)"] = _r(dur[vm & k.freezing].sum())
         if P.head_memb is not None and zn in P.head_memb:
             hfm = P.visits_mask(("head", zn), P.head_memb[zn])
-            hv_ = eps(hfm, entries=True)
-            res[f"{zn}: head entries"] = len(hv_)
-            res[f"{zn}: head time (s)"] = _r(dur[hfm[sl]].sum())
-            res[f"{zn}: latency to head entry (s)"] = _r(lat(hv_))
-        res[f"{zn}: latency to second entry (s)"] = _r(float(t[visits[1][0]] - t0) if len(visits) > 1 else never)
-        exits = [b for a, b in runs(fm) if i0 < b < i1]
-        res[f"{zn}: time of last exit (s)"] = _r(float(K.t[exits[-1] - 1] + K.dur[exits[-1] - 1] - t0)
+            hv = p.eps(hfm, entries=True)
+            res[f"{zn}: head entries"] = len(hv)
+            res[f"{zn}: head time (s)"] = _r(dur[hfm[p.sl]].sum())
+            res[f"{zn}: latency to head entry (s)"] = _r(p.lat(hv))
+        res[f"{zn}: latency to second entry (s)"] = _r(float(t[visits[1][0]] - p.t0) if len(visits) > 1 else p.never)
+        exits = [b for a, b in runs(fm) if p.i0 < b < p.i1]
+        res[f"{zn}: time of last exit (s)"] = _r(float(K.t[exits[-1] - 1] + K.dur[exits[-1] - 1] - p.t0)
                                                 if exits else math.nan)
-        res[f"{zn}: longest visit (s)"] = _r(max(vdur, default=0.0))
+        res[f"{zn}: longest visit (s)"] = _r(max((float(dur[a:b].sum()) for a, b in visits), default=0.0))
         res[f"{zn}: entries (/min)"] = _r(len(visits) / (T / 60) if T > 0 else math.nan)
         res[f"{zn}: time mobile (s)"] = _r(dur[vm & k.mobile].sum())
-        res[f"{zn}: immobile episodes"] = len(eps(fm & ~K.mobile))
+        res[f"{zn}: immobile episodes"] = len(p.eps(fm & ~K.mobile))
         if has_motion:
-            res[f"{zn}: freezing episodes"] = len(eps(fm & K.freezing))
+            res[f"{zn}: freezing episodes"] = len(p.eps(fm & K.freezing))
+        sp = p.sp
         res[f"{zn}: max speed ({u}/s)"] = _r(np.nanmax(sp[vm]) if vm.any() and np.isfinite(sp[vm]).any() else math.nan)
         zobj = app.zone(zn)
-        if facing_ok and zobj is not None:
+        if p.facing is not None and zobj is not None:
+            hxf, hyf, ang_body = p.facing
             zx, zy = zobj.shape.centroid()
             diff = _angle_diff(np.arctan2(zy - hyf, zx - hxf), ang_body)
-            head_in = head_memb[zn] if head_memb is not None and zn in head_memb else np.zeros(n, bool)
-            facing = (diff <= s.exploration_facing_deg) & ~head_in & ~hid_any
-            res[f"{zn}: time facing (s)"] = _r(dur[facing].sum())
-    for hz in hidden:
-        res[f"{hz}: time hidden (s)"] = _r(dur[hidden[hz]].sum())
-    # zone transitions between the smallest zones the animal is in (none across a pause)
+            head_in = p.head_memb[zn] if p.head_memb is not None and zn in p.head_memb else np.zeros(p.n, bool)
+            res[f"{zn}: time facing (s)"] = _r(dur[(diff <= s.exploration_facing_deg) & ~head_in & ~p.hid_any].sum())
+    for hz in p.hidden:
+        res[f"{hz}: time hidden (s)"] = _r(dur[p.hidden[hz]].sum())
     if app.zones:
-        def _transitions():
-            order = sorted(range(len(app.zones)), key=lambda i: app.zones[i].shape.area())
-            cur = np.full(N, -1)
-            for i in reversed(order):
-                m = P.memb.get(app.zones[i].name)
-                if m is not None:
-                    cur[m] = i
-            idx = np.flatnonzero(cur >= 0)
-            ch = cur[idx[1:]] != cur[idx[:-1]]
-            if brk.any():
-                bc = np.cumsum(brk)
-                ch &= bc[idx[1:]] == bc[idx[:-1]]
-            return idx[1:][ch]
-        tr_at = P.cached("transitions", _transitions)
-        res["Zone transitions"] = int(np.count_nonzero((tr_at >= i0) & (tr_at < i1)))
+        tr_at = P.cached("transitions", lambda: _transitions(P))
+        res["Zone transitions"] = int(np.count_nonzero((tr_at >= p.i0) & (tr_at < p.i1)))
 
-    # ---- points of interest --------------------------------------------------
-    for p in app.points:
-        A = P.cached(("point", p.name), lambda p=p: _point_arrays(P, p))
-        dist = A["dist"][sl]
-        res[f"{p.name}: mean distance ({u})"] = _r(np.nanmean(dist), 2)
-        res[f"{p.name}: min distance ({u})"] = _r(np.nanmin(dist), 2)
+
+def _transitions(P: _Prepared) -> np.ndarray:
+    """Frames of the whole test where the smallest zone the animal is in changes (none across a pause)."""
+    zones = P.app.zones
+    order = sorted(range(len(zones)), key=lambda i: zones[i].shape.area())
+    cur = np.full(len(P.k.t), -1)
+    for i in reversed(order):
+        m = P.memb.get(zones[i].name)
+        if m is not None:
+            cur[m] = i
+    idx = np.flatnonzero(cur >= 0)
+    ch = cur[idx[1:]] != cur[idx[:-1]]
+    if P.breaks.any():
+        bc = np.cumsum(P.breaks)
+        ch &= bc[idx[1:]] == bc[idx[:-1]]
+    return idx[1:][ch]
+
+
+def _points(res, p: _Period):
+    P, s, k, dur, u = p.P, p.P.s, p.k, p.dur, p.P.app.unit
+    for pt in P.app.points:
+        A = P.cached(("point", pt.name), lambda pt=pt: _point_arrays(P, pt))
+        dist = A["dist"][p.sl]
+        res[f"{pt.name}: mean distance ({u})"] = _r(np.nanmean(dist), 2)
+        res[f"{pt.name}: min distance ({u})"] = _r(np.nanmin(dist), 2)
         if "near" in A:
             if "explore" in A:
-                explore = A["explore"]
-                res[f"{p.name}: time exploring (s)"] = _r(dur[explore[sl]].sum())
-                res[f"{p.name}: exploration bouts"] = len(eps(A["explore_bouts"]))
-                res[f"{p.name}: latency to explore (s)"] = _r(lat(eps(explore)))
-            near = A["near"]
-            res[f"{p.name}: time near (s)"] = _r(dur[near[sl]].sum())
-            ap = eps(near)
-            res[f"{p.name}: approaches"] = len(ap)
-            res[f"{p.name}: latency to approach (s)"] = _r(lat(ap))
-        res[f"{p.name}: max distance ({u})"] = _r(np.nanmax(dist), 2)
-        dd = A["dd"][sl]
+                res[f"{pt.name}: time exploring (s)"] = _r(dur[A["explore"][p.sl]].sum())
+                res[f"{pt.name}: exploration bouts"] = len(p.eps(A["explore_bouts"]))
+                res[f"{pt.name}: latency to explore (s)"] = _r(p.lat(p.eps(A["explore"])))
+            res[f"{pt.name}: time near (s)"] = _r(dur[A["near"][p.sl]].sum())
+            ap = p.eps(A["near"])
+            res[f"{pt.name}: approaches"] = len(ap)
+            res[f"{pt.name}: latency to approach (s)"] = _r(p.lat(ap))
+        res[f"{pt.name}: max distance ({u})"] = _r(np.nanmax(dist), 2)
+        dd = A["dd"][p.sl]
         towards = k.mobile & (dd < 0)
         away = k.mobile & (dd > 0)
-        res[f"{p.name}: time moving towards (s)"] = _r(dur[towards].sum())
-        res[f"{p.name}: time moving away (s)"] = _r(dur[away].sum())
-        res[f"{p.name}: distance moved towards ({u})"] = _r(-dd[towards].sum(), 2)
-        res[f"{p.name}: distance moved away ({u})"] = _r(dd[away].sum(), 2)
-        if facing_ok:
-            diff = _angle_diff(np.arctan2(p.y - hyf, p.x - hxf), ang_body)
-            res[f"{p.name}: time head oriented towards (s)"] = _r(dur[diff <= s.exploration_facing_deg].sum())
-            res[f"{p.name}: time head oriented away (s)"] = _r(dur[diff >= 180 - s.exploration_facing_deg].sum())
-            res[f"{p.name}: mean head angle (deg)"] = _r(np.nanmean(diff), 1)
-            res[f"{p.name}: head turns towards"] = len(eps(A["head_towards"]))
+        res[f"{pt.name}: time moving towards (s)"] = _r(dur[towards].sum())
+        res[f"{pt.name}: time moving away (s)"] = _r(dur[away].sum())
+        res[f"{pt.name}: distance moved towards ({u})"] = _r(-dd[towards].sum(), 2)
+        res[f"{pt.name}: distance moved away ({u})"] = _r(dd[away].sum(), 2)
+        if p.facing is not None:
+            hxf, hyf, ang_body = p.facing
+            diff = _angle_diff(np.arctan2(pt.y - hyf, pt.x - hxf), ang_body)
+            res[f"{pt.name}: time head oriented towards (s)"] = _r(dur[diff <= s.exploration_facing_deg].sum())
+            res[f"{pt.name}: time head oriented away (s)"] = _r(dur[diff >= 180 - s.exploration_facing_deg].sum())
+            res[f"{pt.name}: mean head angle (deg)"] = _r(np.nanmean(diff), 1)
+            res[f"{pt.name}: head turns towards"] = len(p.eps(A["head_towards"]))
 
-    # ---- lines (no crossing across a pause) ---------------------------------
-    if app.lines and N > 1:
-        Pxy = P.cached("xy", lambda: np.column_stack([K.x, K.y]))
-        for ln in app.lines:
-            def _cross(ln=ln):
-                hit, sign = segments_intersect(Pxy[:-1], Pxy[1:], (ln.x1, ln.y1), (ln.x2, ln.y2))
-                hit = np.asarray(hit, bool) & ~brk[1:]
-                return hit, np.asarray(sign)
-            hit, sign = P.cached(("line", ln.name), _cross)
-            j = np.arange(1, N)  # frame each segment ends in
-            inp = (j >= i0) & (j < i1)
-            hit = hit & inp
-            res[f"{ln.name}: crossings"] = int(hit.sum())
-            res[f"{ln.name}: crossings left-to-right"] = int((hit & (sign > 0)).sum())
-            res[f"{ln.name}: crossings right-to-left"] = int((hit & (sign < 0)).sum())
-            idx = np.flatnonzero(hit)
-            res[f"{ln.name}: latency to first crossing (s)"] = _r(float(K.t[idx[0] + 1] - t0) if len(idx) else never)
 
-    # ---- grids ---------------------------------------------------------------
+def _lines(res, p: _Period):
+    """Line crossings (none across a pause)."""
+    P, K = p.P, p.P.k
+    N = len(K.t)
+    if not P.app.lines or N < 2:
+        return
+    xy = P.cached("xy", lambda: np.column_stack([K.x, K.y]))
+    for ln in P.app.lines:
+        def cross(ln=ln):
+            hit, sign = segments_intersect(xy[:-1], xy[1:], (ln.x1, ln.y1), (ln.x2, ln.y2))
+            return np.asarray(hit, bool) & ~P.breaks[1:], np.asarray(sign)
+        hit, sign = P.cached(("line", ln.name), cross)
+        j = np.arange(1, N)  # frame each segment ends in
+        hit = hit & (j >= p.i0) & (j < p.i1)
+        res[f"{ln.name}: crossings"] = int(hit.sum())
+        res[f"{ln.name}: crossings left-to-right"] = int((hit & (sign > 0)).sum())
+        res[f"{ln.name}: crossings right-to-left"] = int((hit & (sign < 0)).sum())
+        idx = np.flatnonzero(hit)
+        res[f"{ln.name}: latency to first crossing (s)"] = _r(float(K.t[idx[0] + 1] - p.t0) if len(idx) else p.never)
+
+
+def _grids_and_sequences(res, p: _Period):
+    s, app = p.P.s, p.P.app
     for g in app.grids:
-        res.update(grid_measures(g, memb, t, dur, t0, T, s))
-
-    # ---- sequences / zone entry order ----------------------------------------
-    def seq(names, part=None):
-        if part is None:
-            # the occupancy of the analysed (hidden-blanked) track, as zone_sequence() computes it
-            m_all = P.cached(("occ", None), lambda: occupancy(P.track, app, s)[0])
-        else:
-            m_all = P.cached(("occ", part), lambda: occupancy(P.track, app, s, part=part)[0])
-        out = []
-        for zn in names:
-            if zn not in m_all:
-                continue
-            fm = P.visits_mask(("seq", part, zn), m_all[zn])
-            for a, b in eps(fm, entries=True):
-                out.append((zn, float(t[a]), float(t[b - 1] + dur[b - 1])))
-        out.sort(key=lambda e: e[1])
-        return out
-
+        res.update(grid_measures(g, p.memb, p.t, p.dur, p.t0, p.T, s))
     if app.sequences:
         from .sequences import find_sequences, other_zones, sequence_measures
 
         for q in app.sequences:
             names = list(dict.fromkeys(list(q.steps) + ([] if q.allow_other else other_zones(app, q))))
-            entries = seq([zn for zn in names if zn in memb])
-            att = find_sequences(q, entries, names)
-            res.update(sequence_measures(q, att, t0, T, s.latency_if_never))
+            att = find_sequences(q, p.seq([zn for zn in names if zn in p.memb]), names)
+            res.update(sequence_measures(q, att, p.t0, p.T, s.latency_if_never))
 
-    # ---- test-specific -----------------------------------------------------
-    _template_measures(res, track, app, s, k, memb, head_memb, seq=seq, initial=i0 == 0)
 
-    # ---- social (multiple animals) -----------------------------------------
-    for j, ot in enumerate(P.others):
-        o = ot.slice_time(*t_range) if t_range is not None else ot
-        res.update(social_measures(track, k, o, app, s, f"Animal {ot.meta.get('animal_index', j + 1)}"))
+def _template(res, p: _Period):
+    P = p.P
+    template_measures(TemplateData(res, p.track, P.app, P.s, p.k, p.memb, p.head_memb, p.seq, p.i0 == 0))
 
-    # ---- manual scoring ------------------------------------------------------
+
+def _social(res, p: _Period):
+    for j, ot in enumerate(p.P.others):
+        o = ot.slice_time(*p.t_range) if p.t_range is not None else ot
+        res.update(social_measures(p.track, p.k, o, p.P.app, p.P.s, f"Animal {ot.meta.get('animal_index', j + 1)}"))
+
+
+# the measures of a period, in column order
+_SECTIONS = (_detection, _locomotion, _arena_position, _zones, _points, _lines, _grids_and_sequences, _template,
+             _social)
+
+
+def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range, behaviours, result_variables,
+                    io_devices) -> "OrderedDict[str, object]":
+    """Measures for frames [i0, i1) of a prepared test (t0: period start, T: period length)."""
+    p = _Period(P, i0, i1, t0, T, t_range)
+    s = P.s
+    res: OrderedDict[str, object] = OrderedDict()
+    for section in _SECTIONS:
+        section(res, p)
     if behaviours:
-        zocc = {zn: m for zn, m in memb.items()} if s.behaviour_by_zone else None
-        res.update(behaviour_measures(P.events or [], behaviours, t0, t0 + T, zones=zocc, t=t, dur=dur,
-                                      latency_if_never=s.latency_if_never))
-
-    # ---- I/O and procedure variables -----------------------------------------
+        res.update(behaviour_measures(P.events or [], behaviours, t0, t0 + T, zones=p.memb if s.behaviour_by_zone
+                                      else None, t=p.t, dur=p.dur, latency_if_never=s.latency_if_never))
     if P.io_events:
         try:
             res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices))
         except Exception:  # a malformed I/O log must not prevent the other measures
             pass
-    if result_variables:
-        for name, v in result_variables.items():
-            try:
-                res[f"Variable: {name}"] = _r(float(v))
-            except (TypeError, ValueError):
-                res[f"Variable: {name}"] = str(v)
-    if not app.px_per_cm:
+    for name, v in (result_variables or {}).items():
+        try:
+            res[f"Variable: {name}"] = _r(float(v))
+        except (TypeError, ValueError):
+            res[f"Variable: {name}"] = str(v)
+    if not P.app.px_per_cm:
         res["Warnings"] = ("Apparatus not calibrated: distances, speeds and distance thresholds (mobility, "
                            "thigmotaxis, contact, ...) are in pixels")
-
     if s.measure_filter:
         keep = set(s.measure_filter) | {"Test duration (s)", "Warnings"}
         res = OrderedDict((key, v) for key, v in res.items() if key in keep)
@@ -1055,15 +724,6 @@ def grid_measures(g, memb: dict, t: np.ndarray, dur: np.ndarray, t0: float, T: f
     return out
 
 
-def _point_segment_distance(px, py, ax, ay, bx, by) -> np.ndarray:
-    abx, aby = bx - ax, by - ay
-    den = abx ** 2 + aby ** 2
-    with np.errstate(invalid="ignore", divide="ignore"):
-        u = np.clip(((px - ax) * abx + (py - ay) * aby) / np.where(den > 0, den, np.nan), 0, 1)
-    u = np.nan_to_num(u)
-    return np.hypot(px - (ax + u * abx), py - (ay + u * aby))
-
-
 def social_measures(track: Track, k: Kinematics, o: Track, app: Apparatus, s: AnalysisSettings,
                     label: str) -> "OrderedDict[str, object]":
     """Inter-animal measures for this animal relative to another animal tracked in the same arena."""
@@ -1094,7 +754,7 @@ def social_measures(track: Track, k: Kinematics, o: Track, app: Apparatus, s: An
         ohx, ohy = ffill(o.hx[:n]) * sc, ffill(o.hy[:n]) * sc
         otx, oty = ffill(o.tx[:n]) * sc, ffill(o.ty[:n]) * sc
         nn = np.hypot(mhx - ohx, mhy - ohy) <= nd
-        nb = (_point_segment_distance(mhx, mhy, otx, oty, ohx, ohy) <= nd) & ~nn
+        nb = (point_segment_distance(mhx, mhy, otx, oty, ohx, ohy) <= nd) & ~nn
         out[f"{label}: nose-to-nose contacts"] = len(runs(nn))
         out[f"{label}: nose-to-nose time (s)"] = _r(dur[nn].sum())
         out[f"{label}: nose-to-body contacts"] = len(runs(nb))
@@ -1186,360 +846,6 @@ def behaviour_measures(events: list, behaviours: list, t0: float, t1: float, zon
     return out
 
 
-def _template_measures(res, track, app, s, k, memb, head_memb, seq=None, initial=True):
-    """seq(zone names, part) -> [(zone, t_enter, t_exit)] entries in the analysed period (default: zone_sequence on
-    `track`); initial: the period starts at the start of the test."""
-    tpl = app.template
-    t, dur, T = k.t, k.dur, k.duration
-    u = app.unit
-
-    def _seq(names, part=None):
-        return seq(names, part) if seq is not None else zone_sequence(track, app, names, s, part=part)
-
-    def ztime(name):
-        return float(res.get(f"{name}: time (s)", 0) or 0)
-
-    def zent(name):
-        return int(res.get(f"{name}: entries", 0) or 0)
-
-    if tpl in ("open_field", "novel_object", "custom") and s.grid_cells and s.grid_cells > 1 and app.arena is not None:
-        x0, y0, x1, y1 = app.arena.bounds()
-        n = int(s.grid_cells)
-        gx = np.clip(((k.x - x0) / max(x1 - x0, 1e-9) * n).astype(int), 0, n - 1)
-        gy = np.clip(((k.y - y0) / max(y1 - y0, 1e-9) * n).astype(int), 0, n - 1)
-        cell = gx * n + gy
-        moved = np.diff(cell) != 0
-        if k.breaks is not None and len(moved):
-            moved &= ~k.breaks[1:]  # not across a pause
-        res[f"Grid crossings ({n}×{n})"] = int(np.count_nonzero(moved))
-        inner = (gx > 0) & (gx < n - 1) & (gy > 0) & (gy < n - 1)
-        res["Inner grid squares time (%)"] = _r(100 * dur[inner].sum() / T if T > 0 else math.nan, 2)
-
-    if tpl in ("epm", "ezm"):
-        o, c = ("Open arms", "Closed arms") if tpl == "epm" else ("Open quadrants", "Closed quadrants")
-        to, tc = ztime(o), ztime(c)
-        eo, ec = zent(o), zent(c)
-        # count arm entries per arm (entries into the group may merge adjacent arms)
-        arms_o = app.group(o).zones if app.group(o) else []
-        arms_c = app.group(c).zones if app.group(c) else []
-        eo = sum(zent(a) for a in arms_o) or eo
-        ec = sum(zent(a) for a in arms_c) or ec
-        lbl = "arm" if tpl == "epm" else "quadrant"
-        res[f"Open {lbl} time (%)"] = _r(100 * to / (to + tc) if to + tc > 0 else math.nan, 2)
-        res[f"Open {lbl} entries (%)"] = _r(100 * eo / (eo + ec) if eo + ec > 0 else math.nan, 2)
-        res[f"Total {lbl} entries"] = eo + ec
-        res[f"Open {lbl} entries"] = eo
-        res[f"Closed {lbl} entries"] = ec
-        # head dips approximation: head outside the apparatus while body in an open arm
-        if head_memb is not None and app.arena is not None:
-            head_out = ~app.arena.contains(ffill(track.hx), ffill(track.hy))
-            body_open = memb.get(o, np.zeros(len(t), bool))
-            res["Head dips"] = len(runs(drop_short_runs(head_out & body_open, t, dur, 0.2, value=True)))
-
-    elif tpl == "y_maze":
-        arms = [z.name for z in app.zones if z.name.startswith("Arm")]
-        seq = [e[0] for e in _seq(arms)]
-        # consecutive entries into the same arm are kept (a short gap can split a visit): they break an alternation
-        # triplet and are counted as same arm returns
-        res["Arm entry sequence"] = "".join(a.split()[-1] for a in seq)
-        n = len(seq)
-        alt = sum(1 for i in range(n - 2) if len({seq[i], seq[i + 1], seq[i + 2]}) == 3)
-        res["Total arm entries"] = n
-        res["Spontaneous alternations"] = alt
-        res["Alternation (%)"] = _r(100 * alt / (n - 2) if n > 2 else math.nan, 2)
-        res["Same arm returns"] = sum(1 for i in range(n - 1) if seq[i] == seq[i + 1])
-        res["Alternate arm returns"] = sum(1 for i in range(n - 2) if seq[i] == seq[i + 2] and seq[i] != seq[i + 1])
-
-    elif tpl == "radial_arm_maze":
-        arms = [z.name for z in app.zones if z.name.startswith("Arm")]
-        seq = [e[0] for e in _seq(arms)]
-        visited = set()
-        errors = 0
-        first_err = None
-        for i, a in enumerate(seq):
-            if a in visited:
-                errors += 1
-                if first_err is None:
-                    first_err = i
-            visited.add(a)
-        res["Total arm entries"] = len(seq)
-        res["Different arms visited"] = len(visited)
-        res["Working memory errors (re-entries)"] = errors
-        res["Correct entries before first error"] = first_err if first_err is not None else len(seq)
-        first_n = seq[: len(arms)]
-        res[f"Different arms in first {len(arms)} entries"] = len(set(first_n))
-        res["Arm entry sequence"] = " ".join(a.split()[-1] for a in seq)
-        all_idx = None
-        seen = set()
-        for i, a in enumerate(seq):
-            seen.add(a)
-            if len(seen) == len(arms):
-                all_idx = i
-                break
-        res["Entries to visit all arms"] = (all_idx + 1) if all_idx is not None else math.nan
-
-    elif tpl == "t_maze":
-        seq = _seq(["Left arm", "Right arm"])
-        res["First choice"] = seq[0][0].split()[0] if seq else "None"
-        res["Choice latency (s)"] = _r(seq[0][1] - k.t0 if seq else T)
-        res["Arm alternations"] = sum(1 for i in range(len(seq) - 1) if seq[i][0] != seq[i + 1][0])
-
-    elif tpl == "water_maze":
-        plat = app.zone("Platform")
-        pc = app.point("Platform centre")
-        if plat is not None:
-            inp = memb.get("Platform", np.zeros(len(t), bool))
-            idx = np.flatnonzero(inp)
-            lat = float(t[idx[0]] - k.t0) if len(idx) else T
-            res["Escape latency (s)"] = _r(lat)
-            res["Found platform"] = "Yes" if len(idx) else "No"
-            stop = idx[0] if len(idx) else len(t)
-            res[f"Path length to platform ({u})"] = _r(k.step[:stop + 1].sum(), 2)
-            res["Platform crossings"] = zent("Platform") - (1 if initial and inp[0] and s.count_initial_entry else 0)
-            others = [z.name for z in app.zones if z.name.startswith("Platform position")]
-            if others:
-                res["Mean crossings of other platform positions"] = _r(np.mean([zent(o) for o in others]), 2)
-        if pc is not None:
-            d = np.hypot((k.x - pc.x) * k.scale, (k.y - pc.y) * k.scale)
-            res[f"Mean distance to platform ({u})"] = _r(np.nanmean(d), 2)
-            res[f"Cumulative distance to platform ({u}·s)"] = _r(np.nansum(d * dur), 1)
-            # initial heading error: direction from start to position after ~1 s vs direction to platform
-            ok = np.flatnonzero(np.isfinite(k.ux))
-            if len(ok) > 2:
-                i0 = ok[0]
-                j = np.searchsorted(t, t[i0] + 1.0)
-                j = min(max(j, i0 + 1), len(t) - 1)
-                hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]
-                tdx, tdy = pc.x - k.x[i0], pc.y - k.y[i0]
-                if math.hypot(hdx, hdy) > 0 and math.hypot(tdx, tdy) > 0:
-                    a = math.degrees(math.atan2(hdy, hdx) - math.atan2(tdy, tdx))
-                    res["Initial heading error (deg)"] = _r(abs((a + 180) % 360 - 180), 1)
-        if pc is not None:
-            _whishaw(res, app, s, k, memb, pc)
-        tq = app.group("Target quadrant")
-        if tq is not None:
-            res["Target quadrant time (%)"] = res.get("Target quadrant: time (%)")
-            res["Opposite quadrant time (%)"] = res.get("Opposite quadrant: time (%)")
-        if "Thigmotaxis zone: time (%)" in res:
-            res["Wall-hugging (%)"] = res["Thigmotaxis zone: time (%)"]
-        res["Search strategy"] = classify_water_maze_strategy(res, u)
-
-    elif tpl == "barnes_maze":
-        holes = [z.name for z in app.zones if z.name.startswith("Hole")]
-        esc = app.group("Escape hole zone")
-        esc_name = esc.zones[0] if esc and esc.zones else None
-        part = "head" if track.has_head() else s.zone_body_part
-        seq = _seq(holes, part)
-        names = [e[0] for e in seq]
-        if esc_name in names:
-            first = names.index(esc_name)
-            res["Primary latency (s)"] = _r(seq[first][1] - k.t0)
-            res["Primary errors"] = first
-            stop = np.searchsorted(t, seq[first][1])
-            res[f"Primary path length ({u})"] = _r(k.step[:stop + 1].sum(), 2)
-        else:
-            res["Primary latency (s)"] = _r(T)
-            res["Primary errors"] = len(names)
-            res[f"Primary path length ({u})"] = _r(k.step.sum(), 2)
-        res["Total errors"] = sum(1 for n in names if n != esc_name)
-        res["Escape hole visits"] = sum(1 for n in names if n == esc_name)
-        res["Hole visit sequence"] = " ".join(n.split()[-1] for n in names)
-        res["Search strategy"] = classify_barnes_strategy(names, esc_name, len(holes))
-
-    elif tpl == "novel_object":
-        novel = s.novel_object
-        names = [p.name for p in app.points]
-        if len(names) >= 2:
-            fam = [n for n in names if n != novel][0] if novel in names else names[0]
-            nov = novel if novel in names else names[1]
-            key = "time exploring (s)" if track.has_head() else "time near (s)"
-            tn = float(res.get(f"{nov}: {key}", 0) or 0)
-            tf = float(res.get(f"{fam}: {key}", 0) or 0)
-            res["Novel object exploration (s)"] = _r(tn)
-            res["Familiar object exploration (s)"] = _r(tf)
-            res["Total exploration (s)"] = _r(tn + tf)
-            res["Discrimination index"] = _r((tn - tf) / (tn + tf) if tn + tf > 0 else math.nan)
-            res["Recognition index (%)"] = _r(100 * tn / (tn + tf) if tn + tf > 0 else math.nan, 2)
-
-    elif tpl == "light_dark":
-        dark = memb.get("Dark compartment")
-        if dark is not None:
-            res["Latency to enter dark (s)"] = res.get("Dark compartment: latency to first entry (s)")
-            light = memb.get("Light compartment", ~dark)
-            state = np.where(dark, 1, np.where(light, 0, -1))
-            st = state[state >= 0]
-            res["Transitions"] = int(np.sum(np.diff(st) != 0)) if len(st) > 1 else 0
-            res["Time in light (%)"] = res.get("Light compartment: time (%)")
-
-    elif tpl == "three_chamber":
-        left = float(res.get("Left cup interaction zone: time (s)", 0) or 0)
-        right = float(res.get("Right cup interaction zone: time (s)", 0) or 0)
-        soc, obj = (left, right) if s.social_side.lower().startswith("l") else (right, left)
-        res["Social interaction (s)"] = _r(soc)
-        res["Object/empty interaction (s)"] = _r(obj)
-        res["Sociability index"] = _r((soc - obj) / (soc + obj) if soc + obj > 0 else math.nan)
-        lc = ztime("Left chamber")
-        rc = ztime("Right chamber")
-        sc, oc = (lc, rc) if s.social_side.lower().startswith("l") else (rc, lc)
-        res["Social chamber preference index"] = _r((sc - oc) / (sc + oc) if sc + oc > 0 else math.nan)
-
-    elif tpl == "novel_tank":
-        res["Latency to top (s)"] = res.get("Top: latency to first entry (s)")
-        res["Top entries"] = zent("Top")
-        res["Time in top (%)"] = res.get("Top: time (%)")
-        res["Time in bottom (%)"] = res.get("Bottom: time (%)")
-        tt, tb = ztime("Top"), ztime("Bottom")
-        res["Top/bottom ratio"] = _r(tt / tb if tb > 0 else math.nan)
-        if app.arena is not None:
-            _, y0, _, y1 = app.arena.bounds()
-            depth = (k.y - y0) * k.scale
-            res[f"Mean depth ({u})"] = _r(np.nanmean(depth), 2)
-        # erratic movements: sharp turns (> 90°) at high speed
-        h = k.heading
-        fast = k.speed > 2 * max(np.nanmedian(k.speed[k.mobile]) if k.mobile.any() else 0, s.mobility_threshold)
-        turn = np.zeros(len(t), bool)
-        if len(t) > 1:
-            dh = np.abs((np.diff(h) + 180) % 360 - 180)
-            turn[1:] = np.nan_to_num(dh) > 90
-        res["Erratic movements"] = len(runs(turn & fast))
-
-    elif tpl == "cpp":
-        chambers = [z.name for z in app.zones if z.name.startswith("Chamber")]
-        if len(chambers) >= 2:
-            paired = s.paired_chamber if s.paired_chamber in chambers else chambers[0]
-            unpaired = next(c for c in chambers if c != paired)
-            tp, tu = ztime(paired), ztime(unpaired)
-            res["Paired chamber time (s)"] = _r(tp)
-            res["Unpaired chamber time (s)"] = _r(tu)
-            res["CPP score (s)"] = _r(tp - tu)
-            res["Preference index"] = _r((tp - tu) / (tp + tu) if tp + tu > 0 else math.nan)
-            res["Paired chamber time (%)"] = _r(100 * tp / (tp + tu) if tp + tu > 0 else math.nan, 2)
-            seq = [e[0] for e in _seq(chambers)]
-            res["Chamber transitions"] = sum(1 for a, b in zip(seq, seq[1:]) if a != b)
-
-    elif tpl == "hole_board":
-        holes = [p for p in app.points if p.name.startswith("Hole")]
-        if holes:
-            if track.has_head():
-                hx, hy = ffill(track.hx), ffill(track.hy)
-            else:
-                hx, hy = k.x, k.y
-            dips_total, dip_time, first, explored, repeats = 0, 0.0, math.inf, 0, 0
-            order = []
-            for p in holes:
-                dd = np.hypot((hx - p.x) * k.scale, (hy - p.y) * k.scale)
-                near = drop_short_runs(dd <= (p.radius_cm or 1.0), t, dur, 0.2, value=True)
-                rr = runs(near)
-                res[f"{p.name}: head dips"] = len(rr)
-                dips_total += len(rr)
-                dip_time += float(dur[near].sum())
-                if rr:
-                    explored += 1
-                    first = min(first, float(t[rr[0][0]] - k.t0))
-                    order += [(float(t[a]), p.name) for a, _ in rr]
-            order.sort()
-            seen = set()
-            for _, nme in order:
-                if nme in seen:
-                    repeats += 1
-                seen.add(nme)
-            res["Head dips"] = dips_total
-            res["Head-dip time (s)"] = _r(dip_time)
-            res["Latency to first head dip (s)"] = _r(first if math.isfinite(first) else
-                                                      (T if s.latency_if_never == "duration" else math.nan))
-            res["Holes explored"] = explored
-            res["Repeated head dips"] = repeats
-            res["Head dips (/min)"] = _r(dips_total / (T / 60) if T > 0 else math.nan)
-
-    elif tpl == "thermal_gradient":
-        sectors = [z.name for z in app.zones if z.name.startswith("Sector")]
-        if sectors:
-            times = np.array([ztime(z) for z in sectors])
-            res["Preferred sector"] = sectors[int(np.argmax(times))] if times.sum() > 0 else "None"
-            idx = np.arange(1, len(sectors) + 1)
-            res["Mean sector (time-weighted)"] = _r((idx * times).sum() / times.sum() if times.sum() > 0 else math.nan, 2)
-            res["Sector entries"] = sum(zent(z) for z in sectors)
-
-    elif tpl == "activity_wheel":
-        if app.arena is not None:
-            cx, cy = app.arena.centroid()
-            pa = np.degrees(np.arctan2(k.y - cy, k.x - cx))
-            cw, acw = count_rotations(pa, s.rotation_reset_deg)
-            res["Revolutions clockwise"] = cw
-            res["Revolutions anticlockwise"] = acw
-            res["Revolutions (/min)"] = _r((cw + acw) / (T / 60) if T > 0 else math.nan, 2)
-
-    elif tpl == "forced_swim":
-        if "Time freezing (s)" in res:
-            res["Immobility (s)"] = res["Time freezing (s)"]
-            res["Immobility (%)"] = res["Freezing (%)"]
-            res["Latency to immobility (s)"] = res["Latency to first freezing (s)"]
-
-
-def _whishaw(res, app, s, k, memb, pc):
-    """Whishaw's corridor: a band from the release point (first position or a "Release point" point) to the
-    platform; reports how much of the swim to the platform stayed inside it."""
-    ok = np.flatnonzero(np.isfinite(k.x))
-    if len(ok) < 2:
-        return
-    rp = app.point("Release point") or app.point("Start")
-    sx, sy = (rp.x, rp.y) if rp is not None else (k.x[ok[0]], k.y[ok[0]])
-    width = s.whishaw_width
-    if not width or width <= 0:
-        if app.px_per_cm:
-            width = 20.0
-        else:
-            x0, _, x1, _ = app.arena_or_bounds().bounds()
-            width = 0.13 * (x1 - x0)
-    wpx = width / k.scale
-    inp = memb.get("Platform")
-    found = np.flatnonzero(inp) if inp is not None else np.zeros(0, int)
-    stop = found[0] if len(found) else len(k.t) - 1
-    seg = slice(ok[0], stop + 1)
-    d = _point_segment_distance(k.x, k.y, sx, sy, pc.x, pc.y)
-    inside = (d <= wpx / 2)[seg]
-    dd, st = k.dur[seg], k.step[seg]
-    res["Whishaw corridor time (%)"] = _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2)
-    res["Whishaw corridor path (%)"] = _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2)
-    res["Left Whishaw corridor"] = "No" if inside.all() else "Yes"
-
-
-def classify_water_maze_strategy(res: dict, u: str) -> str:
-    """Very simple heuristic search-strategy classification (Garthe et al.-inspired)."""
-    eff = res.get("Path efficiency", math.nan)
-    thig = res.get("Wall-hugging (%)", res.get("Thigmotaxis (%)", 0)) or 0
-    tq = res.get("Target quadrant time (%)", 0) or 0
-    found = res.get("Found platform") == "Yes"
-    if found and isinstance(eff, float) and eff >= 0.6:
-        return "Direct"
-    if thig >= 50:
-        return "Thigmotaxis"
-    if found and tq >= 50:
-        return "Focal search"
-    if found and isinstance(eff, float) and eff >= 0.3:
-        return "Directed search"
-    return "Random / scanning"
-
-
-def classify_barnes_strategy(names: list[str], esc: str | None, n_holes: int) -> str:
-    if not names:
-        return "None"
-    if esc is None:
-        return "Unknown"
-    if esc in names:
-        first = names.index(esc)
-        before = names[:first]
-    else:
-        before = names
-    if len(before) <= 2:
-        return "Direct"
-    nums = [int(n.split()[-1]) for n in before]
-    adj = sum(1 for a, b in zip(nums, nums[1:]) if min((a - b) % n_holes, (b - a) % n_holes) == 1)
-    if len(nums) > 2 and adj / (len(nums) - 1) >= 0.6:
-        return "Serial"
-    return "Random"
-
-
 # ---------------------------------------------------------------------------
 
 def time_periods(duration: float, s: AnalysisSettings) -> list[tuple[str, float, float]]:
@@ -1581,20 +887,14 @@ def analyse_segmented(track: Track, app: Apparatus, s: AnalysisSettings, **kw) -
 def all_periods(track: Track, app: Apparatus, s: AnalysisSettings, duration: float | None = None, events=None,
                 io_events=None, zone_overrides=None, pauses=None) -> list[tuple[str, float, float]]:
     """Time bins / custom periods followed by event-anchored periods, in test time (pauses removed, as analyse())."""
-    if pauses:
-        track = _drop_pauses(track, pauses)[0]
-        if events:
-            events = [{**e, "t": float(to_test_time([e["t"]], pauses)[0]),
-                       "t_end": None if e.get("t_end") is None else float(to_test_time([e["t_end"]], pauses)[0])}
-                      for e in events]
-        if io_events:
-            io_events = [{**e, "t": float(to_test_time([e["t"]], pauses)[0])} for e in io_events]
+    track = drop_pauses(track, pauses)[0]
+    events, io_events = shift_events(events, pauses), shift_events(io_events, pauses)
     if duration is None:
         duration = track.t[-1] + track.dt if len(track) else 0
     out = time_periods(duration, s)
     if s.event_periods:
         from .periods import event_periods
 
-        out += event_periods(s.event_periods, duration, track, app.with_overrides(zone_overrides), s, events,
+        out += event_periods(s.event_periods, duration, track, apply_overrides(app, zone_overrides), s, events,
                              io_events)
     return out

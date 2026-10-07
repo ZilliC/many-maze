@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .series import moving_average
+
 COLUMNS = ["t", "x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle", "detected"]
 
 
@@ -80,15 +82,18 @@ class Track:
     def has_head(self) -> bool:
         return bool(np.isfinite(self.hx).any())
 
+    def take(self, index) -> "Track":
+        """The frames selected by `index` (a slice gives views of the columns; a mask or indices give copies)."""
+        return Track(**{c: getattr(self, c)[index] for c in COLUMNS}, fps=self.fps, meta=dict(self.meta))
+
     def copy(self) -> "Track":
-        return Track(**{c: getattr(self, c).copy() for c in COLUMNS}, fps=self.fps, meta=dict(self.meta))
+        return self.take(np.arange(len(self)))
 
     def slice_time(self, t0: float, t1: float) -> "Track":
-        m = (self.t >= t0) & (self.t < t1)
-        return Track(**{c: getattr(self, c)[m] for c in COLUMNS}, fps=self.fps, meta=dict(self.meta))
+        return self.take((self.t >= t0) & (self.t < t1))
 
     def slice_index(self, i0: int, i1: int) -> "Track":
-        return Track(**{c: getattr(self, c)[i0:i1] for c in COLUMNS}, fps=self.fps, meta=dict(self.meta))
+        return self.take(slice(i0, i1))
 
     # ------------------------------------------------------------------
     def interpolate(self, max_gap_s: float = 1.0) -> "Track":
@@ -113,7 +118,7 @@ class Track:
         window = int(window) | 1
         out = self.copy()
         for name in ("x", "y", "hx", "hy", "tx", "ty"):
-            setattr(out, name, _nan_moving_average(getattr(out, name), window))
+            setattr(out, name, moving_average(getattr(out, name), window))
         return out
 
     def to_units(self, scale: float) -> "Track":
@@ -198,18 +203,6 @@ def _fill_gaps(t: np.ndarray, v: np.ndarray, max_gap_s: float):
     fill = missing[gap <= max_gap_s + 1e-9]
     if len(fill):
         v[fill] = np.interp(t[fill], t[ok], v[ok])
-
-
-def _nan_moving_average(v: np.ndarray, window: int) -> np.ndarray:
-    ok = np.isfinite(v)
-    vv = np.where(ok, v, 0.0)
-    k = np.ones(window)
-    num = np.convolve(vv, k, mode="same")
-    den = np.convolve(ok.astype(float), k, mode="same")
-    with np.errstate(invalid="ignore", divide="ignore"):
-        out = num / den
-    out[~ok] = np.nan
-    return out
 
 
 def import_deeplabcut_csv(path, fps: float, centre_parts=None, head_part=None, tail_part=None,

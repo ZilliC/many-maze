@@ -347,3 +347,13 @@ def body_fraction_inside(shape: Shape, x, y, angle_deg, a, b) -> np.ndarray:
     frac = frac.astype(float)
     frac[bad] = np.nan
     return frac
+
+
+def point_segment_distance(px, py, ax, ay, bx, by) -> np.ndarray:
+    """Distance of points (px, py) to the segment (ax, ay)-(bx, by)."""
+    abx, aby = bx - ax, by - ay
+    den = abx ** 2 + aby ** 2
+    with np.errstate(invalid="ignore", divide="ignore"):
+        u = np.clip(((px - ax) * abx + (py - ay) * aby) / np.where(den > 0, den, np.nan), 0, 1)
+    u = np.nan_to_num(u)
+    return np.hypot(px - (ax + u * abx), py - (ay + u * aby))

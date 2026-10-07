@@ -217,6 +217,30 @@ def test_uncalibrated_warning():
     assert "Warnings" not in analyse(_track(np.full(50, 100.0)), _app(), AnalysisSettings())
 
 
+def test_tracks_shorter_than_the_smoothing_window():
+    from manymaze.core.series import moving_average
+
+    assert moving_average(np.array([1.0, 2.0, 6.0]), 5).tolist() == [1.5, 3.0, 4.0]
+    assert moving_average(np.array([1.0, 3.0]), 5).tolist() == [1.0, 3.0]
+    r = analyse(_track([10.0, 20.0, 30.0]), _app(), AnalysisSettings())
+    assert r["Total distance (cm)"] > 0
+    assert _track(np.arange(10.0)).smooth(25).x.shape == (10,)
+
+
+def test_water_maze_periods_use_the_moved_platform():
+    """Event periods are computed on the apparatus as analysed: the target quadrant follows a moved platform."""
+    app = templates.build("water_maze", 0, 0, 400, 400)
+    ov = {"Platform": {"type": "ellipse", "cx": 100, "cy": 300, "rx": 8, "ry": 8}}  # moved to SW
+    tr = _track(np.r_[np.full(50, 300.0), np.full(50, 100.0)], np.r_[np.full(50, 100.0), np.full(50, 300.0)])
+    s = AnalysisSettings(event_periods=[{"label": "Target", "anchor": "first_entry", "zone": "Target quadrant",
+                                         "duration_s": 0, "occurrence": 1}])
+    from manymaze.core.measures import all_periods
+
+    assert all_periods(tr, app, s, None, zone_overrides=ov) == [("Target", 2.0, 4.0)]
+    assert templates.apply_overrides(app, ov).group("Target quadrant").zones == ["Quadrant SW"]
+    assert templates.apply_overrides(app, None) is app
+
+
 def test_kruskal_effect_size_label():
     from manymaze.core.stats import compare_groups
 

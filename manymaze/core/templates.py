@@ -15,7 +15,7 @@ from typing import Callable
 import numpy as np
 
 from .apparatus import Apparatus, Line, PointOfInterest, Zone, ZoneGroup
-from .geometry import Ellipse, Polygon, circle, rect, rotated_rect
+from .geometry import Ellipse, Polygon, annular_sector, circle, rect, rotated_rect
 
 PALETTE = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#84cc16", "#06b6d4"]
 
@@ -24,16 +24,6 @@ def _calibrate_width(app: Apparatus, w_px: float, w_cm: float):
     if w_cm and w_cm > 0:
         app.px_per_cm = w_px / w_cm
         app.calibration_length_cm = w_cm
-
-
-def _sector(cx, cy, r0, r1, a0, a1, n=24) -> Polygon:
-    """Annular sector between radii r0..r1 and angles a0..a1 (degrees, y down)."""
-    ts = np.linspace(math.radians(a0), math.radians(a1), n)
-    outer = [(cx + r1 * math.cos(t), cy + r1 * math.sin(t)) for t in ts]
-    if r0 <= 0:
-        return Polygon([(cx, cy)] + outer)
-    inner = [(cx + r0 * math.cos(t), cy + r0 * math.sin(t)) for t in ts[::-1]]
-    return Polygon(outer + inner)
 
 
 # --------------------------------------------------------------------------
@@ -103,7 +93,7 @@ def elevated_zero_maze(x, y, w, h, outer_diameter_cm=60.0, track_width_cm=5.0) -
     names = [("Open quadrant NE", -90, 0, True), ("Closed quadrant SE", 0, 90, False),
              ("Open quadrant SW", 90, 180, True), ("Closed quadrant NW", 180, 270, False)]
     for n, a0, a1, is_open in names:
-        app.zones.append(Zone(n, _sector(cx, cy, r0, r1, a0, a1), PALETTE[1] if is_open else PALETTE[0]))
+        app.zones.append(Zone(n, annular_sector(cx, cy, r0, r1, a0, a1, 24), PALETTE[1] if is_open else PALETTE[0]))
     app.groups.append(ZoneGroup("Open quadrants", [n for n, *_, o in names if o]))
     app.groups.append(ZoneGroup("Closed quadrants", [n for n, *_, o in names if not o]))
     app.arena = circle(cx, cy, r1)
@@ -193,7 +183,7 @@ def morris_water_maze(x, y, w, h, pool_diameter_cm=150.0, platform_diameter_cm=1
     app.arena = circle(cx, cy, r)
     quads = {"NE": (-90, 0), "SE": (0, 90), "SW": (90, 180), "NW": (180, 270)}
     for i, (q, (a0, a1)) in enumerate(quads.items()):
-        app.zones.append(Zone(f"Quadrant {q}", _sector(cx, cy, 0, r, a0, a1), PALETTE[i]))
+        app.zones.append(Zone(f"Quadrant {q}", annular_sector(cx, cy, 0, r, a0, a1, 24), PALETTE[i]))
     a0, a1 = quads[platform_quadrant]
     am = math.radians((a0 + a1) / 2)
     pr = r * platform_distance_fraction
@@ -204,7 +194,7 @@ def morris_water_maze(x, y, w, h, pool_diameter_cm=150.0, platform_diameter_cm=1
     app.zones.append(Zone("Platform annulus", circle(px, py, prad * 2), "#fb7185", moveable=True))
     app.points.append(PointOfInterest("Platform centre", px, py, radius_cm=platform_diameter_cm / 2))
     app.points.append(PointOfInterest("Pool centre", cx, cy, radius_cm=0))
-    app.zones.append(Zone("Thigmotaxis zone", _sector(cx, cy, r * 0.9, r, 0, 360, 72), "#94a3b8"))
+    app.zones.append(Zone("Thigmotaxis zone", annular_sector(cx, cy, r * 0.9, r, 0, 360, 72), "#94a3b8"))
     # opposite-quadrant platform positions for annulus crossing comparison
     opp = {"NE": "SW", "SW": "NE", "NW": "SE", "SE": "NW"}
     for q in quads:
@@ -479,8 +469,8 @@ def thermal_gradient_ring(x, y, w, h, outer_diameter_cm=60.0, track_width_cm=8.0
     n = max(2, int(n_sectors))
     step = 360.0 / n
     for i in range(n):
-        app.zones.append(Zone(f"Sector {i + 1}", _sector(cx, cy, r0, r1, -90 + i * step, -90 + (i + 1) * step),
-                              PALETTE[i % len(PALETTE)]))
+        shape = annular_sector(cx, cy, r0, r1, -90 + i * step, -90 + (i + 1) * step, 24)
+        app.zones.append(Zone(f"Sector {i + 1}", shape, PALETTE[i % len(PALETTE)]))
     app.arena = circle(cx, cy, r1)
     _calibrate_width(app, 2 * r1, outer_diameter_cm)
     return app
@@ -519,6 +509,7 @@ class TemplateInfo:
     default_duration_s: float = 300.0
     choices: dict = field(default_factory=dict)  # parameter name -> allowed values (combo box in the UI)
     multi: bool = False  # build_many() gives one apparatus per arena (e.g. one per well)
+    align: Callable[[Apparatus], Apparatus] | None = None  # adjusts the apparatus to per-test zone positions
 
 
 TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
@@ -542,7 +533,8 @@ TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
     TemplateInfo("water_maze", "Morris water maze", morris_water_maze,
                  "Circular pool with quadrants, hidden platform and annulus zones.",
                  {"pool_diameter_cm": 150.0, "platform_diameter_cm": 10.0, "platform_quadrant": "NE",
-                  "platform_distance_fraction": 0.5}, 60, choices={"platform_quadrant": ["NE", "NW", "SE", "SW"]}),
+                  "platform_distance_fraction": 0.5}, 60, choices={"platform_quadrant": ["NE", "NW", "SE", "SW"]},
+                 align=align_water_maze),
     TemplateInfo("barnes_maze", "Barnes maze", barnes_maze,
                  "Circular platform with holes around the edge and an escape hole.",
                  {"diameter_cm": 122.0, "n_holes": 20, "hole_diameter_cm": 5.0, "escape_hole": 1}, 180),
@@ -594,6 +586,14 @@ def build(key: str, x, y, w, h, **params) -> Apparatus:
 def build_many(key: str, x, y, w, h, **params) -> list[Apparatus]:
     """Like build(), but templates with several arenas (multi-well plates) give one apparatus per arena."""
     app = build(key, x, y, w, h, **params)
-    if key == "multi_well":
+    if TEMPLATES[key].multi:
         return split_wells(app, float(params.get("centre_fraction", 0.5)))
     return [app]
+
+
+def apply_overrides(app: Apparatus, overrides: dict | None) -> Apparatus:
+    """The apparatus of a test: app.with_overrides(overrides) (Test.zone_overrides), then adjusted by its template
+    to the moved zones (e.g. the water maze's target quadrant follows the platform)."""
+    moved = app.with_overrides(overrides)
+    info = TEMPLATES.get(app.template)
+    return info.align(moved) if overrides and info is not None and info.align is not None else moved
