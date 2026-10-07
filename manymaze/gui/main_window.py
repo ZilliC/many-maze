@@ -170,6 +170,22 @@ class WelcomePage(QWidget):
             self.side_buttons[k].setEnabled(has)
 
 
+def page_hook(page, hook: str, *args, on_error=None):
+    """Call an optional page hook (set_project, on_show, on_hide, commit, shutdown, ribbon_groups, explorer_items,
+    show_item …).  Returns its result, or None when the page lacks it or it fails: a failing page is reported
+    (printed, and to on_error) but never stops the others."""
+    fn = getattr(page, hook, None)
+    if fn is None:
+        return None
+    try:
+        return fn(*args)
+    except Exception as e:
+        traceback.print_exc()
+        if on_error is not None:
+            on_error(e)
+        return None
+
+
 class SectionView(QWidget):
     """A ribbon tab's work area: an explorer list on the left and the selected page on the right.
 
@@ -235,12 +251,7 @@ class SectionView(QWidget):
         cur_key = cur.data(0, Qt.UserRole + 1) if cur is not None and cur.parent() is it else None
         self.explorer.blockSignals(True)
         it.takeChildren()
-        items = []
-        if hasattr(page, "explorer_items"):
-            try:
-                items = page.explorer_items() or []
-            except Exception:
-                traceback.print_exc()
+        items = page_hook(page, "explorer_items") or []
         for label, icon_name, key in items:
             c = QTreeWidgetItem([label])
             c.setIcon(0, icon(icon_name))
@@ -272,11 +283,8 @@ class SectionView(QWidget):
         self.stack.setCurrentWidget(page)
         self.page_changed.emit(page)
         key = it.data(0, Qt.UserRole + 1)
-        if key is not None and hasattr(page, "show_item"):
-            try:
-                page.show_item(key)
-            except Exception:
-                traceback.print_exc()
+        if key is not None:
+            page_hook(page, "show_item", key)
 
 
 class MainWindow(QMainWindow):
@@ -400,6 +408,7 @@ class MainWindow(QMainWindow):
         act(hm, f"About {APP_NAME}", self.about)
         # the ribbon replaces the menu bar, except on macOS where the menu bar lives at the top of the screen
         mb.setVisible(sys.platform == "darwin")
+
     def _open_guide(self):
         from .help import show_user_guide
 
@@ -440,12 +449,7 @@ class MainWindow(QMainWindow):
         for i in range(1, self._help_tab):
             self.ribbon.tabs.setTabEnabled(i, has)
         self.save_quick.setEnabled(has)
-        for page in self.pages:
-            if hasattr(page, "set_project"):
-                try:
-                    page.set_project(project)
-                except Exception:
-                    traceback.print_exc()
+        self._for_pages("set_project", project)
         for page in self.pages:
             self.refresh_explorer(page)
         if has:
@@ -485,13 +489,14 @@ class MainWindow(QMainWindow):
             elif sec.explorer.currentItem() is None and sec.pages:
                 sec.select(sec.pages[0])
 
+    def _for_pages(self, hook: str, *args):
+        """Run a page hook (set_project, commit, shutdown) on every page that has it."""
+        for page in self.pages:
+            page_hook(page, hook, *args)
+
     def _hide_current(self):
-        cur = self._current_page
-        if cur is not None and hasattr(cur, "on_hide"):
-            try:
-                cur.on_hide()
-            except Exception:
-                traceback.print_exc()
+        if self._current_page is not None:
+            page_hook(self._current_page, "on_hide")
 
     def _page_changed(self, page):
         """A section switched to `page` (explorer or ribbon): run hide/show hooks and refresh the ribbon."""
@@ -513,19 +518,8 @@ class MainWindow(QMainWindow):
         self._current_page = page
         for a in sec.nav_actions:
             a.setChecked(a.page is page)
-        groups = []
-        if hasattr(page, "ribbon_groups"):
-            try:
-                groups = page.ribbon_groups() or []
-            except Exception:
-                traceback.print_exc()
-        sec.panel.set_context(groups)
-        if hasattr(page, "on_show"):
-            try:
-                page.on_show()
-            except Exception as e:
-                traceback.print_exc()
-                self.status(f"Error: {e}")
+        sec.panel.set_context(page_hook(page, "ribbon_groups") or [])
+        page_hook(page, "on_show", on_error=lambda e: self.status(f"Error: {e}"))
 
     def show_page(self, page):
         idx = self._page_section.get(id(page))
@@ -677,12 +671,7 @@ class MainWindow(QMainWindow):
     def save(self) -> bool:
         if self.project is None:
             return False
-        for page in self.pages:
-            if hasattr(page, "commit"):
-                try:
-                    page.commit()
-                except Exception:
-                    traceback.print_exc()
+        self._for_pages("commit")
         try:
             self.project.save()
         except Exception as e:
@@ -701,12 +690,7 @@ class MainWindow(QMainWindow):
             return
         import shutil
 
-        for page in self.pages:
-            if hasattr(page, "commit"):
-                try:
-                    page.commit()
-                except Exception:
-                    traceback.print_exc()
+        self._for_pages("commit")
         safe = "".join(c for c in self.project.name.strip() if c not in '/\\:*?"<>|') or "experiment"
         dest = Path(d) / f"{safe}.mmaze"
         old = self.project.path
@@ -788,12 +772,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if self.maybe_save():
-            for page in self.pages:
-                if hasattr(page, "shutdown"):
-                    try:
-                        page.shutdown()
-                    except Exception:
-                        traceback.print_exc()
+            self._for_pages("shutdown")
             e.accept()
         else:
             e.ignore()
