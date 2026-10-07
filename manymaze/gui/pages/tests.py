@@ -21,8 +21,7 @@ from ...core.video import VIDEO_EXTENSIONS, VideoSource
 from ...core.workflow import treatment_code
 from .. import ribbon, theme
 from ..icons import icon
-from ..widgets import error_box, run_with_progress
-from .animals import swatch
+from ..widgets import color_icon, error_box, run_with_progress
 from .base import Page
 from .schedule_dialogs import AddVideosDialog, DlcImportDialog, ScheduleDialog, VariablesDialog
 
@@ -68,10 +67,6 @@ def ready_tests(project) -> set[int]:
         seen.add(t.apparatus)
         out.add(t.id)
     return out
-
-
-def track_tests_job(project, tests):  # kept for testview
-    return partial(track_tests, project, tests)
 
 
 # ------------------------------------------------------------------ model
@@ -204,7 +199,7 @@ class TestsModel(QAbstractTableModel):
             if c == C_GROUP and not p.blind:
                 a = p.get_animal(t.animal_id)
                 if a and a.group:
-                    return swatch(p.group_color(a.group), 10)
+                    return color_icon(p.group_color(a.group), 10)
         elif role == Qt.FontRole:
             if t.status in ("excluded", "superseded"):
                 f = QFont()

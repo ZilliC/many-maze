@@ -484,8 +484,3 @@ def zone_bands(track: Track, app: Apparatus, zones: list[str], settings=None) ->
         spans = [(float(t[a]), float(t[b - 1] + dur[b - 1])) for a, b in zone_visits(t, dur, memb[zn], s, all_runs=True)]
         out.append((zn, col, spans))
     return out
-
-
-def apparatus_of_test(project, test) -> Apparatus | None:
-    """Project.apparatus_of (kept for older callers)."""
-    return project.apparatus_of(test)

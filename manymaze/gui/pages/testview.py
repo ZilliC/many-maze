@@ -6,6 +6,7 @@ import datetime as _dt
 import html
 import math
 import time
+from functools import partial
 from pathlib import Path
 
 import cv2
@@ -18,16 +19,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFr
                                QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from ...core import workflow as wf
+from ...core.batch import track_tests
 from ...core.plots import heatmap, speed_trace, track_plot
 from ...core.track import Track
 from ...core.tracking import ANIMAL_COLORS, ArenaTracker, DetectionSettings, compute_background, draw_overlay
-from .. import theme
+from .. import ribbon, theme
 from ..confirm_id import confirm_animal_id
 from ..scoring_pad import ScoringPad
 from ..widgets import PlotCanvas, VideoPlayer, Worker, error_box, fmt_time, run_with_progress
-from .animals import ribbon_action, treatment_text
 from .base import DETECTION_SPEC, Page, SettingsForm
-from .tests import track_tests_job
 
 SPEC_ATTRS = [a for a, *_ in DETECTION_SPEC]
 INFO_KEYS = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"}
@@ -139,7 +139,7 @@ class TestViewPage(Page):
 
         # ---- commands (ribbon groups Test, Playback, Scoring, View, Track editing) -------------------
         def act(text, ic, fn=None, tip="", checkable=False, large=False):
-            return ribbon_action(self, text, ic, fn, tip, checkable, large)
+            return ribbon.action(self, text, ic, fn, tip, checkable, large)
 
         self.prev_btn = act("Previous test", "back", lambda: self.step_test(-1), "Previous test of the schedule")
         self.next_btn = act("Next test", "forward", lambda: self.step_test(1), "Next test of the schedule")
@@ -826,7 +826,7 @@ class TestViewPage(Page):
             return
         a = p.get_animal(t.animal_id)
         grp = (f"Treatment <span style='color:{wf.display_color(p, a.group)}'>"
-               f"{html.escape(treatment_text(p, a.group))}</span>" if a and a.group else "")
+               f"{html.escape(wf.treatment_text(p, a.group))}</span>" if a and a.group else "")
         if a is not None and a.retired:
             grp += " <span style='color:#dc2626'>(animal retired)</span>"
         dur = t.duration_s or p.test_duration_s
@@ -1110,7 +1110,7 @@ class TestViewPage(Page):
             return None
         self.player.pause()
         self._tracking = True
-        return run_with_progress(self, f"Tracking test {t.id}", track_tests_job(p, [t]),
+        return run_with_progress(self, f"Tracking test {t.id}", partial(track_tests, p, [t]),
                                  on_done=self._tracking_done, on_fail=self._tracking_failed)
 
     def _tracking_done(self, res):

@@ -239,14 +239,12 @@ class OverlayRenderer:
 def export_video(project, test, path, options: OverlayOptions | None = None, progress=None, should_stop=None
                  ) -> Path | None:
     """Write the test's video with overlays to `path` (.mp4 recommended). Returns the path, or None if cancelled."""
-    from . import charts
-
     o = options or OverlayOptions()
     video = project.abs_path(test.video)
     if not video or not Path(video).exists():
         raise FileNotFoundError(f"Video not found: {test.video}")
     tracks = project.load_tracks(test) if project.has_track(test) else []
-    app = charts.apparatus_of_test(project, test)
+    app = project.apparatus_of(test)
     with VideoSource(video) as src:
         fps, w, h, nframes = src.fps, src.width, src.height, src.frame_count
     video_start = float(tracks[0].meta.get("video_start_s", test.start_s) or 0.0) if tracks else float(test.start_s)

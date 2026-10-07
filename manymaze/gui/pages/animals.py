@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer
-from PySide6.QtGui import QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QActionGroup, QColor, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QComboBox, QDialog, QFileDialog,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QStackedWidget,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
@@ -14,11 +14,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QC
 from ...core import export
 from ...core import workflow as wf
 from ...core.project import Animal
-from ...core.workflow import treatment_code, treatment_text  # noqa: F401 (testview imports it from here)
+from ...core.workflow import treatment_code, treatment_text
 from .. import ribbon, theme
 from ..icons import icon
-from ..ribbon import action as ribbon_action  # noqa: F401 (testview imports it from here)
-from ..widgets import error_box
+from ..widgets import color_icon, error_box
 from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog
 from .base import Page
 
@@ -27,12 +26,6 @@ STATUSES = ["Normal", "Retired"]
 COMBO_KINDS = ("status", "treatment", "sex")
 ROW_H = 32
 MUTED_ROW = "#9ca3af"
-
-
-def swatch(color: str, size: int = 12) -> QIcon:
-    pm = QPixmap(size, size)
-    pm.fill(QColor(color))
-    return QIcon(pm)
 
 
 def unique_id(base: str, taken: set[str]) -> str:
@@ -107,7 +100,7 @@ class _SheetDelegate(QStyledItemDelegate):
             if kind == "treatment":
                 cb.addItem("", "")
                 for g in p.groups:
-                    cb.addItem(swatch(wf.display_color(p, g.name)), treatment_text(p, g.name), g.name)
+                    cb.addItem(color_icon(wf.display_color(p, g.name)), treatment_text(p, g.name), g.name)
             else:
                 cb.addItems(SEXES)
         cb.activated.connect(lambda _i, cb=cb: (self.commitData.emit(cb), self.closeEditor.emit(cb)))
@@ -403,7 +396,7 @@ class AnimalsPage(Page):
             items["status"].setToolTip(f"Retired: {a.retired_reason}")
         g = self._item(treatment_text(p, a.group) if p.blind else a.group, editable=not p.blind)
         if a.group:
-            g.setIcon(swatch(wf.display_color(p, a.group)))
+            g.setIcon(color_icon(wf.display_color(p, a.group)))
         items["treatment"] = g
         ids = counts.get(a.id, [])
         n = self._item(editable=False, align=Qt.AlignRight | Qt.AlignVCenter)
@@ -446,7 +439,7 @@ class AnimalsPage(Page):
             if p.blind:
                 name.setForeground(QColor(MUTED_ROW))
             col = self._item(wf.display_color(p, g.name) if not p.blind else "", editable=False)
-            col.setIcon(swatch(wf.display_color(p, g.name), 16))
+            col.setIcon(color_icon(wf.display_color(p, g.name), 16))
             col.setToolTip("Double-click to change the colour")
             cnt = self._item(editable=False, align=Qt.AlignRight | Qt.AlignVCenter)
             cnt.setData(Qt.DisplayRole, n)
@@ -668,7 +661,7 @@ class AnimalsPage(Page):
                     p.ensure_group(text)
                 a.group = text
                 item.setText(text)
-                item.setIcon(swatch(p.group_color(text)) if text else QIcon())
+                item.setIcon(color_icon(p.group_color(text)) if text else QIcon())
                 self._changed()
                 self._refresh_side()
             elif kind == "sex":
