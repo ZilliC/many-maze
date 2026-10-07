@@ -610,6 +610,25 @@ def test_validate_reports_errors_with_paths():
         assert validate([ex]) == []
 
 
+def test_project_context_and_statement_fields():
+    from manymaze.core import templates
+    from manymaze.core.project import Project
+
+    p = Project()
+    assert P.project_context(p) == {"zones": None, "devices": None}
+    p.apparatus = [templates.build("epm", 0, 0, 100, 100), templates.build("open_field", 0, 0, 100, 100)]
+    p.io_devices = [{"name": "box", "type": "virtual", "channels": []}]
+    p.settings_extra["touchscreen"] = {"areas": [{"name": "left"}, {"name": ""}]}
+    ctx = P.project_context(p)
+    assert "Open arms" in ctx["zones"] and "Corner 1" in ctx["zones"] and ctx["zones"] == sorted(set(ctx["zones"]))
+    assert ctx["devices"] == p.io_devices and ctx["areas"] == ["left"]
+    assert [f["name"] for f in P.statement_fields(DO("pellet"))] == ["device", "channel", "count", "pulse_width", "gap"]
+    assert [f["name"] for f in P.statement_fields(WHEN("every", []))] == ["interval", "first"]
+    assert [f["name"] for f in P.statement_fields({"type": "wait", "until": "x"})] == ["until"]
+    assert [f["name"] for f in P.statement_fields({"type": "repeat", "mode": "forever"})] == []
+    assert P.statement_fields({"type": "comment"}) == []
+
+
 def test_describe_statements():
     assert P.describe_statement(W(5)) == "Wait 5 s"
     assert P.describe_statement({"type": "repeat", "mode": "while", "while": "x < 3"}) == "Repeat while x < 3"
