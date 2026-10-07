@@ -157,7 +157,7 @@ class MultiTestMixin:
             self.row_stage.addItems(p.stages if p else [])
             self.row_device.clear()
             self.row_device.addItem("Automatic (only test running)", "")
-            for c in (getattr(p, "io_devices", None) or []) if p else []:
+            for c in (p.io_devices if p else []):
                 if c.get("enabled", True) and c.get("type", "virtual") != "audio" and c.get("name"):
                     self.row_device.addItem(f"{c['name']} ({c.get('type', 'virtual')})", str(c["name"]))
             self.row_device.addItem("None (simulated outputs)", "-")
@@ -536,7 +536,7 @@ class MultiTestMixin:
             return None, ("the serial port in the test settings is shared by every test: with several tests at "
                           "once, configure each box as an I/O device instead (Experiment › I/O devices) and clear "
                           "the serial port.")
-        if not getattr(p, "io_devices", None):
+        if not p.io_devices:
             return "*", ""
         return device_plan(p.io_devices, e.meta.get("device", "") or "", others)
 

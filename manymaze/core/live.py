@@ -29,7 +29,7 @@ START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual")
 
 def open_devices(project):
     """A DeviceManager for the project's I/O devices, or None (no devices / failure)."""
-    if project is None or not getattr(project, "io_devices", None):
+    if project is None or not project.io_devices:
         return None
     try:
         from .iodevices import DeviceManager
@@ -641,7 +641,7 @@ class LiveSession(_Scoring):
         pct = d.motion / max(d.area, 1) * 100
         t = self.cols["t"][-1]
         a = self.analysis
-        off = getattr(a, "freeze_off_pct", a.freeze_on_pct)
+        off = a.freeze_off_pct
         self._frz_state = pct <= max(off, a.freeze_on_pct) if self._frz_state else pct < a.freeze_on_pct
         if self._frz_state:
             if self._still_since is None:

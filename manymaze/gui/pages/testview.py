@@ -97,8 +97,9 @@ class ObservationClock:
             self._acc = self.elapsed()
             self.state = "paused"
 
-    def stop(self) -> float:
-        self._acc = self.elapsed()
+    def stop(self, at: float | None = None) -> float:
+        """Stop the clock (at a given elapsed time, e.g. the end of the test). Returns the elapsed time."""
+        self._acc = self.elapsed() if at is None else float(at)
         self.state = "stopped"
         return self._acc
 
@@ -1461,9 +1462,7 @@ class TestViewPage(Page):
         t, p = self.test, self.project
         if self.clock.state == "stopped" or t is None:
             return
-        if at is not None:
-            self.clock._acc, self.clock.state = float(at), "paused"
-        e = round(self.clock.stop(), 3)
+        e = round(self.clock.stop(at), 3)
         self._clock_timer.stop()
         for name in list(self._open_states):
             self._end_state(name, e)

@@ -20,7 +20,7 @@ SUFFIX = ".autosave.json"
 
 def path_for(project, test) -> str:
     """The crash-recovery side file of a live test (in the recordings folder)."""
-    safe = re.sub(r"[^\w.-]+", "_", getattr(test, "animal_id", "") or "animal")
+    safe = re.sub(r"[^\w.-]+", "_", test.animal_id or "animal")
     return str(project.recordings_dir() / f"test_{test.id:04d}_{safe}{SUFFIX}")
 
 
@@ -153,7 +153,7 @@ def recover(project) -> list:
     recovered test gets the track, events, pauses and I/O log written up to the last autosave (and its recording,
     playable up to the last fragment).  The project is saved, then the side files are deleted.  Returns the
     recovered tests."""
-    if project is None or getattr(project, "path", None) is None:
+    if project is None or project.path is None:
         return []
     folder = Path(project.path) / "recordings"
     if not folder.is_dir():
@@ -170,7 +170,7 @@ def recover(project) -> list:
             continue
         m = d.get("meta") or {}
         test = project.get_test(m["test_id"]) if m.get("test_id") is not None else None
-        if test is not None and (getattr(test, "recorded_at", "") or "") >= str(d.get("saved_at") or "~"):
+        if test is not None and (test.recorded_at or "") >= str(d.get("saved_at") or "~"):
             f.unlink(missing_ok=True)  # stale: the test was saved after this side file was written
             continue
         if test is None:

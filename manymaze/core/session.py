@@ -82,8 +82,6 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         test.result_variables = {**test.result_variables, **rv}
     kept = session.kept_variables
     if kept:  # procedure variables kept between tests: only from tests that are saved
-        if getattr(project, "variables", None) is None:
-            project.variables = {}
         project.variables.update(copy.deepcopy(kept))
     test.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
     try:
