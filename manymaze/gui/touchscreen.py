@@ -65,7 +65,7 @@ class TouchStimulusWindow(QWidget):
 
     @classmethod
     def from_project(cls, project) -> "TouchStimulusWindow":
-        cfg = (getattr(project, "settings_extra", {}) or {}).get("touchscreen", {}) or {}
+        cfg = (project.settings_extra or {}).get("touchscreen") or {}
         w = cls(cfg.get("areas") or None, cfg.get("background", "#000000"), cfg.get("outline", False))
         w.screen_index = cfg.get("screen")
         return w

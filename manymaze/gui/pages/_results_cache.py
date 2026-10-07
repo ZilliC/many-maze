@@ -31,7 +31,7 @@ def has_periods(project) -> bool:
     if project is None:
         return False
     s = project.analysis
-    return bool(s.custom_periods) or (s.bin_length_s or 0) > 0 or bool(getattr(s, "event_periods", None))
+    return bool(s.custom_periods) or (s.bin_length_s or 0) > 0 or bool(s.event_periods)
 
 
 # test variables that only affect figures (not results) and must not invalidate cached rows

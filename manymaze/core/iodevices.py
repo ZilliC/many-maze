@@ -613,7 +613,7 @@ class DeviceManager:
 
     @classmethod
     def from_project(cls, project, open: bool = True) -> "DeviceManager":
-        return cls(getattr(project, "io_devices", None) or [], open=open)
+        return cls(project.io_devices or [], open=open)
 
     def open(self):
         with self._lock:

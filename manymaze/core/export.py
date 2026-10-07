@@ -324,7 +324,7 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
             for k, v in d.items():
                 w(f"      <setting{_attrs(name=k, **_value_attrs(v))}/>\n")
             w(f"    </{tag}>\n")
-        variables = getattr(project, "variables", {}) or {}
+        variables = project.variables
         if variables:
             w("    <variables>\n")
             for k, v in variables.items():
@@ -379,25 +379,25 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
             if t.variables:
                 w("      <variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
                                                  for n, v in t.variables.items()) + "      </variables>\n")
-            ov = getattr(t, "zone_overrides", None) or {}
+            ov = t.zone_overrides
             if ov:
                 w("      <zone-overrides>\n")
                 for zn, sd in ov.items():
                     w(f"        <zone{_attrs(name=zn)}>\n" + _shape_xml("shape", sd, "          ") + "        </zone>\n")
                 w("      </zone-overrides>\n")
-            pauses = getattr(t, "pauses", None) or []
+            pauses = t.pauses
             if pauses:
                 w("      <pauses>\n" + "".join(f"        <pause{_attrs(start=float(a), end=float(b))}/>\n"
                                               for a, b in pauses) + "      </pauses>\n")
             w("      <events>\n" + "".join(
                 f"        <event{_attrs(behaviour=e.get('behaviour'), t=float(e['t']), t_end=None if e.get('t_end') is None else float(e['t_end']))}/>\n"
                 for e in t.events) + "      </events>\n")
-            io = getattr(t, "io_events", None) or []
+            io = t.io_events
             if io:
                 w("      <io-events>\n" + "".join(
                     f"        <io{_attrs(t=float(e.get('t', 0)), device=e.get('device'), channel=e.get('channel'), kind=e.get('kind'), value=e.get('value'))}/>\n"
                     for e in io) + "      </io-events>\n")
-            rv = getattr(t, "result_variables", None) or {}
+            rv = t.result_variables
             if rv:
                 w("      <result-variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
                                                         for n, v in rv.items()) + "      </result-variables>\n")

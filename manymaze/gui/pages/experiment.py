@@ -499,14 +499,13 @@ class ExperimentPage(Page):
 
     def new_apparatus(self):
         page = self.main.goto("ApparatusPage")
-        if page is not None and hasattr(page, "add_apparatus"):
+        if page is not None:
             page.add_apparatus()
-            if hasattr(self.main, "refresh_explorer"):
-                self.main.refresh_explorer(page)
+            self.main.refresh_explorer(page)
 
     def apparatus_from_template(self):
         page = self.main.goto("ApparatusPage")
-        if page is not None and hasattr(page, "create_from_template"):
+        if page is not None:
             page.create_from_template()
 
     def new_stage(self):
