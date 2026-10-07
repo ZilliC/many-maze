@@ -23,6 +23,7 @@ from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented,
 from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
+from .video import VideoSource
 
 PROJECT_FILE = "project.json"
 FORMAT_VERSION = 1
@@ -316,6 +317,14 @@ class Project:
             raise ValueError("Save the project first")
         suffix = "" if animal_index == 0 else f"_a{animal_index + 1}"
         return self.path / "tracks" / f"test_{test.id:04d}{suffix}.csv"
+
+    def start_frame(self, test: Test) -> np.ndarray | None:
+        """The video frame at the start of the test (None without a readable video), e.g. under track plots."""
+        try:
+            with VideoSource(self.abs_path(test.video)) as v:
+                return v.frame_at(int(round(test.start_s * v.fps)))
+        except Exception:
+            return None
 
     def recordings_dir(self) -> Path:
         d = (self.path or Path.cwd()) / "recordings"

@@ -1,9 +1,8 @@
-"""Per-frame parameters (time series) computed from a track, and charts of them over time.
+"""Per-frame parameters (time series) computed from a track.
 
 `parameters()` lists what can be charted for an apparatus; `compute()` evaluates the requested
-parameters (one value per track sample); `chart_figure()` draws them on a shared time axis with
-zone-occupancy background bands and manual-scoring event markers.  The same series feed per-test raw
-data exports and behaviour heat maps.
+parameters (one value per track sample); plots.chart_figure() draws them over time.  The same series
+feed per-test raw data exports and behaviour heat maps.
 """
 
 from __future__ import annotations
@@ -11,11 +10,11 @@ from __future__ import annotations
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
+
 import numpy as np
-from matplotlib.figure import Figure
-from matplotlib.patches import Patch
 
 from .apparatus import Apparatus
+from .project import Behaviour
 from .measures import AnalysisSettings, ffill, kinematics, moving_average, occupancy, runs, zone_visits
 from .track import Track
 
@@ -205,8 +204,8 @@ def _definitions(app: Apparatus, track: Track | None, behaviours, n_others: int)
         add(f"{ln.name}: crossings", "", COUNT, "Lines", lambda c, ln=ln: _line_crossings(c, ln))
     # ---- manual scoring --------------------------------------------------------------------
     for b in behaviours or []:
-        name, kind = b["name"], b.get("kind", "state")
-        if kind == "point":
+        name = b.name
+        if b.kind == "point":
             add(f"{name}: count", "", COUNT, "Behaviours", lambda c, name=name: _event_count(c, name))
         else:
             add(f"{name}: active", "", STATE, "Behaviours", lambda c, name=name: _event_state(c, name))
@@ -381,29 +380,22 @@ def _other_distance(c, j):
 
 
 # ---- public API -------------------------------------------------------------------------
-def _beh_dicts(behaviours):
-    out = []
-    for b in behaviours or []:
-        out.append(b if isinstance(b, dict) else {"name": b.name, "key": getattr(b, "key", ""),
-                                                  "kind": getattr(b, "kind", "state")})
-    return out
-
-
-def parameters(app: Apparatus, track: Track | None = None, behaviours=None, n_others: int = 0) -> list[Param]:
+def parameters(app: Apparatus, track: Track | None = None, behaviours: list[Behaviour] | None = None,
+               n_others: int = 0) -> list[Param]:
     """Parameters that can be computed for this apparatus (and track: head/orientation availability)."""
-    return [p for p, _ in _definitions(app, track, _beh_dicts(behaviours), n_others).values()]
+    return [p for p, _ in _definitions(app, track, behaviours, n_others).values()]
 
 
 def compute(track: Track, app: Apparatus, names: list[str] | None = None, settings: AnalysisSettings | None = None,
-            events: list | None = None, behaviours=None, other_tracks: list[Track] | None = None
+            events: list | None = None, behaviours: list[Behaviour] | None = None,
+            other_tracks: list[Track] | None = None
             ) -> "OrderedDict[str, np.ndarray]":
     """Evaluate the named parameters (all if None) for each track sample. Unknown names raise KeyError."""
-    beh = _beh_dicts(behaviours)
-    defs = _definitions(app, track, beh, len(other_tracks or []))
+    defs = _definitions(app, track, behaviours, len(other_tracks or []))
     names = list(defs) if names is None else list(names)
     if not len(track):
         return OrderedDict((n, np.zeros(0)) for n in names)
-    ctx = _Ctx(track, app, settings or AnalysisSettings(), events, beh, other_tracks)
+    ctx = _Ctx(track, app, settings or AnalysisSettings(), events, behaviours, other_tracks)
     out: OrderedDict[str, np.ndarray] = OrderedDict()
     for n in names:
         if n not in defs:
@@ -414,7 +406,7 @@ def compute(track: Track, app: Apparatus, names: list[str] | None = None, settin
 
 
 def param_info(app: Apparatus, name: str, track: Track | None = None, behaviours=None, n_others: int = 3) -> Param:
-    d = _definitions(app, track, _beh_dicts(behaviours), n_others)
+    d = _definitions(app, track, behaviours, n_others)
     return d[name][0] if name in d else Param(name)
 
 
@@ -422,7 +414,7 @@ def per_frame_table(track: Track, app: Apparatus, settings=None, events=None, be
                     names: list[str] | None = None, other_tracks=None) -> tuple[list[str], np.ndarray]:
     """(column labels, 2-D array) of time, raw track columns and derived per-frame parameters."""
     data = compute(track, app, names, settings, events, behaviours, other_tracks)
-    defs = _definitions(app, track, _beh_dicts(behaviours), len(other_tracks or []))
+    defs = _definitions(app, track, behaviours, len(other_tracks or []))
     cols = ["Time (s)"] + [defs[n][0].label for n in data]
     arr = np.column_stack([track.t] + list(data.values())) if len(track) else np.zeros((0, len(cols)))
     return cols, arr
@@ -474,7 +466,7 @@ def find_peaks(t: np.ndarray, v: np.ndarray, prominence: float | None = None, mi
     return [(float(t[i]), float(v[i])) for i in idx]
 
 
-# ---- chart figure -------------------------------------------------------------------------------
+# ---- zone occupancy bands ---------------------------------------------------------------------------
 def zone_bands(track: Track, app: Apparatus, zones: list[str], settings=None) -> list[tuple[str, str, list]]:
     """[(zone, colour, [(t_start, t_end), ...])] occupancy intervals for background bands."""
     s = settings or AnalysisSettings()
@@ -494,147 +486,6 @@ def zone_bands(track: Track, app: Apparatus, zones: list[str], settings=None) ->
     return out
 
 
-def chart_figure(track: Track, app: Apparatus, names: list[str], settings=None, events=None, behaviours=None,
-                 bands: list[str] | None = None, show_events: bool = True, t_range: tuple | None = None,
-                 data: dict | None = None, title: str = "", size=(8, 5), other_tracks=None,
-                 fig: Figure | None = None) -> Figure:
-    """Stacked time series (shared time axis) of the chosen parameters.
-
-    bands: zones whose occupancy is shown as coloured background bands; events (manual scoring) are drawn
-    as an extra strip of bars (state behaviours) and ticks (point behaviours).
-    """
-    beh = _beh_dicts(behaviours)
-    fig = fig or Figure(figsize=size, dpi=100)
-    names = list(names)[:10]
-    if data is None:
-        data = compute(track, app, names, settings, events, beh, other_tracks)
-    evs = [e for e in (events or []) if e.get("behaviour")] if show_events else []
-    n_ax = len(names) + (1 if evs else 0)
-    if n_ax == 0:
-        ax = fig.add_subplot(111)
-        ax.axis("off")
-        ax.text(0.5, 0.5, "Choose parameters to chart", ha="center", va="center", color="#64748b",
-                transform=ax.transAxes)
-        return fig
-    ratios = [3] * len(names) + ([max(1, len({e['behaviour'] for e in evs})) * 0.6] if evs else [])
-    gs = fig.add_gridspec(n_ax, 1, height_ratios=ratios, hspace=0.12)
-    t = track.t
-    axes = []
-    band_data = zone_bands(track, app, bands or [], settings) if bands else []
-    defs = _definitions(app, track, beh, len(other_tracks or []))
-    for i, n in enumerate(names):
-        ax = fig.add_subplot(gs[i], sharex=axes[0] if axes else None)
-        axes.append(ax)
-        p = defs[n][0] if n in defs else Param(n)
-        v = data[n]
-        if p.kind == STATE:
-            ax.fill_between(t, 0, np.nan_to_num(v), step="post", color="#f97316", alpha=0.55, lw=0)
-            ax.set_ylim(-0.05, 1.15)
-            ax.set_yticks([0, 1])
-            ax.set_yticklabels(["off", "on"], fontsize=7)
-        elif p.kind == COUNT:
-            ax.step(t, v, where="post", lw=1.0, color="#7c3aed")
-        else:
-            ax.plot(t, v, lw=0.8, color=f"C{i % 10}")
-        ax.set_ylabel(_wrap_label(p.label), fontsize=7, rotation=0, ha="right", va="center", labelpad=6)
-        ax.tick_params(labelsize=7)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.grid(axis="y", color="#e2e8f0", lw=0.5)
-        for zn, col, spans in band_data:
-            for a, b in spans:
-                ax.axvspan(a, b, color=col, alpha=0.13, lw=0)
-    if evs:
-        ax = fig.add_subplot(gs[len(names)], sharex=axes[0] if axes else None)
-        axes.append(ax)
-        rows = list(OrderedDict.fromkeys(e["behaviour"] for e in evs))
-        kinds = {b["name"]: b.get("kind", "state") for b in beh}
-        end = float(t[-1] + track.dt) if len(t) else 0.0
-        for j, b in enumerate(rows):
-            col = f"C{(j + 3) % 10}"
-            for e in evs:
-                if e["behaviour"] != b:
-                    continue
-                if kinds.get(b) == "point" or (e.get("t_end") is None and kinds.get(b) != "state"):
-                    ax.plot([e["t"], e["t"]], [j - 0.38, j + 0.38], color=col, lw=1.6)
-                else:
-                    t1 = e.get("t_end") if e.get("t_end") is not None else end
-                    ax.broken_barh([(e["t"], max(t1 - e["t"], 1e-3))], (j - 0.32, 0.64), color=col, alpha=0.8)
-        ax.set_yticks(range(len(rows)))
-        ax.set_yticklabels(rows, fontsize=7)
-        ax.set_ylim(-0.6, len(rows) - 0.4)
-        ax.invert_yaxis()
-        ax.tick_params(labelsize=7)
-        ax.spines[["top", "right"]].set_visible(False)
-    for ax in axes[:-1]:
-        ax.tick_params(labelbottom=False)
-    axes[-1].set_xlabel("time (s)", fontsize=8)
-    if len(t):
-        lo, hi = (t_range if t_range else (float(t[0]), float(t[-1] + track.dt)))
-        axes[0].set_xlim(lo, hi)
-    if band_data:
-        handles = [Patch(color=col, alpha=0.35, label=zn) for zn, col, _ in band_data]
-        axes[0].legend(handles=handles, fontsize=7, frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0),
-                       ncol=min(6, len(handles)))
-    if title:
-        fig.suptitle(title, fontsize=9)
-    try:
-        fig.subplots_adjust(left=0.2, right=0.97, top=0.9 if (band_data or title) else 0.96, bottom=0.09)
-    except Exception:
-        pass
-    return fig
-
-
-def _wrap_label(s: str, width: int = 18) -> str:
-    if len(s) <= width:
-        return s
-    words, lines, cur = s.split(), [], ""
-    for w in words:
-        if cur and len(cur) + 1 + len(w) > width:
-            lines.append(cur)
-            cur = w
-        else:
-            cur = f"{cur} {w}".strip()
-    lines.append(cur)
-    return "\n".join(lines)
-
-
-
 def apparatus_of_test(project, test) -> Apparatus | None:
-    """The apparatus of a test with its moveable-zone overrides applied (Test.zone_overrides)."""
-    fn = getattr(project, "apparatus_for", None)
-    if callable(fn):
-        try:
-            return fn(test)
-        except Exception:
-            pass
-    app = project.get_apparatus(test.apparatus)
-    ov = getattr(test, "zone_overrides", None) or {}
-    if app is None or not ov:
-        return app
-    if hasattr(app, "with_overrides"):
-        return app.with_overrides(ov)
-    from .geometry import shape_from_dict
-
-    app = app.copy()
-    for z in app.zones:
-        if z.name in ov:
-            try:
-                z.shape = shape_from_dict(ov[z.name])
-            except Exception:
-                pass
-    return app
-
-
-def series_of_test(project, test, names: list[str] | None = None, animal_index: int = 0):
-    """(track, apparatus, {name: series}) for one animal of a project test (events only for the first animal)."""
-    from dataclasses import asdict
-
-    tracks = project.load_tracks(test)
-    if animal_index >= len(tracks):
-        return None, None, OrderedDict()
-    tr = tracks[animal_index]
-    app = apparatus_of_test(project, test)
-    others = [o for j, o in enumerate(tracks) if j != animal_index]
-    beh = [asdict(b) for b in project.behaviours]
-    events = test.events if animal_index == 0 else []
-    return tr, app, compute(tr, app, names, project.analysis_for(test), events, beh, others or None)
+    """Project.apparatus_of (kept for older callers)."""
+    return project.apparatus_of(test)

@@ -2,6 +2,7 @@
 
 import csv
 from collections import OrderedDict
+from dataclasses import asdict
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from manymaze.core.demo import create_demo_project
 from manymaze.core.export import (export_raw_data, export_results, export_xml, html_report, read_experiment_xml,
                                   table_text, write_table)
 from manymaze.core.measures import AnalysisSettings, analyse
+from manymaze.core.project import Behaviour
 from manymaze.core.track import Track
 
 
@@ -38,7 +40,7 @@ def app():
 # ---------------------------------------------------------------- charts
 def test_parameters_and_values(app):
     tr = _circle_track()
-    beh = [{"name": "Rearing", "kind": "state"}, {"name": "Poop", "kind": "point"}]
+    beh = [Behaviour("Rearing", kind="state"), Behaviour("Poop", kind="point")]
     params = charts.parameters(app, tr, beh)
     names = [p.name for p in params]
     assert len(params) >= 40 and len(set(names)) == len(names)
@@ -47,7 +49,7 @@ def test_parameters_and_values(app):
     events = [{"behaviour": "Rearing", "t": 3.0, "t_end": 5.0}, {"behaviour": "Poop", "t": 7.0, "t_end": None}]
     d = charts.compute(tr, app, None, AnalysisSettings(), events, beh)
     assert set(d) == set(names) and all(len(v) == len(tr) for v in d.values())
-    res = analyse(tr, app, AnalysisSettings(), events, beh)
+    res = analyse(tr, app, AnalysisSettings(), events, [asdict(b) for b in beh])
     assert d["Distance travelled"][-1] == pytest.approx(res["Total distance (cm)"], rel=1e-3)
     assert d["Centre: time in zone"][-1] == pytest.approx(res["Centre: time (s)"], abs=0.05)
     assert d["Centre: entries"][-1] == res["Centre: entries"]
@@ -73,8 +75,8 @@ def test_measure_peaks_and_figure(app):
     assert m["mean"] == pytest.approx(0, abs=0.02) and m["duration"] == 5
     assert len(charts.find_peaks(t, v)) == 4 and len(charts.find_peaks(t, v, valleys=True)) == 4
     tr = _circle_track()
-    beh = [{"name": "Rearing", "kind": "state"}]
-    fig = charts.chart_figure(tr, app, ["Speed", "Freezing", "Centre: entries"], events=[
+    beh = [Behaviour("Rearing", kind="state")]
+    fig = plots.chart_figure(tr, app, ["Speed", "Freezing", "Centre: entries"], events=[
         {"behaviour": "Rearing", "t": 3.0, "t_end": 5.0}], behaviours=beh, bands=["Centre", "Corners"])
     assert len(fig.axes) == 4  # 3 parameters + event strip
     assert fig.axes[0].get_legend() is not None  # zone band legend
@@ -123,7 +125,7 @@ def test_heatmaps_and_track_plots(app):
                                    norm="percent")
     assert len([a for a in g.axes if a.images]) == 2
     mk = plots.behaviour_markers(tr, app, AnalysisSettings(), [{"behaviour": "Poop", "t": 2.0, "t_end": None}],
-                                 [{"name": "Poop", "kind": "point"}])
+                                 [Behaviour("Poop", kind="point")])
     assert {m["label"] for m in mk} == {"Freezing", "Poop"}
     for color_by in ("none", "time", "speed", "Distance from wall"):
         fig = plots.track_plot(tr, app, color_by=color_by, colorbar=True, markers=mk, part="head")
@@ -380,6 +382,18 @@ def test_tables_and_report(demo, tmp_path):
                       chart_parameters=["Speed", "Centre: in zone"], color_by="speed")
     text = rep.read_text()
     assert text.count("<img") >= 3 * len(demo.tests) + 1 and "Group occupancy" in text
+
+
+def test_group_heatmap(demo):
+    by_group = {}
+    for t in demo.tests:
+        by_group.setdefault(demo.get_animal(t.animal_id).group, []).append(t)
+    seen = []
+    fig = plots.group_heatmap(demo, dict(reversed(list(by_group.items()))), heat_of="Freezing", progress=seen.append)
+    titles = [a.get_title() for a in fig.axes if a.images]
+    assert [t.split(" (")[0] for t in titles] == [g.name for g in demo.groups] and seen[-1] == 1.0
+    fig = plots.group_heatmap(demo, by_group, period="no such period")
+    assert all(a.get_title().endswith("(n = 0)") for a in fig.axes if a.images)
 
 
 # ---------------------------------------------------------------- video

@@ -4,7 +4,6 @@ maps, charts of per-frame parameters over time and video export with overlays.""
 from __future__ import annotations
 
 import math
-from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +21,6 @@ from ...core.export import (export_raw_data, export_xml, html_report, write_csv,
                             write_tsv, write_xlsx)
 from ...core.measures import all_periods, kinematics
 from ...core.project import INACTIVE_STATUSES, result_columns
-from ...core.video import VideoSource
 from .. import theme
 from ..icons import icon
 from ..widgets import PlotCanvas, error_box, run_with_progress
@@ -456,9 +454,9 @@ class ChartsPanel(QWidget):
         tracks = p.load_tracks(test)
         self.test = test
         self.track = tracks[ai] if ai < len(tracks) else (tracks[0] if tracks else None)
-        self.app = charts.apparatus_of_test(p, test)
+        self.app = p.apparatus_of(test)
         self.others = [o for j, o in enumerate(tracks) if j != ai]
-        self.beh = [asdict(b) for b in p.behaviours]
+        self.beh = p.behaviours
         checked = set(self.checked_params()) or {"Speed", "Freezing"}
         bands = set(self.checked_bands())
         self.param_list.clear()
@@ -567,7 +565,7 @@ class ChartsPanel(QWidget):
             self.data = {}
             names = []
         title = self.test_combo.currentText()
-        charts.chart_figure(self.track, self.app, names, s, events, self.beh, bands=self.checked_bands(),
+        plots.chart_figure(self.track, self.app, names, s, events, self.beh, bands=self.checked_bands(),
                             show_events=self.events_check.isChecked(), t_range=self.period_combo.currentData(),
                             data=self.data, title=title, fig=self.figure, other_tracks=self.others or None)
         self._attach_spans()
@@ -1969,13 +1967,7 @@ class ResultsPage(Page):
 
     def _frame(self, test):
         if test.id not in self._frames:
-            frame = None
-            try:
-                with VideoSource(self.project.abs_path(test.video)) as v:
-                    frame = v.frame_at(int(round(test.start_s * v.fps)))
-            except Exception:
-                pass
-            self._frames[test.id] = frame
+            self._frames[test.id] = self.project.start_frame(test)
         return self._frames[test.id]
 
     def _select_changed(self):
@@ -2015,7 +2007,7 @@ class ResultsPage(Page):
             return
         tr = tracks[ai]
         full = tr
-        app = charts.apparatus_of_test(p, test)
+        app = p.apparatus_of(test)
         period = r.get("Period", "Whole test")
         t_range = None
         if period and period != "Whole test":
@@ -2043,7 +2035,7 @@ class ResultsPage(Page):
         return next(((a, b) for lab, a, b in self._periods(test, track, app) if lab == label), None)
 
     def _fill_param_combos(self, app, tr):
-        beh = [asdict(b) for b in self.project.behaviours]
+        beh = self.project.behaviours
         params = charts.parameters(app, tr, beh)
         for combo, items, keep in (
                 (self.color_combo, [p for p in params if p.kind != charts.STATE and p.group not in ("Zones",)],
@@ -2123,7 +2115,7 @@ class ResultsPage(Page):
     def _mask(self, track, app, which, test, events=None):
         if not which:
             return None
-        beh = [asdict(b) for b in self.project.behaviours]
+        beh = self.project.behaviours
         return charts.state_mask(track, app, which, self.project.analysis_for(test),
                                  test.events if events is None else events, beh)
 
@@ -2136,7 +2128,7 @@ class ResultsPage(Page):
         tr, app, test = d["track"], d["app"], d["test"]
         o = self.plot_options()
         s = self.project.analysis_for(test)
-        beh = [asdict(b) for b in self.project.behaviours]
+        beh = self.project.behaviours
         try:
             if i == 0:
                 frame = self._frame(test)
@@ -2192,42 +2184,12 @@ class ResultsPage(Page):
             by_group.setdefault(str(r.get("Group", "")) or "No group", []).append(t)
         if not by_group:
             return
-        order = [g.name for g in p.groups if g.name in by_group] + [g for g in by_group if
-                                                                    g not in {x.name for x in p.groups}]
         o = self.plot_options()
         per = self.period_combo.currentData() if self.seg_check.isChecked() else None
         per = per if per and per != "Whole test" else None
-        beh = [asdict(b) for b in p.behaviours]
 
         def work(progress, stop):
-            data, masks = [], {}
-            n = sum(len(v) for v in by_group.values())
-            k = 0
-            ref = charts.apparatus_of_test(p, by_group[order[0]][0])
-            for g in order:
-                trs, ms = [], []
-                for t in by_group[g]:
-                    app = charts.apparatus_of_test(p, t)
-                    for tr in p.load_tracks(t)[:1]:
-                        mask = None
-                        if o["heat_of"]:
-                            mask = charts.state_mask(tr, app, o["heat_of"], p.analysis_for(t), t.events, beh)
-                        if per:
-                            rng = self._period_range(t, tr, app, per)
-                            if rng is None:
-                                continue
-                            keep = (tr.t >= rng[0]) & (tr.t < rng[1])
-                            mask = None if mask is None else mask[keep]
-                            tr = tr.slice_time(*rng)
-                        if o["heat_of"]:
-                            ms.append(mask)
-                        trs.append(plots.align_track(tr, app, (t.variables or {}).get("heatmap_transform", "none"),
-                                                     ref))
-                    k += 1
-                    progress(k / n)
-                data.append((g, trs, ref))
-                masks[g] = ms if o["heat_of"] else None
-            return plots.group_heatmap_figure(data, norm=o["norm"], vmax=o["vmax"], masks=masks, part=o["part"], what=o["heat_of"] or "")
+            return plots.group_heatmap(p, by_group, o["heat_of"], per, o["part"], o["norm"], o["vmax"], progress)
 
         def done(fig):
             self.groups_canvas.set_figure(fig)
@@ -2261,7 +2223,3 @@ class ResultsPage(Page):
         if isinstance(canvas, PlotCanvas) and figure_to_clipboard(canvas.figure):
             self.main.status("Figure copied to the clipboard")
 
-
-def group_heatmap_figure(data: list[tuple[str, list, object]], **kw) -> Figure:
-    """Grid of average-occupancy heat maps (one per group) on a common colour scale."""
-    return plots.group_heatmap_figure(data, **kw)

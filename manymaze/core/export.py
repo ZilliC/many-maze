@@ -8,7 +8,6 @@ import re
 import datetime as _dt
 import html
 import math
-from dataclasses import asdict
 from pathlib import Path
 from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
 
@@ -191,12 +190,12 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
     out_dir.mkdir(parents=True, exist_ok=True)
     tests = [t for t in (tests if tests is not None else project.tests) if project.has_track(t)]
     written = []
-    beh = [asdict(b) for b in project.behaviours]
+    beh = project.behaviours
     for k, t in enumerate(tests):
         if should_stop and should_stop():
             break
         tracks = project.load_tracks(t)
-        app = charts.apparatus_of_test(project, t)
+        app = project.apparatus_of(t)
         ids = [t.animal_id] + list(t.extra_animals)
         for i, tr in enumerate(tracks):
             raw_cols = [c for c in COLUMNS if c != "t"]
@@ -464,7 +463,6 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     parameters), group heat maps on a common scale, results and statistics (compared between treatments as the
     Statistics page does). rows: the results to tabulate and compare (default: the whole-test results of `tests`)."""
     from . import analyses, charts, plots
-    from .video import VideoSource
 
     tests = tests if tests is not None else [t for t in project.tests
                                              if t.status not in INACTIVE_STATUSES and project.has_results(t)]
@@ -486,7 +484,7 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     out.append(f"<p>{html.escape(project.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}. "
                f"{len(tests)} tests, {len(project.animals)} animals.</p>")
-    beh = [asdict(b) for b in project.behaviours]
+    beh = project.behaviours
     if include_plots and tests:
         out.append("<h2>Tracks</h2><div class='grid'>")
         hm_vmax = None
@@ -495,20 +493,15 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
             for t in tests:
                 trs = project.load_tracks(t)
                 if trs:
-                    H, _ = plots.occupancy(trs[:1], charts.apparatus_of_test(project, t))
+                    H, _ = plots.occupancy(trs[:1], project.apparatus_of(t))
                     hm_vmax = max(hm_vmax, float(H.max()) if H.size else 0.0)
             hm_vmax = hm_vmax or None
         for t in tests:
             tracks = project.load_tracks(t)
             if not tracks:
                 continue
-            app = charts.apparatus_of_test(project, t)
-            frame = None
-            try:
-                with VideoSource(project.abs_path(t.video)) as v:
-                    frame = v.frame_at(int(t.start_s * v.fps))
-            except Exception:
-                pass
+            app = project.apparatus_of(t)
+            frame = project.start_frame(t)
             an = project.get_animal(t.animal_id)
             title = f"Test {t.id} · {t.animal_id} · {an.group if an else ''}"
             markers = plots.behaviour_markers(tracks[0], app, project.analysis_for(t), t.events, beh)
@@ -520,7 +513,7 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
             if chart_parameters:
                 names = [p.name for p in charts.parameters(app, tracks[0], beh) if p.name in chart_parameters]
                 if names:
-                    fig = charts.chart_figure(tracks[0], app, names, project.analysis_for(t), t.events, beh,
+                    fig = plots.chart_figure(tracks[0], app, names, project.analysis_for(t), t.events, beh,
                                               size=(6.5, 1.0 + 1.1 * len(names)))
                     card += "<br>" + _img(plots.fig_to_png(fig), 560)
             out.append(card + "</div>")
@@ -529,20 +522,11 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         groups = {}
         for t in tests:
             a = project.get_animal(t.animal_id)
-            groups.setdefault(a.group if a else "", []).append(t)
+            groups.setdefault(a.group if a and a.group else "No group", []).append(t)
         if len(groups) > 1:
-            app0 = charts.apparatus_of_test(project, tests[0])
-            data = []
-            for g, ts in groups.items():
-                trs = []
-                for t in ts:
-                    for tr in project.load_tracks(t)[:1]:
-                        trs.append(plots.align_track(tr, charts.apparatus_of_test(project, t),
-                                                     (t.variables or {}).get("heatmap_transform", "none"), app0))
-                data.append((g or "No group", trs, app0))
-            fig = plots.group_heatmap_figure(data, norm="auto" if heatmap_norm == "fixed" else heatmap_norm)
+            fig = plots.group_heatmap(project, groups, norm="auto" if heatmap_norm == "fixed" else heatmap_norm)
             out.append("<h2>Group occupancy</h2><div class='grid'><div class='card'>"
-                       f"{_img(plots.fig_to_png(fig), 300 * min(3, len(data)) + 60)}</div></div>")
+                       f"{_img(plots.fig_to_png(fig), 300 * min(3, len(groups)) + 60)}</div></div>")
     if stats_measures and rows:
         out.append("<h2>Statistics</h2>")
         for m in stats_measures:
