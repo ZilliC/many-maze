@@ -263,6 +263,12 @@ class Project:
         self.tests.append(t)
         return t
 
+    def add_stage(self, name: str) -> str:
+        """Add the stage to the experiment's stages if it is new. Returns the name."""
+        if name and name not in self.stages:
+            self.stages.append(name)
+        return name
+
     def ensure_animal(self, aid: str, group: str = "") -> Animal:
         a = self.get_animal(aid)
         if a is None:

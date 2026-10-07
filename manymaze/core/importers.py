@@ -163,9 +163,7 @@ def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | N
         a = project.ensure_animal(aid, _cell(r, mapping.get("group")))
         if not a.group and _cell(r, mapping.get("group")):
             a.group = _cell(r, mapping.get("group"))
-        stage = _cell(r, mapping.get("stage"))
-        if stage and stage not in project.stages:
-            project.stages.append(stage)
+        stage = project.add_stage(_cell(r, mapping.get("stage")))
         trial = parse_number(_cell(r, mapping.get("trial")))
         video = _cell(r, mapping.get("video"))
         if video and video_dir is not None:
@@ -223,3 +221,24 @@ def import_track(header, rows, mapping: dict, scale: float = 1.0, offset=(0.0, 0
     tr = Track(t=t, **vals, detected=detected, fps=fps or est)
     tr.meta["source"] = "imported table"
     return tr
+
+
+def dlc_bodyparts(path) -> list[str]:
+    """Body parts of a DeepLabCut CSV in column order ([] if the file is not one)."""
+    with open(path, newline="") as f:
+        for i, row in enumerate(csv.reader(f)):
+            if row and row[0].strip().lower() == "bodyparts":
+                return list(dict.fromkeys(row[1:]))
+            if i > 5:
+                break
+    return []
+
+
+def trim_to_test(track: Track, start_s: float, duration_s: float) -> Track:
+    """The test period (from start_s, duration_s seconds; 0 = to the end) of a track covering the whole video, in
+    test time."""
+    if start_s > 0 or duration_s:
+        track = track.slice_time(start_s, start_s + duration_s if duration_s else math.inf)
+        track.t = track.t - start_s
+    track.meta["video_start_s"] = start_s
+    return track

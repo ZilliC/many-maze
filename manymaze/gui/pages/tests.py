@@ -3,8 +3,7 @@ the next test of each apparatus is "Ready" — plus batch tracking, track import
 
 from __future__ import annotations
 
-import csv
-import dataclasses
+from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QModelIndex, QRect,
@@ -16,7 +15,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
-from ...core.batch import TrackingCancelled, track_tests, tracking_batches  # noqa: F401 (re-exported)
+from ...core.batch import track_tests, tracking_batches
+from ...core.importers import dlc_bodyparts, trim_to_test
 from ...core.track import Track, import_deeplabcut_csv
 from ...core.video import VIDEO_EXTENSIONS, VideoSource
 from .. import theme
@@ -69,13 +69,8 @@ def ready_tests(project) -> set[int]:
     return out
 
 
-# ------------------------------------------------------------------ tracking jobs
-def track_tests_job(project, tests):
-    """Return fn(progress, should_stop) tracking tests (in parallel processes) from a background thread.
-
-    The result is a dict {"tracked": [test ids], "cancelled": bool, "errors": [str], "workers": n}.
-    """
-    return lambda progress, should_stop: track_tests(project, tests, progress, should_stop)
+def track_tests_job(project, tests):  # kept for testview
+    return partial(track_tests, project, tests)
 
 
 # ------------------------------------------------------------------ model
@@ -186,7 +181,7 @@ class TestsModel(QAbstractTableModel):
                     tips.append(f"Re-performs test {t.replaces}")
                 return "\n".join(tips) or None
         elif role == Qt.ForegroundRole:
-            inactive = t.status in ("excluded", "superseded", "skipped")
+            inactive = t.status in wf.INACTIVE_STATUSES
             if inactive:
                 return QBrush(QColor(GREY_FG))
             if t.id in self.ready:
@@ -203,7 +198,7 @@ class TestsModel(QAbstractTableModel):
                 return QBrush(QColor(READY_BG))
         elif role == Qt.DecorationRole:
             if c == C_ID:
-                inactive = t.status in ("excluded", "superseded", "skipped")
+                inactive = t.status in wf.INACTIVE_STATUSES
                 return self.dot(GREY_FG if inactive else READY_FG if t.id in self.ready else LINK_FG)
             if c == C_GROUP and not p.blind:
                 a = p.get_animal(t.animal_id)
@@ -239,8 +234,7 @@ class TestsModel(QAbstractTableModel):
             st = str(value).strip()
             if st == t.stage:
                 return False
-            if st and st not in p.stages:
-                p.stages.append(st)
+            p.add_stage(st)
             t.stage = st
         elif c == C_TRIAL:
             t.trial = int(value)
@@ -525,20 +519,6 @@ class ScheduleDialog(QDialog):
         head = ", ".join(f"{r['animal_id']}/{r['stage'] or '–'}/{r['trial']}" for r in rows[:6])
         self.preview.setText(f"<b>{len(rows)}</b> test{'s' if len(rows) != 1 else ''} will be created"
                              + (f" — first: {head}{' …' if len(rows) > 6 else ''}" if rows else "."))
-
-
-def dlc_bodyparts(path) -> list[str]:
-    with open(path, newline="") as f:
-        for i, row in enumerate(csv.reader(f)):
-            if row and row[0].strip().lower() == "bodyparts":
-                seen = []
-                for p in row[1:]:
-                    if p not in seen:
-                        seen.append(p)
-                return seen
-            if i > 5:
-                break
-    return []
 
 
 class DlcImportDialog(QDialog):
@@ -838,7 +818,7 @@ class TestsPage(Page):
         self.a_import_data.setEnabled(n == 1)
         sel = self.selected_tests() if n else []
         self.a_excl.setText("Include" if sel and all(t.status == "excluded" for t in sel) else "Exclude")
-        self.a_skip.setEnabled(any(t.status not in ("skipped", "excluded", "superseded") for t in sel))
+        self.a_skip.setEnabled(any(t.status not in wf.INACTIVE_STATUSES for t in sel))
         self.a_resume.setEnabled(any(t.status == "skipped" for t in sel))
 
     def _double_clicked(self, index):
@@ -904,9 +884,7 @@ class TestsPage(Page):
             aid = r.get("animal_id", "")
             if aid:
                 p.ensure_animal(aid)
-            st = r.get("stage", "")
-            if st and st not in p.stages:
-                p.stages.append(st)
+            st = p.add_stage(r.get("stage", ""))
             new.append(p.add_test(r.get("video", ""), aid, r.get("apparatus", ""), stage=st,
                                   trial=int(r.get("trial", 1)), variables=dict(r.get("variables") or {})))
         self.main.mark_dirty()
@@ -965,14 +943,7 @@ class TestsPage(Page):
         self.refresh()
 
     def duplicate_selected(self):
-        p = self.project
-        new = []
-        for t in self.selected_tests():
-            d = dataclasses.asdict(t)
-            d.update(id=p.next_test_id(), events=[], status="pending", recorded_at="")
-            nt = type(t).from_dict(d)
-            p.tests.append(nt)
-            new.append(nt)
+        new = [wf.duplicate_test(self.project, t) for t in self.selected_tests()]
         if new:
             self.main.mark_dirty()
             self.refresh()
@@ -988,12 +959,7 @@ class TestsPage(Page):
                 "their tracks? Video files are not deleted.") != QMessageBox.Yes:
             return
         for t in tests:
-            if p.path is not None:
-                for i in range(t.n_animals):
-                    tp = p.track_path(t, i)
-                    if tp.exists():
-                        tp.unlink()
-            p.tests.remove(t)
+            wf.delete_test(p, t)
         self.main.mark_dirty()
         self.refresh()
 
@@ -1009,7 +975,7 @@ class TestsPage(Page):
         self.refresh()
 
     def skip_selected(self):
-        tests = [t for t in self.selected_tests() if t.status not in ("skipped", "excluded", "superseded")]
+        tests = [t for t in self.selected_tests() if t.status not in wf.INACTIVE_STATUSES]
         for t in tests:
             wf.skip_test(t)
         self._status_changed(tests, "Skipped")
@@ -1026,22 +992,6 @@ class TestsPage(Page):
         self.main.mark_dirty()
         self.refresh()
         self.main.status(f"{verb} {len(tests)} test{'s' if len(tests) != 1 else ''}.")
-
-    def toggle_skip(self):
-        """Skip the selected tests, or resume them when they are all skipped."""
-        p = self.project
-        tests = self.selected_tests()
-        if not tests:
-            return
-        resume = all(t.status == "skipped" for t in tests)
-        for t in tests:
-            if resume:
-                wf.resume_test(p, t)
-            elif t.status not in ("excluded", "superseded"):
-                wf.skip_test(t)
-        self.main.mark_dirty()
-        self.refresh()
-        self.main.status(f"{'Resumed' if resume else 'Skipped'} {len(tests)} test{'s' if len(tests) != 1 else ''}.")
 
     def reperform_selected(self) -> list:
         p = self.project
@@ -1119,7 +1069,7 @@ class TestsPage(Page):
         if n_batches < len(tests):
             title += f" ({n_batches} video pass{'es' if n_batches != 1 else ''})"
         self._tracking = True
-        return run_with_progress(self, title, track_tests_job(p, tests), on_done=self._tracking_done,
+        return run_with_progress(self, title, partial(track_tests, p, tests), on_done=self._tracking_done,
                                  on_fail=self._tracking_failed)
 
     def _tracking_done(self, res):
@@ -1194,12 +1144,7 @@ class TestsPage(Page):
                 trim = opts.pop("trim", True)
                 tr = import_deeplabcut_csv(path, **opts)
                 if trim:
-                    t0 = test.start_s
-                    dur = test.duration_s or p.test_duration_s
-                    if t0 > 0 or dur:
-                        tr = tr.slice_time(t0, t0 + dur if dur else float("inf"))
-                        tr.t = tr.t - t0
-                    tr.meta["video_start_s"] = t0
+                    tr = trim_to_test(tr, test.start_s, test.duration_s or p.test_duration_s)
             else:
                 tr = Track.from_csv(path)
             if len(tr) == 0:
