@@ -68,7 +68,7 @@ def test_moveable_zone_per_test(tmp_path):
 def test_hardware_and_procedure_editor_hookups(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QDialog
 
-    from manymaze.gui.procedure_editor import IODevicesDialog
+    from manymaze.gui.io_devices_dialog import IODevicesDialog
     from manymaze.gui.touchscreen import TouchScreenDialog, TouchStimulusWindow
 
     w, p = _window(tmp_path)

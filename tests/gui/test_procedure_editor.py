@@ -8,7 +8,8 @@ from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 from manymaze.core import procedures as pr
 from manymaze.core import templates
 from manymaze.core.project import Project
-from manymaze.gui.procedure_editor import IODevicesDialog, ProcedureEditor
+from manymaze.gui.io_devices_dialog import IODevicesDialog
+from manymaze.gui.procedure_editor import ProcedureEditor
 
 app = QApplication.instance() or QApplication([])
 
@@ -289,7 +290,7 @@ def test_touchscreen_window_drives_engine():
     assert marks == ["wrong", "outside", "correct"] and win.stimuli == {}
     assert [a for a, _x, _y in win.touches] == ["right", "", "left"]
     eng.stop(2)
-    from manymaze.core.iodevices import io_measures
+    from manymaze.core.iomeasures import io_measures
     m = io_measures(eng.io_events, 2)
     assert m["touch left: activations"] == 1 and m["left: times on"] == 1
     win.close()

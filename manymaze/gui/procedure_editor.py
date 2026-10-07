@@ -18,13 +18,12 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStyle, QTextBrowser,
                                QToolButton, QVBoxLayout, QWidget)
 
-from ..core import iodevices as iod
+from ..core import ioconfig
 from ..core import procedures as pr
 from ..core.apparatus import unique_name
 from ..core.procedures import edit as pe
 from .icons import icon as named_icon
-from .io_devices_dialog import IODevicesDialog  # noqa: F401  (re-exported)
-from .statement_tree import ELSE, TYPE_ROLE, StatementTree, block_parts  # noqa: F401  (re-exported)
+from .statement_tree import StatementTree
 from .widgets import loading, value_text
 
 ROLE = Qt.UserRole
@@ -655,7 +654,7 @@ class ProcedureEditor(QWidget):
             devs = self.project.io_devices if self.project is not None else []
             return [d.get("name") for d in devs if typ == "device" or d.get("type") == "audio"]
         if typ in ("input", "output"):
-            want = iod.INPUT_KINDS if typ == "input" else iod.OUTPUT_KINDS
+            want = ioconfig.INPUT_KINDS if typ == "input" else ioconfig.OUTPUT_KINDS
             devs = self.project.io_devices if self.project is not None else []
             return sorted({c.get("name") for d in devs for c in d.get("channels", []) or []
                            if c.get("kind", "input") in want and c.get("name")})

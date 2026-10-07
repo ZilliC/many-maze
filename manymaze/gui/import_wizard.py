@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QListWidgetItem, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import importers as imp
-from .widgets import error_box
+from .widgets import error_box, hint
 
 KINDS = {
     "animals": ("Import animals", imp.ANIMAL_ROLES,
@@ -41,11 +41,8 @@ class ImportDialog(QDialog):
         head = QLabel(title)
         head.setObjectName("PageTitle")
         lay.addWidget(head)
-        hint = QLabel("Choose a spreadsheet saved from ANY-maze (File ▸ Save / Copy of a spreadsheet as CSV, text or "
-                      "Excel) or from other software. Columns are matched by name — check the mapping below.")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
+        lay.addWidget(hint("Choose a spreadsheet saved from ANY-maze (File ▸ Save / Copy of a spreadsheet as CSV, text "
+                           "or Excel) or from other software. Columns are matched by name — check the mapping below."))
         row = QHBoxLayout()
         self.path = QLineEdit(path or "")
         self.path.setReadOnly(True)
