@@ -114,6 +114,18 @@ def median_background(frames: Sequence[np.ndarray]) -> np.ndarray:
     return np.median(stack, axis=0).astype(np.uint8)
 
 
+def sample_background(src, n: int = 21) -> np.ndarray | None:
+    """Median of n frames evenly spaced through an open video source (frame_count / frame_at / seek, e.g. a live
+    source simulated by a file); the source is rewound."""
+    count = src.frame_count
+    if not count:
+        return None
+    frames = [f for f in (src.frame_at(int(i)) for i in np.unique(np.linspace(0, count - 1, n).astype(int)))
+              if f is not None]
+    src.seek(0)
+    return median_background(frames) if frames else None
+
+
 def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarray:
     with VideoSource(video_path) as v:
         if settings.background == "frame":

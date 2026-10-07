@@ -101,3 +101,21 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     if notes:
         test.notes = (test.notes + "\n" + "\n".join(notes)).strip()
     return True
+
+
+def finish_live_test(project, test, session: Session, record_path: str | None = None, save: bool = True,
+                     new_test: bool = False) -> bool:
+    """A live test is over: store the session in its test (:func:`save_live_test`), or discard it — its recording
+    and crash-recovery file are deleted and a test created for it (new_test) is removed.  Returns True when
+    stored; the caller then saves the project and removes the crash-recovery file (``session.remove_autosave()``)."""
+    if save and project is not None and test is not None and save_live_test(project, test, session, record_path):
+        return True
+    session.remove_autosave()
+    if record_path:
+        try:
+            Path(record_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    if new_test and project is not None and test in project.tests:
+        project.tests.remove(test)
+    return False

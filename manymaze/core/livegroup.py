@@ -6,15 +6,14 @@ from __future__ import annotations
 
 import datetime as _dt
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
 
-from .camera import FramePacer, SourceSpec
+from .camera import SourceReader, SourceSpec
 from .session import Session
-from .tracking import draw_tracking, median_background
+from .tracking import draw_tracking
 
 DEFAULT_START_KEYS = ["Space", "PageDown", "F5"]
 DEFAULT_STOP_KEYS = ["B", "PageUp"]
@@ -81,49 +80,15 @@ class LiveEntry:
         return self.session.elapsed if self.session is not None else 0.0
 
 
-class SourceRunner:
-    """Reads one source in its own thread and dispatches every frame to the group.
+class SourceRunner(SourceReader):
+    """A source of the group, read in its own thread: every frame goes to the sessions bound to it.  A display
+    image (every animal and its trail) is rendered only when the UI took the previous one."""
 
-    A rendered display image (all sessions' overlays) is produced only when the UI took the previous one."""
-
-    def __init__(self, group: "LiveGroup", key: str, spec: SourceSpec, opener=None, speed: float = 1.0,
-                 loop: bool = True):
-        self.group, self.key, self.spec = group, key, spec
-        self.opener = opener
-        self.speed = speed
-        self.loop = loop
-        self.fps = 25.0
-        self.size: tuple[int, int] | None = None
-        self.error = ""
-        self.ended = False
-        self.opened = False
-        self.background: np.ndarray | None = None
-        self.last_frame: np.ndarray | None = None
-        self.frames = 0
-        self.src = None
+    def __init__(self, group: "LiveGroup", key: str, spec: SourceSpec, opener=None, speed: float = 1.0):
+        super().__init__(spec, opener, speed, name=f"live-{key}")
+        self.group, self.key = group, key
         self._display: np.ndarray | None = None
         self._want_display = True
-        self._stop = False
-        self._restart = False
-        self.thread = threading.Thread(target=self._run, name=f"live-{key}", daemon=True)
-
-    def start(self):
-        self.thread.start()
-
-    def stop(self, wait: float = 5.0):
-        self._stop = True
-        if self.thread.is_alive() and threading.current_thread() is not self.thread:
-            self.thread.join(wait)
-
-    def restart(self):
-        self._restart = True
-
-    def raw_frames(self):
-        """(primary, second) untransformed frames for the camera options dialog."""
-        src = self.src
-        if src is not None and hasattr(src, "last_raw"):
-            return src.last_raw, src.last_raw2
-        return self.last_frame, None
 
     def take_display(self) -> np.ndarray | None:
         d, self._display = self._display, None
@@ -131,73 +96,20 @@ class SourceRunner:
             self._want_display = True
         return d
 
-    def _run(self):
-        try:
-            src = self.spec.open(self.opener)
-        except Exception as e:
-            self.error = f"Cannot open {self.spec.label}: {e}"
-            self.group._source_failed(self.key, self.error)
-            return
-        try:
-            self.src = src
-            self.fps = float(getattr(src, "fps", 25.0) or 25.0)
-            self.size = (int(src.width), int(src.height))
-            self.opened = True
-            if not src.is_camera and getattr(src, "frame_count", 0):
-                try:
-                    n = src.frame_count
-                    self.background = median_background(
-                        [f for f in (src.frame_at(int(i)) for i in np.unique(np.linspace(0, n - 1, 15).astype(int)))
-                         if f is not None])
-                except Exception:
-                    self.background = None
-                src.seek(0)
-            self._loop(src)
-        except Exception as e:  # surfaced to the UI through group warnings
-            import traceback
+    def on_frame(self, frame: np.ndarray, ts: float):
+        self.group.process(self.key, frame, ts)
+        if self._want_display:
+            self._want_display = False
+            self._display = self.group.render(self.key, frame)
 
-            traceback.print_exc()
-            self.error = f"{type(e).__name__}: {e}"
-            self.group._source_failed(self.key, self.error)
-        finally:
-            src.release()
+    def keep_looping(self) -> bool:
+        return not self.group.has_active(self.key)
 
-    def _loop(self, src):
-        pacer = FramePacer(self.fps, src.is_camera, self.speed)
-        failures = 0
-        while not self._stop:
-            if self._restart:
-                self._restart = False
-                self.ended = False
-                src.seek(0)
-                pacer.reset()
-            if self.ended:
-                time.sleep(0.02)
-                continue
-            ok, frame = src.read()
-            if not ok:
-                if src.is_camera:
-                    failures += 1
-                    if failures > 100:
-                        raise IOError("the camera stopped delivering frames")
-                    time.sleep(0.01)
-                    continue
-                if self.loop and not self.group.has_active(self.key):
-                    src.seek(0)
-                    pacer.reset()
-                    continue
-                self.ended = True
-                self.group.source_ended(self.key)
-                continue
-            failures = 0
-            pacer.speed = self.speed
-            ts = pacer.next()
-            self.last_frame = frame
-            self.frames += 1
-            self.group.process(self.key, frame, ts)
-            if self._want_display:
-                self._want_display = False
-                self._display = self.group.render(self.key, frame)
+    def on_ended(self):
+        self.group.source_ended(self.key)
+
+    def on_failed(self, msg: str):
+        self.group.source_failed(self.key, msg)
 
 
 class LiveGroup:
@@ -294,7 +206,7 @@ class LiveGroup:
         for r in self.runners.values():
             r.speed = speed
 
-    def _source_failed(self, key, msg):
+    def source_failed(self, key, msg):
         self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", msg))
         for e in self.entries_for(key):
             s = e.session

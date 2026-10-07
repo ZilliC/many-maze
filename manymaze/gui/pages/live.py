@@ -10,15 +10,13 @@ from __future__ import annotations
 import copy
 import datetime as _dt
 import json
-import os
 import re
 import threading
-import time
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QRectF, QSize, QThread, QTime, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, QTime, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
@@ -28,12 +26,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
 
 from ...core import autosave
 from ...core import workflow as wf
-from ...core.camera import CameraView, SourceSpec, TransformedSource, camera_settings, set_camera_settings
+from ...core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
 from ...core.live import LiveSession, ObservationSession, open_devices
 from ...core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, device_plan
 from ...core.procedures import Outputs
-from ...core.session import save_live_test
-from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_tracking, median_background
+from ...core.session import finish_live_test
+from ...core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras
 from ..icons import icon
 from ..live_widgets import (LAYOUT_LABELS, LAYOUTS, CameraOptionsDialog, MonitorPanel, ObservationPanel,
@@ -94,151 +92,48 @@ def recording_path(project, test, size=(640, 480), fps=25.0) -> str:
             probe.unlink()
 
 
-def _source_background(src) -> np.ndarray | None:
-    """Median of frames sampled through a (transformed) file source."""
-    n = getattr(src, "frame_count", 0)
-    if not n:
-        return None
-    frames = [f for f in (src.frame_at(int(i)) for i in np.unique(np.linspace(0, n - 1, 21).astype(int)))
-              if f is not None]
-    src.seek(0)
-    return median_background(frames) if frames else None
-
-
-class FrameGrabber(QThread):
-    """Reads frames from a camera / file and runs `handler(frame, t)` on them, off the UI thread.
-
-    handler returns (display_frame, info); frame_ready is only emitted when the UI has consumed the previous
-    frame (call ack()), so a slow UI drops display frames but never tracking frames.
-    Files are paced at their frame rate × speed and loop while `loop` is True.  An optional CameraView (region,
-    zoom, rotation, flip) and a second source merged into the same image are applied to every frame.
-    """
-
+class _GrabberSignals(QObject):
     frame_ready = Signal(object, object)
     opened = Signal(int, int, float)
     background_ready = Signal(object)
     ended = Signal()
     failed = Signal(str)
 
-    def __init__(self, source, handler, size=None, fps=None, parent=None, view: CameraView | None = None,
-                 second=None, layout: str = "side"):
-        super().__init__(parent)
-        self.source = source
+
+class FrameGrabber(SourceReader):
+    """The single test's source: `handler(frame, t)` tracks every frame in the reader thread and returns
+    (display frame, info).  frame_ready is only emitted when the UI took the previous display (call ack()), so a
+    slow UI drops display frames but never tracking frames.  Video files loop while `loop` is True."""
+
+    def __init__(self, spec: SourceSpec, handler, opener=None):
+        super().__init__(spec, opener, name="live-single")
+        self.signals = _GrabberSignals()
         self.handler = handler
-        self.size = size
-        self.req_fps = fps
-        self.view = view or CameraView()
-        self.second = second
-        self.layout = layout
         self.loop = True
-        self.speed = 1.0
-        self._stop = False
-        self._restart = False
         self._busy = False
-        self.fps = 25.0
-        self.src = None
-
-    def stop(self):
-        self._stop = True
-
-    def restart(self):
-        self._restart = True
 
     def ack(self):
         self._busy = False
 
-    def raw_frames(self):
-        src = self.src
-        if isinstance(src, TransformedSource):
-            return src.last_raw, src.last_raw2
-        return None, None
+    def keep_looping(self) -> bool:
+        return self.loop
 
-    def run(self):
-        try:
-            w, h = self.size or (None, None)
-            src = VideoSource(self.source, w, h, self.req_fps or None)
-            if self.second is not None or not self.view.is_identity:
-                second = None
-                if self.second is not None:
-                    try:
-                        second = VideoSource(self.second, w, h, self.req_fps or None)
-                    except Exception:
-                        src.release()
-                        raise
-                src = TransformedSource(src, self.view, second, self.layout)
-        except Exception as e:
-            self.failed.emit(f"Cannot open {'camera' if isinstance(self.source, int) else 'video'}: {e}")
-            return
-        self.src = src
-        self.fps = src.fps or 25.0
-        self.opened.emit(src.width, src.height, self.fps)
-        try:
-            if not src.is_camera:
-                try:
-                    if isinstance(src, TransformedSource):
-                        bg = _source_background(src)
-                    else:
-                        bg = compute_background(str(self.source), DetectionSettings(background_samples=21))
-                    if bg is not None:
-                        self.background_ready.emit(bg)
-                except Exception:
-                    pass
-            self._loop(src)
-        finally:
-            src.release()
+    def on_opened(self):
+        self.signals.opened.emit(*self.size, self.fps)
+        if self.background is not None:
+            self.signals.background_ready.emit(self.background)
 
-    def _loop(self, src):
-        idx = 0
-        t_start = time.monotonic()
-        at_end = False
-        failures = 0
-        while not self._stop:
-            if self._restart:
-                self._restart = False
-                at_end = False
-                src.seek(0)
-                idx = 0
-                t_start = time.monotonic()
-            if at_end:
-                self.msleep(20)
-                continue
-            ok, frame = src.read()
-            if not ok:
-                if src.is_camera:
-                    failures += 1
-                    if failures > 100:
-                        self.failed.emit("The camera stopped delivering frames.")
-                        return
-                    self.msleep(10)
-                    continue
-                if self.loop:
-                    src.seek(0)
-                    idx = 0
-                    t_start = time.monotonic()
-                    continue
-                at_end = True
-                self.ended.emit()
-                continue
-            failures = 0
-            if src.is_camera:
-                ts = time.monotonic() - t_start
-            else:
-                ts = idx / self.fps
-                delay = t_start + ts / max(self.speed, 1e-3) - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-            idx += 1
-            try:
-                out = self.handler(frame, ts)
-            except Exception as e:  # surfaced to the UI once, then stop
-                import traceback
+    def on_frame(self, frame, ts):
+        out = self.handler(frame, ts)
+        if not self._busy:
+            self._busy = True
+            self.signals.frame_ready.emit(*out)
 
-                traceback.print_exc()
-                self.failed.emit(f"{type(e).__name__}: {e}")
-                return
-            if not self._busy:
-                self._busy = True
-                self.frame_ready.emit(*out)
+    def on_ended(self):
+        self.signals.ended.emit()
+
+    def on_failed(self, msg: str):
+        self.signals.failed.emit(msg)
 
 
 TRAIL_LEN = 250  # positions drawn behind the animal on the camera images
@@ -1383,15 +1278,15 @@ class LivePage(Page):
         size = self.resolution.currentData() if not self.simulating else None
         fps = self.cam_fps.value() if not self.simulating else None
         self._source_is_file = self.simulating
-        g = FrameGrabber(src, self.process_frame, size=size, fps=fps, parent=self, view=self._view,
-                         second=self._second, layout=self._merge_layout)
+        spec = SourceSpec(src, self._second, self._merge_layout, self._view, size, fps or None)
+        g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
         g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
-        g.frame_ready.connect(self._on_frame)
-        g.opened.connect(self._on_opened)
-        g.background_ready.connect(self._on_file_background)
-        g.ended.connect(self._on_source_ended)
-        g.failed.connect(self._on_grab_failed)
-        g.finished.connect(self._grabber_finished)
+        sig = g.signals
+        sig.frame_ready.connect(self._on_frame)
+        sig.opened.connect(self._on_opened)
+        sig.background_ready.connect(self._on_file_background)
+        sig.ended.connect(self._on_source_ended)
+        sig.failed.connect(self._on_grab_failed)
         self.grabber = g
         g.start()
         self._update_buttons()
@@ -1405,8 +1300,6 @@ class LivePage(Page):
             return
         self.grabber = None
         g.stop()
-        g.wait(5000)
-        g.deleteLater()
         self._update_buttons()
         if self.session is None:
             self._set_state_display("idle")
@@ -1419,12 +1312,6 @@ class LivePage(Page):
                 QMessageBox.information(self, "Run tests", "Stop the test before stopping the camera.")
                 return
             self.stop_preview()
-
-    def _grabber_finished(self):
-        if self.grabber is not None and self.grabber.isFinished():
-            g, self.grabber = self.grabber, None
-            g.deleteLater()
-            self._update_buttons()
 
     def _on_opened(self, w, h, fps):
         self._fps = fps
@@ -1687,7 +1574,7 @@ class LivePage(Page):
             self.devices = open_devices(self.project)
         return self.devices
 
-    def _autosave_args(self, test, apparatus: str = "") -> dict:
+    def _autosave_args(self, test) -> dict:
         """Crash-recovery side file of a live test (see core.autosave)."""
         p = self.project
         if p is None or p.path is None:
@@ -1697,8 +1584,28 @@ class LivePage(Page):
         except Exception:
             return {}
         return {"autosave_path": path, "autosave_meta": {
-            "test_id": test.id, "animal": test.animal_id, "apparatus": apparatus or test.apparatus,
-            "stage": getattr(test, "stage", ""), "trial": getattr(test, "trial", 1)}}
+            "test_id": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
+            "trial": test.trial}}
+
+    def _make_session(self, test, app, bg, size, fps: float, outputs, devices, name: str, entry=None,
+                      on_stimulus=None) -> LiveSession:
+        """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
+        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
+        p = self.project
+        settings = self._detection_settings(test)
+        if settings.background == "frame" and bg is None:
+            settings.background = "adaptive"
+            self._log("No empty-arena background: using an adaptive background.", entry)
+        s = LiveSession(app, settings, duration_s=self.duration.value(), start_mode=self._session_mode(),
+                        procedures=copy.deepcopy(p.procedures), outputs=outputs,
+                        record_path=recording_path(p, test, size, fps) if self.record.isChecked() else None,
+                        fps=fps, analysis=p.analysis_for(test), devices=devices, variables=p.variables,
+                        record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
+                        name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
+                        outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test))
+        if bg is not None:
+            s.set_background(bg)
+        return s
 
     def _close_devices(self):
         if self.devices is not None and not self.any_active():
@@ -1742,34 +1649,20 @@ class LivePage(Page):
         if self.grabber is None and not self.start_preview():
             self._discard_new_test()
             return False
-        settings = self._detection_settings()
-        bg = self._current_background()
-        if settings.background == "frame" and bg is None:
-            settings.background = "adaptive"
-            self._log("No empty-arena background: using an adaptive background.")
-        size = self._frame_size or (640, 480)
-        self._record_path = recording_path(p, test, size, self._fps) if self.record.isChecked() else None
-        port = self.serial.currentText().strip() or None
-        outputs = Outputs(port)
+        outputs = Outputs(self.serial.currentText().strip() or None)
         self._outputs = outputs
         for line in outputs.log:
             self._log(line)
         dur = self.duration.value()
         touch = self._touch_window()
-        session = LiveSession(p.get_apparatus(test.apparatus), settings, duration_s=dur,
-                              start_mode=self._session_mode(), procedures=copy.deepcopy(p.procedures),
-                              outputs=outputs, record_path=self._record_path, fps=self._fps,
-                              analysis=p.analysis_for(test), devices=self._open_devices(), variables=p.variables,
-                              record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
-                              name=f"Test {test.id} · {test.animal_id}", zone_overrides=test.zone_overrides,
-                              on_stimulus=touch.handle if touch is not None else None,
-                              outputs_off_on_pause=self.pause_off.isChecked(),
-                              **self._autosave_args(test))
+        session = self._make_session(test, p.get_apparatus(test.apparatus), self._current_background(),
+                                     self._frame_size or (640, 480), self._fps, outputs, self._open_devices(),
+                                     f"Test {test.id} · {test.animal_id}",
+                                     on_stimulus=touch.handle if touch is not None else None)
+        self._record_path = session.record_path
         if touch is not None:
             touch.clear()
             touch.connect_session(session)  # session lock first, like the camera thread (no deadlock)
-        if bg is not None:
-            session.set_background(bg)
         with self._lock:
             self._apparatus = session.apparatus
             self._fired_seen = 0
@@ -1860,26 +1753,16 @@ class LivePage(Page):
             self._outputs = None
         if self.grabber is not None:
             self.grabber.loop = True
-        p, test = self.project, self.test
+        test = self.test
         self.test = None
         el = s.elapsed
-        for t, msg in s.warnings:
-            self._log(f"{fmt_time(t)}  warning: {msg}")
-        if not save or p is None or test is None or not save_live_test(p, test, s, self._record_path):
-            s.remove_autosave()
-            _remove_file(self._record_path)
-            if test is not None and self._new_test and p is not None and test in p.tests:
-                p.tests.remove(test)
+        if not self._store(test, s, self._record_path, save, self._new_test):
             self._log("Test discarded.")
             self._set_state_display("preview" if self.grabber else "idle")
             self._update_buttons()
             self._close_devices()
             self.on_show()
             return
-        self.main.mark_dirty()
-        if self.main.save():
-            s.remove_autosave()
-        self.last_test_id = test.id
         self._log(f"Test {test.id} finished after {fmt_time(el)} and saved.")
         self._set_state_display("finished")
         self._hold_finished = True
@@ -1890,6 +1773,20 @@ class LivePage(Page):
         self.single_panel.set_title(f"{self.single_panel.title.text()} - {short_time(el)}")
         if not quiet:
             self.main.status(f"Test {test.id} saved. Press “Next test” to continue.")
+
+    def _store(self, test, session, record_path: str | None, save: bool, new_test: bool, entry=None) -> bool:
+        """A test is over (any mode): its warnings go to the log, then it is stored and the experiment saved, or
+        it is discarded (see session.finish_live_test).  Returns True when stored."""
+        prefix = f"{entry.label} · " if entry is not None else ""
+        for t, msg in session.warnings:
+            self._log(f"{prefix}{fmt_time(t)}  warning: {msg}", entry)
+        if not finish_live_test(self.project, test, session, record_path, save, new_test):
+            return False
+        self.main.mark_dirty()
+        if self.main.save():
+            session.remove_autosave()
+        self.last_test_id = test.id
+        return True
 
     def _discard_new_test(self):
         if self._new_test and self.test is not None and self.test in self.project.tests:
@@ -2423,15 +2320,11 @@ class LivePage(Page):
         m["test_id"] = test.id
         r = self.group.runners.get(e.source_key)
         size, fps = (r.size if r is not None and r.size else (640, 480)), (r.fps if r is not None else 25.0)
-        settings = self._detection_settings(test)
         bg = self._group_bgs.get(e.source_key)
         if bg is None and r is not None and r.background is not None:
             bg = r.background
         if bg is not None and bg.shape[:2] != (size[1], size[0]):
             bg = None
-        if settings.background == "frame" and bg is None:
-            settings.background = "adaptive"
-        m["record_path"] = recording_path(p, test, size, fps) if self.record.isChecked() else None
         if self._group_outputs is None:
             self._group_outputs = Outputs(self.serial.currentText().strip() or None)
         try:
@@ -2442,23 +2335,17 @@ class LivePage(Page):
                 p.tests.remove(test)
             m["test_id"] = None
             return False
-        s = LiveSession(app, settings, duration_s=dur, start_mode=self._session_mode(),
-                        procedures=copy.deepcopy(p.procedures), outputs=self._group_outputs,
-                        record_path=m["record_path"], fps=fps, analysis=p.analysis_for(test),
-                        devices=devices, variables=p.variables,
-                        record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
-                        name=f"Test {test.id} · {test.animal_id} · {app.name}",
-                        zone_overrides=test.zone_overrides, outputs_off_on_pause=self.pause_off.isChecked(),
-                        **self._autosave_args(test, app.name))
+        panel = self._panels.get(e.id)
+        if panel is not None:
+            panel.log.clear()
+        s = self._make_session(test, app, bg, size, fps, self._group_outputs, devices,
+                               f"Test {test.id} · {test.animal_id} · {app.name}", entry=e)
+        m["record_path"] = s.record_path
         m["io_plan"] = plan
-        if bg is not None:
-            s.set_background(bg)
         self.group.arm(e, s)
         self.main.mark_dirty()
-        p_ = self._panels.get(e.id)
-        if p_ is not None:
-            p_.log.clear()
-            p_.view.set_apparatus(s.apparatus)
+        if panel is not None:
+            panel.view.set_apparatus(s.apparatus)
         self._log(f"{e.label}: test {test.id} armed ({self.start_mode.currentText().lower()}).", e)
         return True
 
@@ -2595,19 +2482,9 @@ class LivePage(Page):
             m = e.meta
             s = e.session
             test = p.get_test(m.get("test_id")) if p is not None and m.get("test_id") is not None else None
-            for t, msg in s.warnings:
-                self._log(f"{e.label} · {fmt_time(t)}  warning: {msg}", e)
-            if e.aborted or test is None or not save_live_test(p, test, s, m.get("record_path")):
-                s.remove_autosave()
-                _remove_file(m.get("record_path"))
-                if test is not None and m.get("new_test") and test in p.tests:
-                    p.tests.remove(test)
+            if not self._store(test, s, m.get("record_path"), not e.aborted, bool(m.get("new_test")), e):
                 self._log(f"{e.label}: test discarded.", e)
             else:
-                self.main.mark_dirty()
-                if self.main.save():
-                    s.remove_autosave()
-                self.last_test_id = test.id
                 self._log(f"{e.label}: test {test.id} finished after {fmt_time(s.elapsed)} and saved.", e)
                 self._show_results(test, switch=False)
                 m["trial"] = int(m.get("trial", 1)) + 1
@@ -2675,16 +2552,10 @@ class LivePage(Page):
         o.finish()
         self.obs, self.obs_test = None, None
         self._schedule = None
-        p = self.project
-        if save and p is not None and test is not None and save_live_test(p, test, o):
-            self.main.mark_dirty()
-            self.main.save()
-            self.last_test_id = test.id
+        if self._store(test, o, None, save, self._obs_new):
             self._log(f"Observation of test {test.id} saved: {len(o.events)} events in {fmt_time(o.elapsed)}.")
             self._show_results(test)
         else:
-            if test is not None and self._obs_new and p is not None and test in p.tests:
-                p.tests.remove(test)
             self._log("Observation discarded.")
         if self.session is None and not any(e.state in ("waiting", "running", "paused")
                                              for e in self.group.entries):
@@ -3075,14 +2946,6 @@ def _confirm_id(parent, test) -> bool:
     except Exception:  # pragma: no cover
         return True
     return bool(confirm_animal_id(parent, test))
-
-
-def _remove_file(path):
-    if path and Path(path).exists():
-        try:
-            os.remove(path)
-        except OSError:
-            pass
 
 
 def _first_frame(path) -> np.ndarray | None:
