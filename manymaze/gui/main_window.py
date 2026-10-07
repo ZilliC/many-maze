@@ -595,6 +595,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, ms)
 
     def maybe_save(self) -> bool:
+        """Before the experiment closes: stop (and save) live tests still running, then offer to save changes."""
+        if not self._stop_live_tests():
+            return False
         if self.project is None or not self.dirty:
             return True
         r = QMessageBox.question(self, APP_NAME, f"Save changes to “{self.project.name}”?",
@@ -604,6 +607,19 @@ class MainWindow(QMainWindow):
         if r == QMessageBox.Save:
             return self.save()
         self.dirty = False  # discarded: don't ask again on the way to the next experiment
+        return True
+
+    def _stop_live_tests(self) -> bool:
+        """Live tests keep running in the background (Run tests): they are stopped and saved, or nothing happens."""
+        live = self.page("LivePage")
+        if live is None or not live.any_active():
+            return True
+        r = QMessageBox.question(self, APP_NAME, "Tests are still running on the Run tests page.\n\nStop them and "
+                                 "save the data recorded so far?", QMessageBox.Save | QMessageBox.Cancel,
+                                 QMessageBox.Save)
+        if r == QMessageBox.Cancel:
+            return False
+        live.stop_and_save_all()
         return True
 
     def new_project(self):

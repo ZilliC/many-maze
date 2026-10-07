@@ -328,7 +328,7 @@ def test_autosave_and_recovery(tmp_path):
     assert "interrupted" in t.notes.lower() and not side.exists()
 
 
-def test_autosave_removed_after_save(tmp_path):
+def test_autosave_kept_until_the_project_is_saved(tmp_path):
     proj = Project(name="p")
     proj.save(tmp_path / "p.mmaze")
     test = proj.add_test("", "A1", "")
@@ -338,6 +338,9 @@ def test_autosave_removed_after_save(tmp_path):
         s.process(_frame(), i / 25)
     s.finish()
     assert save_live_test(proj, test, s)
+    s.flush_autosave()
+    assert side.exists()  # the test is only in memory: a crash now must still be recoverable
+    s.remove_autosave()
     assert not side.exists()
 
 

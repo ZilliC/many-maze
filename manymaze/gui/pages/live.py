@@ -1146,18 +1146,13 @@ class LivePage(Page):
         """Live tests interrupted by a crash leave an autosave side file: store what they recorded."""
         try:
             rec = recover_autosaves(project)
-        except Exception as e:  # never block opening the experiment
+        except Exception as e:  # never block opening the experiment (the side files stay for the next time)
             self._log(f"Could not recover interrupted live tests: {e}")
             return
         if not rec:
             return
         ids = ", ".join(str(t.id) for t in rec)
         self._log(f"Recovered {len(rec)} live test(s) interrupted by a crash: {ids} (see the test notes).")
-        try:  # saved at once: the side files are gone (the other pages are still being set up: no main.save())
-            project.save()
-        except Exception as e:
-            self._log(f"Could not save the recovered tests: {e}")
-            self.main.mark_dirty()
         try:
             self.main.status(f"Recovered interrupted live test(s) {ids}.")
         except Exception:  # pragma: no cover
@@ -1256,15 +1251,18 @@ class LivePage(Page):
             self._touch = None
             self._touch_cfg = None
 
-    def shutdown(self):
-        self._close_touch()
+    def stop_and_save_all(self):
+        """Stop every test and save what it recorded (the window closes or another experiment opens)."""
         if self.session is not None:
             self.stop_test(save=True, quiet=True)
         if self.obs is not None:
             self.obs_stop(save=True)
-        if any(e.state in ("running", "paused") for e in self.group.entries):
-            self.group.stop_all(save=True)
-            self._save_finished_entries()
+        self.group.stop_all(save=True)
+        self._save_finished_entries()
+
+    def shutdown(self):
+        self._close_touch()
+        self.stop_and_save_all()
         self.group.close()
         self._save_finished_entries()
         self.stop_preview()
@@ -2005,7 +2003,8 @@ class LivePage(Page):
             self.on_show()
             return
         self.main.mark_dirty()
-        self.main.save()
+        if self.main.save():
+            s.remove_autosave()
         self.last_test_id = test.id
         self._log(f"Test {test.id} finished after {fmt_time(el)} and saved.")
         self._set_state_display("finished")
@@ -2734,7 +2733,8 @@ class LivePage(Page):
                 self._log(f"{e.label}: test discarded.", e)
             else:
                 self.main.mark_dirty()
-                self.main.save()
+                if self.main.save() and hasattr(s, "remove_autosave"):
+                    s.remove_autosave()
                 self.last_test_id = test.id
                 self._log(f"{e.label}: test {test.id} finished after {fmt_time(s.elapsed)} and saved.", e)
                 self._show_results(test, switch=False)

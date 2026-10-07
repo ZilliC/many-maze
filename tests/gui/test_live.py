@@ -160,6 +160,29 @@ def test_simulated_live_test_threaded(win):
     assert page.grabber is None
 
 
+def test_running_test_is_saved_or_kept_when_the_experiment_changes(win, monkeypatch):
+    p = win.project
+    video = p.abs_path(p.tests[0].video)
+    page = setup_page(win, video, duration=0)
+    page._on_file_background(compute_background(video, DetectionSettings(background_samples=21)))
+    page.start_preview = lambda: True
+    assert page.arm()
+    test = page.test
+    src = VideoSource(video)
+    for i in range(10):
+        ok, f = src.read()
+        page.feed_frame(f, i / 25)
+    src.release()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel)
+    win.close_project()
+    assert win.project is p and page.session is not None  # cancelled: the test keeps running
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Save)
+    win.close_project()
+    assert win.project is None and page.session is None
+    saved = Project.load(p.path).get_test(test.id)
+    assert saved is not None and saved.status == "tracked"
+
+
 def test_abort_discards_new_test(win):
     p = win.project
     video = p.abs_path(p.tests[0].video)
@@ -227,7 +250,7 @@ def test_several_tests_need_one_io_device_each(win, monkeypatch):
 
     other = LiveEntry(99, "src", Running(), "other", meta={"io_plan": "box1"})
     me = LiveEntry(100, "src", None, "me", meta={"device": ""})
-    page.group.entries.append(other)
+    page.group.entries += (other,)
     try:
         plan, msg = page._io_plan(me)
         assert plan is None and "Device" in msg  # automatic is refused while another test runs
@@ -242,7 +265,7 @@ def test_several_tests_need_one_io_device_each(win, monkeypatch):
         page._load_row_editor()
         assert [page.row_device.itemData(i) for i in range(page.row_device.count())] == ["", "box1", "box2", "-"]
     finally:
-        page.group.entries.remove(other)
+        page.group.entries = tuple(x for x in page.group.entries if x is not other)
         page._close_devices()
 
 

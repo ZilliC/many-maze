@@ -217,7 +217,7 @@ class LiveGroup:
     def __init__(self, start_keys=None, stop_keys=None, clock: Callable[[], _dt.datetime] = _dt.datetime.now):
         self.sources: dict[str, SourceSpec] = {}
         self.runners: dict[str, SourceRunner] = {}
-        self.entries: list[LiveEntry] = []
+        self.entries: tuple[LiveEntry, ...] = ()  # copy-on-write: runner threads iterate it without the lock
         self.schedules: list[ClockSchedule] = []
         self.start_keys = list(DEFAULT_START_KEYS if start_keys is None else start_keys)
         self.stop_keys = list(DEFAULT_STOP_KEYS if stop_keys is None else stop_keys)
@@ -246,7 +246,7 @@ class LiveGroup:
             if session is not None and apparatus is None:
                 e.apparatus = getattr(session, "apparatus", None)
             self._next_id += 1
-            self.entries.append(e)
+            self.entries += (e,)
             return e
 
     def add_session(self, source_key: str | None, session, label: str = "", meta: dict | None = None) -> LiveEntry:
@@ -263,8 +263,7 @@ class LiveGroup:
         with self._lock:
             if entry.session is not None and entry.session.state != "finished":
                 entry.session.finish()
-            if entry in self.entries:
-                self.entries.remove(entry)
+            self.entries = tuple(x for x in self.entries if x is not entry)
             self._last_dets.pop(entry.id, None)
 
     def entry(self, entry_id: int) -> LiveEntry | None:
@@ -511,10 +510,7 @@ def save_live_test(project, test, session, record_path: str | None = None) -> bo
                                             for p in session.pause_log))
     if notes:
         test.notes = (test.notes + "\n" + "\n".join(notes)).strip()
-    remove = getattr(session, "remove_autosave", None)
-    if remove is not None:
-        remove()
-    return True
+    return True  # the caller removes the session's crash-recovery file once the project is saved
 
 
 # ====================================================================== I/O devices of simultaneous tests
@@ -605,7 +601,8 @@ class _RecoveredSession:
 def recover_autosaves(project) -> list:
     """Tests interrupted by a crash: rebuild them from the autosave side files left in the recordings folder.
     Each recovered test gets the track, events, pauses and I/O log written up to the last autosave (and its
-    recording, playable up to the last fragment). Returns the recovered tests; the side files are deleted."""
+    recording, playable up to the last fragment). The project is saved, then the side files are deleted.
+    Returns the recovered tests."""
     if project is None or getattr(project, "path", None) is None:
         return []
     folder = Path(project.path) / "recordings"
@@ -642,6 +639,9 @@ def recover_autosaves(project) -> list:
         when = d.get("saved_at", "")
         test.notes = (test.notes + "\n" + f"Recovered after the live test was interrupted (data up to "
                       f"{s.elapsed:.1f} s, saved {when}).").strip()
-        f.unlink(missing_ok=True)
-        out.append(test)
-    return out
+        out.append((test, f))
+    if out:
+        project.save()  # the side files go only once their data is in the saved experiment
+        for _, f in out:
+            f.unlink(missing_ok=True)
+    return [t for t, _ in out]
