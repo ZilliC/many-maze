@@ -431,7 +431,7 @@ class Project:
         app = self.get_apparatus(test.apparatus)
         s = self.analysis_for(test)
         rows = []
-        behaviours = [asdict(b) for b in self.behaviours]
+        behaviours = self.behaviours
         ids = [test.animal_id] + list(test.extra_animals)
         if not tracks and test.events and behaviours:
             # manual scoring only (TakeNote / observation, or a video scored without tracking)

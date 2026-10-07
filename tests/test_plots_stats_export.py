@@ -49,7 +49,7 @@ def test_parameters_and_values(app):
     events = [{"behaviour": "Rearing", "t": 3.0, "t_end": 5.0}, {"behaviour": "Poop", "t": 7.0, "t_end": None}]
     d = charts.compute(tr, app, None, AnalysisSettings(), events, beh)
     assert set(d) == set(names) and all(len(v) == len(tr) for v in d.values())
-    res = analyse(tr, app, AnalysisSettings(), events, [asdict(b) for b in beh])
+    res = analyse(tr, app, AnalysisSettings(), events, beh)
     assert d["Distance travelled"][-1] == pytest.approx(res["Total distance (cm)"], rel=1e-3)
     assert d["Centre: time in zone"][-1] == pytest.approx(res["Centre: time (s)"], abs=0.05)
     assert d["Centre: entries"][-1] == res["Centre: entries"]
@@ -423,6 +423,6 @@ def test_video_export(demo, tmp_path):
     tr = demo.load_tracks(t)[0]
     r = OverlayRenderer([tr], demo.apparatus[0], OverlayOptions(timestamp=False, info=False, zones=False,
                                                                 trail_s=0, body_points=False, freezing=False),
-                        [{"behaviour": "Rearing", "t": 1.0, "t_end": 2.0}], [{"name": "Rearing", "kind": "state"}])
+                        [{"behaviour": "Rearing", "t": 1.0, "t_end": 2.0}], [Behaviour("Rearing", kind="state")])
     blank = np.zeros((400, 400, 3), np.uint8)
     assert r.render(blank, 1.5).sum() > 0 and r.render(blank, 3.0).sum() == 0

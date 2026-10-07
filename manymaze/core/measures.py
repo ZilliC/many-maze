@@ -17,6 +17,7 @@ import math
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, fields, replace
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -29,6 +30,9 @@ from .series import count_rotations, drop_short_runs, ffill, round_result as _r,
 from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides
 from .track import Track
+
+if TYPE_CHECKING:
+    from .project import Behaviour
 
 
 @dataclass
@@ -243,7 +247,7 @@ def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_
 
 
 def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, events: list | None = None,
-            behaviours: list | None = None, t_range: tuple[float, float] | None = None,
+            behaviours: list[Behaviour] | None = None, t_range: tuple[float, float] | None = None,
             duration: float | None = None, other_tracks: list[Track] | None = None,
             zone_overrides: dict | None = None, io_events: list | None = None,
             result_variables: dict | None = None, pauses: list | None = None,
@@ -785,12 +789,11 @@ def social_measures(track: Track, k: Kinematics, o: Track, app: Apparatus, s: An
     return out
 
 
-def behaviour_measures(events: list, behaviours: list, t0: float, t1: float, zones: dict | None = None,
+def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1: float, zones: dict | None = None,
                        t: np.ndarray | None = None, dur: np.ndarray | None = None,
                        latency_if_never: str = "duration") -> "OrderedDict[str, object]":
     """Measures from manually scored events.
 
-    behaviours: [{"name", "key", "kind": "state"|"hold"|"point"}]
     events: [{"behaviour", "t", "t_end" (state only)}]
     zones: optional {zone: per-frame bool} with frame times t / durations dur → the same measures per zone.
     """
@@ -798,9 +801,9 @@ def behaviour_measures(events: list, behaviours: list, t0: float, t1: float, zon
     T = t1 - t0
     never = T if latency_if_never == "duration" else math.nan
     for b in behaviours:
-        name = b["name"]
+        name = b.name
         evs = [e for e in events if e.get("behaviour") == name]
-        if b.get("kind", "state") == "point":
+        if b.kind == "point":
             ts = sorted(e["t"] for e in evs if t0 <= e["t"] < t1)
             out[f"{name}: count"] = len(ts)
             out[f"{name}: latency (s)"] = _r(ts[0] - t0 if ts else never)

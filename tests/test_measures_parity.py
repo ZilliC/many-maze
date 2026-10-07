@@ -12,6 +12,7 @@ from manymaze.core.geometry import annular_sector, body_fraction_inside, circle,
 from manymaze.core.measures import (AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures,
                                     occupancy)
 from manymaze.core.periods import event_periods
+from manymaze.core.project import Behaviour
 from manymaze.core.sequences import find_sequences, sequence_measures
 from manymaze.core.track import Track
 
@@ -440,7 +441,7 @@ def test_social_contacts_following_approaches():
 
 
 def test_behaviours_per_zone_and_hold_keys():
-    beh = [{"name": "Groom", "key": "g", "kind": "hold"}, {"name": "Rear", "key": "r", "kind": "point"}]
+    beh = [Behaviour("Groom", "g", "hold"), Behaviour("Rear", "r", "point")]
     ev = [{"behaviour": "Groom", "t": 1.0, "t_end": 3.0}, {"behaviour": "Groom", "t": 6.0, "t_end": 7.0},
           {"behaviour": "Rear", "t": 2.0}, {"behaviour": "Rear", "t": 8.0}]
     t = np.arange(0, 10, 0.04)

@@ -9,6 +9,7 @@ from manymaze.core import charts, templates
 from manymaze.core.apparatus import Apparatus, Zone
 from manymaze.core.geometry import circle, rect
 from manymaze.core.measures import AnalysisSettings, analyse, analyse_segmented
+from manymaze.core.project import Behaviour
 from manymaze.core.track import Track
 
 FPS = 25.0
@@ -163,7 +164,7 @@ def test_interval_pause_uses_test_time():
     t = np.arange(250) / FPS  # 10 s of video, paused 2-4 s => 8 s of test
     x = np.where(t < 6, 300.0, 100.0)  # enters "Left" at 6 s video time = 4 s test time
     tr = _track(x)
-    beh = [{"name": "Rear", "key": "r", "kind": "point"}, {"name": "Groom", "key": "g", "kind": "state"}]
+    beh = [Behaviour("Rear", "r", "point"), Behaviour("Groom", "g", "state")]
     ev = [{"behaviour": "Rear", "t": 9.0, "t_end": None}, {"behaviour": "Groom", "t": 8.0, "t_end": 9.5}]
     io = [{"t": 9.0, "device": "v", "channel": "lever", "kind": "input", "value": 1},
           {"t": 9.2, "device": "v", "channel": "lever", "kind": "input", "value": 0}]
@@ -203,7 +204,7 @@ def test_water_maze_target_follows_moved_platform():
 # ---------------------------------------------------------------- low priority
 def test_behaviour_latency_honours_latency_if_never():
     tr = _track(np.full(100, 100.0))
-    beh = [{"name": "Rear", "key": "r", "kind": "point"}, {"name": "Groom", "key": "g", "kind": "state"}]
+    beh = [Behaviour("Rear", "r", "point"), Behaviour("Groom", "g", "state")]
     r = analyse(tr, _app(), AnalysisSettings(latency_if_never="blank"), events=[], behaviours=beh)
     assert math.isnan(r["Rear: latency (s)"]) and math.isnan(r["Groom: latency (s)"])
     r2 = analyse(tr, _app(), AnalysisSettings(), events=[], behaviours=beh)

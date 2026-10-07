@@ -9,6 +9,7 @@ from manymaze.core.apparatus import Apparatus, Line, PointOfInterest, Zone, Zone
 from manymaze.core.geometry import circle, rect, segments_intersect, shape_from_dict
 from manymaze.core.measures import AnalysisSettings, analyse, analyse_segmented, count_rotations, runs
 from manymaze.core.procedures import ProcedureEngine
+from manymaze.core.project import Behaviour
 from manymaze.core.stats import compare_groups, two_way_anova
 from manymaze.core.track import Track
 
@@ -167,7 +168,7 @@ def test_time_bins():
 
 def test_behaviour_measures():
     tr = make_track([(25, 50)] * 100, fps=10)
-    b = [{"name": "Groom", "key": "g", "kind": "state"}, {"name": "Poop", "key": "p", "kind": "point"}]
+    b = [Behaviour("Groom", "g", "state"), Behaviour("Poop", "p", "point")]
     ev = [{"behaviour": "Groom", "t": 1, "t_end": 3}, {"behaviour": "Groom", "t": 5, "t_end": 6},
           {"behaviour": "Poop", "t": 4, "t_end": None}]
     r = analyse(tr, open_field_app(), AnalysisSettings(), events=ev, behaviours=b)

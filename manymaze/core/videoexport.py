@@ -7,7 +7,7 @@ Frames are decoded, drawn and encoded one at a time, so memory use does not depe
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -63,11 +63,7 @@ class OverlayRenderer:
         self.tracks = tracks
         self.app = app
         self.events = [e for e in (events or []) if e.get("behaviour")]
-        kinds = {}
-        for b in behaviours or []:
-            d = b if isinstance(b, dict) else asdict(b)
-            kinds[d["name"]] = d.get("kind", "state")
-        self.kinds = kinds
+        self.kinds = {b.name: b.kind for b in behaviours or []}
         self.caption = caption
         s = settings or AnalysisSettings()
         self.colors = []
@@ -264,7 +260,7 @@ def export_video(project, test, path, options: OverlayOptions | None = None, pro
     ow, oh = int(round(w * o.scale)), int(round(h * o.scale))
     ow, oh = ow - ow % 2, oh - oh % 2
     caption = f"Test {test.id} - {test.animal_id}" if test.animal_id else f"Test {test.id}"
-    rend = OverlayRenderer(tracks, app, o, test.events, [asdict(b) for b in project.behaviours],
+    rend = OverlayRenderer(tracks, app, o, test.events, project.behaviours,
                            project.analysis_for(test), caption)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
