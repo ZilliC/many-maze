@@ -3,175 +3,76 @@ statistics.  :class:`ObservationSession` is the camera-less variant (a clock and
 
 from __future__ import annotations
 
-import dataclasses
 import datetime as _dt
-import inspect
-import json
 import math
-import os
+import queue
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import cv2
 import numpy as np
 
 from .apparatus import Apparatus
+from .autosave import Autosaver
 from .geometry import body_fraction_inside
 from .measures import AnalysisSettings
 from .procedures import Outputs, ProcedureEngine
+from .session import Session
 from .track import Track
-from .tracking import ArenaTracker, Detection, DetectionSettings, postprocess, to_gray
+from .tracking import ArenaTracker, Detection, DetectionSettings, TrackBuilder, postprocess, to_gray
 from .video import VideoRecorder
 
 START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual")
-AUTOSAVE_SUFFIX = ".autosave.json"
-
-
-class LiveRecorder:
-    """Records a live test. MP4 / MOV files are written as *fragmented* MP4 with PyAV (H.264: VideoToolbox on
-    macOS, else x264; MPEG-4 part 2 as a last resort) so that a crash or power cut leaves a playable file up to
-    the last fragment (a keyframe every 2 s). Other formats, odd frame sizes or a missing encoder fall back to
-    :class:`VideoRecorder`. Frames are written at a constant rate; the session pads gaps (see LiveSession)."""
-
-    CODECS = ("h264_videotoolbox", "libx264", "mpeg4")
-
-    def __init__(self, path: str, fps: float, size: tuple[int, int]):
-        self.path, self.fps, self.size = str(path), float(fps or 25.0), (int(size[0]), int(size[1]))
-        self.frames = 0
-        self.backend = ""
-        self._av = self._stream = None
-        self._rec: VideoRecorder | None = None
-        self._codecs: list[str] = []
-        ext = Path(self.path).suffix.lower()
-        if ext in (".mp4", ".m4v", ".mov") and self.size[0] % 2 == 0 and self.size[1] % 2 == 0:
-            try:
-                import av
-
-                self._codecs = [c for c in self.CODECS if c in av.codecs_available]
-            except Exception:
-                self._codecs = []
-        if not self._open_next():
-            self._rec = VideoRecorder(self.path, self.fps, self.size)
-            self.backend = getattr(self._rec, "backend", "opencv")
-
-    def _open_next(self) -> bool:
-        from fractions import Fraction
-
-        while self._codecs:
-            codec = self._codecs.pop(0)
-            try:
-                import av
-
-                c = av.open(self.path, "w", format="mov" if self.path.lower().endswith(".mov") else "mp4",
-                            options={"movflags": "frag_keyframe+empty_moov+default_base_moof",
-                                     "flush_packets": "1"})
-            except Exception:
-                return False
-            try:
-                st = c.add_stream(codec, rate=Fraction(self.fps).limit_denominator(1001))
-                st.width, st.height = self.size
-                st.pix_fmt = "nv12" if codec == "h264_videotoolbox" else "yuv420p"
-                gop = str(max(1, int(round(self.fps * 2))))
-                if codec == "libx264":
-                    st.options = {"preset": "veryfast", "crf": "20", "g": gop}
-                else:
-                    st.bit_rate = int(self.size[0] * self.size[1] * self.fps * (0.15 if "264" in codec else 0.4))
-                    st.options = {"g": gop}
-            except Exception:
-                c.close()
-                Path(self.path).unlink(missing_ok=True)
-                continue
-            self._av, self._stream, self.backend = c, st, codec
-            return True
-        return False
-
-    def write(self, frame: np.ndarray):
-        if self._rec is not None:
-            self._rec.write(frame)
-            self.frames += 1
-            return
-        import av
-
-        img = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        while True:
-            vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(img), format="bgr24")
-            vf.pts = self.frames
-            try:
-                for pkt in self._stream.encode(vf):
-                    self._av.mux(pkt)
-                break
-            except Exception:
-                if self.frames:
-                    raise
-                # encoders open lazily (e.g. no VideoToolbox in a VM): try the next one
-                try:
-                    self._av.close()
-                except Exception:
-                    pass
-                self._av = None
-                Path(self.path).unlink(missing_ok=True)
-                if not self._open_next():
-                    self._rec = VideoRecorder(self.path, self.fps, self.size)
-                    self.backend = getattr(self._rec, "backend", "opencv")
-                    self._rec.write(frame)
-                    break
-        self.frames += 1
-
-    def close(self):
-        if self._rec is not None:
-            self._rec.close()
-            return
-        if self._av is None:
-            return
-        av_, self._av = self._av, None
-        if not self.frames:  # nothing written: the encoder may never have opened
-            try:
-                av_.close()
-            except Exception:
-                pass
-            return
-        try:
-            for pkt in self._stream.encode():
-                av_.mux(pkt)
-        finally:
-            av_.close()
-
-
-def make_engine(procedures, outputs: Outputs | None = None, devices=None, on_mark=None, on_end=None, on_log=None,
-                variables: dict | None = None, context: dict | None = None, **callbacks):
-    """A procedure engine through the new contract (devices / variables / context) when available, else the old
-    rules + Outputs API."""
-    try:
-        params = inspect.signature(ProcedureEngine).parameters
-    except (TypeError, ValueError):
-        params = {}
-    if "devices" in params:
-        # the legacy serial-port Outputs is accepted in place of a DeviceManager by the new engine
-        extra = {k: v for k, v in callbacks.items() if k in params and v is not None}  # on_pause / on_stimulus …
-        return ProcedureEngine(procedures, devices=devices if devices is not None else outputs, on_mark=on_mark,
-                               on_end=on_end, on_log=on_log, variables=variables if variables is not None else {},
-                               context=context or {}, **extra)
-    return ProcedureEngine(procedures, outputs or Outputs(), on_mark=on_mark, on_end=on_end)
 
 
 def open_devices(project):
-    """A DeviceManager for the project's I/O devices, or None (no devices / module not available / failure)."""
+    """A DeviceManager for the project's I/O devices, or None (no devices / failure)."""
     if project is None or not getattr(project, "io_devices", None):
         return None
     try:
-        from . import iodevices
-        dm = iodevices.DeviceManager
+        from .iodevices import DeviceManager
+
+        return DeviceManager.from_project(project)
     except Exception:
         return None
-    for build in (lambda: dm.from_project(project), lambda: dm(project.io_devices)):
+
+
+class _RecordingThread:
+    """Encodes a recording in its own thread, so the frame thread (holding the session lock) never waits for the
+    encoder.  The queue is bounded: a stalled encoder slows the frame thread down rather than filling the memory."""
+
+    def __init__(self, recorder: VideoRecorder, maxsize: int = 64):
+        self.recorder = recorder
+        self.error: Exception | None = None
+        self._queue: queue.Queue = queue.Queue(maxsize)
+        self._thread = threading.Thread(target=self._run, name="live-recorder", daemon=True)
+        self._thread.start()
+
+    def write(self, frame: np.ndarray):
+        if self.error is not None:
+            raise self.error
+        self._queue.put(frame)
+
+    def close(self):
+        """Encode what is queued, close the file; raises the encoder's error, if any."""
+        self._queue.put(None)
+        self._thread.join()
+        if self.error is not None:
+            raise self.error
+
+    def _run(self):
+        while (frame := self._queue.get()) is not None:
+            if self.error is None:
+                try:
+                    self.recorder.write(frame)
+                except Exception as e:
+                    self.error = e
         try:
-            return build()
-        except Exception:
-            continue
-    return None
+            self.recorder.close()
+        except Exception as e:
+            self.error = self.error or e
 
 
 # ====================================================================== live zone occupancy
@@ -370,15 +271,28 @@ class LiveStats:
 
 
 # ====================================================================== scoring shared by both session kinds
-class _Scoring:
+class _Scoring(Session):
     def _init_scoring(self):
         self.events: list[dict] = []
         self.open_states: dict[str, dict] = {}
         self.pauses: list[list[float]] = []
         self.pause_log: list[dict] = []  # {"t": test time, "duration_s": real pause length}
+        self.warnings: list[tuple[float, str]] = []
+        self.log: list[tuple[float, str]] = []
+
+    def warn(self, msg: str, t: float | None = None):
+        self.warnings.append((round(self.elapsed if t is None else t, 2), msg))
+
+    def _call_engine(self, fn, *args, t: float | None = None):
+        """A procedure engine call: procedure errors become warnings, they never stop the test."""
+        try:
+            fn(*args)
+        except Exception as e:
+            self.warn(f"Procedure error: {e}", t)
 
     def score(self, behaviour: str, kind: str = "point", t: float | None = None) -> dict | None:
-        """Score a behaviour now: a point event, or start / end of a state event. Returns the event."""
+        """Score a behaviour now: a point event, or start / end of a state event. Returns the event, or None when
+        the test is not running."""
         with self.lock:
             if self.state != "running":
                 return None
@@ -393,12 +307,8 @@ class _Scoring:
             else:
                 ev = {"behaviour": behaviour, "t": t, "t_end": None}
             self.events.append(ev)
-            engine = getattr(self, "engine", None)
-            if engine is not None and hasattr(engine, "mark_event"):
-                try:  # procedures can react to scored behaviours ("event marked")
-                    engine.mark_event(t, behaviour)
-                except Exception as e:
-                    self.warn(f"Procedure error: {e}")
+            if self.engine is not None:  # procedures can react to scored behaviours ("event marked")
+                self._call_engine(self.engine.mark_event, t, behaviour)
             return ev
 
     def _close_states(self):
@@ -433,8 +343,9 @@ class LiveSession(_Scoring):
     handlers that end or pause the test cannot deadlock.
 
     Recording: frames are written at ``fps`` with the last frame repeated for dropped / late frames so that the
-    video stays aligned with the track time. With ``autosave_path`` the track, events and I/O log are written
-    to that side file every ``autosave_s`` seconds (see :func:`livegroup.recover_autosaves`).
+    video stays aligned with the track time; they are encoded in a background thread. With ``autosave_path`` the
+    track, events and I/O log are written to that side file every ``autosave_s`` seconds (see
+    :func:`autosave.recover`).
     """
 
     apparatus: Apparatus
@@ -447,7 +358,7 @@ class LiveSession(_Scoring):
     record_path: str | None = None
     fps: float = 25.0
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
-    devices: object = None  # core.iodevices.DeviceManager (new procedure engine)
+    devices: object = None  # core.iodevices.DeviceManager (or a per-test DeviceView)
     variables: dict | None = None  # procedure variables shared between tests (project.variables)
     record_overlay: bool = False  # burn the test time and event labels into the recording
     experimenter_area_px: int = 0  # foreground area counted as the experimenter; 0 = auto
@@ -467,30 +378,29 @@ class LiveSession(_Scoring):
         self.tracker: ArenaTracker | None = None
         self.state = "waiting"
         self.t0: float | None = None
-        self.cols = {c: [] for c in ("t", "x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle", "detected")}
+        self._track = TrackBuilder()
+        self.cols = self._track.cols
         self._init_scoring()
-        self.recorder: VideoRecorder | None = None
-        self.log: list[tuple[float, str]] = []
-        self.warnings: list[tuple[float, str]] = []
-        names = ([z.name for z in self.apparatus.zones] + [g.name for g in self.apparatus.groups]
-                 if self.apparatus else [])
-        ctx = {"zones": names, "points": [p.name for p in self.apparatus.points] if self.apparatus else [],
-               "keys": []}
-        self.engine = make_engine(self.procedures, self.outputs, self.devices, on_mark=self._mark,
-                                  on_end=self._engine_end, on_log=self._engine_log, variables=self.variables,
-                                  context=ctx, on_pause=lambda t: self.pause(), on_resume=lambda t: self.resume(),
-                                  on_stimulus=self.on_stimulus, outputs_off_on_pause=bool(self.outputs_off_on_pause),
-                                  commit_kept=False)
+        self.recorder: _RecordingThread | None = None
+        app = self.apparatus
+        ctx = {"zones": [z.name for z in app.zones] + [g.name for g in app.groups] if app else [],
+               "points": [p.name for p in app.points] if app else [], "keys": []}
+        # the legacy serial-port Outputs is accepted in place of a DeviceManager by the engine
+        self.engine = ProcedureEngine(self.procedures, self.devices if self.devices is not None else self.outputs,
+                                      on_mark=self._mark, on_end=self.finish, on_log=self._engine_log,
+                                      variables=self.variables if self.variables is not None else {}, context=ctx,
+                                      on_pause=lambda t: self.pause(), on_resume=lambda t: self.resume(),
+                                      on_stimulus=self.on_stimulus,
+                                      outputs_off_on_pause=bool(self.outputs_off_on_pause), commit_kept=False)
         if self.outputs is None:
-            self.outputs = getattr(self.engine, "outputs", None)
+            self.outputs = self.engine.outputs
         self.stats = LiveStats(self.apparatus, self.fps, self.analysis)
         self.occupancy = LiveOccupancy(self.apparatus, self.analysis)
         self.start_phase = ""  # experimenter_leaves: "experimenter" -> "leaving" -> "animal"
+        self._frame_shape: tuple[int, int] | None = None
         self._detect_since: float | None = None
         self._frame_i = 0
-        self._last_dets: list[Detection] = []
         self._still_since: float | None = None
-        self._motion_hist: list[float] = []
         self._start_requested = False
         self._resume_pending = False
         self._pause_ts: float | None = None
@@ -500,18 +410,12 @@ class LiveSession(_Scoring):
         self._errors_seen = 0
         self._band: np.ndarray | None = None
         self._arena_px = 0
-        self.frames_dropped = 0
-        self.frames_padded = 0  # frames repeated in the recording for dropped / late camera frames
-        self.last_fg: np.ndarray | None = None
-        self.started_wall: float | None = None
         self._frz_state = False
         self._rec_frames = 0
         self._last_rec_frame: np.ndarray | None = None
         self._autosave_last = -1e9
-        self._autosave_lock = threading.Lock()
-        self._autosave_data: dict | None = None
-        self._autosave_thread: threading.Thread | None = None
-        self._autosave_closed = False
+        self._autosaver = Autosaver(self.autosave_path, self.autosave_snapshot, self.warn) \
+            if self.autosave_path else None
 
     # ------------------------------------------------------------------
     def set_background(self, frame: np.ndarray):
@@ -527,23 +431,23 @@ class LiveSession(_Scoring):
     def _mark(self, name: str, t: float):
         self.events.append({"behaviour": name, "t": t, "t_end": None})
 
-    def _engine_end(self):
-        self.finish()
-
     def _engine_log(self, msg: str, t: float | None = None):
         self.log.append((self.elapsed if t is None else t, str(msg)))
 
-    def warn(self, msg: str, t: float | None = None):
-        self.warnings.append((round(self.elapsed if t is None else t, 2), msg))
-
     @property
     def elapsed(self) -> float:
-        n = len(self.cols["t"])
-        return self.cols["t"][-1] if n else 0.0
+        t = self.cols["t"]
+        return t[-1] if t else 0.0
 
     @property
     def running(self) -> bool:
         return self.state == "running"
+
+    def trail(self, n: int) -> list[tuple[float, float]]:
+        with self.lock:
+            if self.state not in ("running", "paused"):
+                return []
+            return list(zip(self.cols["x"][-n:], self.cols["y"][-n:]))
 
     # ------------------------------------------------------------------ control (any thread)
     def request_start(self):
@@ -560,16 +464,9 @@ class LiveSession(_Scoring):
             self._pause_ts = self._last_ts
             self._pause_t = self.elapsed
             self._pause_wall = time.monotonic()
-            self._notify_engine("pause", self._pause_t)
+            # procedures see "test paused"; the engine's own pause action calls back here
+            self._call_engine(self.engine.pause, self._pause_t)
             return True
-
-    def _notify_engine(self, what: str, t: float):
-        fn = getattr(self.engine, what, None)
-        if fn is not None:  # procedures see "test paused / resumed"; the engine's own pause action calls back here
-            try:
-                fn(t)
-            except Exception as e:
-                self.warn(f"Procedure error: {e}")
 
     def resume(self) -> bool:
         with self.lock:
@@ -577,26 +474,20 @@ class LiveSession(_Scoring):
                 return False
             self.state = "running"
             self._resume_pending = True
-            self._notify_engine("resume", self._pause_t)
+            self._call_engine(self.engine.resume, self._pause_t)
             return True
 
     def key(self, key: str, down: bool = True):
-        """Forward a key press to the procedure engine (new API); also while paused (e.g. a "resume" key)."""
+        """Forward a key press to the procedures; also while paused (e.g. a "resume" key)."""
         with self.lock:
-            if self.state in ("running", "paused") and hasattr(self.engine, "key"):
-                try:
-                    self.engine.key(self.elapsed, key, down=down)
-                except Exception as e:
-                    self.warn(f"Procedure error: {e}")
+            if self.state in ("running", "paused"):
+                self._call_engine(self.engine.key, self.elapsed, key, down)
 
     def touch(self, area: str | None, x: float | None = None, y: float | None = None):
         """A touch on the stimulus screen (any thread): forwarded to the procedures under the session lock."""
         with self.lock:
-            if self.state in ("running", "paused") and hasattr(self.engine, "touch"):
-                try:
-                    self.engine.touch(self.elapsed, area or None, x, y)
-                except Exception as e:
-                    self.warn(f"Procedure error: {e}")
+            if self.state in ("running", "paused"):
+                self._call_engine(self.engine.touch, self.elapsed, area or None, x, y)
 
     # ------------------------------------------------------------------ frames (grabber thread)
     def process(self, frame: np.ndarray, timestamp: float | None = None) -> list[Detection]:
@@ -610,8 +501,6 @@ class LiveSession(_Scoring):
         ts = timestamp if timestamp is not None else self._frame_i / self.fps
         self._frame_i += 1
         dets, fg = self.tracker.process(frame)
-        self._last_dets = dets
-        self.last_fg = fg
         prev_ts, self._last_ts = self._last_ts, ts
         if self.state == "finished":
             return dets
@@ -620,7 +509,7 @@ class LiveSession(_Scoring):
             if self.state != "running":
                 return dets
         if self.state == "paused":
-            self._paused_tick()
+            self._call_engine(self.engine.paused_tick, time.monotonic() - self._pause_wall)
             return dets
         if self._resume_pending:
             self._resume_pending = False
@@ -631,14 +520,10 @@ class LiveSession(_Scoring):
             self.pause_log.append({"t": round(self._pause_t, 3), "duration_s": round(max(gap, real), 3)})
         elif prev_ts is not None and self.cols["t"] and ts - prev_ts > 2.5 / self.fps:
             n = int(round((ts - prev_ts) * self.fps)) - 1
-            self.frames_dropped += n
             self.warn(f"{n} frame{'s' if n > 1 else ''} dropped")
         t = ts - self.t0
         d = dets[0] if dets else Detection()
-        self.cols["t"].append(t)
-        for c in ("x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle"):
-            self.cols[c].append(getattr(d, c))
-        self.cols["detected"].append(d.detected)
+        self._track.add(t, d)
         zones, head_zones = self.occupancy.update(d)
         freezing = self._freezing_now(d)
         self.stats.update(t, d, zones, freezing)
@@ -648,19 +533,10 @@ class LiveSession(_Scoring):
         self._update_engine(t, d, zones, head_zones, freezing)
         if self.duration_s and t >= self.duration_s:
             self.finish()
-        elif self.autosave_path and t - self._autosave_last >= self.autosave_s:
+        elif self._autosaver is not None and t - self._autosave_last >= self.autosave_s:
             self._autosave_last = t
-            self._queue_autosave()
+            self._autosaver.request()
         return dets
-
-    def _paused_tick(self):
-        fn = getattr(self.engine, "paused_tick", None)
-        if fn is None:
-            return
-        try:
-            fn(time.monotonic() - self._pause_wall)
-        except Exception as e:
-            self.warn(f"Procedure error: {e}")
 
     def _check_start(self, ts, dets, fg):
         detected = any(d.detected for d in dets)
@@ -730,7 +606,6 @@ class LiveSession(_Scoring):
             if prev is not None:
                 for _ in range(target - done - 1):
                     self.recorder.write(prev)
-                    self.frames_padded += 1
                 self._rec_frames = target - 1
             self.recorder.write(img)
             self._rec_frames += 1
@@ -746,19 +621,15 @@ class LiveSession(_Scoring):
     def _update_engine(self, t, d, zones, head_zones, freezing):
         eng = self.engine
         try:
-            if hasattr(eng, "update_state"):
-                eng.update_state(t, {"zones": zones, "head_zones": head_zones, "detected": bool(d.detected),
-                                     "freezing": freezing, "immobile": self.stats.immobile,
-                                     "x": float(d.x), "y": float(d.y), "speed": self.stats.speed,
-                                     "distance": self.stats.distance})
-            else:
-                eng.update(t, zones, detected=d.detected, freezing=freezing, immobile=freezing)
+            eng.update_state(t, {"zones": zones, "head_zones": head_zones, "detected": bool(d.detected),
+                                 "freezing": freezing, "immobile": self.stats.immobile,
+                                 "x": float(d.x), "y": float(d.y), "speed": self.stats.speed,
+                                 "distance": self.stats.distance})
         except Exception as e:
             self.warn(f"Procedure error: {type(e).__name__}: {e}", t)
-        errs = getattr(eng, "errors", None) or []
-        for msg in errs[self._errors_seen:]:
+        for msg in eng.errors[self._errors_seen:]:
             self.warn(f"Procedure error: {msg}", t)
-        self._errors_seen = len(errs)
+        self._errors_seen = len(eng.errors)
 
     def _freezing_now(self, d: Detection) -> bool:
         """Freezing with the analysis rules (measures.kinematics): motion below freeze_on_pct starts it, it
@@ -768,9 +639,6 @@ class LiveSession(_Scoring):
             self._still_since = None
             return False
         pct = d.motion / max(d.area, 1) * 100
-        self._motion_hist.append(pct)
-        if len(self._motion_hist) > 10000:
-            del self._motion_hist[:5000]
         t = self.cols["t"][-1]
         a = self.analysis
         off = getattr(a, "freeze_off_pct", a.freeze_on_pct)
@@ -791,15 +659,11 @@ class LiveSession(_Scoring):
             self._rec_frames = 0
             self._last_rec_frame = None
             try:
-                self.recorder = LiveRecorder(self.record_path, self.fps, (w, h))
+                self.recorder = _RecordingThread(VideoRecorder(self.record_path, self.fps, (w, h), fragmented=True))
             except Exception as e:
                 self.recorder = None
                 self.warn(f"Cannot record: {e}", 0.0)
-        try:
-            self.engine.start(0.0)
-        except Exception as e:
-            self.warn(f"Procedure error: {e}", 0.0)
-        self.started_wall = time.time()
+        self._call_engine(self.engine.start, 0.0, t=0.0)
 
     def finish(self):
         with self.lock:
@@ -810,12 +674,9 @@ class LiveSession(_Scoring):
                 self.pause_log.append({"t": round(self._pause_t, 3),
                                        "duration_s": round(time.monotonic() - self._pause_wall, 3)})
             if self.state in ("running", "paused"):
-                try:
-                    self.engine.stop(self.elapsed)
-                except Exception as e:
-                    self.warn(f"Procedure error: {e}")
+                self._call_engine(self.engine.stop, self.elapsed)
             self._close_states()
-            for m in getattr(self.engine, "state_events", None) or []:  # "mark start / end" actions
+            for m in self.engine.state_events:  # "mark start / end" actions
                 self.events.append({"behaviour": m["behaviour"], "t": m["t"],
                                     "t_end": m["t_end"] if m["t_end"] is not None else round(self.elapsed, 3)})
             self.state = "finished"
@@ -832,118 +693,40 @@ class LiveSession(_Scoring):
                     release()
                 except Exception as e:
                     self.warn(f"I/O error: {e}")
-            if self.autosave_path and self.cols["t"]:
-                self._queue_autosave()  # the final state, until the test is saved or discarded
+            if self._autosaver is not None and self.cols["t"]:
+                self._autosaver.request()  # the final state, until the test is saved or discarded
 
     # ------------------------------------------------------------------ crash recovery
     def autosave_snapshot(self) -> dict:
-        """Everything needed to rebuild the test after a crash (JSON-serialisable)."""
+        """Everything needed to rebuild the test after a crash (JSON-serialisable).  The short parts are copied
+        under the lock; the track columns, only ever appended to, are copied up to that instant without it."""
         with self.lock:
-            return {"version": 1, "name": self.name, "meta": dict(self.autosave_meta or {}), "fps": self.fps,
-                    "duration_s": self.duration_s, "state": self.state, "record_path": self.record_path,
-                    "settings": dataclasses.asdict(self.settings) if dataclasses.is_dataclass(self.settings)
-                    else {}, "cols": {c: list(v) for c, v in self.cols.items()},
-                    "events": [dict(e) for e in self.events], "open_states": list(self.open_states),
-                    "pauses": [list(p) for p in self.pauses],
-                    "pause_log": [dict(p) for p in self.pause_log], "io_events": [dict(e) for e in self.io_events],
-                    "log": list(self.log), "warnings": list(self.warnings),
-                    "result_variables": self.result_variables,
-                    "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
-
-    def _queue_autosave(self):
-        if not self.autosave_path or self._autosave_closed:
-            return
-        try:
-            data = self.autosave_snapshot()
-        except Exception as e:  # pragma: no cover - defensive
-            self.warn(f"Autosave failed: {e}")
-            return
-        with self._autosave_lock:
-            self._autosave_data = data
-            if self._autosave_thread is None:
-                self._autosave_thread = threading.Thread(target=self._autosave_worker, name="live-autosave",
-                                                         daemon=True)
-                self._autosave_thread.start()
-
-    def _autosave_worker(self):
-        while True:
-            with self._autosave_lock:
-                data, self._autosave_data = self._autosave_data, None
-                if data is None or self._autosave_closed:
-                    self._autosave_thread = None
-                    return
-            try:  # outside the lock: the frame thread never waits for the disk
-                write_autosave(self.autosave_path, data)
-            except Exception as e:
-                self.warnings.append((round(self.elapsed, 2), f"Autosave failed: {e}"))
+            n = len(self.cols["t"])
+            d = {"version": 1, "name": self.name, "meta": dict(self.autosave_meta or {}), "fps": self.fps,
+                 "duration_s": self.duration_s, "state": self.state, "record_path": self.record_path,
+                 "settings": self.settings.to_dict(), "events": [dict(e) for e in self.events],
+                 "open_states": list(self.open_states), "pauses": [list(p) for p in self.pauses],
+                 "pause_log": [dict(p) for p in self.pause_log], "io_events": self.io_events,
+                 "log": list(self.log), "warnings": list(self.warnings),
+                 "result_variables": self.result_variables,
+                 "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
+        d["cols"] = self._track.snapshot(n)
+        return d
 
     def flush_autosave(self, timeout: float = 10.0):
         """Write the side file now and wait until it is on disk."""
-        self._queue_autosave()
-        th = self._autosave_thread
-        if th is not None and th is not threading.current_thread():
-            th.join(timeout)
+        if self._autosaver is not None:
+            self._autosaver.flush(timeout)
 
     def remove_autosave(self):
         """The test was saved or discarded: stop autosaving and delete the side file."""
-        with self._autosave_lock:
-            self._autosave_closed = True
-            self._autosave_data = None
-        th = self._autosave_thread
-        if th is not None and th is not threading.current_thread():
-            th.join(10.0)
-        if self.autosave_path:
-            try:
-                Path(self.autosave_path).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    @property
-    def kept_variables(self) -> dict:
-        """Procedure variables marked "keep" (stored in the project variables when the test is saved)."""
-        return dict(getattr(self.engine, "kept_variables", None) or {})
-
-    @property
-    def io_events(self) -> list:
-        return list(getattr(self.engine, "io_events", None) or [])
-
-    @property
-    def result_variables(self) -> dict:
-        return dict(getattr(self.engine, "result_variables", None) or {})
+        if self._autosaver is not None:
+            self._autosaver.remove()
 
     def track(self) -> Track:
-        tr = Track(**{c: np.asarray(v) for c, v in self.cols.items()}, fps=self.fps)
+        tr = self._track.build(self.fps)
         tr.meta["source"] = "live"
         return postprocess(tr, self.settings)
-
-
-def _json_default(o):
-    if isinstance(o, np.generic):
-        return o.item()
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    if isinstance(o, (set, tuple)):
-        return list(o)
-    return str(o)
-
-
-def write_autosave(path: str, data: dict):
-    """Atomically (write + rename) write a crash-recovery side file."""
-    p = Path(path)
-    tmp = p.with_name(p.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, default=_json_default)
-        fh.flush()
-        try:
-            os.fsync(fh.fileno())
-        except OSError:  # pragma: no cover
-            pass
-    os.replace(tmp, p)
-
-
-def read_autosave(path: str) -> dict:
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
 
 
 def annotate_recording(frame: np.ndarray, t: float, labels: list[str] = ()) -> np.ndarray:
@@ -962,6 +745,8 @@ def annotate_recording(frame: np.ndarray, t: float, labels: list[str] = ()) -> n
     return img
 
 
+
+
 # ====================================================================== observation only (no camera)
 class ObservationSession(_Scoring):
     """Live observation without a camera (TakeNote): a test clock and scoring keys, saved as ``test.events``.
@@ -976,11 +761,8 @@ class ObservationSession(_Scoring):
         self.clock = clock
         self.name = name
         self.state = "waiting"
-        self._init_scoring()
-        self.warnings: list[tuple[float, str]] = []
-        self.log: list[tuple[float, str]] = []
-        self.stats = None
         self.apparatus = None
+        self._init_scoring()
         self._t0: float | None = None
         self._paused_total = 0.0
         self._pause_at: float | None = None
@@ -1027,9 +809,6 @@ class ObservationSession(_Scoring):
             self.state = "running"
             return True
 
-    def key(self, key: str, down: bool = True):
-        pass
-
     def tick(self):
         with self.lock:
             if self.state == "running" and self.duration_s and self.elapsed >= self.duration_s:
@@ -1046,14 +825,3 @@ class ObservationSession(_Scoring):
                 self._frozen = self.elapsed
             self._close_states()
             self.state = "finished"
-
-    @property
-    def io_events(self) -> list:
-        return []
-
-    @property
-    def result_variables(self) -> dict:
-        return {}
-
-    def track(self):
-        return None

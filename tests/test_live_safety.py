@@ -13,11 +13,13 @@ import pytest
 from manymaze.core import iodevices as io
 from manymaze.core import synthetic as syn
 from manymaze.core import templates
+from manymaze.core.autosave import recover as recover_autosaves
 from manymaze.core.iodevices import DeviceManager, DeviceView
 from manymaze.core.live import LiveSession
-from manymaze.core.livegroup import device_plan, recover_autosaves, save_live_test
+from manymaze.core.livegroup import device_plan
 from manymaze.core.procedures import ProcedureEngine
 from manymaze.core.project import Project
+from manymaze.core.session import save_live_test
 from manymaze.core.tracking import Detection, DetectionSettings
 
 

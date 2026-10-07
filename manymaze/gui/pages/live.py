@@ -31,14 +31,15 @@ from ...core import procedures as procs
 from ...core import workflow as wf
 from ...core.camera import CameraView, SourceSpec, TransformedSource, camera_settings, set_camera_settings
 from ...core.live import LiveSession, ObservationSession, open_devices
-from ...core.livegroup import (DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, autosave_path_for,
-                               device_plan, recover_autosaves, save_live_test)
+from ...core import autosave
+from ...core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup, device_plan
 from ...core.procedures import Outputs
-from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, median_background
+from ...core.session import save_live_test
+from ...core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_tracking, median_background
 from ...core.video import VIDEO_EXTENSIONS, VideoRecorder, VideoSource, list_cameras
 from ..icons import icon
 from ..live_widgets import (LAYOUT_LABELS, LAYOUTS, CameraOptionsDialog, MonitorPanel, ObservationPanel,
-                            PanelGrid, PanelSettingsDialog, TestPanel, draw_tracking, short_time)
+                            PanelGrid, PanelSettingsDialog, TestPanel, short_time)
 from ..widgets import Worker, cv_to_qpixmap, error_box, fmt_time
 from .base import Page
 
@@ -248,27 +249,7 @@ class FrameGrabber(QThread):
                 self.frame_ready.emit(*out)
 
 
-class _PanelGroup(LiveGroup):
-    """LiveGroup whose display images only carry the animals and their trails: the test panels draw the apparatus
-    on top of the image (sharp at any zoom, highlighted zones, optional labels)."""
-
-    show_trail = True
-
-    def render(self, key: str, frame: np.ndarray) -> np.ndarray:
-        img = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        img = img.copy()
-        for e in self.entries_for(key):
-            s = e.session
-            if s is None:
-                continue
-            trail = None
-            if self.show_trail and getattr(s, "cols", None) and s.state in ("running", "paused"):
-                with s.lock:
-                    trail = list(zip(s.cols["x"][-250:], s.cols["y"][-250:]))
-            draw_tracking(img, self._last_dets.get(e.id, []), trail, copy=False)
-        return img
-
-
+TRAIL_LEN = 250  # positions drawn behind the animal on the camera images
 VIEW_DEFAULTS = {"layout": "2x2", "fit": True, "trail": True, "zones": True, "labels": False, "hide_report": False,
                  "hide_apparatus": False, "panel": {}}
 
@@ -314,7 +295,7 @@ class LivePage(Page):
         self.devices = None  # core.iodevices.DeviceManager while tests run
         self.mode = "single"
         # several tests at once
-        self.group = _PanelGroup()
+        self.group = LiveGroup()
         self._group_bgs: dict[str, np.ndarray] = {}
         self._panels: dict[int, TestPanel] = {}
         self._group_outputs: Outputs | None = None
@@ -660,7 +641,8 @@ class LivePage(Page):
         lay = d.get("layout") if d.get("layout") in LAYOUTS else "2x2"
         self.layout_acts[lay].setChecked(True)
         self.mosaic.set_layout_key(lay)
-        self._show_trail = self.group.show_trail = bool(d.get("trail", True))
+        self._show_trail = bool(d.get("trail", True))
+        self.group.trail_len = TRAIL_LEN if self._show_trail else 0
         self.tabs.setVisible(not d.get("hide_report"))
         for p in self._all_panels():
             self._apply_prefs_to_panel(p)
@@ -1117,8 +1099,8 @@ class LivePage(Page):
         self.stop_test(save=False, quiet=True)
         self.stop_preview()
         self.group.close()
-        self.group = _PanelGroup()
-        self.group.show_trail = self._show_trail
+        self.group = LiveGroup()
+        self.group.trail_len = TRAIL_LEN if self._show_trail else 0
         self._panels = {}  # the panels of the previous experiment go with its session
         self._group_bgs = {}
         self.obs_stop(save=False)
@@ -1145,7 +1127,7 @@ class LivePage(Page):
     def _recover_interrupted(self, project):
         """Live tests interrupted by a crash leave an autosave side file: store what they recorded."""
         try:
-            rec = recover_autosaves(project)
+            rec = autosave.recover(project)
         except Exception as e:  # never block opening the experiment (the side files stay for the next time)
             self._log(f"Could not recover interrupted live tests: {e}")
             return
@@ -1627,12 +1609,10 @@ class LivePage(Page):
                 dets = s.process(frame, ts)
                 state = s.state
                 d = dets[0] if dets else None
-                n = 250
-                trail = list(zip(s.cols["x"][-n:], s.cols["y"][-n:]))
+                trail = s.trail(TRAIL_LEN) if self._show_trail else None
                 elapsed = s.elapsed if state != "waiting" else 0.0
                 info = {"session": s, "state": state, "elapsed": elapsed, "duration": s.duration_s,
-                        "events": len(s.events),
-                        "fired": list(getattr(s.engine, "fired", [])),
+                        "events": len(s.events), "fired": list(s.engine.fired),
                         "outputs": list(s.outputs.log) if s.outputs is not None else [],
                         "proc_log": list(s.log), "phase": s.start_phase}
                 info["distance"] = s.stats.distance
@@ -1651,7 +1631,7 @@ class LivePage(Page):
                 zm = app.zone_membership(np.array([d.x]), np.array([d.y]))
                 zones = [k for k, v in zm.items() if bool(np.asarray(v).ravel()[0])]
             info["zones"] = zones
-        disp = draw_tracking(frame, [d] if d is not None else [], trail if self._show_trail else None)
+        disp = draw_tracking(frame, [d] if d is not None else [], trail)
         return disp, info
 
     def _make_preview_tracker(self, frame, app):
@@ -1814,12 +1794,12 @@ class LivePage(Page):
         return self.devices
 
     def _autosave_args(self, test, apparatus: str = "") -> dict:
-        """Crash-recovery side file of a live test (see livegroup.recover_autosaves)."""
+        """Crash-recovery side file of a live test (see core.autosave)."""
         p = self.project
         if p is None or p.path is None:
             return {}
         try:
-            path = autosave_path_for(p, test)
+            path = autosave.path_for(p, test)
         except Exception:
             return {}
         return {"autosave_path": path, "autosave_meta": {
@@ -2322,7 +2302,7 @@ class LivePage(Page):
                 src = str(spec.source) if spec.is_file else spec.label
                 p.set_source(src, src)
             p.view.set_apparatus(e.session.apparatus if e.session is not None and
-                                 getattr(e.session, "apparatus", None) is not None else e.apparatus)
+                                 e.session.apparatus is not None else e.apparatus)
             p.view.set_focus(self._focus_rect(e))
         self._panels = panels
         self.mosaic.set_panels(panels)
@@ -2356,8 +2336,8 @@ class LivePage(Page):
                 p.set_state("idle")
                 p.reset_values()
             else:
-                p.set_state(st, e.elapsed if st != "waiting" else 0.0, getattr(s, "duration_s", 0.0) or 0.0)
-                stats = getattr(s, "stats", None)
+                p.set_state(st, e.elapsed if st != "waiting" else 0.0, s.duration_s or 0.0)
+                stats = s.stats
                 if stats is not None and st in ("running", "paused", "finished"):
                     with s.lock:
                         zones = stats.current_zones() if stats.detected else []
@@ -2388,7 +2368,7 @@ class LivePage(Page):
         for r, e in enumerate(rows):
             st = e.state
             s = e.session
-            if st == "waiting" and getattr(s, "start_phase", ""):
+            if st == "waiting" and s.start_phase:
                 txt = {"experimenter": "wait hand", "leaving": "hand in", "animal": "wait animal"}[s.start_phase]
             else:
                 txt = {"idle": "not armed"}.get(st, st)
@@ -2592,8 +2572,7 @@ class LivePage(Page):
         """Which I/O devices the test of panel `e` may use (see livegroup.device_plan), given the running tests."""
         p = self.project
         others = [x.meta.get("io_plan") or "*" for x in self.group.entries
-                  if x is not e and x.session is not None and x.state in ("waiting", "running", "paused")
-                  and not isinstance(x.session, ObservationSession)]
+                  if x is not e and x.session is not None and x.state in ("waiting", "running", "paused")]
         if others and self.serial.currentText().strip():
             return None, ("the serial port in the test settings is shared by every test: with several tests at "
                           "once, configure each box as an I/O device instead (Experiment › I/O devices) and clear "
@@ -2725,15 +2704,14 @@ class LivePage(Page):
             for t, msg in s.warnings:
                 self._log(f"{e.label} · {fmt_time(t)}  warning: {msg}", e)
             if e.aborted or test is None or not save_live_test(p, test, s, m.get("record_path")):
-                if hasattr(s, "remove_autosave"):
-                    s.remove_autosave()
+                s.remove_autosave()
                 _remove_file(m.get("record_path"))
                 if test is not None and m.get("new_test") and test in p.tests:
                     p.tests.remove(test)
                 self._log(f"{e.label}: test discarded.", e)
             else:
                 self.main.mark_dirty()
-                if self.main.save() and hasattr(s, "remove_autosave"):
+                if self.main.save():
                     s.remove_autosave()
                 self.last_test_id = test.id
                 self._log(f"{e.label}: test {test.id} finished after {fmt_time(s.elapsed)} and saved.", e)
@@ -2887,7 +2865,7 @@ class LivePage(Page):
             warns = self.group.all_warnings()
         elif s is not None:
             warns = [f"{fmt_time(t)}  {m}" for t, m in s.warnings]
-        devs = getattr(s, "devices", None) if s is not None else None
+        devs = s.devices if s is not None else None
         self.monitor.refresh(s, title, devs if devs is not None else self.devices, warns)
 
     # ================================================================== keys: scoring, start / stop, remote

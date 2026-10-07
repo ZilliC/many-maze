@@ -23,7 +23,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
-from .track import Track
+from .track import COLUMNS, Track
 from .video import FrameReader, VideoSource
 
 
@@ -495,18 +495,27 @@ class ArenaTracker:
             d.motion = float(changed[y0:y1, x0:x1].sum())
 
 
-class _TrackBuilder:
-    def __init__(self):
-        self.cols = {c: [] for c in ("t", "x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle", "detected")}
+class TrackBuilder:
+    """The columns of a track (track.COLUMNS), one detection at a time.  Rows are only ever appended, so a copy
+    of the first n rows (:meth:`snapshot`) is safe while another thread keeps adding."""
 
-    def add(self, t, d: Detection):
+    def __init__(self, cols: dict | None = None):
+        self.cols: dict[str, list] = {c: list((cols or {}).get(c) or []) for c in COLUMNS}
+
+    def __len__(self) -> int:
+        return len(self.cols["t"])
+
+    def add(self, t: float, d: Detection):
         self.cols["t"].append(t)
-        for c in ("x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle"):
+        for c in COLUMNS[1:]:
             self.cols[c].append(getattr(d, c))
-        self.cols["detected"].append(d.detected)
 
-    def build(self, fps) -> Track:
-        return Track(**{c: np.asarray(v) for c, v in self.cols.items()}, fps=fps)
+    def snapshot(self, n: int | None = None) -> dict[str, list]:
+        n = len(self.cols[COLUMNS[-1]]) if n is None else n  # the last column is appended last
+        return {c: v[:n] for c, v in self.cols.items()}
+
+    def build(self, fps: float) -> Track:
+        return Track(**self.snapshot(), fps=fps)
 
 
 @dataclass
@@ -568,7 +577,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         if end <= 0:
             end = 10**12
         step = max(1, int(s0.frame_step))
-        builders = [[_TrackBuilder() for _ in range(max(1, j.settings.n_animals))] for j in jobs]
+        builders = [[TrackBuilder() for _ in range(max(1, j.settings.n_animals))] for j in jobs]
         total = max(1, end - start)
     # colour is only needed for the pose model and preview callbacks; otherwise decode straight to grey
     reader = FrameReader(video_path, start, gray=pose is None and frame_callback is None, threads=decode_threads)
@@ -609,6 +618,40 @@ def track_video(video_path: str, jobs: list[ArenaJob],
 
 
 APPARATUS_BGR = (31, 138, 255)  # ANY-maze style orange apparatus outlines
+ANIMAL_COLORS = [(0, 200, 255), (255, 0, 200), (0, 255, 0), (255, 255, 0)]  # BGR, one per animal
+TRAIL_BGR = (214, 120, 37)  # live images: blue trail, green centre, orange head
+CENTRE_BGR = (60, 200, 60)
+HEAD_BGR = (31, 138, 255)
+
+
+def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
+    h = (h or "#ffffff").lstrip("#")
+    try:
+        return int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16)
+    except ValueError:
+        return (255, 255, 255)
+
+
+def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True) -> np.ndarray:
+    """The animal's position (green centre, orange head) and trail drawn on a BGR copy of the frame (live camera
+    images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom)."""
+    img = frame
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif copy:
+        img = img.copy()
+    s = max(1, int(round(img.shape[1] / 480)))
+    if trail is not None and len(trail) > 1:
+        pts = np.array([p for p in trail if math.isfinite(p[0]) and math.isfinite(p[1])], np.int32)
+        if len(pts) > 1:
+            cv2.polylines(img, [pts], False, TRAIL_BGR, s, cv2.LINE_AA)
+    for d in dets or []:
+        if not d.detected or not math.isfinite(d.x):
+            continue
+        cv2.circle(img, (int(d.x), int(d.y)), 2 + 2 * s, CENTRE_BGR, -1, cv2.LINE_AA)
+        if math.isfinite(d.hx) and math.isfinite(d.hy):
+            cv2.circle(img, (int(d.hx), int(d.hy)), 1 + 2 * s, HEAD_BGR, -1, cv2.LINE_AA)
+    return img
 
 
 def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Apparatus | None = None,
@@ -625,21 +668,20 @@ def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Appara
         img = cv2.addWeighted(img, 1.0, tint, 0.5, 0)
     if apparatus is not None:
         for z in apparatus.zones:
-            c = zone_color if zone_color is not None else _hex_to_bgr(z.color)
+            c = zone_color if zone_color is not None else hex_to_bgr(z.color)
             cv2.polylines(img, [np.round(z.shape.polygon()).astype(np.int32)], True, c, 1, cv2.LINE_AA)
         for p in apparatus.points:
-            cv2.circle(img, (int(p.x), int(p.y)), 4, _hex_to_bgr(p.color), -1, cv2.LINE_AA)
+            cv2.circle(img, (int(p.x), int(p.y)), 4, hex_to_bgr(p.color), -1, cv2.LINE_AA)
         for l in apparatus.lines:
-            cv2.line(img, (int(l.x1), int(l.y1)), (int(l.x2), int(l.y2)), _hex_to_bgr(l.color), 1, cv2.LINE_AA)
+            cv2.line(img, (int(l.x1), int(l.y1)), (int(l.x2), int(l.y2)), hex_to_bgr(l.color), 1, cv2.LINE_AA)
     if trail is not None and len(trail) > 1:
         pts = np.array([p for p in trail if np.isfinite(p[0])], np.int32)
         if len(pts) > 1:
             cv2.polylines(img, [pts], False, (255, 160, 0), 1, cv2.LINE_AA)
-    colors = [(0, 200, 255), (255, 0, 200), (0, 255, 0), (255, 255, 0)]
     for i, d in enumerate(dets):
         if not d.detected:
             continue
-        col = colors[i % len(colors)]
+        col = ANIMAL_COLORS[i % len(ANIMAL_COLORS)]
         if d.contour is not None:
             cv2.drawContours(img, [d.contour], -1, col, 1, cv2.LINE_AA)
         if d.keypoints is not None:
@@ -651,12 +693,3 @@ def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Appara
             cv2.circle(img, (int(d.hx), int(d.hy)), 4, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.circle(img, (int(d.tx), int(d.ty)), 3, (255, 0, 0), -1, cv2.LINE_AA)
     return img
-
-
-def _hex_to_bgr(h: str) -> tuple[int, int, int]:
-    h = h.lstrip("#")
-    try:
-        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    except (ValueError, IndexError):
-        return (255, 255, 255)
-    return (b, g, r)

@@ -242,16 +242,11 @@ class FramePacer:
     def reset(self):
         self.t_start = self.clock()
         self.index = 0
-        self.dropped = 0
-        self._last_ts: float | None = None
 
     def next(self) -> float:
         """Timestamp (s) of the frame just read; waits until it is due for files."""
         if self.is_camera:
             ts = self.clock() - self.t_start
-            if self._last_ts is not None and ts - self._last_ts > 2.5 / self.fps:
-                self.dropped += int((ts - self._last_ts) * self.fps) - 1
-            self._last_ts = ts
         else:
             ts = self.index / self.fps
             if self.speed > 0:

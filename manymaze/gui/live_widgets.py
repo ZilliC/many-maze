@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import math
 
-import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -276,9 +275,6 @@ STATE_STYLE = {
     "finished": ("Finished", "#6f52b5"),
 }
 ZONE_FILL = QColor(76, 175, 80, 95)  # zone the animal is in (ANY-maze green)
-TRAIL_BGR = (214, 120, 37)  # blue trail
-CENTRE_BGR = (60, 200, 60)  # green dot on the animal's centre
-HEAD_BGR = (31, 138, 255)  # orange dot on the head
 
 
 def short_time(t: float) -> str:
@@ -286,28 +282,6 @@ def short_time(t: float) -> str:
     t = max(0.0, float(t or 0.0))
     m, s = divmod(int(t), 60)
     return f"{m}:{s:02d}" if m < 60 else f"{m // 60}:{m % 60:02d}:{s:02d}"
-
-
-def draw_tracking(frame: np.ndarray, dets, trail=None, copy: bool = True) -> np.ndarray:
-    """The animal's position (green centre, orange head) and trail drawn on a BGR copy of the frame.  The apparatus
-    is drawn by :class:`LiveView` on top of the image, so it stays sharp at any zoom."""
-    img = frame
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif copy:
-        img = img.copy()
-    s = max(1, int(round(img.shape[1] / 480)))
-    if trail is not None and len(trail) > 1:
-        pts = np.array([p for p in trail if math.isfinite(p[0]) and math.isfinite(p[1])], np.int32)
-        if len(pts) > 1:
-            cv2.polylines(img, [pts], False, TRAIL_BGR, s, cv2.LINE_AA)
-    for d in dets or []:
-        if not getattr(d, "detected", False) or not math.isfinite(d.x):
-            continue
-        cv2.circle(img, (int(d.x), int(d.y)), 2 + 2 * s, CENTRE_BGR, -1, cv2.LINE_AA)
-        if math.isfinite(getattr(d, "hx", math.nan)) and math.isfinite(getattr(d, "hy", math.nan)):
-            cv2.circle(img, (int(d.hx), int(d.hy)), 1 + 2 * s, HEAD_BGR, -1, cv2.LINE_AA)
-    return img
 
 
 class ElidedLabel(QLabel):

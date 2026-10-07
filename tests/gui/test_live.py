@@ -275,7 +275,7 @@ def test_interrupted_live_test_is_recovered_when_the_experiment_opens(win, tmp_p
     from manymaze.core import synthetic as syn
     from manymaze.core import templates
     from manymaze.core.live import LiveSession
-    from manymaze.core.livegroup import autosave_path_for
+    from manymaze.core.autosave import path_for as autosave_path_for
 
     p = win.project
     test = p.add_test("", "C9", p.apparatus[0].name)

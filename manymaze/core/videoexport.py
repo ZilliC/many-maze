@@ -15,9 +15,8 @@ import numpy as np
 
 from .measures import AnalysisSettings, kinematics, moving_average
 from .track import Track
+from .tracking import ANIMAL_COLORS, hex_to_bgr
 from .video import FrameReader, VideoRecorder, VideoSource
-
-ANIMAL_COLORS = [(0, 200, 255), (255, 0, 200), (0, 255, 0), (255, 255, 0)]  # BGR
 
 
 @dataclass
@@ -44,14 +43,6 @@ def _cmap_bgr(values: np.ndarray, vmin: float, vmax: float, cmap: str = "turbo")
     v = np.nan_to_num((np.asarray(values, float) - vmin) / max(vmax - vmin, 1e-9), nan=0.0)
     rgba = colormaps[cmap](np.clip(v, 0, 1))
     return (rgba[:, [2, 1, 0]] * 255).astype(np.uint8)
-
-
-def _hex_bgr(h: str) -> tuple[int, int, int]:
-    h = (h or "#ffffff").lstrip("#")
-    try:
-        return int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16)
-    except ValueError:
-        return (255, 255, 255)
 
 
 def _text(img, txt, org, scale, color=(255, 255, 255), bg=(0, 0, 0), thick=1):
@@ -116,7 +107,7 @@ class OverlayRenderer:
         if self.app is not None and self.o.zones and self.o.zone_fill > 0:
             for z in self.app.zones:
                 pts = self._scaled_pts(z.shape.polygon())
-                cv2.fillPoly(layer, [pts], _hex_bgr(z.color))
+                cv2.fillPoly(layer, [pts], hex_to_bgr(z.color))
                 cv2.fillPoly(mask, [pts], 255)
         self._static = (layer, mask > 0)
         return self._static
@@ -145,7 +136,7 @@ class OverlayRenderer:
             used = []
             for z in self.app.zones:
                 pts = self._scaled_pts(z.shape.polygon())
-                cv2.polylines(img, [pts], True, _hex_bgr(z.color), 1, cv2.LINE_AA)
+                cv2.polylines(img, [pts], True, hex_to_bgr(z.color), 1, cv2.LINE_AA)
                 if o.zone_labels:
                     (tw, th), _ = cv2.getTextSize(z.name, cv2.FONT_HERSHEY_SIMPLEX, fs * 0.8, 1)
                     cx, cy = z.shape.centroid()
@@ -153,14 +144,14 @@ class OverlayRenderer:
                     while any(abs(x - ux) < tw and abs(y - uy) < th + 4 for ux, uy in used):
                         y += th + 6
                     used.append((x, y))
-                    cv2.putText(img, z.name, (x, y), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.8, _hex_bgr(z.color), 1,
+                    cv2.putText(img, z.name, (x, y), cv2.FONT_HERSHEY_SIMPLEX, fs * 0.8, hex_to_bgr(z.color), 1,
                                 cv2.LINE_AA)
             for p in self.app.points:
-                cv2.circle(img, tuple(self._scaled_pts([p.x, p.y])), 4, _hex_bgr(p.color), -1, cv2.LINE_AA)
+                cv2.circle(img, tuple(self._scaled_pts([p.x, p.y])), 4, hex_to_bgr(p.color), -1, cv2.LINE_AA)
             for ln in self.app.lines:
                 a = tuple(self._scaled_pts([ln.x1, ln.y1]))
                 b = tuple(self._scaled_pts([ln.x2, ln.y2]))
-                cv2.line(img, a, b, _hex_bgr(ln.color), 2, cv2.LINE_AA)
+                cv2.line(img, a, b, hex_to_bgr(ln.color), 2, cv2.LINE_AA)
         active = []
         for ai, tr in enumerate(self.tracks):
             j = self.sample_index(tr, t)

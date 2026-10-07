@@ -12,8 +12,9 @@ from manymaze.core import templates
 from manymaze.core.camera import CameraView, FramePacer, SourceSpec, TransformedSource, camera_settings, \
     merge_frames, set_camera_settings
 from manymaze.core.live import LiveSession, ObservationSession, annotate_recording
-from manymaze.core.livegroup import ClockSchedule, LiveGroup, save_live_test
+from manymaze.core.livegroup import ClockSchedule, LiveGroup
 from manymaze.core.project import Project
+from manymaze.core.session import save_live_test
 from manymaze.core.tracking import ArenaTracker, DetectionSettings, median_background
 from manymaze.core.video import VideoSource
 
@@ -287,8 +288,7 @@ def test_camera_view_and_merge(tmp_path):
     cam = FramePacer(25, True, clock=lambda: clock[0])
     cam.next()
     clock[0] = 0.2
-    cam.next()
-    assert cam.dropped == 4
+    assert cam.next() == pytest.approx(0.2)  # cameras: wall-clock time (the session detects dropped frames)
     img = annotate_recording(f, 61.5, ["Tone"])
     assert img.shape == f.shape and img.sum() > f.sum()
 

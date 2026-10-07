@@ -146,7 +146,7 @@ def test_view_preferences(win, monkeypatch):
         page.hide_app_act.trigger()
         assert not page.view.show_apparatus
         page.trail_act.trigger()
-        assert not page._show_trail and not page.group.show_trail
+        assert not page._show_trail and page.group.trail_len == 0
         page.labels_act.trigger()
         assert page.view.show_labels
         page.fit_act.trigger()
