@@ -30,8 +30,9 @@ light, pellet dispenser, door, shocker trigger, laser), ``pwm`` (analogue / PWM 
 
 pyserial is optional (only needed for ``arduino`` and ``serial`` devices).
 
-:func:`io_measures` (in :mod:`.iomeasures`, re-exported here) turns a test's I/O log (``Test.io_events``) into
-ANY-maze-style result measures.
+Device types, channel kinds and the configuration rules (new_device, watchdog_ms...) are in :mod:`.ioconfig`,
+re-exported here. :func:`io_measures` (in :mod:`.iomeasures`, re-exported here) turns a test's I/O log
+(``Test.io_events``) into ANY-maze-style result measures.
 """
 
 from __future__ import annotations
@@ -49,53 +50,11 @@ from pathlib import Path
 
 import numpy as np
 
+from .ioconfig import (AUDIO_BACKENDS, CHANNEL_FIELDS, CHANNEL_KINDS, DEFAULT_WATCHDOG_MS,  # noqa: F401
+                       DEVICE_FIELDS, DEVICE_TYPES, INPUT_KINDS, OUTPUT_KINDS, new_device, next_free_pin, watchdog_ms)
 from .iomeasures import io_measures  # noqa: F401  (re-exported)
 
-DEVICE_TYPES = {
-    "virtual": "Simulated device",
-    "arduino": "Arduino (mANY-MAZE I/O firmware)",
-    "serial": "Serial port (text commands)",
-    "audio": "Audio output (speakers)",
-}
-CHANNEL_KINDS = {
-    "input": "Digital input",
-    "output": "Digital output",
-    "pwm": "PWM / analogue output",
-    "analog": "Analogue input",
-    "encoder": "Rotary encoder",
-}
-INPUT_KINDS = ("input", "analog", "encoder")
-OUTPUT_KINDS = ("output", "pwm")
 FIRMWARE_ID = "MANYMAZE_IO"
-AUDIO_BACKENDS = ("auto", "none", "afplay", "paplay", "aplay")
-
-# configuration fields of each device type (besides name, type, enabled and channels), with the defaults of a new
-# device, and the channel fields it uses (besides name, kind and driver options such as pullup or debounce_ms)
-DEVICE_FIELDS = {
-    "virtual": {},
-    "arduino": {"port": "", "baud": 115200, "watchdog_ms": None},  # None: not stored, see watchdog_ms()
-    "serial": {"port": "", "baud": 9600},
-    "audio": {"backend": "auto"},
-}
-CHANNEL_FIELDS = {"virtual": (), "arduino": ("pin", "pin_b", "invert"), "serial": ("on", "off"), "audio": ()}
-_NAME_BASES = {"virtual": "sim", "arduino": "box", "serial": "serial", "audio": "speakers"}
-
-
-def new_device(type_: str, taken=()) -> dict:
-    """Configuration of a new device of a type, named "sim", "box", "serial" or "speakers" (with a number if the
-    name is taken)."""
-    base = _NAME_BASES[type_]
-    name, k = base, 2
-    while name in set(taken):
-        name, k = f"{base}{k}", k + 1
-    fields = {f: v for f, v in DEVICE_FIELDS[type_].items() if v is not None}
-    return {"name": name, "type": type_, "enabled": True, "channels": [], **fields}
-
-
-def next_free_pin(cfg: dict, first: int = 2, last: int = 69) -> int:
-    """The lowest digital pin no channel of a board uses (pins 0 and 1 are the Arduino's serial port)."""
-    used = {int(c["pin"]) for c in cfg.get("channels", []) if str(c.get("pin", "")).isdigit()}
-    return next(p for p in range(first, last + 1) if p not in used)
 
 
 def serial_ports() -> list[str] | None:
@@ -322,23 +281,6 @@ class SerialDevice(_LineDevice):
                     self._changed(n, 0)
 
 
-DEFAULT_WATCHDOG_MS = 2000
-
-
-def watchdog_ms(cfg: dict) -> int:
-    """An Arduino's heartbeat watchdog timeout: the configured ``watchdog_ms`` (0 = off) or, when not set, 2000 ms
-    if the board drives outputs (all outputs go off if mANY-MAZE stops talking to the board)."""
-    v = cfg.get("watchdog_ms")
-    if v is None:
-        has_out = any(c.get("name") and c.get("kind", "input") in OUTPUT_KINDS
-                      for c in cfg.get("channels", []) or [])
-        return DEFAULT_WATCHDOG_MS if has_out else 0
-    try:
-        return max(0, int(v))
-    except (TypeError, ValueError):
-        return 0
-
-
 class ArduinoDevice(_LineDevice):
     """Arduino running firmware/manymaze_io (see firmware/README.md for the protocol)."""
 
@@ -396,8 +338,6 @@ class ArduinoDevice(_LineDevice):
         if wd:
             self.write_line(f"H {wd}")
         self.write_line("Q")
-
-    DEFAULT_WATCHDOG_MS = DEFAULT_WATCHDOG_MS
 
     def watchdog_ms(self) -> int:
         return watchdog_ms(self.cfg)
