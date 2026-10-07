@@ -21,10 +21,10 @@ from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
 from ..pose_model import PoseModelBox
+from ..widgets import ColorButton, button_row, hint, separator
 from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, Page, SettingsForm,
                    property_form)
-from .protocol_pages import (ColorButton, ElementPage, KeyEditor, button_row, hint, key_mode, mode_to_kind,
-                             separator, small_button)
+from .protocol_pages import ElementPage, KeyEditor, small_button
 
 # protocol elements: (key, explorer label, icon)
 ELEMENTS = [("protocol", "Protocol", "protocol"), ("tracking", "Animal tracking", "tracking"),
@@ -689,7 +689,7 @@ class ExperimentPage(Page):
 
     @staticmethod
     def _kind_index(kind: str, group: str) -> int:
-        mode = key_mode(kind, group)
+        mode = wf.key_mode(kind, group)
         return {"simple": 0, "toggle": 1, "radio": 2, "event": 3}[mode]
 
     def _kind_changed(self, combo: QComboBox):
@@ -702,7 +702,7 @@ class ExperimentPage(Page):
         it = self.beh.item(r, 3)
         group = it.text().strip() if it else ""
         mode = ("simple", "toggle", "radio", "event")[combo.currentIndex()]
-        _kind, new_group = mode_to_kind(mode, group)
+        _kind, new_group = wf.mode_to_kind(mode, group)
         if new_group != group:
             self._loading = True
             self.beh.setItem(r, 3, QTableWidgetItem(new_group))

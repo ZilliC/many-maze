@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import traceback
+from contextlib import contextmanager
 from typing import Callable
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
-from PySide6.QtWidgets import (QFormLayout, QGraphicsEllipseItem, QGraphicsItemGroup, QGraphicsLineItem,
+from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+                           QTransform)
+from PySide6.QtWidgets import (QColorDialog, QFrame, QGraphicsEllipseItem, QGraphicsItemGroup, QGraphicsLineItem,
                                QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsView, QHBoxLayout, QLabel, QMessageBox, QProgressDialog, QPushButton,
                                QSizePolicy, QSlider, QStyle, QVBoxLayout, QWidget)
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (QFormLayout, QGraphicsEllipseItem, QGraphicsItemG
 from ..core.apparatus import Apparatus
 from ..core.geometry import Ellipse
 from ..core.video import VideoSource
+from . import theme
 
 
 # ---------------------------------------------------------------- conversion
@@ -65,6 +68,7 @@ class FrameView(QGraphicsView):
         self.pixmap_item.setZValue(-100)
         self.scene().addItem(self.pixmap_item)
         self._auto_fit = True
+        self._fitting = False
         self.frame_size: tuple[int, int] | None = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumSize(320, 240)
@@ -80,7 +84,7 @@ class FrameView(QGraphicsView):
             self.fit()
 
     def fit(self):
-        if self.frame_size and not getattr(self, "_fitting", False):
+        if self.frame_size and not self._fitting:
             # fit the whole scene rect (frame + margin) so scrollbars never toggle and re-trigger resizes
             self._fitting = True
             try:
@@ -132,8 +136,6 @@ def draw_apparatus(scene: QGraphicsScene, app: Apparatus | None, labels: bool = 
                    fill_alpha: int = 40) -> QGraphicsItemGroup:
     """Add a read-only rendering of an apparatus to a scene in the style of ANY-maze — thin orange outlines,
     zones lightly tinted with their colour, small dark labels — and return the item group."""
-    from . import theme
-
     orange = QColor(theme.APPARATUS)
     group = QGraphicsItemGroup()
     scene.addItem(group)
@@ -464,17 +466,84 @@ class PlotCanvas(QWidget):
             self.figure.savefig(path, dpi=dpi, bbox_inches="tight")
 
 
-def form_row_widget(*widgets) -> QWidget:
-    w = QWidget()
-    lay = QHBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    for x in widgets:
-        lay.addWidget(x)
-    return w
+# ---------------------------------------------------------------- small helpers
+@contextmanager
+def loading(obj, attr: str = "_loading"):
+    """Set the flag ``obj._loading`` (by default) while widgets are filled from the model, so their change
+    signals are ignored; restores the previous value (nesting is fine)."""
+    was = getattr(obj, attr)
+    setattr(obj, attr, True)
+    try:
+        yield
+    finally:
+        setattr(obj, attr, was)
 
 
-def compact_form() -> QFormLayout:
-    f = QFormLayout()
-    f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    f.setLabelAlignment(Qt.AlignRight)
-    return f
+def hint(text: str = "", wrap: bool = True) -> QLabel:
+    """A muted explanatory label."""
+    lbl = QLabel(text)
+    lbl.setObjectName("Hint")
+    lbl.setWordWrap(wrap)
+    return lbl
+
+
+def separator() -> QFrame:
+    """Thin horizontal line between blocks of a panel or property page."""
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine)
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background:{theme.BORDER};border:none;margin:0;")
+    return line
+
+
+def button_row(*buttons, stretch: bool = True) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    for b in buttons:
+        row.addWidget(b)
+    if stretch:
+        row.addStretch()
+    return row
+
+
+def color_icon(color: str, size: int = 12) -> QIcon:
+    """A small rounded colour swatch."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(QPen(QColor(color).darker(130), 1))
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), 2, 2)
+    p.end()
+    return QIcon(pm)
+
+
+class ColorButton(QPushButton):
+    """A colour swatch; click to choose a colour (``color_changed`` is emitted with the new colour name)."""
+
+    color_changed = Signal(str)
+
+    def __init__(self, color: str = "#3b82f6", title: str = "Colour", parent=None, width: int = 30):
+        super().__init__(parent)
+        self.title = title
+        self._color = color
+        self.setFixedSize(width, 26)
+        self.clicked.connect(self.pick)
+        self.set_color(color)
+
+    def color(self) -> str:
+        return self._color
+
+    def set_color(self, c: str):
+        self._color = c
+        self.setToolTip(f"{self.title}: {c} (click to change)")
+        self.setStyleSheet(f"QPushButton{{background:{c};border:1px solid #9ca3af;border-radius:2px;padding:0;}}"
+                           f"QPushButton:hover{{border-color:{theme.ACCENT};}}"
+                           "QPushButton:disabled{background:#e5e7eb;border-color:#d1d5db;}")
+
+    def pick(self):
+        c = QColorDialog.getColor(QColor(self._color), self, self.title)
+        if c.isValid():
+            self.set_color(c.name())
+            self.color_changed.emit(c.name())

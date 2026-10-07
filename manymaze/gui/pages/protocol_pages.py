@@ -4,57 +4,19 @@ big blue title, flat section headings and sentence-style rows, and the "Key" pro
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from ...core import workflow as wf
+from ...core.workflow import RADIO_SET, key_mode, mode_to_kind
 from ..icons import icon
+from ..widgets import ColorButton, hint, separator
 from .base import property_form, section_title
 
-# how a key works, as in ANY-maze ("Specify how you'd like this key to work"); internally a behaviour's kind
-# ("hold" / "state" / "point") plus an exclusive set (radio keys share a set)
+# how a key works, as in ANY-maze ("Specify how you'd like this key to work"); see workflow.key_mode
 KEY_MODES = [("simple", "Simple - key activity is occurring while key is pressed"),
              ("toggle", "Toggle - key activity starts on first press and ends on second press"),
              ("radio", "Radio - like toggle but also ends if any other radio key is pressed"),
              ("event", "Event - an instantaneous event, scored when the key is pressed")]
-KEY_MODE_SHORT = {"simple": "Simple", "toggle": "Toggle", "radio": "Radio", "event": "Event"}
-RADIO_SET = "radio"  # exclusive set given to a key made a radio key
-
-
-def key_mode(kind: str, group: str) -> str:
-    if kind == "hold":
-        return "simple"
-    if kind == "point":
-        return "event"
-    return "radio" if group else "toggle"
-
-
-def mode_to_kind(mode: str, group: str) -> tuple[str, str]:
-    """(kind, exclusive set) of a key working in `mode`."""
-    if mode == "simple":
-        return "hold", group
-    if mode == "event":
-        return "point", group
-    if mode == "radio":
-        return "state", group or RADIO_SET
-    return "state", ""
-
-
-def separator() -> QFrame:
-    """Thin line between blocks of a property page."""
-    line = QFrame()
-    line.setFrameShape(QFrame.HLine)
-    line.setFixedHeight(1)
-    line.setStyleSheet("background:#dcdcdc;border:none;margin:0;")
-    return line
-
-
-def hint(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setObjectName("Hint")
-    lbl.setWordWrap(True)
-    return lbl
 
 
 def small_button(text: str, icon_name: str | None = None, tip: str = "", slot=None) -> QPushButton:
@@ -66,15 +28,6 @@ def small_button(text: str, icon_name: str | None = None, tip: str = "", slot=No
     if slot is not None:
         b.clicked.connect(lambda _=False: slot())
     return b
-
-
-def button_row(*buttons) -> QHBoxLayout:
-    row = QHBoxLayout()
-    row.setSpacing(6)
-    for b in buttons:
-        row.addWidget(b)
-    row.addStretch()
-    return row
 
 
 class ElementPage(QScrollArea):
@@ -119,32 +72,6 @@ class ElementPage(QScrollArea):
 
     def finish(self):
         self.body.addStretch()
-
-
-class ColorButton(QPushButton):
-    """A swatch that opens a colour dialog; property ``color`` holds the colour name."""
-
-    color_changed = Signal(str)
-
-    def __init__(self, color: str = "#22c55e", title: str = "Colour", parent=None):
-        super().__init__(parent)
-        self._title = title
-        self.setFixedSize(64, 26)
-        self.clicked.connect(self.pick)
-        self.set_color(color)
-
-    def set_color(self, color: str):
-        self.setProperty("color", color)
-        self.setStyleSheet(f"QPushButton{{background:{color};border:1px solid #9aa3ad;border-radius:3px;}}")
-
-    def color(self) -> str:
-        return self.property("color") or ""
-
-    def pick(self):
-        c = QColorDialog.getColor(QColor(self.color()), self, self._title)
-        if c.isValid():
-            self.set_color(c.name())
-            self.color_changed.emit(c.name())
 
 
 class KeyEditor(QWidget):
@@ -199,7 +126,7 @@ class KeyEditor(QWidget):
         self.group.editingFinished.connect(self._emit)
         self.group_lbl = QLabel("Radio set (keys in a set end each other)")
         f.addRow(self.group_lbl, self.group)
-        self.color = ColorButton(title="Key colour")
+        self.color = ColorButton("#22c55e", "Key colour", width=64)
         self.color.setToolTip("Colour of the on-screen scoring button and of the key's bouts in plots")
         self.color.color_changed.connect(lambda _c: self._emit())
         f.addRow("Colour of the scoring button", self.color)
@@ -258,8 +185,3 @@ class KeyEditor(QWidget):
         self._update_group_row()
         self.edited.emit(self.values())
 
-
-def fixed_width(w: QWidget, width: int) -> QWidget:
-    w.setMaximumWidth(width)
-    w.setSizePolicy(QSizePolicy.Expanding, w.sizePolicy().verticalPolicy())
-    return w
