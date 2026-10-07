@@ -5,8 +5,10 @@ import wave
 import numpy as np
 import pytest
 
+from manymaze.core import ioconfig
 from manymaze.core import iodevices as io
-from manymaze.core.iodevices import DeviceManager, io_measures
+from manymaze.core.iodevices import DeviceManager
+from manymaze.core.iomeasures import io_measures
 from manymaze.core.procedures import ProcedureEngine
 
 
@@ -204,11 +206,11 @@ def test_io_measures():
 
 
 def test_new_device_free_pin_and_watchdog_default():
-    assert io.new_device("arduino", ["box"]) == {"name": "box2", "type": "arduino", "enabled": True, "channels": [],
+    assert ioconfig.new_device("arduino", ["box"]) == {"name": "box2", "type": "arduino", "enabled": True, "channels": [],
                                                  "port": "", "baud": 115200}
-    assert io.new_device("audio")["backend"] == "auto" and io.new_device("virtual")["name"] == "sim"
+    assert ioconfig.new_device("audio")["backend"] == "auto" and ioconfig.new_device("virtual")["name"] == "sim"
     cfg = {"channels": [{"name": "a", "pin": 2}, {"name": "b", "pin": "3"}, {"name": "c", "kind": "analog"}]}
-    assert io.next_free_pin(cfg) == 4
-    assert io.watchdog_ms(cfg) == 0  # no outputs: off unless set
+    assert ioconfig.next_free_pin(cfg) == 4
+    assert ioconfig.watchdog_ms(cfg) == 0  # no outputs: off unless set
     cfg["channels"].append({"name": "led", "kind": "output", "pin": 13})
-    assert io.watchdog_ms(cfg) == io.DEFAULT_WATCHDOG_MS and io.watchdog_ms({**cfg, "watchdog_ms": 0}) == 0
+    assert ioconfig.watchdog_ms(cfg) == ioconfig.DEFAULT_WATCHDOG_MS and ioconfig.watchdog_ms({**cfg, "watchdog_ms": 0}) == 0

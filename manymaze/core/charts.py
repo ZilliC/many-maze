@@ -15,7 +15,9 @@ import numpy as np
 
 from .apparatus import Apparatus
 from .project import Behaviour
-from .measures import AnalysisSettings, ffill, kinematics, moving_average, occupancy, runs, zone_visits
+from .measures import AnalysisSettings, kinematics
+from .occupancy import occupancy, zone_visits
+from .series import ffill, moving_average, runs
 from .track import Track
 
 STATE, VALUE, COUNT = "state", "value", "count"

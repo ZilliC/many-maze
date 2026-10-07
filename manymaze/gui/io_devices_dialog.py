@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QMessageBox, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
+from ..core import ioconfig
 from ..core import iodevices as iod
 from .widgets import loading, value_text
 
@@ -76,7 +77,7 @@ class IODevicesDialog(QDialog):
         add.setText("Add ▾")
         add.setPopupMode(QToolButton.InstantPopup)
         m = QMenu(add)
-        for t, label in iod.DEVICE_TYPES.items():
+        for t, label in ioconfig.DEVICE_TYPES.items():
             m.addAction(label, lambda t=t: self.add_device(t))
         add.setMenu(m)
         rm = QToolButton()
@@ -95,7 +96,7 @@ class IODevicesDialog(QDialog):
         f = QFormLayout(self.dev_box)
         self.f_name = QLineEdit()
         self.f_type = QComboBox()
-        for t, label in iod.DEVICE_TYPES.items():
+        for t, label in ioconfig.DEVICE_TYPES.items():
             self.f_type.addItem(label, t)
         self.f_port = QComboBox()
         self.f_port.setEditable(True)
@@ -119,7 +120,7 @@ class IODevicesDialog(QDialog):
         self.f_watchdog.setToolTip("All outputs switch off if the computer stops talking to the board for this long "
                                    "(default 2000 ms when the board has outputs; Off = 0)")
         self.f_backend = QComboBox()
-        for b in iod.AUDIO_BACKENDS:
+        for b in ioconfig.AUDIO_BACKENDS:
             self.f_backend.addItem(b, b)
         self.f_enabled = QCheckBox("Enabled")
         f.addRow("Name", self.f_name)
@@ -215,7 +216,7 @@ class IODevicesDialog(QDialog):
         with loading(self):
             self.dev_list.clear()
             for c in self.configs:
-                self.dev_list.addItem(f"{c.get('name', '?')}  ·  {iod.DEVICE_TYPES.get(c.get('type'), c.get('type'))}")
+                self.dev_list.addItem(f"{c.get('name', '?')}  ·  {ioconfig.DEVICE_TYPES.get(c.get('type'), c.get('type'))}")
         if self.configs:
             self.dev_list.setCurrentRow(min(max(cur, 0), len(self.configs) - 1))
         self._load_device()
@@ -225,7 +226,7 @@ class IODevicesDialog(QDialog):
         return self.configs[i] if 0 <= i < len(self.configs) else None
 
     def add_device(self, type_: str = "virtual"):
-        self.configs.append(iod.new_device(type_, [c.get("name") for c in self.configs]))
+        self.configs.append(ioconfig.new_device(type_, [c.get("name") for c in self.configs]))
         self._refresh_list(len(self.configs) - 1)
 
     def remove_device(self):
@@ -244,7 +245,7 @@ class IODevicesDialog(QDialog):
             self.f_type.setCurrentIndex(max(0, self.f_type.findData(c.get("type", "virtual"))))
             self.f_port.setCurrentText(c.get("port", ""))
             self.f_baud.setCurrentText(str(c.get("baud", 115200)))
-            self.f_watchdog.setValue(iod.watchdog_ms(c))
+            self.f_watchdog.setValue(ioconfig.watchdog_ms(c))
             self.f_backend.setCurrentIndex(max(0, self.f_backend.findData(c.get("backend", "auto"))))
             self.f_enabled.setChecked(c.get("enabled", True))
             self._fill_channels(c)
@@ -253,12 +254,12 @@ class IODevicesDialog(QDialog):
     def _update_visibility(self):
         t = (self._cur() or {}).get("type", "virtual")
         for key, w in self._rows.items():
-            show = key in iod.DEVICE_FIELDS.get(t, {})
+            show = key in ioconfig.DEVICE_FIELDS.get(t, {})
             w.setVisible(show)
             lbl = self._form.labelForField(w)
             if lbl is not None:
                 lbl.setVisible(show)
-        shown = {"name", "kind", "options", *iod.CHANNEL_FIELDS.get(t, ())}
+        shown = {"name", "kind", "options", *ioconfig.CHANNEL_FIELDS.get(t, ())}
         for col, (key, _label) in enumerate(CH_COLS):
             self.ch_table.setColumnHidden(col, key not in shown)
         self.ch_box.setVisible(t != "audio")
@@ -270,7 +271,7 @@ class IODevicesDialog(QDialog):
         c["name"] = self.f_name.text().strip() or c.get("name", "device")
         c["type"] = self.f_type.currentData()
         c["enabled"] = self.f_enabled.isChecked()
-        fields = iod.DEVICE_FIELDS[c["type"]]
+        fields = ioconfig.DEVICE_FIELDS[c["type"]]
         for k in self._rows:
             if k not in fields:
                 c.pop(k, None)
@@ -284,7 +285,7 @@ class IODevicesDialog(QDialog):
             c["backend"] = self.f_backend.currentData()
         it = self.dev_list.currentItem()
         if it is not None:
-            it.setText(f"{c['name']}  ·  {iod.DEVICE_TYPES.get(c['type'], c['type'])}")
+            it.setText(f"{c['name']}  ·  {ioconfig.DEVICE_TYPES.get(c['type'], c['type'])}")
         if retype:
             self._update_visibility()
 
@@ -304,7 +305,7 @@ class IODevicesDialog(QDialog):
         r = self.ch_table.rowCount()
         self.ch_table.insertRow(r)
         kind = QComboBox()
-        for k, label in iod.CHANNEL_KINDS.items():
+        for k, label in ioconfig.CHANNEL_KINDS.items():
             kind.addItem(label, k)
         kind.setCurrentIndex(max(0, kind.findData(ch.get("kind", "input"))))
         kind.currentIndexChanged.connect(lambda *_: self._save_channels())
@@ -326,8 +327,8 @@ class IODevicesDialog(QDialog):
             return
         n = len(c.get("channels", []))
         ch = ch or {"name": f"ch{n + 1}", "kind": "output" if n % 2 else "input"}
-        if "pin" in iod.CHANNEL_FIELDS.get(c.get("type"), ()) and "pin" not in ch:
-            ch["pin"] = iod.next_free_pin(c)
+        if "pin" in ioconfig.CHANNEL_FIELDS.get(c.get("type"), ()) and "pin" not in ch:
+            ch["pin"] = ioconfig.next_free_pin(c)
         c.setdefault("channels", []).append(ch)
         with loading(self):
             self._append_channel_row(ch)
@@ -367,7 +368,7 @@ class IODevicesDialog(QDialog):
         c["channels"] = out
         if "watchdog_ms" not in c:  # the default depends on whether the board has outputs
             with loading(self):
-                self.f_watchdog.setValue(iod.watchdog_ms(c))
+                self.f_watchdog.setValue(ioconfig.watchdog_ms(c))
 
     # ------------------------------------------------------------------ live status
     def toggle_connection(self):
@@ -410,12 +411,12 @@ class IODevicesDialog(QDialog):
             self._status_keys = keys
             self.status.setRowCount(len(rows))
             for r, (d, c, k, _v) in enumerate(rows):
-                for col, text in enumerate((d, c, iod.CHANNEL_KINDS.get(k, k))):
+                for col, text in enumerate((d, c, ioconfig.CHANNEL_KINDS.get(k, k))):
                     self.status.setItem(r, col, QTableWidgetItem(text))
                 self.status.setItem(r, 3, QTableWidgetItem(""))
                 dev = m.devices.get(d)
-                if k in iod.OUTPUT_KINDS or (k == "input" and isinstance(dev, iod.VirtualDevice)):
-                    b = QPushButton("Toggle" if k in iod.OUTPUT_KINDS else "Simulate")
+                if k in ioconfig.OUTPUT_KINDS or (k == "input" and isinstance(dev, iod.VirtualDevice)):
+                    b = QPushButton("Toggle" if k in ioconfig.OUTPUT_KINDS else "Simulate")
                     b.clicked.connect(lambda _=False, d=d, c=c, k=k: self.toggle_channel(d, c, k))
                     self.status.setCellWidget(r, 4, b)
                 else:
@@ -436,7 +437,7 @@ class IODevicesDialog(QDialog):
         if m is None:
             return
         dev = m.devices.get(device)
-        if kind in iod.OUTPUT_KINDS:
+        if kind in ioconfig.OUTPUT_KINDS:
             m.set_output(device, channel, 0 if dev.outputs.get(channel) else 1)
         else:
             m.set_input(device, channel, 0 if dev.inputs.get(channel) else 1)
@@ -455,12 +456,12 @@ class IODevicesDialog(QDialog):
         if 0 <= r < len(self._status_keys):
             d, ch, k = self._status_keys[r]
         else:
-            outs = [key for key in self._status_keys if key[2] in iod.OUTPUT_KINDS]
+            outs = [key for key in self._status_keys if key[2] in ioconfig.OUTPUT_KINDS]
             if not outs:
                 self.conn_lbl.setText("Select an output to test")
                 return
             d, ch, k = outs[0]
-        if k not in iod.OUTPUT_KINDS:
+        if k not in ioconfig.OUTPUT_KINDS:
             self.conn_lbl.setText(f"{ch} is an input: press the lever / break the beam to see it change")
             return
         m.set_output(d, ch, 1)

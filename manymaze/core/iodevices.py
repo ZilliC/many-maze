@@ -30,9 +30,8 @@ light, pellet dispenser, door, shocker trigger, laser), ``pwm`` (analogue / PWM 
 
 pyserial is optional (only needed for ``arduino`` and ``serial`` devices).
 
-Device types, channel kinds and the configuration rules (new_device, watchdog_ms...) are in :mod:`.ioconfig`,
-re-exported here. :func:`io_measures` (in :mod:`.iomeasures`, re-exported here) turns a test's I/O log
-(``Test.io_events``) into ANY-maze-style result measures.
+Device types, channel kinds and the configuration rules (new_device, watchdog_ms...) are in :mod:`.ioconfig`.
+:func:`.iomeasures.io_measures` turns a test's I/O log (``Test.io_events``) into ANY-maze-style result measures.
 """
 
 from __future__ import annotations
@@ -50,9 +49,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .ioconfig import (AUDIO_BACKENDS, CHANNEL_FIELDS, CHANNEL_KINDS, DEFAULT_WATCHDOG_MS,  # noqa: F401
-                       DEVICE_FIELDS, DEVICE_TYPES, INPUT_KINDS, OUTPUT_KINDS, new_device, next_free_pin, watchdog_ms)
-from .iomeasures import io_measures  # noqa: F401  (re-exported)
+from .ioconfig import INPUT_KINDS, watchdog_ms
 
 FIRMWARE_ID = "MANYMAZE_IO"
 

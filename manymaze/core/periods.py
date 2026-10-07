@@ -24,7 +24,7 @@ ANCHORS = {
 
 
 def _entry_exit_times(memb, t, dur, zone, s, exits: bool) -> list[float]:
-    from .measures import zone_visits
+    from .occupancy import zone_visits
 
     inside = memb.get(zone)
     if inside is None:

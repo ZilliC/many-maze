@@ -23,9 +23,8 @@ import numpy as np
 from .apparatus import Apparatus
 from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures
-from .occupancy import occupancy, zone_sequence, zone_visits  # noqa: F401  (zone_sequence, zone_visits re-exported)
+from .occupancy import occupancy
 from .pauses import drop_pauses, shift_events
-from .series import moving_average  # noqa: F401  (re-exported)
 from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs, seg_moving_average, segments
 from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides

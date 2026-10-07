@@ -161,7 +161,8 @@ def _series_for(track: Track, app, color_by: str, settings=None):
     if color_by == "time":
         return track.t, "time (s)"
     if color_by == "speed":
-        from .measures import AnalysisSettings, kinematics, moving_average
+        from .measures import AnalysisSettings, kinematics
+        from .series import moving_average
 
         k = kinematics(track, app, settings or AnalysisSettings())
         win = max(1, int(round(0.2 / max(track.dt, 1e-6))))

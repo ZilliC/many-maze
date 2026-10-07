@@ -666,7 +666,8 @@ into equivalent procedures (one per rule) the first time the procedure editor op
 ### For developers
 
 ```python
-from manymaze.core.iodevices import DeviceManager, io_measures
+from manymaze.core.iodevices import DeviceManager
+from manymaze.core.iomeasures import io_measures
 from manymaze.core.procedures import ProcedureEngine, validate
 
 devices = DeviceManager(project.io_devices)            # opens the hardware

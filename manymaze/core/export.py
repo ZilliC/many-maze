@@ -173,7 +173,7 @@ def export_results(project: Project, path, segmented: bool = False, columns: lis
 
 def zone_visit_rows(project: Project, tests=None) -> list[dict]:
     """One row per zone visit (zone, entry time, exit time, duration) for every tracked test."""
-    from .measures import zone_sequence
+    from .occupancy import zone_sequence
 
     rows = []
     for t in tests if tests is not None else project.tests:

@@ -13,7 +13,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .measures import AnalysisSettings, kinematics, moving_average
+from .measures import AnalysisSettings, kinematics
+from .series import moving_average
 from .track import Track
 from .tracking import ANIMAL_COLORS, hex_to_bgr
 from .video import FrameReader, VideoRecorder, VideoSource
