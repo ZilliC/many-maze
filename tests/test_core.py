@@ -310,3 +310,36 @@ def test_project_rename_moves_zone_overrides():
     assert set(t1.zone_overrides) == set(t2.zone_overrides) == {"Alpha", "Pt"} and t3.zone_overrides == ov
     assert app.with_overrides(t1.zone_overrides).point("Pt").x == 1
     assert Project.from_dict({}).protocol == Project().protocol
+
+
+def test_project_round_trip_ignores_unknown_keys():
+    from manymaze.core.project import Animal, Behaviour, Group, Project
+
+    p = Project(name="R")
+    p.apparatus = [templates.build("light_dark", 0, 0, 300, 200)]
+    p.animals = [Animal("A1", "G", fields={"w": "20"})]
+    p.groups = [Group("G", "#ffffff")]
+    p.behaviours = [Behaviour("Rear", "r")]
+    p.add_test(animal_id="A1", zone_overrides={"Doorway": {"x": 1, "y": 2}})
+    d = p.to_dict()
+    assert Project.from_dict(d).to_dict() == d
+    for key in ("groups", "behaviours", "tests"):
+        d[key][0]["from_the_future"] = 1
+    d["apparatus"][0]["lines"][0]["from_the_future"] = 1
+    q = Project.from_dict(d)
+    assert q.groups == p.groups and q.tests == p.tests and q.apparatus[0].lines == p.apparatus[0].lines
+
+
+def test_project_apparatus_of_and_test_periods():
+    from manymaze.core.project import Project
+
+    p = Project()
+    p.apparatus = [templates.build("water_maze", 0, 0, 400, 400)]
+    p.analysis.bin_length_s = 2
+    t = p.add_test(zone_overrides={"Platform": {"type": "ellipse", "cx": 100, "cy": 300, "rx": 8, "ry": 8}})
+    app = p.apparatus_of(t)
+    assert app.zone("Platform").shape.centroid() == pytest.approx((100, 300))
+    assert app.group("Target quadrant").zones == ["Quadrant SW"] and p.apparatus[0].zone("Platform") is not None
+    t.pauses = [[1.0, 2.0]]
+    tr = make_track(np.full((125, 2), 200.0))  # 5 s, 1 s of it paused
+    assert p.test_periods(t, tr) == [("0-2 s", 0, 2), ("2-4 s", 2, 4.0)]

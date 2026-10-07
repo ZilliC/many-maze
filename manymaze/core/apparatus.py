@@ -20,6 +20,11 @@ ENTRY_RULES = {
 }
 
 
+def from_known(cls, d: dict):
+    """A dataclass instance from a dict, ignoring keys that are not fields (e.g. written by a newer version)."""
+    return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
 def unique_name(name: str, taken) -> str:
     """`name` (stripped; "Unnamed" if blank), or "name 2", "name 3"… if it is already taken."""
     taken = set(taken)
@@ -82,7 +87,7 @@ class PointOfInterest:
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d["name"], d["x"], d["y"], d.get("radius_cm", 2.0), d.get("color", "#f59e0b"))
+        return from_known(cls, d)
 
 
 @dataclass
@@ -101,7 +106,7 @@ class Line:
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d["name"], d["x1"], d["y1"], d["x2"], d["y2"], d.get("color", "#10b981"))
+        return from_known(cls, d)
 
 
 @dataclass

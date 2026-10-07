@@ -18,8 +18,9 @@ from typing import Callable
 
 import numpy as np
 
-from .apparatus import Apparatus
-from .measures import AnalysisSettings, analyse, analyse_segmented, behaviour_measures
+from .apparatus import Apparatus, from_known
+from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures
+from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
 
@@ -54,6 +55,10 @@ class Group:
     name: str
     color: str = "#3b82f6"
 
+    @classmethod
+    def from_dict(cls, d):
+        return from_known(cls, d)
+
 
 @dataclass
 class Behaviour:
@@ -71,8 +76,7 @@ class Behaviour:
 
     @classmethod
     def from_dict(cls, d):
-        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-        return cls(**known)
+        return from_known(cls, d)
 
     @property
     def has_duration(self) -> bool:
@@ -105,8 +109,7 @@ class Test:
 
     @classmethod
     def from_dict(cls, d):
-        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-        return cls(**known)
+        return from_known(cls, d)
 
     @property
     def n_animals(self) -> int:
@@ -122,11 +125,11 @@ class Project:
     start_mode: str = "manual"  # "manual" (start_s) | "on_detection" (first frame the animal is in the arena)
     detection: DetectionSettings = field(default_factory=DetectionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
-    apparatus: list = field(default_factory=list)  # list[Apparatus]
-    animals: list = field(default_factory=list)  # list[Animal]
-    groups: list = field(default_factory=list)  # list[Group]
-    behaviours: list = field(default_factory=list)  # list[Behaviour]
-    tests: list = field(default_factory=list)  # list[Test]
+    apparatus: list[Apparatus] = field(default_factory=list)
+    animals: list[Animal] = field(default_factory=list)
+    groups: list[Group] = field(default_factory=list)
+    behaviours: list[Behaviour] = field(default_factory=list)
+    tests: list[Test] = field(default_factory=list)
     animal_fields: list = field(default_factory=list)  # extra animal column names
     stages: list = field(default_factory=list)
     procedures: list = field(default_factory=list)  # live procedures (see procedures.py)
@@ -202,7 +205,7 @@ class Project:
             analysis=AnalysisSettings.from_dict(d.get("analysis")),
             apparatus=[Apparatus.from_dict(a) for a in d.get("apparatus", [])],
             animals=[Animal.from_dict(a) for a in d.get("animals", [])],
-            groups=[Group(**g) for g in d.get("groups", [])],
+            groups=[Group.from_dict(g) for g in d.get("groups", [])],
             behaviours=[Behaviour.from_dict(b) for b in d.get("behaviours", [])],
             tests=[Test.from_dict(t) for t in d.get("tests", [])],
             animal_fields=d.get("animal_fields", []),
@@ -221,6 +224,11 @@ class Project:
     # ---- lookup -----------------------------------------------------------
     def get_apparatus(self, name: str) -> Apparatus | None:
         return next((a for a in self.apparatus if a.name == name), self.apparatus[0] if self.apparatus else None)
+
+    def apparatus_of(self, test: Test) -> Apparatus | None:
+        """The test's apparatus as the analysis uses it: per-test zone positions (Test.zone_overrides) applied."""
+        app = self.get_apparatus(test.apparatus)
+        return apply_overrides(app, test.zone_overrides) if app is not None else None
 
     def tests_using(self, apparatus_name: str) -> list[Test]:
         """Tests analysed with this apparatus (their apparatus name resolved as get_apparatus does)."""
@@ -370,6 +378,12 @@ class Project:
         if "paired_chamber" in v:
             s.paired_chamber = v["paired_chamber"]
         return s
+
+    def test_periods(self, test: Test, track: Track, app: Apparatus | None = None) -> list[tuple[str, float, float]]:
+        """The time bins, custom and event-anchored periods of a test, in test time (as the segmented results).
+        app: the test's apparatus without its per-test zone positions (default: the test's)."""
+        return all_periods(track, app or self.get_apparatus(test.apparatus), self.analysis_for(test), None,
+                           test.events, test.io_events, test.zone_overrides, test.pauses)
 
     def test_info(self, test: Test, animal_id: str | None = None) -> dict:
         aid = animal_id if animal_id is not None else test.animal_id
