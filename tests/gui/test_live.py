@@ -57,8 +57,10 @@ def setup_page(w, video, duration=3.0):
     page.animal.setCurrentText("C1")
     page.stage.setCurrentText("Day 1")
     page.trial.setValue(2)
-    page.add_rule({"trigger": "time", "time_s": 1.0, "action": "mark", "payload": "Tone"})
-    page.add_rule({"trigger": "zone_enter", "zone": "Centre", "action": "serial", "payload": "LED ON"})
+    # rules of older experiments: the procedure editor converts them to procedures
+    w.project.procedures = [{"trigger": "time", "time_s": 1.0, "action": "mark", "payload": "Tone"},
+                            {"trigger": "zone_enter", "zone": "Centre", "action": "serial", "payload": "LED ON"}]
+    page.on_show()
     return page
 
 
@@ -66,16 +68,7 @@ def test_simulated_live_test_synchronous(win, monkeypatch):
     p = win.project
     video = p.abs_path(p.tests[0].video)
     page = setup_page(win, video)
-    assert p.procedures[0] == {"trigger": "time", "time_s": 1.0, "action": "mark", "payload": "Tone"}
-    assert "Tone" in page.proc_table.item(0, 2).text()
-    # edit the selected rule through the editor
-    page.proc_table.selectRow(1)
-    page.r_delay.setValue(0.5)
-    assert p.procedures[1]["delay_s"] == 0.5 and "after 0.5 s" in page.proc_table.item(1, 2).text()
-    page.add_rule()
-    assert len(p.procedures) == 3
-    page.remove_rule()
-    assert len(p.procedures) == 2
+    assert len(p.procedures) == 2 and all("statements" in pr for pr in p.procedures)
     n_tests = len(p.tests)
     # drive frames ourselves: no grabber thread
     monkeypatch.setattr(page, "start_preview", lambda: True)
@@ -160,6 +153,29 @@ def test_simulated_live_test_threaded(win):
     assert page.grabber is None
 
 
+def test_running_test_is_saved_or_kept_when_the_experiment_changes(win, monkeypatch):
+    p = win.project
+    video = p.abs_path(p.tests[0].video)
+    page = setup_page(win, video, duration=0)
+    page._on_file_background(compute_background(video, DetectionSettings(background_samples=21)))
+    page.start_preview = lambda: True
+    assert page.arm()
+    test = page.test
+    src = VideoSource(video)
+    for i in range(10):
+        ok, f = src.read()
+        page.feed_frame(f, i / 25)
+    src.release()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel)
+    win.close_project()
+    assert win.project is p and page.session is not None  # cancelled: the test keeps running
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Save)
+    win.close_project()
+    assert win.project is None and page.session is None
+    saved = Project.load(p.path).get_test(test.id)
+    assert saved is not None and saved.status == "tracked"
+
+
 def test_abort_discards_new_test(win):
     p = win.project
     video = p.abs_path(p.tests[0].video)
@@ -227,7 +243,7 @@ def test_several_tests_need_one_io_device_each(win, monkeypatch):
 
     other = LiveEntry(99, "src", Running(), "other", meta={"io_plan": "box1"})
     me = LiveEntry(100, "src", None, "me", meta={"device": ""})
-    page.group.entries.append(other)
+    page.group.entries += (other,)
     try:
         plan, msg = page._io_plan(me)
         assert plan is None and "Device" in msg  # automatic is refused while another test runs
@@ -242,7 +258,7 @@ def test_several_tests_need_one_io_device_each(win, monkeypatch):
         page._load_row_editor()
         assert [page.row_device.itemData(i) for i in range(page.row_device.count())] == ["", "box1", "box2", "-"]
     finally:
-        page.group.entries.remove(other)
+        page.group.entries = tuple(x for x in page.group.entries if x is not other)
         page._close_devices()
 
 
@@ -252,7 +268,7 @@ def test_interrupted_live_test_is_recovered_when_the_experiment_opens(win, tmp_p
     from manymaze.core import synthetic as syn
     from manymaze.core import templates
     from manymaze.core.live import LiveSession
-    from manymaze.core.livegroup import autosave_path_for
+    from manymaze.core.autosave import path_for as autosave_path_for
 
     p = win.project
     test = p.add_test("", "C9", p.apparatus[0].name)
@@ -274,7 +290,7 @@ def test_interrupted_live_test_is_recovered_when_the_experiment_opens(win, tmp_p
 
 
 def test_camera_scan_and_missing_camera(win, monkeypatch):
-    import manymaze.gui.pages.live as live_mod
+    import manymaze.gui.pages.live.single as live_mod
 
     page = win.goto("LivePage")
     monkeypatch.setattr(live_mod, "list_cameras", lambda: [0, 2])

@@ -291,88 +291,116 @@ class FrameReader:
 
 
 class VideoRecorder:
-    """Write frames to a video file (used for recording live camera sessions).
+    """Write frames to a video file (live test recordings, exported overlay videos).
 
-    MP4/MOV files use Apple's VideoToolbox H.264 hardware encoder when available (macOS), else OpenCV.
-    """
+    MP4 / MOV files of even size are H.264-encoded with PyAV: Apple's VideoToolbox hardware encoder on macOS, else
+    x264, MPEG-4 part 2 as a last resort.  Other formats, odd sizes or no working encoder fall back to OpenCV.
+    ``fragmented`` writes a fragmented MP4 (a keyframe every 2 s) so that a crash or a power cut leaves a file
+    playable up to the last fragment."""
 
-    def __init__(self, path: str, fps: float, size: tuple[int, int]):
-        self.path = str(path)
-        self.fps, self.size = fps, size
+    CODECS = ("h264_videotoolbox", "libx264", "mpeg4")
+
+    def __init__(self, path: str, fps: float, size: tuple[int, int], fragmented: bool = False):
+        self.path, self.fps, self.size = str(path), float(fps or 25.0), (int(size[0]), int(size[1]))
+        self.fragmented = fragmented
         self.frames = 0
-        self.backend = "opencv"
+        self.backend = ""
         self.writer = None
-        self._av = None
-        if Path(path).suffix.lower() in (".mp4", ".m4v", ".mov") and hw_decoder_name() == "videotoolbox":
-            try:
-                self._open_av(fps, size)
-                return
-            except Exception:
-                self._av = None
-        self._open_cv(fps, size)
+        self._av = self._stream = None
+        self._codecs: list[str] = []
+        av = _av()
+        if av is not None and Path(self.path).suffix.lower() in (".mp4", ".m4v", ".mov") \
+                and self.size[0] % 2 == 0 and self.size[1] % 2 == 0:
+            hw = os.environ.get("MANYMAZE_HWACCEL", "1") != "0"
+            self._codecs = [c for c in self.CODECS if c in av.codecs_available and (hw or "videotoolbox" not in c)]
+        if not self._open_next():
+            self._open_cv()
 
-    def _open_cv(self, fps: float, size: tuple[int, int]):
-        path = self.path
-        ext = Path(path).suffix.lower()
-        fourccs = ["avc1", "mp4v"] if ext in (".mp4", ".m4v", ".mov") else ["MJPG", "XVID"]
-        for cc in fourccs:
-            w = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*cc), fps, size)
-            if w.isOpened():
-                self.writer = w
-                break
-            w.release()
-        if self.writer is None:
-            raise IOError(f"Could not open a video writer for {path}")
-
-    def _open_av(self, fps: float, size: tuple[int, int]):
-        import av
+    def _open_next(self) -> bool:
+        """Open the next PyAV encoder candidate; False when none is left."""
         from fractions import Fraction
-        c = av.open(self.path, "w")
-        try:
-            st = c.add_stream("h264_videotoolbox", rate=Fraction(fps).limit_denominator(1001))
-            st.width, st.height = size
-            st.pix_fmt = "nv12"
-            st.bit_rate = int(size[0] * size[1] * fps * 0.15)
-        except Exception:
-            c.close()
-            raise
-        self._av, self._stream = c, st
-        self.backend = "videotoolbox"
+
+        av = _av()
+        opts = {"movflags": "frag_keyframe+empty_moov+default_base_moof", "flush_packets": "1"} \
+            if self.fragmented else {}
+        while self._codecs:
+            codec = self._codecs.pop(0)
+            try:
+                c = av.open(self.path, "w", format="mov" if self.path.lower().endswith(".mov") else "mp4",
+                            options=opts)
+            except Exception:
+                return False
+            try:
+                st = c.add_stream(codec, rate=Fraction(self.fps).limit_denominator(1001))
+                st.width, st.height = self.size
+                st.pix_fmt = "nv12" if codec == "h264_videotoolbox" else "yuv420p"
+                gop = str(max(1, int(round(self.fps * 2))))
+                if codec == "libx264":
+                    st.options = {"preset": "veryfast", "crf": "20", "g": gop}
+                else:
+                    st.bit_rate = int(self.size[0] * self.size[1] * self.fps * (0.15 if "264" in codec else 0.4))
+                    st.options = {"g": gop}
+            except Exception:
+                c.close()
+                Path(self.path).unlink(missing_ok=True)
+                continue
+            self._av, self._stream, self.backend = c, st, codec
+            return True
+        return False
+
+    def _open_cv(self):
+        ext = Path(self.path).suffix.lower()
+        for cc in (["avc1", "mp4v"] if ext in (".mp4", ".m4v", ".mov") else ["MJPG", "XVID"]):
+            w = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*cc), self.fps, self.size)
+            if w.isOpened():
+                self.writer, self.backend = w, "opencv"
+                return
+            w.release()
+        raise IOError(f"Could not open a video writer for {self.path}")
 
     def write(self, frame: np.ndarray):
-        if self._av is not None:
+        img = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        while self.writer is None:
             import av
-            vf = av.VideoFrame.from_ndarray(frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR),
-                                            format="bgr24")
+
+            vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(img), format="bgr24")
             vf.pts = self.frames
             try:
                 for pkt in self._stream.encode(vf):
                     self._av.mux(pkt)
+                self.frames += 1
+                return
             except Exception:
                 if self.frames:
                     raise
-                # the hardware encoder is opened lazily; if it is unavailable (e.g. in a VM) use OpenCV
-                self._av.close()
-                self._av = None
-                Path(self.path).unlink(missing_ok=True)
-                self._open_cv(self.fps, self.size)
-                self.writer.write(frame)
-        else:
-            self.writer.write(frame)
-        self.frames += 1
-
-    def close(self):
-        if self._av is not None:
-            if self.frames:
-                for pkt in self._stream.encode():
-                    self._av.mux(pkt)
-                self._av.close()
-            else:  # never written: the (lazily opened) hardware encoder may not even exist
+                # encoders open lazily (e.g. no VideoToolbox in a VM): try the next one
                 try:
                     self._av.close()
                 except Exception:
                     pass
-            self._av = None
-        if getattr(self, "writer", None) is not None:
+                self._av = None
+                Path(self.path).unlink(missing_ok=True)
+                if not self._open_next():
+                    self._open_cv()
+        self.writer.write(img)
+        self.frames += 1
+
+    def close(self):
+        if self.writer is not None:
             self.writer.release()
             self.writer = None
+        av_, self._av = self._av, None
+        if av_ is None:
+            return
+        if not self.frames:  # nothing written: the encoder may never have opened
+            try:
+                av_.close()
+            except Exception:
+                pass
+            return
+        try:
+            for pkt in self._stream.encode():
+                av_.mux(pkt)
+        finally:
+            av_.close()
+

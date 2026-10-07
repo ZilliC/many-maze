@@ -13,11 +13,13 @@ import pytest
 from manymaze.core import iodevices as io
 from manymaze.core import synthetic as syn
 from manymaze.core import templates
+from manymaze.core.autosave import recover as recover_autosaves
 from manymaze.core.iodevices import DeviceManager, DeviceView
 from manymaze.core.live import LiveSession
-from manymaze.core.livegroup import device_plan, recover_autosaves, save_live_test
+from manymaze.core.livegroup import device_plan
 from manymaze.core.procedures import ProcedureEngine
 from manymaze.core.project import Project
+from manymaze.core.session import finish_live_test, save_live_test
 from manymaze.core.tracking import Detection, DetectionSettings
 
 
@@ -328,7 +330,7 @@ def test_autosave_and_recovery(tmp_path):
     assert "interrupted" in t.notes.lower() and not side.exists()
 
 
-def test_autosave_removed_after_save(tmp_path):
+def test_autosave_kept_until_the_project_is_saved(tmp_path):
     proj = Project(name="p")
     proj.save(tmp_path / "p.mmaze")
     test = proj.add_test("", "A1", "")
@@ -338,7 +340,22 @@ def test_autosave_removed_after_save(tmp_path):
         s.process(_frame(), i / 25)
     s.finish()
     assert save_live_test(proj, test, s)
+    s.flush_autosave()
+    assert side.exists()  # the test is only in memory: a crash now must still be recoverable
+    s.remove_autosave()
     assert not side.exists()
+
+
+def test_finish_discards_the_recording_and_the_new_test(tmp_path):
+    proj = Project(name="p")
+    proj.save(tmp_path / "p.mmaze")
+    test = proj.add_test("", "A1", "")
+    rec = tmp_path / "rec.avi"
+    rec.write_bytes(b"x")
+    s = _session(duration_s=0)
+    s.finish()  # nothing recorded
+    assert not finish_live_test(proj, test, s, str(rec), save=True, new_test=True)
+    assert not rec.exists() and test not in proj.tests
 
 
 def test_arduino_watchdog_on_by_default_when_outputs_are_configured():

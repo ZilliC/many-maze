@@ -146,3 +146,12 @@ def test_epm_video_end_to_end(tmp_path):
     assert r["Open arm entries"] == 1 and r["Closed arm entries"] == 1
     assert r["Open arm entries (%)"] == pytest.approx(50.0)
     assert 15 < r["Open arm time (%)"] < 50
+
+
+def test_empty_arena_mask_does_not_crash():
+    from manymaze.core.tracking import ArenaTracker
+
+    tr = ArenaTracker(DetectionSettings(), np.zeros((10, 10), np.uint8))
+    assert tr.roi == (0, 0, 10, 10)
+    dets, _ = tr.process(np.zeros((10, 10), np.uint8))
+    assert not dets[0].detected

@@ -1,13 +1,17 @@
 """Camera image options for live testing: region (crop), digital zoom / pan, rotation, flip, merging two
-cameras into one image, frame-rate pacing and per-camera persistence in ``project.settings_extra``."""
+cameras into one image, frame-rate pacing, reading a source in its own thread and per-camera persistence in
+``project.settings_extra``."""
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 
 import cv2
 import numpy as np
+
+from .tracking import sample_background
 
 _ROT = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 
@@ -242,16 +246,11 @@ class FramePacer:
     def reset(self):
         self.t_start = self.clock()
         self.index = 0
-        self.dropped = 0
-        self._last_ts: float | None = None
 
     def next(self) -> float:
         """Timestamp (s) of the frame just read; waits until it is due for files."""
         if self.is_camera:
             ts = self.clock() - self.t_start
-            if self._last_ts is not None and ts - self._last_ts > 2.5 / self.fps:
-                self.dropped += int((ts - self._last_ts) * self.fps) - 1
-            self._last_ts = ts
         else:
             ts = self.index / self.fps
             if self.speed > 0:
@@ -260,6 +259,126 @@ class FramePacer:
                     self.sleep(delay)
         self.index += 1
         return ts
+
+
+class SourceReader:
+    """Reads a :class:`SourceSpec` in its own thread.
+
+    The source is opened (``opener`` defaults to core.video.VideoSource), a background is sampled from video files,
+    then every frame is timestamped (:class:`FramePacer`) and handed to :meth:`on_frame`.  At the end of a video
+    file reading starts again while :meth:`keep_looping` is True; otherwise :meth:`on_ended` is called and the
+    reader waits for :meth:`restart`.  Subclasses implement the hooks, which run in the reader thread; an
+    exception in one stops the reader through :meth:`on_failed`."""
+
+    def __init__(self, spec: SourceSpec, opener=None, speed: float = 1.0, name: str = "live-source"):
+        self.spec, self.opener, self.speed = spec, opener, speed
+        self.fps = 25.0
+        self.size: tuple[int, int] | None = None
+        self.error = ""
+        self.ended = False
+        self.background: np.ndarray | None = None
+        self.last_frame: np.ndarray | None = None
+        self.src = None
+        self._stop = False
+        self._restart = False
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+
+    # ---- hooks
+    def on_opened(self):
+        """The source is open (fps, size and, for files, background are set)."""
+
+    def on_frame(self, frame: np.ndarray, ts: float):
+        pass
+
+    def keep_looping(self) -> bool:
+        return True
+
+    def on_ended(self):
+        pass
+
+    def on_failed(self, msg: str):
+        pass
+
+    # ---- control (any thread)
+    def start(self):
+        self.thread.start()
+
+    def stop(self, wait: float = 5.0):
+        self._stop = True
+        if self.thread.is_alive() and threading.current_thread() is not self.thread:
+            self.thread.join(wait)
+
+    def restart(self):
+        """Read the video file from its beginning again."""
+        self._restart = True
+
+    def raw_frames(self):
+        """(primary, second) untransformed frames for the camera options dialog."""
+        src = self.src
+        if isinstance(src, TransformedSource):
+            return src.last_raw, src.last_raw2
+        return self.last_frame, None
+
+    # ---- thread
+    def _run(self):
+        try:
+            src = self.spec.open(self.opener)
+        except Exception as e:
+            self.error = f"Cannot open {self.spec.label}: {e}"
+            self.on_failed(self.error)
+            return
+        try:
+            self.src = src
+            self.fps = float(src.fps or 25.0)
+            self.size = (int(src.width), int(src.height))
+            if not src.is_camera:
+                try:
+                    self.background = sample_background(src)
+                except Exception:
+                    self.background = None
+            self.on_opened()
+            self._loop(src)
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            self.error = f"{type(e).__name__}: {e}"
+            self.on_failed(self.error)
+        finally:
+            src.release()
+
+    def _loop(self, src):
+        pacer = FramePacer(self.fps, src.is_camera, self.speed)
+        failures = 0
+        while not self._stop:
+            if self._restart:
+                self._restart = False
+                self.ended = False
+                src.seek(0)
+                pacer.reset()
+            if self.ended:
+                time.sleep(0.02)
+                continue
+            ok, frame = src.read()
+            if not ok:
+                if src.is_camera:
+                    failures += 1
+                    if failures > 100:
+                        raise IOError("the camera stopped delivering frames")
+                    time.sleep(0.01)
+                    continue
+                if self.keep_looping():
+                    src.seek(0)
+                    pacer.reset()
+                    continue
+                self.ended = True
+                self.on_ended()
+                continue
+            failures = 0
+            pacer.speed = self.speed
+            ts = pacer.next()
+            self.last_frame = frame
+            self.on_frame(frame, ts)
 
 
 # ------------------------------------------------------------------ persistence
