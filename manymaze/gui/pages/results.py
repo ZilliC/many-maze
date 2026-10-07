@@ -1886,13 +1886,16 @@ class ResultsPage(Page):
                 return
         p = self.project
         tests = self._shown_tests()
+        rows = self.shown_rows()
+        if not (self.segmented and self.period_combo.currentData()):  # one period chosen, else the whole tests
+            rows = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
         plots_on = True if include_plots is None else include_plots
         color_by = self.color_combo.currentData() or "time"
 
         def work(progress, stop):
             return html_report(p, path, tests=tests, include_plots=plots_on, measures=measures,
                                stats_measures=stats_measures, heatmap_norm=heatmap_norm,
-                               chart_parameters=chart_parameters, color_by=color_by)
+                               chart_parameters=chart_parameters, color_by=color_by, rows=rows)
 
         def done(out):
             self.main.status(f"Report saved: {out}")

@@ -458,18 +458,18 @@ def _img(png: bytes, width=320) -> str:
 
 def html_report(project: Project, path, tests=None, include_plots: bool = True, measures: list[str] | None = None,
                 stats_measures: list[str] | None = None, heatmap_norm: str = "auto",
-                chart_parameters: list[str] | None = None, color_by: str = "time") -> Path:
+                chart_parameters: list[str] | None = None, color_by: str = "time", rows: list[dict] | None = None
+                ) -> Path:
     """Self-contained HTML report: summary, per-test track plots/heat maps (+ optional charts of per-frame
-    parameters), group heat maps on a common scale, results and statistics."""
-    from . import charts, plots
-    from .stats import compare_groups, group_values, summary_text
+    parameters), group heat maps on a common scale, results and statistics (compared between treatments as the
+    Statistics page does). rows: the results to tabulate and compare (default: the whole-test results of `tests`)."""
+    from . import analyses, charts, plots
     from .video import VideoSource
 
     tests = tests if tests is not None else [t for t in project.tests
                                              if t.status not in INACTIVE_STATUSES and project.has_results(t)]
-    rows = []
-    for t in tests:
-        rows.extend(project.analyse_test(t))
+    if rows is None:
+        rows = [r for t in tests for r in project.analyse_test(t)]
     cols = result_columns(rows)
     if measures:
         info = ["Test", "Animal", "Group", "Stage", "Trial"]
@@ -545,15 +545,12 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
                        f"{_img(plots.fig_to_png(fig), 300 * min(3, len(data)) + 60)}</div></div>")
     if stats_measures and rows:
         out.append("<h2>Statistics</h2>")
-        colors = {g.name: g.color for g in project.groups}
         for m in stats_measures:
-            gv = group_values(rows, m, "Group")
-            if len(gv) < 2:
+            a = analyses.compare(project, rows, m, "Group")
+            if len(a.result["groups"]) < 2:
                 continue
-            res = compare_groups(gv)
-            fig = plots.group_plot(gv, m, colors, posthoc=res.get("posthoc"), p_value=res.get("p"))
-            out.append(f"<div class='card'>{_img(plots.fig_to_png(fig), 360)}<pre>{html.escape(summary_text(res, m))}"
-                       f"</pre></div>")
+            out.append(f"<div class='card'>{_img(plots.fig_to_png(a.figure), 360)}"
+                       f"<pre>{html.escape(a.summary_text)}</pre></div>")
     out.append("<h2>Results</h2><table><tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in cols) + "</tr>")
     for r in rows:
         out.append("<tr>" + "".join(f"<td>{html.escape(str(_fmt(r.get(c, ''))))}</td>" for c in cols) + "</tr>")

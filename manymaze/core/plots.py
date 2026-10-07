@@ -675,6 +675,37 @@ def scatter_plot(xs, ys, groups, x_label: str, y_label: str, colors: dict | None
     return fig
 
 
+def proportions_figure(rows_l, cols_l, T, size=(5, 3.6)) -> Figure:
+    """Stacked bars of the proportion of each category per row level."""
+    fig = Figure(figsize=size, dpi=100)
+    ax = fig.add_subplot(111)
+    T = np.asarray(T, float)
+    tot = T.sum(axis=1, keepdims=True)
+    P = np.divide(T, tot, out=np.zeros_like(T), where=tot > 0) * 100
+    bottom = np.zeros(len(rows_l))
+    for j, c in enumerate(cols_l):
+        ax.bar(range(len(rows_l)), P[:, j], bottom=bottom, label=c, color=f"C{j}", alpha=0.8, width=0.6)
+        bottom += P[:, j]
+    ax.set_xticks(range(len(rows_l)))
+    ax.set_xticklabels([f"{r}\n(n = {int(n)})" for r, n in zip(rows_l, tot[:, 0])], fontsize=8)
+    ax.set_ylabel("% of tests", fontsize=8)
+    ax.set_ylim(0, 100)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(fontsize=7, frameon=False, bbox_to_anchor=(1.0, 1.0), loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def message_figure(text: str, size=(4.2, 3.6), fig: Figure | None = None, fontsize: float = 10) -> Figure:
+    """A figure showing only a grey message (no data, nothing chosen…)."""
+    fig = fig or Figure(figsize=size, dpi=100)
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+    ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=fontsize, color="#64748b", wrap=True,
+            transform=ax.transAxes)
+    return fig
+
+
 def fig_to_png(fig: Figure, dpi: int = 120) -> bytes:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi)
