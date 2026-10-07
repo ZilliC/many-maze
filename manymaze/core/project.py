@@ -23,6 +23,7 @@ from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented,
 from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
+from .video import VideoSource
 
 PROJECT_FILE = "project.json"
 FORMAT_VERSION = 1
@@ -33,6 +34,7 @@ FORMAT_VERSION = 1
 # "excluded" (left out of results)
 STATUSES = ("pending", "tracked", "scored", "skipped", "superseded", "excluded")
 INACTIVE_STATUSES = frozenset({"skipped", "superseded", "excluded"})  # left out of results and statistics
+GROUP_PALETTE = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#64748b"]
 
 
 @dataclass
@@ -250,9 +252,24 @@ class Project:
     def get_test(self, tid: int) -> Test | None:
         return next((t for t in self.tests if t.id == tid), None)
 
+    def get_group(self, name: str) -> Group | None:
+        return next((g for g in self.groups if g.name == name), None)
+
     def group_color(self, name: str) -> str:
-        g = next((g for g in self.groups if g.name == name), None)
+        g = self.get_group(name)
         return g.color if g else "#64748b"
+
+    def next_group_color(self) -> str:
+        """The first palette colour no group uses (cycling through the palette once all are used)."""
+        used = {g.color.lower() for g in self.groups}
+        return next((c for c in GROUP_PALETTE if c not in used), GROUP_PALETTE[len(self.groups) % len(GROUP_PALETTE)])
+
+    def ensure_group(self, name: str) -> Group:
+        g = self.get_group(name)
+        if g is None:
+            g = Group(name, self.next_group_color())
+            self.groups.append(g)
+        return g
 
     def next_test_id(self) -> int:
         return max((t.id for t in self.tests), default=0) + 1
@@ -263,14 +280,19 @@ class Project:
         self.tests.append(t)
         return t
 
+    def add_stage(self, name: str) -> str:
+        """Add the stage to the experiment's stages if it is new. Returns the name."""
+        if name and name not in self.stages:
+            self.stages.append(name)
+        return name
+
     def ensure_animal(self, aid: str, group: str = "") -> Animal:
         a = self.get_animal(aid)
         if a is None:
             a = Animal(aid, group)
             self.animals.append(a)
-        if group and not any(g.name == group for g in self.groups):
-            palette = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6"]
-            self.groups.append(Group(group, palette[len(self.groups) % len(palette)]))
+        if group:
+            self.ensure_group(group)
         return a
 
     # ---- paths ----------------------------------------------------------------
@@ -295,6 +317,14 @@ class Project:
             raise ValueError("Save the project first")
         suffix = "" if animal_index == 0 else f"_a{animal_index + 1}"
         return self.path / "tracks" / f"test_{test.id:04d}{suffix}.csv"
+
+    def start_frame(self, test: Test) -> np.ndarray | None:
+        """The video frame at the start of the test (None without a readable video), e.g. under track plots."""
+        try:
+            with VideoSource(self.abs_path(test.video)) as v:
+                return v.frame_at(int(round(test.start_s * v.fps)))
+        except Exception:
+            return None
 
     def recordings_dir(self) -> Path:
         d = (self.path or Path.cwd()) / "recordings"

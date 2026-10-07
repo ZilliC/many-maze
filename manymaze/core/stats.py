@@ -78,8 +78,18 @@ def _clean(v) -> np.ndarray:
     return a[np.isfinite(a)]
 
 
+def is_number(v) -> bool:
+    """A numeric value (not a bool); may be NaN or infinite."""
+    return isinstance(v, (int, float, np.number)) and not isinstance(v, (bool, np.bool_))
+
+
 def _num(v) -> bool:
-    return isinstance(v, (int, float, np.number)) and not isinstance(v, (bool, np.bool_)) and math.isfinite(float(v))
+    return is_number(v) and math.isfinite(float(v))
+
+
+def numeric_columns(rows: list[dict], cols: list[str]) -> list[str]:
+    """The columns holding a number in at least one row."""
+    return [c for c in cols if any(is_number(r.get(c)) for r in rows)]
 
 
 def descriptive(values) -> dict:

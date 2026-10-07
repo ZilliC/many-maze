@@ -3,32 +3,30 @@ the Treatments sheet (name, code, colour, number of animals), with blind coding,
 
 from __future__ import annotations
 
-import csv
 import re
-from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
-                               QInputDialog, QLabel, QLineEdit, QMessageBox, QSpinBox, QStackedWidget,
+from PySide6.QtGui import QActionGroup, QColor, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QComboBox, QDialog, QFileDialog,
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QStackedWidget,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
+from ...core import export
 from ...core import workflow as wf
-from ...core.project import Animal, Group
-from .. import theme
+from ...core.project import Animal
+from ...core.workflow import treatment_code, treatment_text  # noqa: F401 (testview imports it from here)
+from .. import ribbon, theme
 from ..icons import icon
+from ..ribbon import action as ribbon_action  # noqa: F401 (testview imports it from here)
 from ..widgets import error_box
+from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog
 from .base import Page
 
-PALETTE = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#64748b"]
 SEXES = ["", "Male", "Female"]
-ID_KEYS = ("id", "animal", "animal id", "animal_id", "subject", "subject id")
 STATUSES = ["Normal", "Retired"]
 COMBO_KINDS = ("status", "treatment", "sex")
 ROW_H = 32
 MUTED_ROW = "#9ca3af"
-RESERVED = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment")
 
 
 def swatch(color: str, size: int = 12) -> QIcon:
@@ -52,55 +50,6 @@ def unique_id(base: str, taken: set[str]) -> str:
     while f"{base}-{n}" in taken:
         n += 1
     return f"{base}-{n}"
-
-
-def two_lines(text: str) -> str:
-    """Split a ribbon label over two balanced lines (as the ribbon does for large buttons)."""
-    if " " not in text or len(text) <= 9 or "\n" in text:
-        return text
-    words = text.split(" ")
-    best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
-    return " ".join(words[:best]) + "\n" + " ".join(words[best:])
-
-
-def ribbon_action(parent, text: str, icon_name: str, fn=None, tip: str = "", checkable: bool = False,
-                  large: bool = True) -> QAction:
-    """A ribbon command. Large buttons keep their two-line label when the action changes (enabled, checked…):
-    the ribbon button re-reads the action's iconText, so the line break is stored there."""
-    a = QAction(icon(icon_name), text, parent)
-    a.setToolTip(tip or text)
-    a.setCheckable(checkable)
-    if large:
-        a.setIconText(two_lines(text))
-    if fn is not None:
-        (a.toggled if checkable else a.triggered).connect(fn)
-    return a
-
-
-def treatment_code(project, name: str) -> str:
-    """Code of a treatment: its blind code while testing blind, else a letter (A, B, …) in list order."""
-    if not name or project is None:
-        return ""
-    if project.blind:
-        return wf.blind_codes(project).get(name, "??")
-    names = [g.name for g in project.groups]
-    if name not in names:
-        return ""
-    n, s = names.index(name) + 1, ""
-    while n:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
-def treatment_text(project, name: str, with_code: bool = True) -> str:
-    """A treatment as shown to the experimenter: "A - Saline", or only its code while testing blind."""
-    if not name or project is None:
-        return name or ""
-    code = treatment_code(project, name)
-    if project.blind:
-        return code
-    return f"{code} - {name}" if with_code and code else name
 
 
 def _strip_code(project, text: str) -> str:
@@ -185,130 +134,6 @@ class _SheetDelegate(QStyledItemDelegate):
         model.setData(index, text, Qt.EditRole)
 
 
-class _AddSeveralDialog(QDialog):
-    def __init__(self, groups: list[str], parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Add animals")
-        f = QFormLayout(self)
-        self.prefix = QLineEdit("M")
-        self.count = QSpinBox()
-        self.count.setRange(1, 1000)
-        self.count.setValue(10)
-        self.start = QSpinBox()
-        self.start.setRange(0, 100000)
-        self.start.setValue(1)
-        self.digits = QSpinBox()
-        self.digits.setRange(1, 6)
-        self.digits.setValue(2)
-        self.group = QComboBox()
-        self.group.setEditable(True)
-        self.group.addItems([""] + groups)
-        self.preview = QLabel()
-        self.preview.setStyleSheet("color:palette(mid)")
-        for w in (self.prefix,):
-            w.textChanged.connect(self._update)
-        for w in (self.count, self.start, self.digits):
-            w.valueChanged.connect(self._update)
-        f.addRow("ID prefix", self.prefix)
-        f.addRow("Number of animals", self.count)
-        f.addRow("First number", self.start)
-        f.addRow("Digits", self.digits)
-        f.addRow("Treatment", self.group)
-        f.addRow("", self.preview)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        f.addRow(bb)
-        self._update()
-
-    def ids(self) -> list[str]:
-        p, s, d = self.prefix.text().strip(), self.start.value(), self.digits.value()
-        return [f"{p}{s + i:0{d}d}" for i in range(self.count.value())]
-
-    def _update(self, *_):
-        ids = self.ids()
-        self.preview.setText(f"{ids[0]} … {ids[-1]}" if len(ids) > 1 else ids[0])
-
-
-class DoseDialog(QDialog):
-    """Injection volume = weight × dose / concentration, written to the animals' "Volume (mL)" field."""
-
-    def __init__(self, project, n_selected: int, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Dose calculator")
-        ds = wf.dose_settings(project)
-        f = QFormLayout(self)
-        f.addRow(QLabel("Volume (mL) = weight (g) / 1000 × dose (mg/kg) / concentration (mg/mL).<br>"
-                        f"Animals with their own “{wf.DOSE_FIELD}” field use that dose instead of the default."))
-        self.weight = QComboBox()
-        self.weight.setEditable(True)
-        fields = [x for x in project.animal_fields if x not in (wf.VOLUME_FIELD, wf.DOSE_FIELD)]
-        self.weight.addItems(fields or [wf.WEIGHT_FIELD])
-        self.weight.setCurrentText(ds["weight_field"] if ds["weight_field"] in fields or not fields
-                                   else next((x for x in fields if "weight" in x.lower()), fields[0]))
-        self.dose = QDoubleSpinBox()
-        self.dose.setRange(0, 1e6)
-        self.dose.setDecimals(3)
-        self.dose.setSuffix(" mg/kg")
-        self.dose.setValue(float(ds["dose_mg_kg"]))
-        self.conc = QDoubleSpinBox()
-        self.conc.setRange(0.0001, 1e6)
-        self.conc.setDecimals(4)
-        self.conc.setSuffix(" mg/mL")
-        self.conc.setValue(float(ds["conc_mg_ml"]))
-        self.only_sel = QCheckBox(f"Only the {n_selected} selected animal{'s' if n_selected != 1 else ''}")
-        self.only_sel.setEnabled(n_selected > 0)
-        self.only_sel.setChecked(n_selected > 0)
-        f.addRow("Weight column", self.weight)
-        f.addRow("Default dose", self.dose)
-        f.addRow("Concentration", self.conc)
-        f.addRow("", self.only_sel)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText("Calculate volumes")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        f.addRow(bb)
-
-    def settings(self) -> dict:
-        return {"weight_field": self.weight.currentText().strip() or wf.WEIGHT_FIELD,
-                "dose_mg_kg": self.dose.value(), "conc_mg_ml": self.conc.value()}
-
-
-class CriteriaDialog(QDialog):
-    """Result of evaluating the training criteria; Apply retires animals / completes stages."""
-
-    def __init__(self, report: dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Training criteria")
-        lay = QVBoxLayout(self)
-        rows = report["rows"]
-        lay.addWidget(QLabel(f"{len(rows)} animal × criterion evaluation{'s' if len(rows) != 1 else ''}. "
-                             f"<b>{sum(len(v) for v in report['completed'].values())}</b> stage(s) completed, "
-                             f"<b>{len(report['retire'])}</b> animal(s) to retire."))
-        t = QTableWidget(len(rows), 5)
-        t.setHorizontalHeaderLabels(["Animal", "Criterion", "Trials", "Met at trial", "Outcome"])
-        t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        t.verticalHeader().hide()
-        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        for r, row in enumerate(rows):
-            outcome = ("criterion met" if row["met"] else "failed → retire" if row["failed"] and row["action"] == "retire"
-                       else "failed" if row["failed"] else "in progress")
-            for c, v in enumerate((row["animal"], row["criterion"], str(row["trials"]),
-                                   str(row["met_at_trial"] or "–"), outcome)):
-                it = QTableWidgetItem(v)
-                if c == 4:
-                    it.setForeground(QColor("#16a34a" if row["met"] else "#dc2626" if row["failed"] else "#475569"))
-                t.setItem(r, c, it)
-        lay.addWidget(t, 1)
-        bb = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
-        bb.button(QDialogButtonBox.Apply).setToolTip("Retire failing animals (their pending tests are skipped) and "
-                                                     "skip the remaining trials of completed stages")
-        bb.button(QDialogButtonBox.Apply).clicked.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
-        self.resize(760, 420)
-
-
 class AnimalsPage(Page):
     """The Experiment tab: Animals and Treatments sheets with the ANY-maze "Experiment" ribbon."""
 
@@ -322,7 +147,7 @@ class AnimalsPage(Page):
 
         # ---- ribbon actions ------------------------------------------------------------
         def act(text, ic, fn, tip="", checkable=False, large=True):
-            return ribbon_action(self, text, ic, fn, tip, checkable, large)
+            return ribbon.action(self, text, ic, fn, tip, checkable, large)
 
         self.a_view_treat = act("View treatments", "treatment", lambda on: on and self.set_view("treatments"),
                                 "Show the Treatments sheet: treatment names, codes and colours", True)
@@ -696,7 +521,7 @@ class AnimalsPage(Page):
         last = p.animals[-1].id if p.animals else "A0"
         aid = unique_id((aid or "").strip() or last, self._taken())
         if group:
-            self.ensure_group(group)
+            p.ensure_group(group)
         a = Animal(aid, group, sex, dict(fields or {}))
         p.animals.append(a)
         self._changed()
@@ -721,7 +546,7 @@ class AnimalsPage(Page):
         p = self.project
         taken = self._taken()
         if group:
-            self.ensure_group(group)
+            p.ensure_group(group)
         out = []
         for aid in ids:
             if aid in taken:
@@ -739,7 +564,7 @@ class AnimalsPage(Page):
     def _add_several_dialog(self):
         if self.project is None:
             return
-        dlg = _AddSeveralDialog(self._group_names(), self)
+        dlg = AddSeveralDialog(self._group_names(), self)
         if dlg.exec() == QDialog.Accepted:
             self._add_ids(dlg.ids(), dlg.group.currentText().strip())
 
@@ -791,18 +616,8 @@ class AnimalsPage(Page):
             self.delete_animals(sel)
 
     def rename_animal(self, a: Animal, new_id: str) -> bool:
-        new_id = new_id.strip()
-        if not new_id or new_id == a.id:
+        if not wf.rename_animal(self.project, a, new_id):
             return False
-        if new_id in self._taken():
-            return False
-        old = a.id
-        a.id = new_id
-        for t in self.project.tests:
-            if t.animal_id == old:
-                t.animal_id = new_id
-            if old in t.extra_animals:
-                t.extra_animals = [new_id if x == old else x for x in t.extra_animals]
         self._changed()
         return True
 
@@ -849,8 +664,8 @@ class AnimalsPage(Page):
                     item.setText(treatment_text(p, a.group))
                     return
                 text = _strip_code(p, text)
-                if text and text not in self._group_names():
-                    self.ensure_group(text)
+                if text:
+                    p.ensure_group(text)
                 a.group = text
                 item.setText(text)
                 item.setIcon(swatch(p.group_color(text)) if text else QIcon())
@@ -966,65 +781,35 @@ class AnimalsPage(Page):
             QTimer.singleShot(0, self.refresh)
             QMessageBox.warning(self, "Rename treatment", f"A treatment named “{new}” already exists.")
             return
-        g = next((g for g in self.project.groups if g.name == old), None)
-        if g is not None:
-            g.name = new
-            for a in self.project.animals:
-                if a.group == old:
-                    a.group = new
+        if wf.rename_group(self.project, old, new):
             self._changed()
         QTimer.singleShot(0, self.refresh)  # not while the sheet is emitting itemChanged
 
-    def _next_color(self) -> str:
-        used = {g.color.lower() for g in self.project.groups}
-        free = [c for c in PALETTE if c not in used]
-        return free[0] if free else PALETTE[len(self.project.groups) % len(PALETTE)]
-
-    def ensure_group(self, name: str) -> Group:
-        g = next((g for g in self.project.groups if g.name == name), None)
-        if g is None:
-            g = Group(name, self._next_color())
-            self.project.groups.append(g)
+    def add_group(self, name: str, color: str | None = None):
+        g = wf.add_group(self.project, name, color)
+        if g is not None:
             self._changed()
-        return g
-
-    def add_group(self, name: str, color: str | None = None) -> Group | None:
-        name = name.strip()
-        if not name or name in self._group_names():
-            return None
-        g = Group(name, color or self._next_color())
-        self.project.groups.append(g)
-        self._changed()
-        self.refresh()
+            self.refresh()
         return g
 
     def rename_group(self, old: str, new: str) -> bool:
-        new = new.strip()
-        g = next((g for g in self.project.groups if g.name == old), None)
-        if g is None or not new or new == old or new in self._group_names():
-            return False
-        g.name = new
-        for a in self.project.animals:
-            if a.group == old:
-                a.group = new
-        self._changed()
-        self.refresh()
-        return True
+        return self._edited(wf.rename_group(self.project, old, new))
 
     def set_group_color(self, name: str, color: str):
-        g = next((g for g in self.project.groups if g.name == name), None)
+        g = self.project.get_group(name)
         if g is not None:
             g.color = color
-            self._changed()
-            self.refresh()
+            self._edited(True)
 
     def delete_group(self, name: str):
-        self.project.groups = [g for g in self.project.groups if g.name != name]
-        for a in self.project.animals:
-            if a.group == name:
-                a.group = ""
-        self._changed()
-        self.refresh()
+        wf.delete_group(self.project, name)
+        self._edited(True)
+
+    def _edited(self, changed: bool) -> bool:
+        if changed:
+            self._changed()
+            self.refresh()
+        return changed
 
     def _add_group_dialog(self):
         if self.project is None:
@@ -1065,35 +850,13 @@ class AnimalsPage(Page):
 
     # ------------------------------------------------------------------ fields
     def add_field(self, name: str) -> bool:
-        name = name.strip()
-        if not name or name in self.project.animal_fields or name.lower() in RESERVED:
-            return False
-        self.project.animal_fields.append(name)
-        self._changed()
-        self.refresh()
-        return True
+        return self._edited(wf.add_field(self.project, name))
 
     def remove_field(self, name: str):
-        if name not in self.project.animal_fields:
-            return
-        self.project.animal_fields.remove(name)
-        for a in self.project.animals:
-            a.fields.pop(name, None)
-        self._changed()
-        self.refresh()
+        self._edited(wf.remove_field(self.project, name))
 
     def rename_field(self, old: str, new: str) -> bool:
-        new = new.strip()
-        f = self.project.animal_fields
-        if old not in f or not new or new in f or new.lower() in RESERVED:
-            return False
-        f[f.index(old)] = new
-        for a in self.project.animals:
-            if old in a.fields:
-                a.fields[new] = a.fields.pop(old)
-        self._changed()
-        self.refresh()
-        return True
+        return self._edited(wf.rename_field(self.project, old, new))
 
     def _add_field_dialog(self):
         if self.project is None:
@@ -1138,62 +901,6 @@ class AnimalsPage(Page):
             self.remove_field(name)
 
     # ------------------------------------------------------------------ CSV
-    def import_csv(self, path: str) -> tuple[int, int]:
-        """Import animals from a CSV file. Returns (added, updated)."""
-        text = Path(path).read_text(encoding="utf-8-sig")
-        try:
-            dialect = csv.Sniffer().sniff(text.splitlines()[0] if text else ",", delimiters=",;\t")
-        except csv.Error:
-            dialect = csv.excel
-        rows = list(csv.reader(text.splitlines(), dialect))
-        if not rows:
-            return 0, 0
-        header = [h.strip() for h in rows[0]]
-        low = [h.lower() for h in header]
-        id_col = next((i for i, h in enumerate(low) if h in ID_KEYS), None)
-        if id_col is None:
-            raise ValueError("The CSV file needs an “ID” column (header row: ID, Treatment, Sex, …)")
-        g_col = next((i for i, h in enumerate(low) if h in ("group", "treatment", "treatment group")), None)
-        s_col = next((i for i, h in enumerate(low) if h in ("sex", "gender")), None)
-        f_cols = [(i, h) for i, h in enumerate(header) if i not in (id_col, g_col, s_col) and h
-                  and h.lower() not in ("tests",)]
-        p = self.project
-        for _, h in f_cols:
-            if h not in p.animal_fields:
-                p.animal_fields.append(h)
-        added = updated = 0
-        for row in rows[1:]:
-            if len(row) <= id_col or not row[id_col].strip():
-                continue
-            cell = lambda i: row[i].strip() if i is not None and i < len(row) else ""  # noqa: E731
-            aid = cell(id_col)
-            a = p.get_animal(aid)
-            if a is None:
-                a = Animal(aid)
-                p.animals.append(a)
-                added += 1
-            else:
-                updated += 1
-            if g_col is not None:
-                a.group = cell(g_col)
-                if a.group:
-                    self.ensure_group(a.group)
-            if s_col is not None:
-                a.sex = cell(s_col)
-            for i, h in f_cols:
-                a.fields[h] = cell(i)
-        self._changed()
-        self.refresh()
-        return added, updated
-
-    def export_csv(self, path: str):
-        p = self.project
-        with open(path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh)
-            w.writerow(["ID", "Treatment", "Sex"] + list(p.animal_fields))
-            for a in p.animals:
-                w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in p.animal_fields])
-
     def _export_dialog(self):
         if self.project is None:
             return
@@ -1202,7 +909,7 @@ class AnimalsPage(Page):
         if not path:
             return
         try:
-            self.export_csv(path)
+            export.export_animals(self.project, path)
         except Exception as e:
             error_box(self, "Export animals", e)
             return

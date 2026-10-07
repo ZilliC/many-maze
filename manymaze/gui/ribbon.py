@@ -9,14 +9,43 @@ Pages contribute contextual groups by implementing ``ribbon_groups()``::
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QStackedWidget, QTabBar,
                                QToolButton, QVBoxLayout, QWidget)
 
+from .icons import icon
+
 LARGE_ICON = QSize(32, 32)
 SMALL_ICON = QSize(16, 16)
 PANEL_HEIGHT = 92
+
+
+def two_lines(text: str) -> str:
+    """Split a large button's label over two balanced lines, like the ribbon of ANY-maze."""
+    if " " not in text or len(text) <= 9 or "\n" in text:
+        return text
+    words = text.split(" ")
+    best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
+    return " ".join(words[:best]) + "\n" + " ".join(words[best:])
+
+
+def action(parent, text: str, icon_name: str, fn=None, tip: str = "", checkable: bool = False,
+           large: bool = True) -> QAction:
+    """A ribbon command calling fn() (fn(checked) when checkable). Large buttons keep their two-line label when the
+    action changes (enabled, checked…): the ribbon button re-reads the action's iconText, so the break is stored
+    there."""
+    a = QAction(icon(icon_name), text, parent)
+    a.setToolTip(tip or text)
+    a.setCheckable(checkable)
+    if large:
+        a.setIconText(two_lines(text))
+    if fn is not None:
+        if checkable:
+            a.toggled.connect(fn)
+        else:
+            a.triggered.connect(lambda _=False: fn())
+    return a
 
 
 class RibbonGroup(QFrame):
@@ -55,12 +84,8 @@ class RibbonGroup(QFrame):
             b.setIconSize(LARGE_ICON)
             b.setMinimumWidth(52)
             b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-            text = action.iconText().replace("&", "")
-            if " " in text and len(text) > 9 and "\n" not in text:  # two lines, like the ribbon of ANY-maze
-                words = text.split(" ")
-                best = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(" ".join(words[i:]))))
-                # stored on the action so the button keeps it when the action changes (enabled, checked…)
-                action.setIconText(" ".join(words[:best]) + "\n" + " ".join(words[best:]))
+            # stored on the action so the button keeps it when the action changes (enabled, checked…)
+            action.setIconText(two_lines(action.iconText().replace("&", "")))
         else:
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             b.setIconSize(SMALL_ICON)
@@ -178,3 +203,58 @@ class Ribbon(QWidget):
         self.panels.setCurrentIndex(i)
         self.panels.setVisible(i != 0)  # the File tab shows a full-page backstage instead of a panel
         self.tab_changed.emit(i)
+
+
+class RibbonHost(QWidget):
+    """Ribbon-group widget showing controls owned by the page (filters, plot options…).
+
+    The ribbon discards its contextual groups whenever the page or view changes; the host then gives the controls
+    back to `home` (a hidden holder of the page) so that they, their state and their connections survive."""
+
+    def __init__(self, home: QWidget):
+        super().__init__()
+        self._home = home
+        self._owned: list[QWidget] = []
+        self._group = None
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(4, 2, 4, 0)
+        self.grid.setHorizontalSpacing(6)
+        self.grid.setVerticalSpacing(5)
+
+    def add_row(self, *items):
+        r = self.grid.rowCount()
+        for c, x in enumerate(items):
+            if isinstance(x, str):
+                lbl = QLabel(x)
+                lbl.setObjectName("RibbonLabel")
+                self.grid.addWidget(lbl, r, c)
+            else:
+                self.grid.addWidget(x, r, c, 1, 2 if len(items) == 1 else 1)
+                self._owned.append(x)
+                x.show()
+        return self
+
+    def event(self, e):
+        if e.type() == QEvent.ParentChange:
+            g = self.parentWidget()
+            if g is not None and g is not self._group:
+                if self._group is not None:
+                    self._group.removeEventFilter(self)
+                self._group = g
+                g.installEventFilter(self)
+        return super().event(e)
+
+    def eventFilter(self, obj, e):
+        if obj is self._group and (e.type() == QEvent.DeferredDelete or
+                                   (e.type() == QEvent.ParentChange and obj.parentWidget() is None)):
+            self.release()
+        return False
+
+    def release(self):
+        for w in self._owned:
+            try:
+                if w.parentWidget() is not None and self.isAncestorOf(w):
+                    w.hide()
+                    w.setParent(self._home)
+            except RuntimeError:  # pragma: no cover - already deleted
+                pass

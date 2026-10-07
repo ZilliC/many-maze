@@ -226,13 +226,9 @@ def test_skip_reperform_clear(win):
     page = win.goto("TestsPage")
     page.select_ids({1})
     assert page.a_skip.isEnabled() and not page.a_resume.isEnabled()
-    page.toggle_skip()
+    page.skip_selected()
     assert p.get_test(1).status == "skipped" and page.a_resume.isEnabled() and not page.a_skip.isEnabled()
     assert all(r["Test"] != 1 for r in p.results())
-    page.toggle_skip()
-    assert p.get_test(1).status == "tracked"
-    page.skip_selected()
-    assert p.get_test(1).status == "skipped"
     page.resume_selected()
     assert p.get_test(1).status == "tracked"
     new = page.reperform_selected()

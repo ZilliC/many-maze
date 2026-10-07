@@ -8,7 +8,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from manymaze.core.demo import create_demo_project
+from manymaze.core.export import export_animals
+from manymaze.core.importers import ANIMAL_ROLES, guess_mapping, import_animals, read_table
 from manymaze.core.project import Project
+from manymaze.core.workflow import treatment_code
 from manymaze.gui.main_window import MainWindow
 from shots import shot_path
 
@@ -136,19 +139,31 @@ def test_csv_roundtrip(page, tmp_path):
     p = page.project
     src = tmp_path / "in.csv"
     src.write_text("ID;Group;Sex;Genotype;Weight\nC1;Control;Male;WT;30\nK7;KO;Female;KO;25\n")
-    added, updated = page.import_csv(str(src))
-    assert (added, updated) == (1, 1)
+    header, rows = read_table(src)
+    import_animals(p, header, rows, guess_mapping(header, ANIMAL_ROLES), extra_fields=[3, 4])
     assert p.animal_fields == ["Genotype", "Weight"]
     k7 = p.get_animal("K7")
     assert k7.group == "KO" and k7.sex == "Female" and k7.fields == {"Genotype": "KO", "Weight": "25"}
     assert any(g.name == "KO" for g in p.groups)
+    page.refresh()
     assert page.table.rowCount() == 5
     out = tmp_path / "out.csv"
-    page.export_csv(str(out))
+    export_animals(p, out)
     rows = list(csv.reader(out.open()))
     assert rows[0] == ["ID", "Treatment", "Sex", "Genotype", "Weight"]
     assert ["K7", "KO", "Female", "KO", "25"] in rows
     assert len(rows) == 6
+
+
+def test_rename_treatment_keeps_blind_code(page):
+    p = page.project
+    p.blind = True
+    code = treatment_code(p, "Control")
+    page.set_blind(False)
+    page.treatments.item(0, 0).setText("Saline")
+    assert p.groups[0].name == "Saline" and treatment_code(p, "Saline") == "A"
+    p.blind = True
+    assert treatment_code(p, "Saline") == code and "Control" not in p.settings_extra["blind_codes"]
 
 
 def test_screenshot(page):

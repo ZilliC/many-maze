@@ -261,6 +261,26 @@ def test_blind_codes_stable():
     assert wf.display_group(p, "New") not in (a, b)
 
 
+def test_animals_and_treatments():
+    p = make_project()
+    p.blind = True
+    code = wf.treatment_code(p, "Saline")
+    assert wf.rename_group(p, "Saline", "Vehicle") and wf.treatment_code(p, "Vehicle") == code
+    assert not wf.rename_group(p, "Vehicle", "Drug")  # taken
+    assert [a.group for a in p.animals[:2]] == ["Vehicle", "Drug"]
+    assert p.ensure_animal("X1", "New").group == "New" and p.group_color("New") == "#10b981"  # first unused
+    assert wf.add_group(p, "New") is None and wf.add_group(p, "Other").color == "#f59e0b"
+    wf.delete_group(p, "Drug")
+    assert p.get_group("Drug") is None and p.animals[1].group == ""
+    p.add_test(animal_id="M1", extra_animals=["M2"])
+    assert not wf.rename_animal(p, p.animals[0], "M2") and wf.rename_animal(p, p.animals[1], "K2")
+    assert p.tests[-1].extra_animals == ["K2"]
+    assert wf.add_field(p, "Weight") and not wf.add_field(p, "Treatment")
+    p.animals[0].fields["Weight"] = "30"
+    assert wf.rename_field(p, "Weight", "W") and p.animals[0].fields == {"W": "30"}
+    assert wf.remove_field(p, "W") and p.animal_fields == [] and p.animals[0].fields == {}
+
+
 def test_id_matches():
     p = make_project(1)
     p.animal_fields = ["Microchip"]

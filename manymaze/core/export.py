@@ -8,7 +8,6 @@ import re
 import datetime as _dt
 import html
 import math
-from dataclasses import asdict
 from pathlib import Path
 from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
 
@@ -16,19 +15,35 @@ import numpy as np
 
 from .. import __version__
 from .project import INACTIVE_STATUSES, Project, result_columns
+from .stats import is_number
 
 XML_FORMAT_VERSION = 1
 
 
-def _fmt(v):
+def value_text(v) -> str:
+    """Full-precision text of a value (exports, clipboard): whole numbers as integers, other numbers with 10
+    significant digits, blank for missing and non-finite values."""
+    if v is None:
+        return ""
     if isinstance(v, (float, np.floating)):
         if not math.isfinite(v):
             return ""
         f = float(v)
         return str(int(f)) if f.is_integer() and abs(f) < 1e15 else f"{f:.10g}"
     if isinstance(v, np.integer):
-        return int(v)
-    return v
+        return str(int(v))
+    return str(v)
+
+
+def display_text(v) -> str:
+    """A value as shown in tables: numbers with 3 decimals (blank if not finite)."""
+    if v is None:
+        return ""
+    if is_number(v):
+        if isinstance(v, (int, np.integer)):
+            return str(int(v))
+        return f"{float(v):.3f}" if math.isfinite(v) else ""
+    return str(v)
 
 
 def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimiter=","):
@@ -37,7 +52,7 @@ def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimite
         w = csv.writer(f, delimiter=delimiter)
         w.writerow(cols)
         for r in rows:
-            w.writerow([_fmt(r.get(c, "")) for c in cols])
+            w.writerow([value_text(r.get(c)) for c in cols])
 
 
 def write_tsv(rows: list[dict], path, columns: list[str] | None = None):
@@ -100,15 +115,45 @@ def write_table(rows: list[dict], path, columns: list[str] | None = None, sheet:
     return path
 
 
-def table_text(rows: list[dict], columns: list[str], delimiter: str = "\t", header: bool = True) -> str:
-    """Rows × columns as delimited text (for the clipboard)."""
+def table_text(rows: list[dict], columns: list[str], delimiter: str = "\t", header: bool = True,
+               fmt=value_text) -> str:
+    """Rows × columns as delimited text (for the clipboard); fmt(value) -> text (default: full precision)."""
     out = []
     if header:
         out.append(delimiter.join(str(c) for c in columns))
     for r in rows:
-        out.append(delimiter.join(str(_fmt(r.get(c, ""))).replace(delimiter, " ").replace("\n", " ")
-                                  for c in columns))
+        out.append(delimiter.join(fmt(r.get(c)).replace(delimiter, " ").replace("\n", " ") for c in columns))
     return "\n".join(out) + "\n"
+
+
+def results_workbook(project: Project, rows: list[dict], columns: list[str] | None = None,
+                     segmented: bool = False) -> tuple[dict[str, list[dict]], dict[str, list[str]]]:
+    """Sheets ({name: rows}) and their columns of a results workbook: whole-test results, time periods (segmented),
+    zone visits of the tests in `rows`, animals, tests and settings (with the software version)."""
+    whole = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
+    sheets, cols = {"Results": whole}, {}
+    main = [c for c in columns or [] if c != "Period"]
+    if main:
+        cols["Results"] = main
+    seg = [r for r in rows if r.get("Period", "Whole test") != "Whole test"] if segmented else []
+    if seg:
+        sheets["Time periods"] = seg
+        if main:
+            cols["Time periods"] = columns if "Period" in columns else main[:1] + ["Period"] + main[1:]
+    ids = {r.get("Test") for r in rows}
+    visits = zone_visit_rows(project, [t for t in project.tests if t.id in ids])
+    if visits:
+        sheets["Zone visits"] = visits
+    sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields} for a in project.animals]
+    sheets["Tests"] = [{"Test": t.id, "Animal": t.animal_id, "Stage": t.stage, "Trial": t.trial, "Video": t.video,
+                        "Apparatus": t.apparatus, "Start (s)": t.start_s, "Status": t.status, "Notes": t.notes}
+                       for t in project.tests]
+    sheets["Settings"] = [{"Setting": k, "Value": str(v)} for k, v in
+                          {**{f"detection.{k}": v for k, v in project.detection.to_dict().items()},
+                           **{f"analysis.{k}": v for k, v in project.analysis.to_dict().items()},
+                           "test_duration_s": project.test_duration_s,
+                           "software": f"mANY-MAZE {__version__}"}.items()]
+    return sheets, cols
 
 
 def export_results(project: Project, path, segmented: bool = False, columns: list[str] | None = None) -> Path:
@@ -117,29 +162,11 @@ def export_results(project: Project, path, segmented: bool = False, columns: lis
     ext = path.suffix.lower()
     if ext == ".xml":
         return export_xml(project, path)
-    rows = project.results(segmented=False)
+    rows = project.results(segmented=segmented)
     if ext == ".xlsx":
-        sheets = {"Results": rows}
-        if segmented:
-            seg = [r for r in project.results(segmented=True) if r.get("Period") != "Whole test"]
-            if seg:
-                sheets["Time periods"] = seg
-        visits = zone_visit_rows(project)
-        if visits:
-            sheets["Zone visits"] = visits
-        sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields} for a in project.animals]
-        sheets["Tests"] = [{"Test": t.id, "Animal": t.animal_id, "Stage": t.stage, "Trial": t.trial,
-                            "Video": t.video, "Apparatus": t.apparatus, "Start (s)": t.start_s,
-                            "Status": t.status, "Notes": t.notes} for t in project.tests]
-        sheets["Settings"] = [{"Setting": k, "Value": str(v)} for k, v in
-                              {**{f"detection.{k}": v for k, v in project.detection.to_dict().items()},
-                               **{f"analysis.{k}": v for k, v in project.analysis.to_dict().items()},
-                               "test_duration_s": project.test_duration_s,
-                               "software": f"mANY-MAZE {__version__}"}.items()]
-        write_xlsx(sheets, path, {"Results": columns} if columns else None)
+        sheets, cols = results_workbook(project, rows, columns, segmented)
+        write_xlsx(sheets, path, cols)
     else:
-        if segmented:
-            rows = project.results(segmented=True)
         write_csv(rows, path, columns, delimiter="\t" if ext in (".tsv", ".txt", ".tab") else ",")
     return path
 
@@ -166,6 +193,15 @@ def zone_visit_rows(project: Project, tests=None) -> list[dict]:
     return rows
 
 
+def export_animals(project: Project, path):
+    """The animal list as CSV: ID, treatment, sex and the custom fields."""
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields))
+        for a in project.animals:
+            w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in project.animal_fields])
+
+
 def export_track(track, path):
     track.to_csv(path)
 
@@ -182,12 +218,12 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
     out_dir.mkdir(parents=True, exist_ok=True)
     tests = [t for t in (tests if tests is not None else project.tests) if project.has_track(t)]
     written = []
-    beh = [asdict(b) for b in project.behaviours]
+    beh = project.behaviours
     for k, t in enumerate(tests):
         if should_stop and should_stop():
             break
         tracks = project.load_tracks(t)
-        app = charts.apparatus_of_test(project, t)
+        app = project.apparatus_of(t)
         ids = [t.animal_id] + list(t.extra_animals)
         for i, tr in enumerate(tracks):
             raw_cols = [c for c in COLUMNS if c != "t"]
@@ -449,18 +485,17 @@ def _img(png: bytes, width=320) -> str:
 
 def html_report(project: Project, path, tests=None, include_plots: bool = True, measures: list[str] | None = None,
                 stats_measures: list[str] | None = None, heatmap_norm: str = "auto",
-                chart_parameters: list[str] | None = None, color_by: str = "time") -> Path:
+                chart_parameters: list[str] | None = None, color_by: str = "time", rows: list[dict] | None = None
+                ) -> Path:
     """Self-contained HTML report: summary, per-test track plots/heat maps (+ optional charts of per-frame
-    parameters), group heat maps on a common scale, results and statistics."""
-    from . import charts, plots
-    from .stats import compare_groups, group_values, summary_text
-    from .video import VideoSource
+    parameters), group heat maps on a common scale, results and statistics (compared between treatments as the
+    Statistics page does). rows: the results to tabulate and compare (default: the whole-test results of `tests`)."""
+    from . import analyses, charts, plots
 
     tests = tests if tests is not None else [t for t in project.tests
                                              if t.status not in INACTIVE_STATUSES and project.has_results(t)]
-    rows = []
-    for t in tests:
-        rows.extend(project.analyse_test(t))
+    if rows is None:
+        rows = [r for t in tests for r in project.analyse_test(t)]
     cols = result_columns(rows)
     if measures:
         info = ["Test", "Animal", "Group", "Stage", "Trial"]
@@ -477,7 +512,7 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     out.append(f"<p>{html.escape(project.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}. "
                f"{len(tests)} tests, {len(project.animals)} animals.</p>")
-    beh = [asdict(b) for b in project.behaviours]
+    beh = project.behaviours
     if include_plots and tests:
         out.append("<h2>Tracks</h2><div class='grid'>")
         hm_vmax = None
@@ -486,20 +521,15 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
             for t in tests:
                 trs = project.load_tracks(t)
                 if trs:
-                    H, _ = plots.occupancy(trs[:1], charts.apparatus_of_test(project, t))
+                    H, _ = plots.occupancy(trs[:1], project.apparatus_of(t))
                     hm_vmax = max(hm_vmax, float(H.max()) if H.size else 0.0)
             hm_vmax = hm_vmax or None
         for t in tests:
             tracks = project.load_tracks(t)
             if not tracks:
                 continue
-            app = charts.apparatus_of_test(project, t)
-            frame = None
-            try:
-                with VideoSource(project.abs_path(t.video)) as v:
-                    frame = v.frame_at(int(t.start_s * v.fps))
-            except Exception:
-                pass
+            app = project.apparatus_of(t)
+            frame = project.start_frame(t)
             an = project.get_animal(t.animal_id)
             title = f"Test {t.id} · {t.animal_id} · {an.group if an else ''}"
             markers = plots.behaviour_markers(tracks[0], app, project.analysis_for(t), t.events, beh)
@@ -511,7 +541,7 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
             if chart_parameters:
                 names = [p.name for p in charts.parameters(app, tracks[0], beh) if p.name in chart_parameters]
                 if names:
-                    fig = charts.chart_figure(tracks[0], app, names, project.analysis_for(t), t.events, beh,
+                    fig = plots.chart_figure(tracks[0], app, names, project.analysis_for(t), t.events, beh,
                                               size=(6.5, 1.0 + 1.1 * len(names)))
                     card += "<br>" + _img(plots.fig_to_png(fig), 560)
             out.append(card + "</div>")
@@ -520,34 +550,22 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         groups = {}
         for t in tests:
             a = project.get_animal(t.animal_id)
-            groups.setdefault(a.group if a else "", []).append(t)
+            groups.setdefault(a.group if a and a.group else "No group", []).append(t)
         if len(groups) > 1:
-            app0 = charts.apparatus_of_test(project, tests[0])
-            data = []
-            for g, ts in groups.items():
-                trs = []
-                for t in ts:
-                    for tr in project.load_tracks(t)[:1]:
-                        trs.append(plots.align_track(tr, charts.apparatus_of_test(project, t),
-                                                     (t.variables or {}).get("heatmap_transform", "none"), app0))
-                data.append((g or "No group", trs, app0))
-            fig = plots.group_heatmap_figure(data, norm="auto" if heatmap_norm == "fixed" else heatmap_norm)
+            fig = plots.group_heatmap(project, groups, norm="auto" if heatmap_norm == "fixed" else heatmap_norm)
             out.append("<h2>Group occupancy</h2><div class='grid'><div class='card'>"
-                       f"{_img(plots.fig_to_png(fig), 300 * min(3, len(data)) + 60)}</div></div>")
+                       f"{_img(plots.fig_to_png(fig), 300 * min(3, len(groups)) + 60)}</div></div>")
     if stats_measures and rows:
         out.append("<h2>Statistics</h2>")
-        colors = {g.name: g.color for g in project.groups}
         for m in stats_measures:
-            gv = group_values(rows, m, "Group")
-            if len(gv) < 2:
+            a = analyses.compare(project, rows, m, "Group")
+            if len(a.result["groups"]) < 2:
                 continue
-            res = compare_groups(gv)
-            fig = plots.group_plot(gv, m, colors, posthoc=res.get("posthoc"), p_value=res.get("p"))
-            out.append(f"<div class='card'>{_img(plots.fig_to_png(fig), 360)}<pre>{html.escape(summary_text(res, m))}"
-                       f"</pre></div>")
+            out.append(f"<div class='card'>{_img(plots.fig_to_png(a.figure), 360)}"
+                       f"<pre>{html.escape(a.summary_text)}</pre></div>")
     out.append("<h2>Results</h2><table><tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in cols) + "</tr>")
     for r in rows:
-        out.append("<tr>" + "".join(f"<td>{html.escape(str(_fmt(r.get(c, ''))))}</td>" for c in cols) + "</tr>")
+        out.append("<tr>" + "".join(f"<td>{html.escape(value_text(r.get(c)))}</td>" for c in cols) + "</tr>")
     out.append("</table></body></html>")
     path = Path(path)
     path.write_text("\n".join(out), encoding="utf-8")

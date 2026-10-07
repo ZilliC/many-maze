@@ -11,10 +11,11 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QMessageBox, QSt
 
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import Project
+from manymaze.core.workflow import treatment_code, treatment_text
 from manymaze.gui import theme
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.pages.animals import treatment_code, treatment_text, two_lines
 from manymaze.gui.pages.tests import C_ID, C_STATUS, READY_BG, ready_tests
+from manymaze.gui.ribbon import two_lines
 
 app = QApplication.instance() or QApplication([])
 

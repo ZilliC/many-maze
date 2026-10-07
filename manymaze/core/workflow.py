@@ -1,5 +1,5 @@
-"""Experiment workflow: behaviour keys, test schedules, test status actions, training criteria, blind codes,
-animal ID confirmation and dose calculation."""
+"""Experiment workflow: behaviour keys, test schedules, test status actions, training criteria, animals and
+treatments, blind codes, animal ID confirmation and dose calculation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import random
 import string
 from dataclasses import asdict, dataclass
 
-from .project import INACTIVE_STATUSES, Animal, Behaviour, Project, Test
+from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test
 
 MAX_STAGES = 50
 MAX_TRIALS = 99
@@ -22,6 +22,7 @@ WEIGHT_FIELD = "Weight (g)"
 DOSE_FIELD = "Dose (mg/kg)"
 VOLUME_FIELD = "Volume (mL)"
 BLIND_COLOR = "#64748b"
+RESERVED_FIELDS = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment")
 
 
 # ---------------------------------------------------------------- behaviours
@@ -405,6 +406,85 @@ def reinstate_animal(project: Project, animal: Animal) -> int:
     return n
 
 
+# ---------------------------------------------------------------- animals and treatments
+def rename_animal(project: Project, animal: Animal, new_id: str) -> bool:
+    """Give the animal a new (unique, non-empty) ID, updating the tests it takes part in."""
+    new_id = new_id.strip()
+    if not new_id or new_id == animal.id or project.get_animal(new_id) is not None:
+        return False
+    old, animal.id = animal.id, new_id
+    for t in project.tests:
+        if t.animal_id == old:
+            t.animal_id = new_id
+        if old in t.extra_animals:
+            t.extra_animals = [new_id if x == old else x for x in t.extra_animals]
+    return True
+
+
+def add_group(project: Project, name: str, color: str | None = None) -> Group | None:
+    """A new treatment (None if the name is empty or taken)."""
+    name = name.strip()
+    if not name or project.get_group(name) is not None:
+        return None
+    g = Group(name, color or project.next_group_color())
+    project.groups.append(g)
+    return g
+
+
+def rename_group(project: Project, old: str, new: str) -> bool:
+    """Rename a treatment, moving its animals and its blind code to the new name."""
+    new = new.strip()
+    g = project.get_group(old)
+    if g is None or not new or new == old or project.get_group(new) is not None:
+        return False
+    g.name = new
+    for a in project.animals:
+        if a.group == old:
+            a.group = new
+    codes = project.settings_extra.get("blind_codes", {})
+    if old in codes:
+        codes[new] = codes.pop(old)
+    return True
+
+
+def delete_group(project: Project, name: str):
+    """Delete a treatment; its animals are left without one."""
+    project.groups = [g for g in project.groups if g.name != name]
+    for a in project.animals:
+        if a.group == name:
+            a.group = ""
+
+
+def add_field(project: Project, name: str) -> bool:
+    """Add a custom animal field (column); False if the name is empty, taken or reserved."""
+    name = name.strip()
+    if not name or name in project.animal_fields or name.lower() in RESERVED_FIELDS:
+        return False
+    project.animal_fields.append(name)
+    return True
+
+
+def rename_field(project: Project, old: str, new: str) -> bool:
+    new = new.strip()
+    f = project.animal_fields
+    if old not in f or not new or new in f or new.lower() in RESERVED_FIELDS:
+        return False
+    f[f.index(old)] = new
+    for a in project.animals:
+        if old in a.fields:
+            a.fields[new] = a.fields.pop(old)
+    return True
+
+
+def remove_field(project: Project, name: str) -> bool:
+    if name not in project.animal_fields:
+        return False
+    project.animal_fields.remove(name)
+    for a in project.animals:
+        a.fields.pop(name, None)
+    return True
+
+
 # ---------------------------------------------------------------- blind testing
 def blind_codes(project: Project) -> dict[str, str]:
     """Stable random code per group (created on demand, stored in settings_extra["blind_codes"])."""
@@ -421,6 +501,32 @@ def blind_codes(project: Project) -> dict[str, str]:
             codes[g.name] = c
             used.add(c)
     return codes
+
+
+def treatment_code(project: Project | None, name: str) -> str:
+    """Code of a treatment: its blind code while testing blind, else a letter (A, B, …) in list order."""
+    if not name or project is None:
+        return ""
+    if project.blind:
+        return blind_codes(project).get(name, "??")
+    names = [g.name for g in project.groups]
+    if name not in names:
+        return ""
+    n, s = names.index(name) + 1, ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def treatment_text(project: Project | None, name: str, with_code: bool = True) -> str:
+    """A treatment as shown to the experimenter: "A - Saline", or only its code while testing blind."""
+    if not name or project is None:
+        return name or ""
+    code = treatment_code(project, name)
+    if project.blind:
+        return code
+    return f"{code} - {name}" if with_code and code else name
 
 
 def display_group(project: Project, name: str) -> str:

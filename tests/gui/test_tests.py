@@ -10,12 +10,12 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 from manymaze.core.demo import create_demo_project
+from manymaze.core.importers import dlc_bodyparts
 from manymaze.core.project import Project
 from manymaze.core.track import Track
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.pages import tests as tests_mod
 from manymaze.gui.pages.tests import (C_ANIMAL, C_DUR, C_STAGE, C_START, C_STATUS, C_TRIAL, AddVideosDialog,
-                                      DlcImportDialog, VariablesDialog, track_tests_job, tracking_batches)
+                                      DlcImportDialog, VariablesDialog, track_tests, tracking_batches)
 from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
@@ -111,10 +111,17 @@ def test_add_duplicate_exclude_delete(page, monkeypatch, tmp_path):
     assert p.tests[-1].video == "" and len(p.tests) == 6
     new = page.create_tests_for([("C1", "Day 1", 1), ("C1", "Day 1", 2), ("A1", "Day 1", 2)], "Open field")
     assert len(new) == 2  # (C1, Day 1, 1) already exists
+    src = p.get_test(1)
+    src.io_events, src.result_variables, src.pauses = [{"t": 1.0}], {"score": 2.0}, [[1.0, 2.0]]
+    src.zone_overrides, src.attempt, src.replaces = {"Centre": {}}, 2, 9
     page.select_ids({1})
     page.duplicate_selected()
     dup = p.tests[-1]
-    assert dup.video == p.get_test(1).video and dup.status == "pending" and dup.events == []
+    assert dup.video == src.video and dup.status == "pending" and dup.events == []
+    assert (dup.io_events, dup.result_variables, dup.pauses, dup.zone_overrides, dup.attempt, dup.replaces) == \
+        ([], {}, [], {}, 1, 0)
+    src.io_events, src.result_variables, src.pauses, src.zone_overrides, src.attempt, src.replaces = \
+        [], {}, [], {}, 1, 0
     page.select_ids({1, 2})
     page.toggle_exclude()
     assert p.get_test(1).status == p.get_test(2).status == "excluded"
@@ -151,7 +158,7 @@ def test_batches_and_tracking(page):
     batches = tracking_batches(p, [p.get_test(1), dup, p.get_test(2)])
     assert sorted(len(b) for b in batches) == [1, 2]
     # cancelling stops cleanly: nothing saved, status unchanged
-    res = track_tests_job(p, [dup])(lambda f: None, lambda: True)
+    res = track_tests(p, [dup], lambda f: None, lambda: True)
     assert res["cancelled"] and res["tracked"] == []
     assert dup.status == "pending" and not p.track_path(dup).exists()
     # track all untracked through the page (background worker)
@@ -188,7 +195,7 @@ def test_import_tracks(page, tmp_path, monkeypatch):
         rows.append(f"{i}," + ",".join(vals))
     dlc = tmp_path / "videoDLC_resnet50.csv"
     dlc.write_text("\n".join(rows) + "\n")
-    assert tests_mod.dlc_bodyparts(dlc) == ["nose", "body", "tailbase"]
+    assert dlc_bodyparts(dlc) == ["nose", "body", "tailbase"]
     t2 = p.add_test("", "C2", stage="Day 1", trial=9)
     t2.start_s = 1.0
     t2.duration_s = 2.0

@@ -1,4 +1,5 @@
-"""Figures: track plots, occupancy / behaviour heat maps, time courses and group graphs (matplotlib)."""
+"""Figures: track plots, occupancy / behaviour heat maps, charts of per-frame parameters over time, time courses
+and group graphs (matplotlib)."""
 
 from __future__ import annotations
 
@@ -13,10 +14,12 @@ import numpy as np  # noqa: E402
 from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.patches import Polygon as MplPolygon  # noqa: E402
+from matplotlib.patches import Patch, Polygon as MplPolygon  # noqa: E402
 from scipy.ndimage import gaussian_filter  # noqa: E402
 
+from . import charts  # noqa: E402
 from .apparatus import Apparatus  # noqa: E402
+from .project import Behaviour  # noqa: E402
 from .stats import descriptive, error_value, stars  # noqa: E402
 from .track import Track  # noqa: E402
 
@@ -121,7 +124,8 @@ def align_track(track: Track, app: Apparatus | None, transform: str = "none", re
 
 
 # ---------------------------------------------------------------- track plots
-def behaviour_markers(track: Track, app: Apparatus, settings=None, events=None, behaviours=None,
+def behaviour_markers(track: Track, app: Apparatus, settings=None, events=None,
+                      behaviours: list[Behaviour] | None = None,
                       freezing: bool = True, immobile: bool = False) -> list[dict]:
     """Markers for track plots: freezing / immobility episodes and manually scored events.
 
@@ -139,10 +143,7 @@ def behaviour_markers(track: Track, app: Apparatus, settings=None, events=None, 
                 for a, b in runs(mask):
                     out.append({"label": label, "t": float(t[a]), "t_end": float(t[b - 1] + dur[b - 1]),
                                 "color": col})
-    kinds = {}
-    for b in behaviours or []:
-        name = b["name"] if isinstance(b, dict) else b.name
-        kinds[name] = b.get("kind", "state") if isinstance(b, dict) else getattr(b, "kind", "state")
+    kinds = {b.name: b.kind for b in behaviours or []}
     palette = ["#ef4444", "#22c55e", "#eab308", "#ec4899", "#14b8a6", "#f97316", "#6366f1"]
     names = list(dict.fromkeys(e.get("behaviour") for e in events or [] if e.get("behaviour")))
     for e in events or []:
@@ -165,8 +166,6 @@ def _series_for(track: Track, app, color_by: str, settings=None):
         k = kinematics(track, app, settings or AnalysisSettings())
         win = max(1, int(round(0.2 / max(track.dt, 1e-6))))
         return moving_average(k.speed, win), f"speed ({app.unit if app else 'px'}/s)"
-    from . import charts
-
     v = charts.compute(track, app, [color_by], settings)[color_by]
     return v, charts.param_info(app, color_by, track).label
 
@@ -418,6 +417,45 @@ def group_heatmap_figure(data: list[tuple[str, list, object]], norm: str = "auto
         cb.set_label(("mean " if occ_norm == "time" else "") + _norm_label(occ_norm, what), fontsize=8)
         cb.ax.tick_params(labelsize=7)
     return fig
+
+
+def group_heatmap(project, tests_by_group: dict[str, list], heat_of: str | None = None, period: str | None = None,
+                  part: str = "centre", norm: str = "auto", vmax: float | None = None, progress=None) -> Figure:
+    """Average heat map of each group's tests ({label: [Test]}; treatments in experiment order) on a common scale.
+
+    The first animal of each test is drawn, aligned (Test.variables["heatmap_transform"]) onto the apparatus of the
+    first test. heat_of: only the frames where this state parameter is on (e.g. "Freezing"); period: only this time
+    period of each test (tests without it are left out). progress(fraction) is called after each test."""
+    known = [g.name for g in project.groups]
+    order = sorted(tests_by_group, key=lambda g: known.index(g) if g in known else len(known))
+    ref = project.apparatus_of(tests_by_group[order[0]][0])
+    n, k = sum(len(v) for v in tests_by_group.values()), 0
+    data, masks = [], {}
+    for g in order:
+        trs, ms = [], []
+        for t in tests_by_group[g]:
+            app = project.apparatus_of(t)
+            for tr in project.load_tracks(t)[:1]:
+                mask = charts.state_mask(tr, app, heat_of, project.analysis_for(t), t.events,
+                                         project.behaviours) if heat_of else None
+                if period:
+                    try:
+                        rng = next(((a, b) for lab, a, b in project.test_periods(t, tr) if lab == period), None)
+                    except Exception:  # periods that cannot be computed for this test
+                        rng = None
+                    if rng is None:
+                        continue
+                    keep = (tr.t >= rng[0]) & (tr.t < rng[1])
+                    mask = None if mask is None else mask[keep]
+                    tr = tr.slice_time(*rng)
+                ms.append(mask)
+                trs.append(align_track(tr, app, (t.variables or {}).get("heatmap_transform", "none"), ref))
+            k += 1
+            if progress:
+                progress(k / n)
+        data.append((g, trs, ref))
+        masks[g] = ms if heat_of else None
+    return group_heatmap_figure(data, norm=norm, vmax=vmax, masks=masks, part=part, what=heat_of or "")
 
 
 def speed_trace(track: Track, app: Apparatus, freezing: np.ndarray | None = None, size=(7, 2.2)) -> Figure:
@@ -673,6 +711,138 @@ def scatter_plot(xs, ys, groups, x_label: str, y_label: str, colors: dict | None
         ax.legend(fontsize=7, frameon=False)
     fig.tight_layout()
     return fig
+
+
+def proportions_figure(rows_l, cols_l, T, size=(5, 3.6)) -> Figure:
+    """Stacked bars of the proportion of each category per row level."""
+    fig = Figure(figsize=size, dpi=100)
+    ax = fig.add_subplot(111)
+    T = np.asarray(T, float)
+    tot = T.sum(axis=1, keepdims=True)
+    P = np.divide(T, tot, out=np.zeros_like(T), where=tot > 0) * 100
+    bottom = np.zeros(len(rows_l))
+    for j, c in enumerate(cols_l):
+        ax.bar(range(len(rows_l)), P[:, j], bottom=bottom, label=c, color=f"C{j}", alpha=0.8, width=0.6)
+        bottom += P[:, j]
+    ax.set_xticks(range(len(rows_l)))
+    ax.set_xticklabels([f"{r}\n(n = {int(n)})" for r, n in zip(rows_l, tot[:, 0])], fontsize=8)
+    ax.set_ylabel("% of tests", fontsize=8)
+    ax.set_ylim(0, 100)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(fontsize=7, frameon=False, bbox_to_anchor=(1.0, 1.0), loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def message_figure(text: str, size=(4.2, 3.6), fig: Figure | None = None) -> Figure:
+    """A figure showing only a grey message (no data, nothing chosen…)."""
+    fig = fig or Figure(figsize=size, dpi=100)
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+    ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=10, color="#64748b", wrap=True,
+            transform=ax.transAxes)
+    return fig
+
+
+# ---------------------------------------------------------------- charts over time
+def chart_figure(track: Track, app: Apparatus, names: list[str], settings=None, events=None,
+                 behaviours: list[Behaviour] | None = None,
+                 bands: list[str] | None = None, show_events: bool = True, t_range: tuple | None = None,
+                 data: dict | None = None, title: str = "", size=(8, 5), other_tracks=None,
+                 fig: Figure | None = None) -> Figure:
+    """Stacked time series (shared time axis) of the chosen parameters.
+
+    bands: zones whose occupancy is shown as coloured background bands; events (manual scoring) are drawn
+    as an extra strip of bars (state behaviours) and ticks (point behaviours).
+    """
+    fig = fig or Figure(figsize=size, dpi=100)
+    names = list(names)[:10]
+    if data is None:
+        data = charts.compute(track, app, names, settings, events, behaviours, other_tracks)
+    evs = [e for e in (events or []) if e.get("behaviour")] if show_events else []
+    n_ax = len(names) + (1 if evs else 0)
+    if n_ax == 0:
+        return message_figure("Choose parameters to chart", fig=fig)
+    ratios = [3] * len(names) + ([max(1, len({e['behaviour'] for e in evs})) * 0.6] if evs else [])
+    gs = fig.add_gridspec(n_ax, 1, height_ratios=ratios, hspace=0.12)
+    t = track.t
+    axes = []
+    band_data = charts.zone_bands(track, app, bands or [], settings) if bands else []
+    info = {p.name: p for p in charts.parameters(app, track, behaviours, len(other_tracks or []))}
+    for i, n in enumerate(names):
+        ax = fig.add_subplot(gs[i], sharex=axes[0] if axes else None)
+        axes.append(ax)
+        p = info.get(n) or charts.Param(n)
+        v = data[n]
+        if p.kind == charts.STATE:
+            ax.fill_between(t, 0, np.nan_to_num(v), step="post", color="#f97316", alpha=0.55, lw=0)
+            ax.set_ylim(-0.05, 1.15)
+            ax.set_yticks([0, 1])
+            ax.set_yticklabels(["off", "on"], fontsize=7)
+        elif p.kind == charts.COUNT:
+            ax.step(t, v, where="post", lw=1.0, color="#7c3aed")
+        else:
+            ax.plot(t, v, lw=0.8, color=f"C{i % 10}")
+        ax.set_ylabel(_wrap_label(p.label), fontsize=7, rotation=0, ha="right", va="center", labelpad=6)
+        ax.tick_params(labelsize=7)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", color="#e2e8f0", lw=0.5)
+        for zn, col, spans in band_data:
+            for a, b in spans:
+                ax.axvspan(a, b, color=col, alpha=0.13, lw=0)
+    if evs:
+        ax = fig.add_subplot(gs[len(names)], sharex=axes[0] if axes else None)
+        axes.append(ax)
+        rows = list(dict.fromkeys(e["behaviour"] for e in evs))
+        kinds = {b.name: b.kind for b in behaviours or []}
+        end = float(t[-1] + track.dt) if len(t) else 0.0
+        for j, b in enumerate(rows):
+            col = f"C{(j + 3) % 10}"
+            for e in evs:
+                if e["behaviour"] != b:
+                    continue
+                if kinds.get(b) == "point" or (e.get("t_end") is None and kinds.get(b) != "state"):
+                    ax.plot([e["t"], e["t"]], [j - 0.38, j + 0.38], color=col, lw=1.6)
+                else:
+                    t1 = e.get("t_end") if e.get("t_end") is not None else end
+                    ax.broken_barh([(e["t"], max(t1 - e["t"], 1e-3))], (j - 0.32, 0.64), color=col, alpha=0.8)
+        ax.set_yticks(range(len(rows)))
+        ax.set_yticklabels(rows, fontsize=7)
+        ax.set_ylim(-0.6, len(rows) - 0.4)
+        ax.invert_yaxis()
+        ax.tick_params(labelsize=7)
+        ax.spines[["top", "right"]].set_visible(False)
+    for ax in axes[:-1]:
+        ax.tick_params(labelbottom=False)
+    axes[-1].set_xlabel("time (s)", fontsize=8)
+    if len(t):
+        lo, hi = (t_range if t_range else (float(t[0]), float(t[-1] + track.dt)))
+        axes[0].set_xlim(lo, hi)
+    if band_data:
+        handles = [Patch(color=col, alpha=0.35, label=zn) for zn, col, _ in band_data]
+        axes[0].legend(handles=handles, fontsize=7, frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0),
+                       ncol=min(6, len(handles)))
+    if title:
+        fig.suptitle(title, fontsize=9)
+    try:
+        fig.subplots_adjust(left=0.2, right=0.97, top=0.9 if (band_data or title) else 0.96, bottom=0.09)
+    except Exception:
+        pass
+    return fig
+
+
+def _wrap_label(s: str, width: int = 18) -> str:
+    if len(s) <= width:
+        return s
+    words, lines, cur = s.split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    lines.append(cur)
+    return "\n".join(lines)
 
 
 def fig_to_png(fig: Figure, dpi: int = 120) -> bytes:

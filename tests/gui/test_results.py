@@ -121,14 +121,14 @@ def test_column_chooser(page):
     assert len(page.visible_measures()) == len(page.measure_columns())
     # selection kept in memory on the project
     page.set_visible_measures(["Centre: time (%)"])
-    assert "Total distance (cm)" in page.project.ui_hidden_measures
+    assert "Total distance (cm)" in page.hidden
 
 
 def test_exports(page, tmp_path, monkeypatch):
     page.set_visible_measures(["Total distance (cm)", "Centre: time (%)"])
     out = tmp_path / "r.csv"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
-    page.export_csv()
+    page.save_table()
     with open(out) as f:
         rows = list(csv.reader(f))
     assert rows[0] == page.shown_columns()
@@ -146,7 +146,7 @@ def test_exports(page, tmp_path, monkeypatch):
     assert {r["Period"] for r in page.rows} == {"Whole test", "0-4 s", "4-8 s"}
     xo = tmp_path / "r.xlsx"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(xo), ""))
-    page.export_xlsx()
+    page.save_table(suffix=".xlsx")
     from openpyxl import load_workbook
 
     wb = load_workbook(xo)
@@ -157,6 +157,8 @@ def test_exports(page, tmp_path, monkeypatch):
     tp = [c.value for c in wb["Time periods"][1]]
     assert "Period" in tp and tp[-1] == "Centre: time (%)"
     assert wb["Time periods"].max_row == 13
+    assert {"Zone visits", "Animals", "Tests", "Settings"} <= set(wb.sheetnames)
+    assert any(r[1].value.startswith("mANY-MAZE") for r in wb["Settings"].iter_rows(min_row=2))
     # period filter
     page.period_combo.setCurrentIndex(page.period_combo.findData("0-4 s"))
     assert page.proxy.rowCount() == 6
@@ -190,3 +192,9 @@ def test_cache_shared(page):
     page.reload()
     page.wait_loaded()
     assert _results_cache.cached_rows(p, False) is page.rows
+    # so do the I/O log, saved procedure variables and I/O devices
+    for change in (lambda: p.tests[0].io_events.append({"t": 1.0, "device": "d", "channel": 1, "value": 1}),
+                   lambda: p.tests[0].result_variables.update(score=1.0), lambda: p.io_devices.append({})):
+        fp = _results_cache.fingerprint(p)
+        change()
+        assert _results_cache.fingerprint(p) != fp
