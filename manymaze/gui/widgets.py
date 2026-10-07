@@ -1,4 +1,5 @@
-"""Shared Qt widgets and helpers: frame display, video player, background workers, plot canvas."""
+"""Shared Qt widgets and helpers: frame display, video player, background workers, plot canvas, small property-page
+helpers and record tables."""
 
 from __future__ import annotations
 
@@ -11,10 +12,11 @@ import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
                            QTransform)
-from PySide6.QtWidgets import (QColorDialog, QFrame, QGraphicsEllipseItem, QGraphicsItemGroup, QGraphicsLineItem,
-                               QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene, QGraphicsSimpleTextItem,
-                               QGraphicsView, QHBoxLayout, QLabel, QMessageBox, QProgressDialog, QPushButton,
-                               QSizePolicy, QSlider, QStyle, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QFrame, QGraphicsEllipseItem,
+                               QGraphicsItemGroup, QGraphicsLineItem, QGraphicsPathItem, QGraphicsPixmapItem,
+                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QHeaderView, QLabel,
+                               QMessageBox, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.apparatus import Apparatus
 from ..core.geometry import Ellipse
@@ -558,3 +560,114 @@ class ColorButton(QPushButton):
         if c.isValid():
             self.set_color(c.name())
             self.color_changed.emit(c.name())
+
+
+# ---------------------------------------------------------------- record tables
+def style_table(t: QTableWidget, headers: list[str], stretch=(0,)):
+    """Columns, stretching columns and the row look of the property pages' tables (one selected row)."""
+    t.setColumnCount(len(headers))
+    t.setHorizontalHeaderLabels(headers)
+    for c in stretch:
+        t.horizontalHeader().setSectionResizeMode(c, QHeaderView.Stretch)
+    t.verticalHeader().hide()
+    t.verticalHeader().setDefaultSectionSize(32)
+    t.setSelectionBehavior(QAbstractItemView.SelectRows)
+    t.setSelectionMode(QAbstractItemView.SingleSelection)
+
+
+class RecordTable(QTableWidget):
+    """A table editing a list of records (dicts), one row each. Columns are specs (key, header, kind, options):
+
+    - "text": an editable cell (value: the stripped text)
+    - "number" / "int": an editable right-aligned cell (value: the number, None if the text is not one)
+    - "choice": a combo box of (value, label) options (value: the chosen value)
+    - "text_choice": an editable combo box suggesting the options (value: the stripped text)
+    - "spin": a spin box, options (minimum, maximum, special value text, suffix) (value: the number)
+
+    Options may be a callable (evaluated for each new row). ``edited`` is emitted when the user changes a cell."""
+
+    edited = Signal()
+
+    def __init__(self, columns: list[tuple], stretch=(0,)):
+        super().__init__(0, len(columns))
+        self.columns = columns
+        self._loading = False
+        style_table(self, [c[1] for c in columns], stretch)
+        self.itemChanged.connect(self._changed)
+
+    def _changed(self, *_):
+        if not self._loading:
+            self.edited.emit()
+
+    def set_records(self, records):
+        with loading(self):
+            self.setRowCount(0)
+            for rec in records:
+                self.add_record(rec)
+
+    def add_record(self, rec: dict):
+        """Append a row showing a record (missing keys show empty / default cells)."""
+        with loading(self):
+            r = self.rowCount()
+            self.insertRow(r)
+            for c, (key, _header, kind, opts) in enumerate(self.columns):
+                opts = opts() if callable(opts) else opts
+                v = rec.get(key)
+                if kind in ("text", "number", "int"):
+                    it = QTableWidgetItem(value_text(v))
+                    if kind != "text":
+                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.setItem(r, c, it)
+                    continue
+                if kind == "spin":
+                    w = QSpinBox()
+                    w.setRange(opts[0], opts[1])
+                    w.setSpecialValueText(opts[2] if len(opts) > 2 else "")
+                    w.setSuffix(opts[3] if len(opts) > 3 else "")
+                    w.setValue(int(v or 0))
+                    w.valueChanged.connect(self._changed)
+                else:
+                    w = QComboBox()
+                    if kind == "text_choice":
+                        w.setEditable(True)
+                        w.addItems(list(opts))
+                        w.setCurrentText(v or "")
+                        w.currentTextChanged.connect(self._changed)
+                    else:
+                        for value, label in opts:
+                            w.addItem(label, value)
+                        w.setCurrentIndex(max(0, w.findData(v)))
+                        w.currentIndexChanged.connect(self._changed)
+                self.setCellWidget(r, c, w)
+
+    def records(self) -> list[dict]:
+        out = []
+        for r in range(self.rowCount()):
+            rec = {}
+            for c, (key, _header, kind, _opts) in enumerate(self.columns):
+                w, it = self.cellWidget(r, c), self.item(r, c)
+                if kind == "spin":
+                    rec[key] = w.value()
+                elif kind == "choice":
+                    rec[key] = w.currentData()
+                elif kind == "text_choice":
+                    rec[key] = w.currentText().strip()
+                else:
+                    text = it.text().strip() if it is not None else ""
+                    rec[key] = text if kind == "text" else _number(text, kind == "int")
+            out.append(rec)
+        return out
+
+    def remove_current(self):
+        r = self.currentRow()
+        if r >= 0:
+            self.removeRow(r)
+            self.edited.emit()
+
+
+def _number(text: str, integer: bool):
+    try:
+        v = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    return int(v) if integer else v

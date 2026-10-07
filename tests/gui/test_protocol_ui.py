@@ -96,6 +96,31 @@ def test_add_item_menu(win):
     assert len(p.apparatus) == n + 1 and win.current_page() is win.page("ApparatusPage")
 
 
+def test_period_and_criterion_tables(win):
+    ex = win.goto("ExperimentPage")
+    p = win.project
+    p.analysis.custom_periods = [["First minute", 0.0, 60.0]]
+    p.stages = ["Training"]
+    ex.on_show()
+    assert ex.periods.rowCount() == 1 and ex.periods.item(0, 2).text() == "60"
+    ex.new_time_period()
+    assert p.analysis.custom_periods[-1] == ["Period 2", 60.0, 120.0]
+    ex.periods.item(1, 2).setText("oops")  # an invalid row is left out
+    assert p.analysis.custom_periods == [["First minute", 0.0, 60.0]]
+    ex.periods.setCurrentCell(1, 0)
+    ex.delete_time_period()
+    assert ex.periods.rowCount() == 1
+    ex.new_criterion()
+    c = p.training_criteria[0]
+    assert c["stage"] == "Training" and c["action_fail"] == {"after_trials": 0, "action": "none"}
+    ex.crit.cellWidget(0, 6).setValue(4)
+    ex.crit.item(0, 3).setText("2,5")
+    c = p.training_criteria[0]
+    assert c["value"] == 2.5 and c["action_fail"] == {"after_trials": 4, "action": "retire"}
+    ex.on_show()  # shown again from the project
+    assert ex.crit.cellWidget(0, 6).value() == 4 and ex.crit.item(0, 3).text() == "2.5"
+
+
 def test_keys_property_page_modes(win):
     p = win.project
     ex = win.goto("ExperimentPage")

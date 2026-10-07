@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QLineEdit, QPushButton,
 from ...core import workflow as wf
 from ...core.workflow import RADIO_SET, key_mode, mode_to_kind
 from ..icons import icon
-from ..widgets import ColorButton, hint, separator
+from ..widgets import ColorButton, hint, loading, separator
 from .base import property_form, section_title
 
 # how a key works, as in ANY-maze ("Specify how you'd like this key to work"); see workflow.key_mode
@@ -142,20 +142,19 @@ class KeyEditor(QWidget):
 
     def load(self, name: str | None, key: str = "", kind: str = "state", group: str = "", color: str = ""):
         """Show a key (name None = no key selected)."""
-        self._loading = True
-        self.setEnabled(name is not None)
-        self.name.setText(name or "")
-        i = self.stroke.findData((key or "").lower())
-        if i < 0 and key:
-            self.stroke.addItem(icon("key"), key, key)
-            i = self.stroke.count() - 1
-        self.stroke.setCurrentIndex(max(i, 0) if key else -1)
-        self.mode.setCurrentIndex(max(0, self.mode.findData(key_mode(kind, group))))
-        self.group.setText(group)
-        if color:
-            self.color.set_color(color)
-        self._update_group_row()
-        self._loading = False
+        with loading(self):
+            self.setEnabled(name is not None)
+            self.name.setText(name or "")
+            i = self.stroke.findData((key or "").lower())
+            if i < 0 and key:
+                self.stroke.addItem(icon("key"), key, key)
+                i = self.stroke.count() - 1
+            self.stroke.setCurrentIndex(max(i, 0) if key else -1)
+            self.mode.setCurrentIndex(max(0, self.mode.findData(key_mode(kind, group))))
+            self.group.setText(group)
+            if color:
+                self.color.set_color(color)
+            self._update_group_row()
 
     def _update_group_row(self):
         on = self.mode.currentData() == "radio" or bool(self.group.text().strip())
@@ -166,9 +165,8 @@ class KeyEditor(QWidget):
         if self._loading:
             return
         kind, group = mode_to_kind(self.mode.currentData(), self.group.text().strip())
-        self._loading = True
-        self.group.setText(group)
-        self._loading = False
+        with loading(self):
+            self.group.setText(group)
         self._update_group_row()
         self._emit()
 

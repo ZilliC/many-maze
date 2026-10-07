@@ -8,6 +8,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QSpinBox,
                                QVBoxLayout, QWidget)
 
+from ..widgets import loading
+
 if TYPE_CHECKING:  # pragma: no cover
     from ..main_window import MainWindow
 
@@ -287,20 +289,18 @@ class SettingsForm(QWidget):
 
     def load(self, obj):
         self.obj = obj
-        self._loading = True
-        for attr, _, kind, _, _ in self.spec:
-            w = self.editors[attr]
-            v = getattr(obj, attr)
-            if kind in ("int", "float"):
-                w.setValue(v)
-            elif kind == "bool":
-                w.setChecked(bool(v))
-            elif kind == "choice":
-                i = w.findData(v)
-                w.setCurrentIndex(max(0, i))
-            else:
-                w.setText(str(v))
-        self._loading = False
+        with loading(self):
+            for attr, _, kind, _, _ in self.spec:
+                w = self.editors[attr]
+                v = getattr(obj, attr)
+                if kind in ("int", "float"):
+                    w.setValue(v)
+                elif kind == "bool":
+                    w.setChecked(bool(v))
+                elif kind == "choice":
+                    w.setCurrentIndex(max(0, w.findData(v)))
+                else:
+                    w.setText(str(v))
 
     def _emit(self, *_):
         if self._loading or self.obj is None:
