@@ -21,6 +21,10 @@ _lock = threading.Lock()
 _cache: dict[tuple[int, bool], tuple[object, list[dict]]] = {}
 
 
+# information columns that only mean something in a segmented (time period) analysis
+SEGMENT_COLUMNS = ("Period", "Segment of test")
+
+
 def info_columns(project) -> list[str]:
     return INFO_COLUMNS + [f for f in (project.animal_fields if project else []) if f not in INFO_COLUMNS]
 
@@ -60,11 +64,13 @@ def _mtimes(project, test) -> tuple:
 def fingerprint(project) -> tuple:
     tests = tuple((t.id, t.status, _mtimes(project, t), t.animal_id, t.stage, t.trial, t.apparatus,
                    tuple(t.extra_animals), _dump(_result_variables(t.variables)), _dump(t.events), t.duration_s,
-                   _dump(t.zone_overrides), _dump(t.pauses), _dump(t.io_events), _dump(t.result_variables))
+                   _dump(t.zone_overrides), _dump(t.pauses), _dump(t.io_events), _dump(t.result_variables),
+                   t.notes, t.recorded_at, t.experimenter, t.end_reason, t.video, t.start_s)  # (information columns)
                   for t in project.tests)
     return (str(project.path), tests, project.test_duration_s, _dump(project.analysis.to_dict()),
             _dump([a.to_dict() for a in project.apparatus]), _dump([asdict(a) for a in project.animals]),
-            _dump([asdict(b) for b in project.behaviours]), _dump(project.io_devices), tuple(project.animal_fields))
+            _dump([asdict(b) for b in project.behaviours]), _dump(project.io_devices), tuple(project.animal_fields),
+            tuple(g.name for g in project.groups), project.blind, _dump(project.settings_extra.get("blind_codes")))
 
 
 def cached_rows(project, segmented: bool, fp=None) -> list[dict] | None:

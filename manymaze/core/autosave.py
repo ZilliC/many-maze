@@ -12,7 +12,7 @@ from typing import Callable
 
 import numpy as np
 
-from .session import Session, save_live_test
+from .session import END_RECOVERED, Session, save_live_test
 from .tracking import DetectionSettings, TrackBuilder, postprocess
 from .video import recorded_video
 
@@ -128,6 +128,7 @@ class RecoveredSession(Session):
                 e["t_end"] = t_end
         self.pauses = [list(p) for p in d.get("pauses") or []]
         self.pause_log = [dict(p) for p in d.get("pause_log") or []]
+        self.end_reason = str(d.get("end_reason") or "") or END_RECOVERED
 
     @property
     def elapsed(self) -> float:

@@ -115,6 +115,11 @@ def _period_key(label_: str):
         return (1, 0.0)
 
 
+# levels of the test-time information columns in calendar / clock order
+CLOCK_ORDER = {"Day of week": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+               "Time of day": ["Morning", "Afternoon", "Evening", "Night"]}
+
+
 def level_order(project, rows: list[dict], col: str) -> list[str]:
     """The distinct values of a column in display order: treatments and stages as in the experiment, periods in
     time order (whole test first), trials numerically."""
@@ -126,6 +131,9 @@ def level_order(project, rows: list[dict], col: str) -> list[str]:
         vals.sort(key=lambda v: (v != WHOLE, _period_key(v)))
     elif col == "Trial":
         vals.sort(key=lambda v: (0, float(v)) if v.replace(".", "", 1).isdigit() else (1, v))
+    elif col in CLOCK_ORDER:
+        order = CLOCK_ORDER[col]
+        vals.sort(key=lambda v: order.index(v) if v in order else len(order))
     return vals
 
 

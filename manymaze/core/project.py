@@ -20,6 +20,7 @@ import numpy as np
 
 from .apparatus import Apparatus, from_known
 from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures
+from .session import END_ZONE
 from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
@@ -31,8 +32,18 @@ BACKUP_INTERVAL_S = 600.0  # at most one automatic backup per 10 minutes of savi
 BACKUP_KEEP = 30
 FORMAT_VERSION = 1
 # columns of a results row that describe the test rather than measure it (animal fields are added to these)
-INFO_COLUMNS = ["Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Test date", "Day of week",
-                "Test time", "Test notes", "Period"]
+INFO_COLUMNS = ["Test", "Animal", "Group", "Treatment code", "Sex", "Animal notes", "Stage", "Trial", "Apparatus",
+                "Test date", "Day of week", "Test time", "Time of day", "User", "Test notes", "Reason for test end",
+                "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Source video file",
+                "Recorded video file", "Video time at test start (s)", "Moveable zone positions", "Period",
+                "Segment of test"]
+# information columns not shown in the results table until ticked in its column chooser (rarely needed)
+OPTIONAL_INFO_COLUMNS = ["Treatment code", "Animal notes", "Time of day", "Reason for test end",
+                         "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Source video file",
+                         "Recorded video file", "Video time at test start (s)", "Moveable zone positions",
+                         "Segment of test"]
+# ANY-maze "time of day" of a live test: (first hour, name), the name of the last band whose hour has passed
+TIME_OF_DAY = ((0, "Night"), (5, "Morning"), (12, "Afternoon"), (17, "Evening"), (21, "Night"))
 
 
 # test status values: "pending" (to do), "tracked" (has a track), "scored" (manually scored, no track),
@@ -51,11 +62,12 @@ class Animal:
     fields: dict = field(default_factory=dict)
     retired: bool = False  # withdrawn from the experiment (e.g. failed a training criterion)
     retired_reason: str = ""
+    notes: str = ""  # free-form notes about the animal
 
     @classmethod
     def from_dict(cls, d):
         return cls(str(d["id"]), d.get("group", ""), d.get("sex", ""), dict(d.get("fields", {})),
-                   bool(d.get("retired", False)), d.get("retired_reason", ""))
+                   bool(d.get("retired", False)), d.get("retired_reason", ""), str(d.get("notes", "") or ""))
 
 
 @dataclass
@@ -114,6 +126,8 @@ class Test:
     pauses: list = field(default_factory=list)  # [[t_start, t_end], ...] test-time intervals the test was paused
     attempt: int = 1  # re-performed tests get attempt 2, 3, ...
     replaces: int = 0  # id of the test this attempt re-performs (0 = none)
+    experimenter: str = ""  # the user who ran (live) or tracked / scored the test
+    end_reason: str = ""  # why a live test ended (END_* values); "" for tests tracked from a video
 
     @classmethod
     def from_dict(cls, d):
@@ -145,9 +159,11 @@ class Project:
     variables: dict = field(default_factory=dict)  # procedure variables kept between tests
     training_criteria: list = field(default_factory=list)  # per-stage criteria (see project workflow)
     blind: bool = False  # hide group / treatment while testing and scoring
+    experimenters: list = field(default_factory=list)  # user names offered as the current user / test experimenter
     settings_extra: dict = field(default_factory=dict)  # misc. UI / workflow settings
     created: str = field(default_factory=lambda: _dt.datetime.now().isoformat(timespec="seconds"))
     path: Path | None = None
+    current_user: str = ""  # who is using the app (not saved: set by the GUI); stamped on tests run or tracked
 
     # ---- persistence -----------------------------------------------------
     @staticmethod
@@ -232,6 +248,7 @@ class Project:
             "variables": self.variables,
             "training_criteria": self.training_criteria,
             "blind": self.blind,
+            "experimenters": self.experimenters,
             "settings_extra": self.settings_extra,
             "created": self.created,
         }
@@ -264,6 +281,7 @@ class Project:
             variables=d.get("variables", {}),
             training_criteria=d.get("training_criteria", []),
             blind=d.get("blind", False),
+            experimenters=[str(u) for u in d.get("experimenters", []) if str(u).strip()],
             settings_extra=d.get("settings_extra", {}),
             created=d.get("created", ""),
         )
@@ -414,6 +432,8 @@ class Project:
             p.parent.mkdir(parents=True, exist_ok=True)
             tr.to_csv(p)
         test.status = "tracked"
+        if self.current_user and not test.experimenter:
+            test.experimenter = self.current_user
 
     def track_test(self, test: Test, progress: Callable[[float], None] | None = None,
                    should_stop: Callable[[], bool] | None = None, frame_callback=None) -> list[Track]:
@@ -463,22 +483,89 @@ class Project:
                            test.events, test.io_events, test.zone_overrides, test.pauses)
 
     def test_info(self, test: Test, animal_id: str | None = None) -> dict:
+        """The information columns of a results row (INFO_COLUMNS and the animal fields). The columns that come
+        from the track (animal contrast and length, frames tracked, video times) are filled by :meth:`track_info`."""
         aid = animal_id if animal_id is not None else test.animal_id
         a = self.get_animal(aid)
-        info = {"Test": test.id, "Animal": aid, "Group": a.group if a else "", "Sex": a.sex if a else "",
-                "Stage": test.stage, "Trial": test.trial, "Apparatus": test.apparatus,
-                "Test date": "", "Day of week": "", "Test time": "", "Test notes": test.notes or ""}
+        info = {"Test": test.id, "Animal": aid, "Group": a.group if a else "",
+                "Treatment code": self.treatment_code(a.group) if a else "", "Sex": a.sex if a else "",
+                "Animal notes": a.notes if a else "", "Stage": test.stage, "Trial": test.trial,
+                "Apparatus": test.apparatus, "Test date": "", "Day of week": "", "Test time": "", "Time of day": "",
+                "User": test.experimenter or "", "Test notes": test.notes or "",
+                "Reason for test end": test.end_reason or "", "Animal lighter / darker": "", "Animal length": "",
+                "Frames tracked (%)": "", "Source video file": "", "Recorded video file": "",
+                "Video time at test start (s)": "", "Moveable zone positions": moveable_zone_text(test.zone_overrides)}
         try:
             when = _dt.datetime.fromisoformat(test.recorded_at) if test.recorded_at else None
         except ValueError:
             when = None
         if when is not None:
             info.update({"Test date": when.date().isoformat(), "Day of week": when.strftime("%A"),
-                         "Test time": when.strftime("%H:%M:%S")})
+                         "Test time": when.strftime("%H:%M:%S"), "Time of day": time_of_day(when)})
+        if test.video and not test.end_reason:  # a video tracked or scored afterwards
+            info["Source video file"] = self.abs_path(test.video)
+            info["Video time at test start (s)"] = round(float(test.start_s), 3)
+        elif test.video:  # recorded live
+            info["Recorded video file"] = self.abs_path(test.video)
+            info["Video time at test start (s)"] = 0.0
         if a:
             for f in self.animal_fields:
                 info[f] = a.fields.get(f, "")
         return info
+
+    def treatment_code(self, group: str) -> str:
+        """The treatment's code as in the Animals sheet: its blind code while testing blind (already assigned codes
+        only: results may be computed off the UI thread), else a letter A, B, … in treatment order."""
+        if not group:
+            return ""
+        if self.blind:
+            return str(self.settings_extra.get("blind_codes", {}).get(group, ""))
+        names = [g.name for g in self.groups]
+        if group not in names:
+            return ""
+        n, s = names.index(group) + 1, ""
+        while n:
+            n, r = divmod(n - 1, 26)
+            s = chr(65 + r) + s
+        return s
+
+    def track_info(self, test: Test, track: Track, app: Apparatus | None = None) -> dict:
+        """Information columns taken from a test's track: whether the animal is lighter or darker than the apparatus
+        (as detected; else the detection setting), its body length (apparatus units), the percentage of frames in
+        which it was detected, the video times, and "Animal reached the end zone" when the analysis ended the test
+        there (AnalysisSettings.end_zone)."""
+        from .measures import body_length, end_of_test
+        from .pauses import drop_pauses
+
+        out = {}
+        contrast = str(track.meta.get("animal_contrast", "") or "")
+        if not contrast:
+            c = self.detection_for(test)
+            contrast = "" if c.method == "colour" else {"dark": "darker", "light": "lighter"}.get(c.contrast, "")
+        out["Animal lighter / darker"] = contrast.capitalize()
+        app = app or self.get_apparatus(test.apparatus)
+        n = len(track)
+        if n:
+            L = body_length(track, app.scale if app is not None else 1.0)
+            out["Animal length"] = round(float(L), 2) if math.isfinite(L) else ""
+            out["Frames tracked (%)"] = round(100.0 * float(np.count_nonzero(track.detected)) / n, 2)
+        if track.meta.get("source") == "live" or test.end_reason:  # recorded live (the video, if any, is its recording)
+            out.update({"Source video file": "", "Recorded video file": self.abs_path(test.video) if test.video else "",
+                        "Video time at test start (s)": 0.0 if test.video else ""})
+        elif track.meta.get("video") or test.video:
+            out["Source video file"] = self.abs_path(test.video) if test.video else str(track.meta["video"])
+            try:
+                out["Video time at test start (s)"] = round(float(track.meta.get("video_start_s", test.start_s)), 3)
+            except (TypeError, ValueError):
+                out["Video time at test start (s)"] = round(float(test.start_s), 3)
+        s = self.analysis_for(test)
+        if s.end_zone and app is not None and n:
+            try:
+                if end_of_test(drop_pauses(track, test.pauses)[0], self.apparatus_of(test), s) is not None:
+                    out["Reason for test end"] = END_ZONE
+            except Exception:  # a zone that no longer exists, a malformed track …: no reason rather than no results
+                pass
+        return out
 
     def analyse_test(self, test: Test, segmented: bool = False) -> list[dict]:
         """Rows of results for a test: one per animal (and per time period if segmented)."""
@@ -495,6 +582,7 @@ class Project:
                 dur = max((e["t_end"] if e.get("t_end") is not None else e["t"] for e in test.events), default=0.0)
             row = self.test_info(test)
             row["Period"] = "Whole test"
+            row["Segment of test"] = ""
             row.update(behaviour_measures(test.events, behaviours, 0.0, dur))
             return [row]
         for i, tr in enumerate(tracks):
@@ -508,9 +596,18 @@ class Project:
                 parts = analyse_segmented(tr, app, s, **kw)
             else:
                 parts = [("Whole test", analyse(tr, app, s, **kw))]
+            info = self.test_info(test, ids[i] if i < len(ids) else f"{test.animal_id}#{i + 1}")
+            info.update(self.track_info(test, tr, app))
+            k = 0
             for label, res in parts:
-                row = self.test_info(test, ids[i] if i < len(ids) else f"{test.animal_id}#{i + 1}")
+                row = dict(info)
                 row["Period"] = label
+                # ANY-maze "segment of test": 1, 2, … for the periods of a segmented analysis; blank: whole test
+                if label == "Whole test":
+                    row["Segment of test"] = ""
+                else:
+                    k += 1
+                    row["Segment of test"] = k
                 row.update(res)
                 rows.append(row)
         return rows
@@ -555,6 +652,43 @@ def _trim_on_detection(tr: Track, duration: float, t0: float | None = None) -> T
     out.t = out.t - t0
     out.meta["video_start_s"] = float(tr.meta.get("video_start_s", 0) or 0) + float(t0)
     return out
+
+
+def time_of_day(when: _dt.datetime) -> str:
+    """Morning (5–12 h), Afternoon (12–17 h), Evening (17–21 h) or Night."""
+    name = TIME_OF_DAY[0][1]
+    for hour, label in TIME_OF_DAY:
+        if when.hour >= hour:
+            name = label
+    return name
+
+
+def moveable_zone_text(overrides: dict | None) -> str:
+    """The per-test positions of moveable zones and points (Test.zone_overrides) as text: "Object: 312, 140 px;
+    Platform: 80, 95 px" (zone centres / point positions in video pixels; a moved apparatus map is listed too)."""
+    from .apparatus import POSITION_KEY
+    from .geometry import shape_from_dict
+
+    parts = []
+    for name, v in (overrides or {}).items():
+        if not isinstance(v, dict):
+            continue
+        if name == POSITION_KEY:
+            dx, dy = float(v.get("dx", 0) or 0), float(v.get("dy", 0) or 0)
+            ang, sc = float(v.get("angle", 0) or 0), float(v.get("scale", 1) or 1)
+            txt = f"Apparatus moved by {dx:.0f}, {dy:.0f} px"
+            if ang:
+                txt += f", rotated {ang:g}°"
+            if sc != 1:
+                txt += f", scaled ×{sc:g}"
+            parts.append(txt)
+            continue
+        try:
+            x, y = (float(v["x"]), float(v["y"])) if "type" not in v else shape_from_dict(v).centroid()
+        except (KeyError, TypeError, ValueError):
+            continue
+        parts.append(f"{name}: {x:.0f}, {y:.0f} px")
+    return "; ".join(parts)
 
 
 def result_columns(rows: list[dict]) -> list[str]:

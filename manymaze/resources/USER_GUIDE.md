@@ -84,8 +84,10 @@ everything without a camera.
 ## 2. Experiment tab: treatments and animals
 
 Add animals one by one or in bulk, assign **treatments** (groups/genotypes, each with a colour used in all
-graphs), sex and any number of custom columns (age, weight, litter…). Animals can be imported from / exported
-to CSV (`ID, Group, Sex, …`).
+graphs), sex and any number of custom columns (age, weight, litter…). The **Notes** column holds free-form notes
+about each animal (health, handling, anything worth remembering); they are kept with the experiment, exported and
+can be shown in the results (*Animal notes*). Animals can be imported from / exported to CSV
+(`ID, Treatment, Sex, …, Notes`; a *Notes*, *Comments* or *Remarks* column is imported as the notes).
 
 **Randomise treatments** allocates the animals (all, or the selected ones) to the ticked treatments at random, in
 numbers that differ by at most one. *Balance within* spreads each sex — or each value of a column such as litter or
@@ -335,6 +337,21 @@ Starting the clock again on a scored test asks whether to delete the previous ev
 - **Re-perform**: adds a new attempt of the test (same animal, stage, trial, apparatus and variables, *attempt 2*…);
   the previous attempt is kept, marked *superseded* and left out of results and statistics.
 - **Clear tracks**: deletes the tracks of the selected tests (scored events and videos are kept).
+- **End stage for animal**: ends the stage of the selected tests for their animals before they have done all their
+  trials — exactly what a met training criterion does: the animal's remaining (pending) tests of the stage are
+  skipped (noted *stage ended*) and new schedules leave the stage out for it. **Reopen stage for animal** undoes it
+  and resumes the tests it skipped.
+- **Set user…**: the experimenter of the selected tests (also editable in the *User* column).
+
+### Users (experimenters)
+
+The current user is shown at the top right of the window (**User: name ▾**, or *File ▸ Current user…*). Pick a name
+from the experiment's list, or **New user…** to type one; the choice is remembered on this computer. No passwords are
+involved: it only records who did what. The current user is stamped on every test as its *experimenter* when the
+test is run live (the user who ran it), and when it is tracked or scored if it has no experimenter yet. The Test
+schedule shows it in the **User** column, where it can be changed by hand, and the results can show and group by it
+(*User* column, Statistics factors). Each experiment keeps its own list of users; **Remove a user from this
+experiment…** takes a name off the list (tests keep their experimenter).
 
 ### Training criteria
 
@@ -349,7 +366,7 @@ On the Protocol tab (*Training criteria*) add, per stage, a condition on a resul
 
 On the Experiment tab press **Training criteria…** to see, for every animal, the trials done, the trial at which the
 criterion was met and the outcome; **Apply** completes stages and retires failing animals (their pending tests are
-skipped).
+skipped). To end a stage for one animal without a criterion, use **End stage for animal** in the Test schedule.
 
 ### Animals: retirement and dose calculation
 
@@ -414,6 +431,11 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
   interrupted by a crash is restored (marked in its notes) the next time the experiment is opened. Recordings are
   fragmented MP4, playable up to the last fragment even if the app did not close them.
 - **Stop** ends the test early (Save keeps the data, Discard deletes the test).
+- Why each test ended is saved with it and shown in the results (*Reason for test end*): *Test duration reached*,
+  *Stopped by user* (Stop button or stop key), *Ended by procedure* (an *end test* action), *End of the video*
+  (simulating with a video file), *Camera or video failed*, *Interrupted (recovered after a crash)*, and *Animal
+  reached the end zone* when the analysis ends the test in an end zone (*Analysis ▸ Test end*; this also applies to
+  tests tracked from a video, which otherwise have no reason).
 
 If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
 test starts.
@@ -820,6 +842,32 @@ The novel object and the social side can be set per test (test variables) or as 
 * **Thermal gradient ring**: preferred sector, time-weighted mean sector, sector entries.
 * **Home cage** (food zone, hidden nest) and **activity wheel** (revolutions clockwise / anticlockwise, per minute).
 
+### Information columns
+
+Besides Test, Animal, Treatment, Sex, Stage, Trial and Apparatus, the results can show (tick them in the
+*Information* branch of the column chooser; empty columns are hidden automatically, and the less common ones start
+unticked):
+
+| Column | Content |
+|---|---|
+| Test date, Day of week, Test time | When a live test was recorded (blank for tests tracked from a video). |
+| Time of day | *Morning* (05–12 h), *Afternoon* (12–17 h), *Evening* (17–21 h) or *Night*, from the recording time. |
+| User | The experimenter who ran, tracked or scored the test (see *Users*). |
+| Test notes, Animal notes | The notes of the test (Test schedule) and of the animal (Animals sheet). |
+| Treatment code | The treatment's code as on the Animals sheet: its blind code while testing blind, else A, B, C… |
+| Reason for test end | Why a live test ended (see *Starting and ending a test*). |
+| Animal lighter / darker | Whether the animal is lighter or darker than the apparatus: the detection *contrast* setting, or with *auto* what tracking found in most frames. Blank for colour tracking. |
+| Animal length | The animal's median body length (nose–tail, or from its area), in the apparatus unit (cm when calibrated). |
+| Frames tracked (%) | Percentage of the test's frames in which the animal was detected. |
+| Source video file | The video a test was tracked from. |
+| Recorded video file | The video recorded during a live test. |
+| Video time at test start (s) | Where in the video the test starts (0 for recordings). |
+| Moveable zone positions | The positions of the moveable zones and points in this test (centre, in video pixels), and the apparatus position when it was moved. |
+| Period, Segment of test | With time periods: the period's label (e.g. *0-60 s*) and its number (1, 2, …; blank for the whole test). |
+
+*Day of week*, *Time of day*, *User* and *Animal lighter / darker* can also be used to group results in Statistics.
+In the *one row per animal* export, *Treatment code* and *Animal notes* are kept when they are shown.
+
 ### Time periods
 
 Besides regular time bins and custom periods, **event-anchored periods**: anchored on test start, first entry to /
@@ -945,11 +993,12 @@ Root element: `<manymaze-experiment format-version software exported>`. It conta
 | `stages/stage` | `name` |
 | `behaviours/behaviour` | `name`, `key`, `kind` |
 | `apparatus-list/apparatus` | `name`, `template`, `unit`, `px-per-cm`, frame size; `<arena type …>`, `<zone name color><shape type …>`, `<zone-group><member zone/><exclude zone/>`, `<point name x y radius-cm>`, `<line name x1 y1 x2 y2>`. Polygons list `<vertex x y/>` elements; ellipses have `cx cy rx ry` attributes. |
-| `animals/animal` | `id`, `group`, `sex`; `<field name value type>` |
+| `experimenters/experimenter` | `name` (only when the experiment has users) |
+| `animals/animal` | `id`, `group`, `sex`, `notes`; `<field name value type>` |
 | `tests/test` | One element per test (details below) |
 
 Each `tests/test` element has the attributes `id animal stage trial apparatus video start-s duration-s status
-recorded-at` and these children:
+recorded-at` (and `experimenter`, `end-reason` when set) and these children:
 
 - `<extra-animal>`, `<notes>`, `<variables>`, `<zone-overrides>`, `<pauses><pause start end>`;
 - `<events><event behaviour t t-end>` and `<io-events><io t device channel kind value>`;

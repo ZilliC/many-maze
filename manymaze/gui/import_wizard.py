@@ -14,7 +14,7 @@ from .widgets import error_box, hint
 
 KINDS = {
     "animals": ("Import animals", imp.ANIMAL_ROLES,
-                {"id": "Animal ID", "group": "Treatment", "sex": "Sex"}),
+                {"id": "Animal ID", "group": "Treatment", "sex": "Sex", "notes": "Notes"}),
     "tests": ("Import tests (test schedule)", imp.TEST_ROLES,
               {"test": "Test number", "animal": "Animal ID", "group": "Treatment", "stage": "Stage", "trial": "Trial",
                "apparatus": "Apparatus", "video": "Video file", "duration": "Test duration"}),

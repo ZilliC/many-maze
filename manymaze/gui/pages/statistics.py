@@ -543,7 +543,8 @@ class StatisticsPage(Page):
 
     def factors(self) -> list[str]:
         p = self.project
-        cand = ["Group", "Sex", "Stage", "Trial", "Period", "Apparatus"] + (list(p.animal_fields) if p else [])
+        cand = ["Group", "Sex", "Stage", "Trial", "Period", "Apparatus", "User", "Day of week", "Time of day",
+                "Animal lighter / darker"] + (list(p.animal_fields) if p else [])
         out = []
         for c in cand:
             vals = {str(r.get(c, "")) for r in self.rows if str(r.get(c, "")).strip()}

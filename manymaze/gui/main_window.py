@@ -21,7 +21,7 @@ from .. import APP_NAME, __version__
 from ..core.export import protocol_report
 from ..core.project import PROJECT_FILE, Project
 from ..core.templates import TEMPLATES
-from ..core.workflow import copy_protocol
+from ..core.workflow import add_experimenter, copy_protocol, remove_experimenter
 from . import theme
 from .icons import icon
 from .ribbon import Ribbon
@@ -389,6 +389,16 @@ class MainWindow(QMainWindow):
         self.save_quick.setAutoRaise(True)
         self.save_quick.clicked.connect(self.save)
         self.ribbon.corner.addWidget(self.save_quick)
+        # the current user (experimenter), remembered between sessions and stamped on the tests run or tracked
+        self.user_btn = QToolButton()
+        self.user_btn.setAutoRaise(True)
+        self.user_btn.setPopupMode(QToolButton.InstantPopup)
+        self.user_btn.setToolTip("The current user (experimenter): recorded with every test you run, track or score")
+        self.user_menu = QMenu(self.user_btn)
+        self.user_menu.aboutToShow.connect(self._fill_user_menu)
+        self.user_btn.setMenu(self.user_menu)
+        self.ribbon.corner.insertWidget(0, self.user_btn)
+        self._update_user_button()
         self.ribbon.tab_changed.connect(self._tab_changed)
 
         central = QWidget()
@@ -427,6 +437,7 @@ class MainWindow(QMainWindow):
         act(fm, "Save as…", self.save_as, QKeySequence.SaveAs)
         act(fm, "Close experiment", self.close_project)
         fm.addSeparator()
+        act(fm, "Current user…", lambda: self.choose_user())
         act(fm, "Reveal experiment folder", self.reveal_folder)
         act(fm, "Protocol report…", lambda: self.protocol_report())
         act(fm, "Restore a backup…", lambda: self.restore_backup())
@@ -464,6 +475,75 @@ class MainWindow(QMainWindow):
             a = self.recent_menu.addAction(p)
             a.triggered.connect(lambda _=False, p=p: self.load_project(p))
 
+    # ---------------------------------------------------------------- current user
+    def current_user(self) -> str:
+        return str(self.settings.value("current_user", "") or "")
+
+    def set_current_user(self, name: str):
+        """Make `name` the current user ("" = none): remembered in the preferences, added to the experiment's
+        experimenters, and stamped on the tests run, tracked or scored from now on."""
+        name = " ".join(str(name or "").split())
+        self.settings.setValue("current_user", name)
+        p = self.project
+        if p is not None:
+            p.current_user = name
+            if name and name not in p.experimenters:
+                add_experimenter(p, name)
+                self.mark_dirty()
+        self._update_user_button()
+        self.status(f"Current user: {name}" if name else "No current user")
+
+    def _update_user_button(self):
+        name = self.current_user()
+        self.user_btn.setText(f"User: {name}" if name else "No user")
+
+    def _fill_user_menu(self):
+        m = self.user_menu
+        m.clear()
+        cur = self.current_user()
+        names = list(self.project.experimenters) if self.project is not None else []
+        if cur and cur not in names:
+            names.insert(0, cur)
+        for n in names:
+            a = m.addAction(n)
+            a.setCheckable(True)
+            a.setChecked(n == cur)
+            a.triggered.connect(lambda _=False, n=n: self.set_current_user(n))
+        a = m.addAction("No user")
+        a.setCheckable(True)
+        a.setChecked(not cur)
+        a.triggered.connect(lambda: self.set_current_user(""))
+        m.addSeparator()
+        m.addAction("New user…", lambda: self.choose_user(new=True))
+        rm = m.addAction("Remove a user from this experiment…", self._remove_user_dialog)
+        rm.setEnabled(bool(self.project is not None and self.project.experimenters))
+
+    def choose_user(self, new: bool = False) -> str | None:
+        """Ask for the current user (a name of the experiment's list, or a new one)."""
+        names = list(self.project.experimenters) if self.project is not None else []
+        if new or not names:
+            name, ok = QInputDialog.getText(self, "Current user", "Your name (recorded with the tests you run):")
+        else:
+            cur = self.current_user()
+            name, ok = QInputDialog.getItem(self, "Current user", "User (or type a new name):", names,
+                                            names.index(cur) if cur in names else 0, True)
+        if not ok:
+            return None
+        self.set_current_user(name)
+        return self.current_user()
+
+    def _remove_user_dialog(self):
+        p = self.project
+        if p is None or not p.experimenters:
+            return
+        name, ok = QInputDialog.getItem(self, "Remove user", "Remove from this experiment's users (the tests keep "
+                                        "their experimenter):", list(p.experimenters), 0, False)
+        if ok and remove_experimenter(p, name):
+            if self.current_user() == name:
+                self.settings.setValue("current_user", "")
+            self.mark_dirty()
+            self._update_user_button()
+
     # ---------------------------------------------------------------- project
     def recent_projects(self) -> list[str]:
         v = self.settings.value("recent", []) or []
@@ -482,6 +562,11 @@ class MainWindow(QMainWindow):
         self.project = project
         self.dirty = False
         has = project is not None
+        if has:
+            project.current_user = self.current_user()
+            if project.current_user:
+                add_experimenter(project, project.current_user)
+        self._update_user_button()
         for i in range(1, self._help_tab):
             self.ribbon.tabs.setTabEnabled(i, has)
         self.save_quick.setEnabled(has)

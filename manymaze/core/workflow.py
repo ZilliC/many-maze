@@ -22,7 +22,8 @@ WEIGHT_FIELD = "Weight (g)"
 DOSE_FIELD = "Dose (mg/kg)"
 VOLUME_FIELD = "Volume (mL)"
 BLIND_COLOR = "#64748b"
-RESERVED_FIELDS = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment")
+RESERVED_FIELDS = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment", "notes")
+STAGE_ENDED = "stage ended"  # note of the tests skipped by end_stage (removed again by reopen_stage)
 
 
 # ---------------------------------------------------------------- behaviours
@@ -120,7 +121,7 @@ def _fresh_copy(project: Project, test: Test, **changes) -> Test:
     """A pending copy of `test` with a new id and none of its recorded data (scoring, I/O log, results, pauses)."""
     d = asdict(test)
     d.update(id=project.next_test_id(), events=[], status="pending", recorded_at="", notes="", io_events=[],
-             result_variables={}, pauses=[], **changes)
+             result_variables={}, pauses=[], experimenter="", end_reason="", **changes)
     return Test.from_dict(d)
 
 
@@ -400,6 +401,42 @@ def apply_criteria(project: Project, report: dict | None = None) -> dict:
     return {"completed": n_completed, "retired": retired, "skipped": skipped}
 
 
+def end_stage(project: Project, animal_id: str, stage: str) -> int:
+    """End a stage for one animal before it has done all its trials (ANY-maze: "end stage for this animal"), as a
+    met training criterion does: the stage is recorded as completed for the animal (new schedules leave it out)
+    and its pending tests of the stage are skipped. Returns the number of tests skipped."""
+    done = completed_stages(project).setdefault(animal_id, [])
+    if stage not in done:
+        done.append(stage)
+    n = 0
+    for t in project.tests:
+        if t.animal_id == animal_id and t.stage == stage and t.status == "pending":
+            skip_test(t, STAGE_ENDED)
+            n += 1
+    return n
+
+
+def stage_ended(project: Project, animal_id: str, stage: str) -> bool:
+    return stage in project.settings_extra.get("completed_stages", {}).get(animal_id, [])
+
+
+def reopen_stage(project: Project, animal_id: str, stage: str) -> int:
+    """Undo end_stage (or a met criterion): the stage is no longer completed for the animal and the tests that
+    end_stage skipped are resumed. Returns the number of tests resumed."""
+    done = completed_stages(project)
+    if stage in done.get(animal_id, []):
+        done[animal_id].remove(stage)
+        if not done[animal_id]:
+            del done[animal_id]
+    n = 0
+    for t in project.tests:
+        if t.animal_id == animal_id and t.stage == stage and t.status == "skipped" and STAGE_ENDED in t.notes:
+            t.notes = "; ".join(x for x in t.notes.split("; ") if x != STAGE_ENDED)
+            resume_test(project, t)
+            n += 1
+    return n
+
+
 def _animals(test: Test) -> list[str]:
     return [test.animal_id, *test.extra_animals]
 
@@ -565,6 +602,36 @@ def display_color(project: Project, name: str) -> str:
     return BLIND_COLOR if project.blind else project.group_color(name)
 
 
+# ---------------------------------------------------------------- users (experimenters)
+def add_experimenter(project: Project, name: str) -> str:
+    """Add a user name to the experiment's experimenters (if new). Returns the cleaned name ("" if empty)."""
+    name = " ".join(str(name or "").split())
+    if name and name not in project.experimenters:
+        project.experimenters.append(name)
+    return name
+
+
+def remove_experimenter(project: Project, name: str) -> bool:
+    """Remove a user from the list (the tests keep the name they were stamped with)."""
+    if name not in project.experimenters:
+        return False
+    project.experimenters.remove(name)
+    if project.current_user == name:
+        project.current_user = ""
+    return True
+
+
+def set_experimenter(project: Project, tests: list[Test], name: str) -> int:
+    """Set the experimenter of the tests (added to the experiment's list). Returns the number changed."""
+    name = add_experimenter(project, name) if str(name or "").strip() else ""
+    n = 0
+    for t in tests:
+        if t.experimenter != name:
+            t.experimenter = name
+            n += 1
+    return n
+
+
 # ---------------------------------------------------------------- animal identification
 def id_matches(project: Project, test: Test, scanned: str) -> bool:
     """Whether a scanned / typed identifier matches the test's animal (its ID, or a barcode / microchip field)."""
@@ -645,7 +712,8 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     """Give ``dst`` the protocol of ``src`` (ANY-maze: new experiment based on another one's protocol).
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
-    procedures, I/O devices, training criteria, blind testing and animal ID options, and the animal columns;
+    procedures, I/O devices, training criteria, blind testing and animal ID options, the animal columns and the
+    experimenters (users);
     with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
@@ -666,6 +734,7 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.training_criteria = _copy.deepcopy(src.training_criteria)
     dst.blind = src.blind
     dst.animal_fields = list(src.animal_fields)
+    dst.experimenters += [u for u in src.experimenters if u not in dst.experimenters]
     for k in PROTOCOL_EXTRAS:
         if k in src.settings_extra:
             dst.settings_extra[k] = _copy.deepcopy(src.settings_extra[k])

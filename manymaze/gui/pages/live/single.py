@@ -17,7 +17,7 @@ from ....core.live import LiveSession, open_devices
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs
 from ....core.project import INFO_COLUMNS
-from ....core.session import finish_live_test
+from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_live_test
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
 from ...confirm_id import confirm_animal_id
@@ -280,7 +280,7 @@ class SingleTestMixin:
     def _on_grab_failed(self, msg):
         self._log(f"Error: {msg}")
         if self.session is not None:
-            self.stop_test(save=len(self.session.cols["t"]) > 0, quiet=True)
+            self.stop_test(save=len(self.session.cols["t"]) > 0, quiet=True, reason=END_SOURCE_FAILED)
         self.stop_preview()
         error_box(self, "Run tests", msg)
 
@@ -289,7 +289,7 @@ class SingleTestMixin:
             return
         if self.session.state in ("running", "paused"):
             self._log("End of the video file — test finished.")
-            self.stop_test(save=True, quiet=True)
+            self.stop_test(save=True, quiet=True, reason=END_SOURCE)
         else:
             self._log("End of the video file before the test started.")
             self.stop_test(save=False, quiet=True)
@@ -681,11 +681,11 @@ class SingleTestMixin:
         elif r == QMessageBox.Discard:
             self.stop_test(save=False)
 
-    def stop_test(self, save: bool = True, quiet: bool = False):
+    def stop_test(self, save: bool = True, quiet: bool = False, reason: str = END_USER):
         if self.session is None:
             return
         with self._lock:
-            self.session.finish()
+            self.session.finish(reason)
         self._finalise(save=save and len(self.session.cols["t"]) > 0, quiet=quiet)
 
     def _finalise(self, save: bool = True, quiet: bool = False):

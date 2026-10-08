@@ -187,6 +187,9 @@ class ScoringMixin:
 
     def _scoring_changed(self):
         self.test.events.sort(key=lambda e: e["t"])
+        user = self.project.current_user if self.project is not None else ""
+        if user and self.test.events and not self.test.experimenter:  # the user who scored it
+            self.test.experimenter = user
         self.main.mark_dirty()
         self._events_changed()
 
@@ -341,6 +344,8 @@ class ScoringMixin:
             self._loading = False
         if not t.recorded_at:
             t.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
+        if p.current_user and not t.experimenter:
+            t.experimenter = p.current_user
         self._scoring_changed()
         self._update_info()
         self._update_clock_ui()

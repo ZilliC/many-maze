@@ -10,8 +10,8 @@ from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QM
                             QSortFilterProxyModel, Qt)
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QLabel, QMenu, QMessageBox, QSpinBox, QStyledItemDelegate, QTableView,
-                               QVBoxLayout)
+                               QHeaderView, QInputDialog, QLabel, QMenu, QMessageBox, QSpinBox, QStyledItemDelegate,
+                               QTableView, QVBoxLayout)
 
 from ...core import workflow as wf
 from ...core.batch import track_tests, tracking_batches
@@ -26,9 +26,10 @@ from .base import Page
 from .schedule_dialogs import AddVideosDialog, DlcImportDialog, ScheduleDialog, VariablesDialog
 
 COLUMNS = ["Test", "Animal", "Code", "Stage", "Trial", "Apparatus", "Video", "Testing status", "Start (s)",
-           "Duration (s)", "Notes"]
-C_ID, C_ANIMAL, C_GROUP, C_STAGE, C_TRIAL, C_APP, C_VIDEO, C_STATUS, C_START, C_DUR, C_NOTES = range(len(COLUMNS))
-EDITABLE = {C_ANIMAL, C_STAGE, C_TRIAL, C_APP, C_START, C_DUR, C_NOTES}
+           "Duration (s)", "User", "Notes"]
+C_ID, C_ANIMAL, C_GROUP, C_STAGE, C_TRIAL, C_APP, C_VIDEO, C_STATUS, C_START, C_DUR, C_USER, C_NOTES = \
+    range(len(COLUMNS))
+EDITABLE = {C_ANIMAL, C_STAGE, C_TRIAL, C_APP, C_START, C_DUR, C_USER, C_NOTES}
 SORT_ROLE = Qt.UserRole + 1
 STATUS_COLORS = {"pending": "#d97706", "tracked": "#16a34a", "scored": "#0891b2", "skipped": "#9333ea",
                  "superseded": "#94a3b8", "excluded": "#94a3b8"}
@@ -155,6 +156,8 @@ class TestsModel(QAbstractTableModel):
                 if t.attempt > 1:
                     text = f"{text} (attempt {t.attempt})" if text else f"(attempt {t.attempt})"
                 return text
+            if c == C_USER:
+                return t.experimenter
             if c == C_NOTES:
                 return t.notes
         elif role == Qt.ToolTipRole:
@@ -175,7 +178,13 @@ class TestsModel(QAbstractTableModel):
                         ["Not performed yet"] if t.status == "pending" else [])
                 if t.replaces:
                     tips.append(f"Re-performs test {t.replaces}")
+                if t.end_reason:
+                    tips.append(f"Test end: {t.end_reason}")
+                if t.status == "skipped" and wf.STAGE_ENDED in t.notes:
+                    tips.append(f"Stage “{t.stage}” was ended for {t.animal_id}")
                 return "\n".join(tips) or None
+            if c == C_USER:
+                return "The experimenter who ran, tracked or scored the test"
         elif role == Qt.ForegroundRole:
             inactive = t.status in wf.INACTIVE_STATUSES
             if inactive:
@@ -240,6 +249,9 @@ class TestsModel(QAbstractTableModel):
             t.start_s = float(value)
         elif c == C_DUR:
             t.duration_s = float(value)
+        elif c == C_USER:
+            if wf.set_experimenter(p, [t], str(value)) == 0:
+                return False
         elif c == C_NOTES:
             t.notes = str(value)
         else:
@@ -282,11 +294,11 @@ class TestsDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         p = self.page.project
         c = index.column()
-        if c in (C_ANIMAL, C_STAGE, C_APP):
+        if c in (C_ANIMAL, C_STAGE, C_APP, C_USER):
             w = QComboBox(parent)
             w.setEditable(c != C_APP)
             items = ([a.id for a in p.animals] if c == C_ANIMAL else list(p.stages) if c == C_STAGE
-                     else [a.name for a in p.apparatus])
+                     else [""] + list(p.experimenters) if c == C_USER else [a.name for a in p.apparatus])
             w.addItems(items)
             return w
         if c == C_TRIAL:
@@ -365,7 +377,7 @@ class TestsPage(Page):
         hh.setHighlightSections(False)
         hh.setMinimumHeight(36)
         for c, w in ((C_ID, 64), (C_ANIMAL, 96), (C_GROUP, 110), (C_STAGE, 96), (C_TRIAL, 56), (C_APP, 124),
-                     (C_VIDEO, 140), (C_STATUS, 132), (C_START, 86), (C_DUR, 116)):
+                     (C_VIDEO, 140), (C_STATUS, 132), (C_START, 86), (C_DUR, 116), (C_USER, 96)):
             self.table.setColumnWidth(c, w)
         self.table.doubleClicked.connect(self._double_clicked)
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
@@ -421,6 +433,14 @@ class TestsPage(Page):
                           "statistics", large=False)
         self.a_clear = act("Clear tracks", "eraser", lambda: self.clear_selected_tracks(),
                            "Delete the tracks of the selected tests (scored events are kept)", large=False)
+        self.a_end_stage = act("End stage for animal", "stop", lambda: self.end_stage_selected(),
+                               "End the stage of the selected tests for their animals before all trials are done: "
+                               "the remaining tests of the stage are skipped and new schedules leave the stage out "
+                               "(as when a training criterion is met)", large=False)
+        self.a_reopen_stage = act("Reopen stage for animal", "resume", lambda: self.reopen_stage_selected(),
+                                  "Undo “End stage for animal”: the tests it skipped are resumed", large=False)
+        self.a_user = act("Set user…", "edit", lambda: self.set_user_selected(),
+                          "Set the experimenter (user) of the selected tests", large=False)
         # schedule output (menu of the Schedule… button and of the table)
         self.a_print = act("Print schedule…", "print", lambda: self.print_schedule(),
                            "Print the test schedule (in the order shown) to take to the testing room", large=False)
@@ -465,7 +485,8 @@ class TestsPage(Page):
                 ("Testing", [self.a_open, self.a_track, self.a_track_all, (self.a_import, "small"),
                              (self.a_import_data, "small")]),
                 ("Status", [(self.a_skip, "small"), (self.a_resume, "small"), (self.a_redo, "small"),
-                            (self.a_excl, "small"), (self.a_clear, "small")]),
+                            (self.a_excl, "small"), (self.a_clear, "small"), (self.a_end_stage, "small"),
+                            (self.a_reopen_stage, "small"), (self.a_user, "small")]),
                 ("Variables", [self.a_vars])]
 
     # ------------------------------------------------------------------ page API
@@ -618,6 +639,10 @@ class TestsPage(Page):
         self.a_excl.setText("Include" if sel and all(t.status == "excluded" for t in sel) else "Exclude")
         self.a_skip.setEnabled(any(t.status not in wf.INACTIVE_STATUSES for t in sel))
         self.a_resume.setEnabled(any(t.status == "skipped" for t in sel))
+        pairs = self._animal_stages(sel)
+        self.a_end_stage.setEnabled(any(not wf.stage_ended(self.project, a, st) for a, st in pairs))
+        self.a_reopen_stage.setEnabled(any(wf.stage_ended(self.project, a, st) for a, st in pairs))
+        self.a_user.setEnabled(n > 0)
 
     def _double_clicked(self, index):
         r = self.proxy.mapToSource(index).row()
@@ -632,8 +657,8 @@ class TestsPage(Page):
         for a in (self.a_open, self.a_track, self.a_import, self.a_import_data):
             m.addAction(a)
         m.addSeparator()
-        for a in (self.a_video, self.a_vars, self.a_dup, self.a_skip, self.a_resume, self.a_redo, self.a_clear,
-                  self.a_excl, self.a_del):
+        for a in (self.a_video, self.a_vars, self.a_user, self.a_dup, self.a_skip, self.a_resume, self.a_redo,
+                  self.a_clear, self.a_excl, self.a_end_stage, self.a_reopen_stage, self.a_del):
             m.addAction(a)
         m.addSeparator()
         for a in (self.a_print, self.a_save, self.a_copy):
@@ -831,6 +856,65 @@ class TestsPage(Page):
         self.main.mark_dirty()
         self.refresh()
         self.main.status(f"{verb} {len(tests)} test{'s' if len(tests) != 1 else ''}.")
+
+    @staticmethod
+    def _animal_stages(tests) -> list[tuple[str, str]]:
+        """The distinct (animal, stage) pairs of the tests, in order."""
+        out = []
+        for t in tests:
+            if t.animal_id and (t.animal_id, t.stage) not in out:
+                out.append((t.animal_id, t.stage))
+        return out
+
+    def end_stage_selected(self, confirm: bool = True) -> int:
+        """End the stage of the selected tests for their animals (wf.end_stage). Returns the tests skipped."""
+        p = self.project
+        pairs = [(a, st) for a, st in self._animal_stages(self.selected_tests()) if not wf.stage_ended(p, a, st)]
+        if p is None or not pairs:
+            return 0
+        text = ", ".join(f"{a} · {st or '(no stage)'}" for a, st in pairs[:6]) + (" …" if len(pairs) > 6 else "")
+        if confirm and QMessageBox.question(
+                self, "End stage for animal", f"End the stage for {text}?\n\nTheir remaining tests of the stage are "
+                "skipped and new schedules leave the stage out. Use “Reopen stage for animal” to undo.") \
+                != QMessageBox.Yes:
+            return 0
+        n = sum(wf.end_stage(p, a, st) for a, st in pairs)
+        self.main.mark_dirty()
+        self.refresh()
+        self.main.status(f"Ended {len(pairs)} stage{'s' if len(pairs) != 1 else ''} for the animal"
+                         f"{'s' if len(pairs) != 1 else ''}: {n} test{'s' if n != 1 else ''} skipped.")
+        return n
+
+    def reopen_stage_selected(self) -> int:
+        p = self.project
+        pairs = [(a, st) for a, st in self._animal_stages(self.selected_tests()) if wf.stage_ended(p, a, st)]
+        if p is None or not pairs:
+            return 0
+        n = sum(wf.reopen_stage(p, a, st) for a, st in pairs)
+        self.main.mark_dirty()
+        self.refresh()
+        self.main.status(f"Reopened {len(pairs)} stage{'s' if len(pairs) != 1 else ''}: {n} test"
+                         f"{'s' if n != 1 else ''} resumed.")
+        return n
+
+    def set_user_selected(self, name: str | None = None) -> int:
+        """Set the experimenter of the selected tests (asks for the name when None)."""
+        p = self.project
+        tests = self.selected_tests()
+        if p is None or not tests:
+            return 0
+        if name is None:
+            names = [""] + list(p.experimenters)
+            cur = tests[0].experimenter
+            name, ok = QInputDialog.getItem(self, "Set user", "Experimenter of the selected tests (or type a name):",
+                                            names, names.index(cur) if cur in names else 0, True)
+            if not ok:
+                return 0
+        n = wf.set_experimenter(p, tests, name)
+        if n:
+            self.main.mark_dirty()
+            self.refresh()
+        return n
 
     def reperform_selected(self) -> list:
         p = self.project

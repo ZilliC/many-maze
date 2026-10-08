@@ -19,6 +19,9 @@ from .._results_cache import info_columns
 from .dialogs import ReportDialog
 from .table import column_label, measure_category
 
+# information columns describing the animal (not the test), kept in the one-row-per-animal export when shown
+ANIMAL_INFO = ("Treatment code", "Animal notes")
+
 TABLE_FILTERS = dict(zip((".csv", ".tsv", ".xlsx"), TABLE_FILTER.split(";;")))
 
 
@@ -64,7 +67,9 @@ class ExportsMixin:
 
     def wide_rows(self) -> tuple[list[dict], list[str]]:
         """The shown results with one row per animal and one column per measure × stage / trial (× period)."""
-        rows = wide_rows(self.shown_rows(), self._measure_columns())
+        shown = self.shown_columns()
+        keep = ("Animal", "Group", "Sex") + tuple(c for c in ANIMAL_INFO if c in shown)
+        rows = wide_rows(self.shown_rows(), self._measure_columns(), keep=keep)
         return rows, result_columns(rows)
 
     def export_wide(self, path: str | None = None):

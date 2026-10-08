@@ -177,7 +177,10 @@ def _track_parallel(project, batches, progress, should_stop, out, n_workers):
                 if r.get("cancelled"):
                     out["cancelled"] = True
                 for tid in r.get("tracked", []):
-                    project.get_test(tid).status = "tracked"
+                    t = project.get_test(tid)
+                    t.status = "tracked"
+                    if project.current_user and not t.experimenter:  # as Project.save_tracks does
+                        t.experimenter = project.current_user
                     out["tracked"].append(tid)
             try:
                 while True:

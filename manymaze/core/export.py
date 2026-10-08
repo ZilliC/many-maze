@@ -145,9 +145,11 @@ def results_workbook(project: Project, rows: list[dict], columns: list[str] | No
     visits = zone_visit_rows(project, [t for t in project.tests if t.id in ids])
     if visits:
         sheets["Zone visits"] = visits
-    sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields} for a in project.animals]
+    sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields, "Notes": a.notes}
+                         for a in project.animals]
     sheets["Tests"] = [{"Test": t.id, "Animal": t.animal_id, "Stage": t.stage, "Trial": t.trial, "Video": t.video,
-                        "Apparatus": t.apparatus, "Start (s)": t.start_s, "Status": t.status, "Notes": t.notes}
+                        "Apparatus": t.apparatus, "Start (s)": t.start_s, "Status": t.status, "User": t.experimenter,
+                        "Reason for test end": t.end_reason, "Notes": t.notes}
                        for t in project.tests]
     sheets["Settings"] = [{"Setting": k, "Value": str(v)} for k, v in
                           {**{f"detection.{k}": v for k, v in project.detection.to_dict().items()},
@@ -195,12 +197,12 @@ def zone_visit_rows(project: Project, tests=None) -> list[dict]:
 
 
 def export_animals(project: Project, path):
-    """The animal list as CSV: ID, treatment, sex and the custom fields."""
+    """The animal list as CSV: ID, treatment, sex, the custom fields and the notes."""
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields))
+        w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields) + ["Notes"])
         for a in project.animals:
-            w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in project.animal_fields])
+            w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in project.animal_fields] + [a.notes])
 
 
 def event_log_rows(project: Project, test) -> list[dict]:
@@ -549,6 +551,9 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
         w("  <groups>\n" + "".join(f"    <group{_attrs(name=g.name, color=g.color)}/>\n" for g in project.groups)
           + "  </groups>\n")
         w("  <stages>\n" + "".join(f"    <stage{_attrs(name=s)}/>\n" for s in project.stages) + "  </stages>\n")
+        if project.experimenters:
+            w("  <experimenters>\n" + "".join(f"    <experimenter{_attrs(name=u)}/>\n" for u in project.experimenters)
+              + "  </experimenters>\n")
         w("  <behaviours>\n" + "".join(f"    <behaviour{_attrs(name=b.name, key=b.key, kind=b.kind)}/>\n"
                                        for b in project.behaviours) + "  </behaviours>\n")
         w("  <apparatus-list>\n")
@@ -575,7 +580,7 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
         w("  </apparatus-list>\n")
         w("  <animals>\n")
         for an in project.animals:
-            w(f"    <animal{_attrs(id=an.id, group=an.group, sex=an.sex)}")
+            w(f"    <animal{_attrs(id=an.id, group=an.group, sex=an.sex, notes=an.notes or None)}")
             if an.fields:
                 w(">\n" + "".join(f"      <field{_attrs(name=k, **_value_attrs(v))}/>\n" for k, v in an.fields.items())
                   + "    </animal>\n")
@@ -586,7 +591,7 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
         for k, t in enumerate(tests):
             if should_stop and should_stop():
                 break
-            w(f"    <test{_attrs(id=t.id, animal=t.animal_id, stage=t.stage, trial=t.trial, apparatus=t.apparatus, video=t.video, start_s=float(t.start_s), duration_s=float(t.duration_s or project.test_duration_s), status=t.status, recorded_at=t.recorded_at)}>\n")
+            w(f"    <test{_attrs(id=t.id, animal=t.animal_id, stage=t.stage, trial=t.trial, apparatus=t.apparatus, video=t.video, start_s=float(t.start_s), duration_s=float(t.duration_s or project.test_duration_s), status=t.status, recorded_at=t.recorded_at, experimenter=t.experimenter or None, end_reason=t.end_reason or None)}>\n")
             for ea in t.extra_animals:
                 w(f"      <extra-animal{_attrs(id=ea)}/>\n")
             if t.notes:
@@ -679,6 +684,7 @@ def read_experiment_xml(path) -> dict:
     exp = root.find("experiment")
     out = {"name": exp.get("name"), "format_version": int(root.get("format-version", "1")),
            "animals": [dict(a.attrib) for a in root.iter("animal")],
+           "experimenters": [e.get("name") for e in root.iter("experimenter")],
            "apparatus": [a.get("name") for a in root.find("apparatus-list")], "tests": []}
     for t in root.find("tests"):
         d = dict(t.attrib)

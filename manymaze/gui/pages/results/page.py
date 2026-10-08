@@ -10,12 +10,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLay
                                QLabel, QLineEdit, QMenu, QProgressBar, QPushButton, QStackedWidget, QTableView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from ....core.project import result_columns
+from ....core.project import OPTIONAL_INFO_COLUMNS, result_columns
 from ... import ribbon, theme
 from ...icons import icon
 from ...ribbon import RibbonHost
 from ...widgets import error_box
-from .._results_cache import RowsLoader, info_columns
+from .._results_cache import SEGMENT_COLUMNS, RowsLoader, info_columns
 from ..base import Page
 from .charts_panel import ChartsPanel
 from .exports import ExportsMixin
@@ -51,7 +51,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._workers: list = []  # background jobs still running (exports, reports, heat maps)
         self.rows: list[dict] = []
         self.segmented = False
-        self.hidden: set[str] = set()  # columns unticked in the measure chooser (kept while the project is open)
+        # columns unticked in the measure chooser (kept while the project is open); rarely needed information
+        # columns start unticked
+        self.hidden: set[str] = set(OPTIONAL_INFO_COLUMNS)
         self._names = _names(None)
         self._frames: dict[int, object] = {}
         self._detail: dict | None = None
@@ -368,7 +370,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
     def set_project(self, project):
         self.loader.cancel()
         self.rows = []
-        self.hidden = set()
+        self.hidden = set(OPTIONAL_INFO_COLUMNS)
         self._frames = {}
         self._detail = None
         self._detail_key = None
@@ -484,7 +486,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         cols = self.all_columns()
         out = []
         for c in info_columns(self.project):
-            if c not in cols or (c == "Period" and not self.segmented):
+            if c not in cols or (c in SEGMENT_COLUMNS and not self.segmented):
                 continue
             if c not in ("Test", "Animal") and not any(str(r.get(c, "")).strip() for r in self.rows):
                 continue
@@ -606,7 +608,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         hidden = self.hidden
         cats: dict[str, dict[str, list[str]]] = {}
         info = [c for c in info_columns(self.project) if c in self.all_columns() and c != "Test"
-                and (c != "Period" or self.segmented)]
+                and (c not in SEGMENT_COLUMNS or self.segmented)]
         if info:
             cats["Information"] = {"": info}
         for c in self.measure_columns():
@@ -672,7 +674,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         """Show every measure and test again: clears the measure selection, filters, sorting and time periods."""
         if self.project is None:
             return
-        self.hidden.clear()
+        self.hidden = set(OPTIONAL_INFO_COLUMNS)
         self.search.clear()
         for c in (self.group_combo, self.stage_combo, self.period_combo):
             c.setCurrentIndex(0)

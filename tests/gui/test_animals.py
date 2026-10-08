@@ -150,8 +150,8 @@ def test_csv_roundtrip(page, tmp_path):
     out = tmp_path / "out.csv"
     export_animals(p, out)
     rows = list(csv.reader(out.open()))
-    assert rows[0] == ["ID", "Treatment", "Sex", "Genotype", "Weight"]
-    assert ["K7", "KO", "Female", "KO", "25"] in rows
+    assert rows[0] == ["ID", "Treatment", "Sex", "Genotype", "Weight", "Notes"]
+    assert ["K7", "KO", "Female", "KO", "25", ""] in rows
     assert len(rows) == 6
 
 
