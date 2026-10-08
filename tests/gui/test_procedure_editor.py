@@ -354,3 +354,36 @@ def test_variable_record_mode():
     rec.setCurrentIndex(rec.findData("end"))
     app.processEvents()
     assert "record" not in st
+
+
+def test_io_devices_dialog_new_device_types_and_calibration(monkeypatch):
+    from manymaze.gui.io_devices_dialog import CalibrationDialog
+
+    p = make_project()
+    dlg = IODevicesDialog(p)
+    dlg.add_device("notify")
+    w = dlg._extra["email_to"]
+    assert w.isVisible() or not dlg.isVisible()
+    w.setText("lab@example.org")
+    w.editingFinished.emit()
+    dlg._extra["smtp_port"].setText("465")
+    dlg._extra["smtp_port"].editingFinished.emit()
+    c = dlg._cur()
+    assert c["email_to"] == "lab@example.org" and c["smtp_port"] == 465 and dlg.ch_box.isHidden()
+    dlg.add_device("syringe_pump")
+    proto = dlg._extra["protocol"]
+    assert proto.count() >= 5 and dlg._cur()["protocol"] == "new_era"
+    proto.setCurrentIndex(proto.findData("harvard_ultra"))
+    assert dlg._cur()["protocol"] == "harvard_ultra"
+    dlg.f_type.setCurrentIndex(dlg.f_type.findData("scale"))  # retype: the balance's defaults
+    assert dlg._cur()["type"] == "scale" and proto.findData("mt_sics") >= 0
+    kinds = dlg.ch_table.cellWidget(0, 1) if dlg.ch_table.rowCount() else None
+    assert kinds is None or kinds.findData("status") < 0
+    # shocker calibration
+    ch = {"name": "grid", "kind": "output", "intensity": "grid_level", "calibration": "0:0|1:2"}
+    cal = CalibrationDialog(ch, "box")
+    cal.table.cellWidget(2, 1).setValue(0.9)  # level 0.25
+    assert (0.25, 0.9) in cal.points() and cal.points()[0] == (0.0, 0.0) and cal.points()[-1] == (1.0, 2.0)
+    assert cal.table_text().startswith("0:0|0.25:0.9")
+    dlg.accept()
+    assert [d["type"] for d in p.io_devices][-2:] == ["notify", "scale"]

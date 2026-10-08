@@ -676,8 +676,8 @@ class ProcedureEditor(QWidget):
         if typ in ("device", "audio"):
             devs = self.project.io_devices if self.project is not None else []
             return [d.get("name") for d in devs if typ == "device" or d.get("type") == "audio"]
-        if typ in ("input", "output"):
-            want = ioconfig.INPUT_KINDS if typ == "input" else ioconfig.OUTPUT_KINDS
+        if typ in ("input", "output", "sensor", "thermostat", "odour", "pump"):
+            want = ioconfig.channel_kinds_of(typ)
             devs = self.project.io_devices if self.project is not None else []
             return sorted({c.get("name") for d in devs for c in d.get("channels", []) or []
                            if c.get("kind", "input") in want and c.get("name")})
