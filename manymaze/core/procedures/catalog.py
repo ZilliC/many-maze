@@ -413,4 +413,7 @@ STALL_S = 0.25  # a software pulse train later than this (frames stalled) is del
 SAFETY_TASKS = ("shock", "audio")  # scheduled tasks that keep running in real time while the test is paused
 STEP_BUDGET = 5000  # statements a thread may run per frame before yielding
 MAX_CALL_DEPTH = 32  # sub-procedures calling sub-procedures
+MAX_EVENT_CHAIN = 100  # events causing events (signals, variable changes): a longer chain is a loop
+MAX_EVENTS_PER_RUN = 20000  # events dispatched in one frame (or key / touch) at most
+MAX_ENCODER_EVENTS = 100  # "every N encoder counts" events in one frame at most (the rest are dropped)
 EPS = 1e-6

@@ -47,8 +47,9 @@ Statements (``"type"``)::
              {"mode": "until", "until": condition, "var": name?, "body": [...]}   (the body runs at least once)
              {"mode": "forever", "body": [...]}
              "var" receives the iteration number (0, 1, ...). "count", "while" and "until" loops run instantly (a
-             thread yields to the next frame after 5000 statements); a "forever" loop whose body did not
-             wait advances one iteration per frame (it polls).
+             thread yields to the next frame after 5000 statements or empty iterations); a "forever" loop whose
+             body did not wait (a wait of 0 s or until something already true does not count) and a "while" /
+             "until" loop whose body ran nothing advance one iteration per frame (they poll).
     call     {"procedure": name}  run a sub-procedure here (its waits wait in this thread); nested up to 32 deep.
     label    {"name": name}
     goto     {"label": name}  continue after the label, which is in the same block or a block around it (a
@@ -70,7 +71,12 @@ Any statement may carry ``"enabled": false`` to skip it. Expressions are strings
 expressions whose truth value is used. Text parameters may embed expressions in braces: ``"count = {count}"``.
 
 Timing: a handler started by a timed event, and the statements after a ``wait``, run on the first frame at or
-after the due time; the next wait counts from the due time, not the frame time, so sequences never drift.
+after the due time; the next wait counts from the due time, not the frame time, so sequences never drift. A
+thread's time never goes back (an event dated before its wait started resumes it at the wait's start); "every"
+counts from when its handler or wait starts.
+
+Containment: an error in a statement is reported and the statement skipped; an internal error in a When block's
+event detector or handler stops only that When block; the other procedures carry on.
 
 Expressions
 ===========
@@ -99,24 +105,31 @@ space low, disk full, recording error); see ``live_state``.
 Modules: ``catalog`` (statement types, events, actions), ``expr`` (expressions), ``model`` (procedure documents),
 ``validate`` (edit-time checks), ``detect`` (event detectors and waits), ``engine`` and ``actions`` (running them),
 ``live_state`` (investigation, orientation, rearing, event-wizard options, callbacks), ``plugins`` (the "trigger a
-plug-in" action), ``legacy`` (the old rules), ``examples``.
+plug-in" action), ``programs`` (the programs "run a program" may start on this computer), ``legacy`` (the old rules),
+``examples``.
+
+Before a live test is armed, :func:`check_before_test` lists the errors that should stop it (warnings, such as
+"run a program", are left out) and :func:`programs.unauthorised_programs` the programs this computer has not
+allowed yet.
 """
 
 from ..iomeasures import io_measures
 from .catalog import (ACTION_SPECS, CONSTANTS, CONTAINERS, EPS, EVENT_SPECS, KEEP_SCOPES, LOCAL_NAMES, MAX_CALL_DEPTH,
-                      SAFETY_TASKS, SHOCK_MAX_S, STALL_S, STATEMENT_TYPES, STEP_BUDGET, STOP_WHAT, WHEN_MODES, P)
+                      MAX_EVENT_CHAIN, MAX_EVENTS_PER_RUN, SAFETY_TASKS, SHOCK_MAX_S, STALL_S, STATEMENT_TYPES,
+                      STEP_BUDGET, STOP_WHAT, WHEN_MODES, P)
 from .engine import ProcedureEngine, merge_kept_variables
 from .examples import EXAMPLES
 from .expr import (ANYMAZE_FUNCTIONS, FUNCTIONS, MAX_EXPR_LEN, MAX_SEQ, RANDOM_FUNCTIONS, Evaluator, ExprError,
                    check_expr, compile_expr, expr_names, interpolate)
 from .legacy import ACTIONS, TRIGGERS, Outputs, convert_rule, describe_rule, is_legacy_rule
 from .live_state import WHEN_OPTIONS, parse_clock, parse_trials
-from . import plugins
+from . import plugins, programs
 from .model import (RECORD_MODES, branch_block, describe, describe_elif, describe_event, describe_statement, is_branch,
                     iter_statements, keep_scope, new_elif, new_procedure, new_statement, normalize_procedures,
                     path_text, record_mode, repeat_mode, spec_defaults, statement_at, statement_fields,
                     wait_alternatives, wait_mode)
-from .validate import declared_names, project_context, test_context, validate
+from .validate import (ValidationWarning, check_before_test, declared_names, is_warning, project_context,
+                       test_context, validate)
 
 # the procedure editor's names from before the split
 _wait_mode, _repeat_mode = wait_mode, repeat_mode

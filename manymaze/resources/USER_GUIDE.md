@@ -608,7 +608,7 @@ which gets the status *scored*.
 
 ### Procedures
 
-Procedures (§8) run in every live test, including each test of a several-tests session; their variables are shared between tests and saved with the experiment. A *Pause the test* action pauses the test like the Pause button; resume it with *Resume* or a start key.
+Procedures (§8) run in every live test, including each test of a several-tests session. Each test starts its variables from their initial values; only the variables declared with *Keep between tests* carry over to the next test (saved with the experiment when the test is saved). A *Pause the test* action pauses the test like the Pause button; resume it with *Resume* or a start key.
 
 ## 8. Procedures and hardware I/O
 
@@ -641,8 +641,12 @@ The editor has three panes:
 
 Procedures are checked as you type: problems (unknown zones, devices or variables, syntax errors, statements in
 the wrong place, missing values…) are listed under the tree and highlighted in red on the statement; click a
-problem to jump to it. Problems that can only appear while a test runs (division by zero, an array index out of
-range…) are reported in the live-test log without stopping the test.
+problem to jump to it. Some are only warnings: the procedures run as written — *Run a program* (it runs a program
+on this computer, see below) and a loop with nothing in it (only comments, labels or disabled statements: it only
+uses up time). Problems that can only appear while a test runs (division by zero, an array index out of range, a
+When whose number was left empty…) are reported in the live-test log without stopping the test: the statement or
+When block that went wrong is skipped (or stops), the other procedures carry on. A When whose required number is
+empty uses the number's default (e.g. 30 s) and says so in the log.
 
 ### Statements
 
@@ -682,8 +686,13 @@ pulses on the Arduino are timed by the board itself (microsecond resolution), in
 the I/O log records their exact times. Pulse sequences from a file are timed on the computer's clock by the I/O
 service thread (about 1 ms jitter; on the Arduino each pulse's width is timed by the board). Fast analogue inputs
 (up to 1 kHz) are sent by the board in batches with its own clock, and each sample is logged at its own time
-rather than at the frame's. "Repeat N times", "Repeat while" and "Repeat until" loops run instantly; a
-"Repeat forever" loop whose block does not wait runs once per frame (a polling loop).
+rather than at the frame's. "Repeat N times", "Repeat while" and "Repeat until" loops run instantly (up to 5000
+statements or empty passes per frame, then they go on at the next frame); a "Repeat forever" loop whose block does
+not wait — or only waits 0 s or until something already true — runs once per frame (a polling loop), and so does a
+"Repeat while / until" loop with nothing in it. A wait never takes a block back in time: waiting for an event that
+already happened before the wait (e.g. *Time reached* for a time already past) resumes it at the wait's start.
+*Every N seconds* counts from when it starts: the test start, the moment its procedure is enabled, or the start of
+a wait for it (a procedure enabled at 5 s with *every 1 s* fires at 6, 7 … s, not five times at once).
 
 **Several procedures at once.** Every When block that is running is independent: a procedure can wait for 30 s
 while another one counts lever presses and a third one turns a light on whenever the animal enters a zone.
@@ -733,7 +742,7 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 | Inputs | Analogue input rises above (`analog_above`) | Device *(optional)*, Input, Level |
 | Inputs | Analogue input falls below (`analog_below`) | Device *(optional)*, Input, Level |
 | Inputs | Encoder count reaches (`encoder_reaches`) | Device *(optional)*, Input, Counts |
-| Inputs | Every N encoder counts (`encoder_every`) — e.g. once per wheel revolution | Device *(optional)*, Input, Counts |
+| Inputs | Every N encoder counts (`encoder_every`) — e.g. once per wheel revolution; counted from the first reading of the test (at most 100 times in one frame) | Device *(optional)*, Input, Counts |
 | Inputs | Movement detector: movement starts (`movement_start`) | Device *(optional)*, Detector *(optional)* |
 | Inputs | Movement detector: movement ends (`movement_end`) | Device *(optional)*, Detector *(optional)* |
 | Sensors | Sensor rises above (`sensor_above`) | Device *(optional)*, Sensor, Level |
@@ -810,13 +819,13 @@ sounds and virtual switches are switched off when the test ends.
 | Outputs | Pulse output (`output_pulse`) | Device *(optional)*, Output, Duration (s) |
 | Outputs | Set output level (`output_set`) | Device *(optional)*, Output, Level (0–1) |
 | Outputs | Set analogue output (V) (`output_volts`) — as in ANY-maze; the channel's max_v option is the voltage of level 1 (default 5 V) | Device *(optional)*, Output, Level (V) |
-| Outputs | Switch all outputs off (`all_outputs_off`) | Device *(optional)* |
+| Outputs | Switch all outputs off (`all_outputs_off`) — light ramps stop too | Device *(optional)* |
 | Outputs | Pulse train (optogenetics) (`pulse_train`) | Device *(optional)*, Output, Frequency (Hz), Pulse width (ms), Duration (s) |
 | Outputs | Stop pulse train (`pulse_train_stop`) | Device *(optional)*, Output |
 | Outputs | Sync pulse (e-phys / imaging) (`sync_pulse`) | Device *(optional)*, Output, Width (ms) |
-| Operant | Dispense pellet(s) (`pellet`) | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)*, Pellet sensor *(optional)*, Detection time (s) *(optional)*, Retries *(optional)* |
+| Operant | Dispense pellet(s) (`pellet`) — 0 pellets (e.g. worked out by an expression) dispenses nothing | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)*, Pellet sensor *(optional)*, Detection time (s) *(optional)*, Retries *(optional)* |
 | Operant | Present liquid dipper (`dipper`) | Device *(optional)*, Output, Duration (s) |
-| Operant | Deliver liquid drops (dripper) (`liquid_drop`) | Device *(optional)*, Output, Drops, Valve open (ms) *(optional)*, Gap between drops (s) *(optional)* |
+| Operant | Deliver liquid drops (dripper) (`liquid_drop`) — 0 drops delivers nothing | Device *(optional)*, Output, Drops, Valve open (ms) *(optional)*, Gap between drops (s) *(optional)* |
 | Operant | Present odour (`odour`) | Device *(optional)*, Olfactometer, Odour *(optional)*, Air flow (l/min) *(optional)* |
 | Operant | Stop odour (`odour_off`) | Device *(optional)*, Olfactometer |
 | Lights | Set light level (`light_level`) | Device *(optional)*, Output, Level (%) |
@@ -927,7 +936,11 @@ devices (see *Alerts*), to the given address / number or the device's own. *Gene
 warnings; *Generate an error* reports a procedure error and can end the test.
 
 **Programs and plug-ins.** *Run a program* starts a program with its arguments, without a shell, and does not
-wait for it. *Trigger a plug-in* calls a Python function registered with
+wait for it. Because an experiment file can come from anyone, a program only runs on a computer that allows it:
+the list of allowed programs is a setting of this computer (`allowed_programs.json` in mANY-MAZE's settings
+folder), never part of the experiment. A program that is not on the list is not run and the procedure reports
+an error (or, when mANY-MAZE asks for confirmation, it runs once you allow it, and is then remembered). The
+procedure checks list *Run a program* as a warning. *Trigger a plug-in* calls a Python function registered with
 `manymaze.core.procedures.plugins.register(name, fn)` (or installed through the `manymaze.procedure_plugins`
 entry point): `fn(argument, info)` receives the test time, the variables and the test, and its result can be
 stored in a variable.
@@ -987,7 +1000,7 @@ Functions:
 Expressions are evaluated by a restricted interpreter: they cannot call anything else, read files or access
 Python objects, and huge numbers or arrays are refused.
 
-Variables are shared by all procedures. Numeric variables declared with *Save as a test result* are saved with
+Variables are shared by all procedures (within a test). Numeric variables declared with *Save as a test result* are saved with
 the test (`Test.result_variables`) and analysed like any other measure ("Result variable" measures).
 Variables declared with *Keep between tests* are stored in the experiment (`Project.variables`; the values kept
 per animal / apparatus under `@animal` / `@apparatus`), only when the test is saved.
@@ -1003,7 +1016,7 @@ sending heartbeats, e.g. after a crash.
 |---|---|
 | **Arduino** | Any Arduino running `firmware/manymaze_io` (see `firmware/README.md` for wiring and the protocol): debounced digital inputs (levers, nose pokes, beams, TTL), digital outputs (lights, pellet dispensers, doors, shocker triggers, laser TTL, sync pulses) with optional maximum on-time, PWM outputs, analogue inputs, quadrature rotary encoders (running wheels) and a heartbeat watchdog. Pulses and pulse trains are generated on the board. |
 | **Serial port (text commands)** | Any device driven by text lines: each output channel has an *On* and an *Off* command; each input channel the lines the device sends when it switches on / off. *Send serial command* sends any text. |
-| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files, once or repeated (*Play sound file* ▸ *Play* times, or *Play sound file repeatedly* until *Stop sounds*). |
+| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files, once or repeated (*Play sound file* ▸ *Play* times, or *Play sound file repeatedly* until *Stop sounds*). Every sound stops when the test ends (and when the pre-test section ends at the start of the test). |
 | **USB-serial cable control lines** | Any USB-serial adapter as a small TTL interface (the role of ANY-maze's USB TTL cable): outputs on RTS and DTR, inputs from CTS, DSR, RI and CD (the channel's *Pin* is the line name). |
 | **Firmata board** | A board running StandardFirmata (57600 baud): digital inputs with pull-up, movement detectors, digital and PWM outputs, analogue inputs and sensors. |
 | **National Instruments DAQ** | NI devices through NI-DAQmx (`pip install nidaqmx` and NI's driver): digital lines (`port0/line0`), analogue inputs (`ai0`), analogue outputs (`ao0`, level × `max_v`), counters (`ctr0`). |
@@ -1185,7 +1198,8 @@ was at that temperature, contacts made and broken and licks at that temperature.
 ### Projects from older versions
 
 Rules created with earlier versions ("when *trigger*, after *delay*, do *action*") are converted automatically
-into equivalent procedures (one per rule) the first time the procedure editor opens.
+into equivalent procedures (one per rule) the first time the procedure editor opens. A zone rule without a zone
+never ran; it is converted disabled, with a comment (choose a zone and enable it to use it).
 
 ### For developers
 
@@ -1206,7 +1220,10 @@ engine.stop(t_end)
 test.io_events = engine.io_events; test.result_variables = engine.result_variables
 test.pauses = engine.pauses; test.events += engine.state_events   # point marks go through on_mark
 io_measures(test.io_events, duration, t_range=None, devices=project.io_devices)  # -> {measure: value}
-validate(project.procedures, context) # -> [(procedure index, statement path, message)]
+validate(project.procedures, context) # -> [(procedure index, statement path, message)]; is_warning(message)
+check_before_test(project.procedures, project_context(project))  # -> errors that should stop arming the test
+programs.unauthorised_programs(project.procedures)  # "Run a program" programs this computer has not allowed
+programs.policy.confirm = lambda path, arguments, context: ask_the_user(path)  # True: allow (remembered)
 ```
 
 ## 9. Results: data, plots and data transfer

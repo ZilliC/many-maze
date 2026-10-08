@@ -262,6 +262,9 @@ class Actions:
 
     def _a_all_outputs_off(self, th, p, device):
         device = self._devname(device)
+        for key in list(self._ramps):  # a light ramp would switch its output on again on the next frame
+            if not device or key[0] == device:
+                del self._ramps[key]
         for key in list(self._trains):
             if not device or key[0] == device:
                 self._stop_train(key, self.t)
@@ -382,7 +385,9 @@ class Actions:
         self._start_train(th, p, device, channel, width / 1000.0, width / 1000.0, 1, "sync")
 
     def _a_pellet(self, th, p, device, channel, count, pulse_width, gap, sensor="", timeout=1.0, retries=0):
-        n = max(1, int(count))
+        n = int(count)
+        if n <= 0:  # e.g. a count worked out by an expression: nothing to dispense
+            return
         width = max(0.001, pulse_width / 1000.0)
         dev, ch = self._resolve(th, p, device, channel)
         self.pellet_counts[(dev, ch)] = self.pellet_counts.get((dev, ch), 0) + n
@@ -434,8 +439,10 @@ class Actions:
         self._start_train(th, p, device, channel, duration, max(0.001, duration), 1, "dipper")
 
     def _a_liquid_drop(self, th, p, device, channel, count, pulse_width, gap):
+        if int(count) <= 0:  # nothing to deliver
+            return
         width = max(0.001, pulse_width / 1000.0)
-        self._start_train(th, p, device, channel, max(width * 2, gap), width, max(1, int(count)), "drop")
+        self._start_train(th, p, device, channel, max(width * 2, gap), width, int(count), "drop")
 
     # -- odours
     def _a_odour(self, th, p, device, channel, odour, flow):
@@ -575,6 +582,7 @@ class Actions:
         if "volume" in kw and kw["volume"] is not None:  # the "set speaker volume" level scales every sound
             kw["volume"] = max(0.0, min(1.0, float(kw["volume"]) * self.volumes.get(dev, 1.0)))
         if self.devices.has(dev):
+            self._audio_devs.add(dev)
             try:
                 self.devices.audio(dev, cmd, duration=duration, **kw)
             except Exception as e:  # pragma: no cover
@@ -582,6 +590,8 @@ class Actions:
             for err in self.devices.device(dev).errors:
                 self._error(th, p, err)
         key = (dev, channel)
+        # the end of the sound this one replaces (e.g. a loop after a timed sound) must not stop this one
+        self._cancel_task(("audio",) + key)
         was_on = any(k[0] == dev for k in self._audio_on)
         self._audio_on[key] = value
         self._log_io(self.t, dev, channel, "output", value, "audio")
@@ -1004,7 +1014,7 @@ class Actions:
     def _a_disable_procedure(self, th, p, procedure):
         for i in self._procs_named(procedure):
             self._disable_proc(i, keep=th)
-            if i == th.proc_i:
+            if i == th.owner:
                 raise _Stop()
 
     # -- touch screen
@@ -1137,18 +1147,24 @@ class Actions:
     # -- programs and plug-ins
     def _a_run_program(self, th, p, program, arguments):
         import shlex
-        import shutil
         import subprocess
 
+        from . import programs
+
         exe = str(program).strip()
-        found = exe if Path(exe).expanduser().is_file() else shutil.which(exe)
+        found = programs.resolve(exe)
         if not found:
             raise ExprError(f"program not found: {exe}")
         try:
             args = shlex.split(str(arguments or ""))
         except ValueError as e:
             raise ExprError(f"arguments: {e}") from None
-        proc = subprocess.Popen([str(Path(found).expanduser())] + args, stdin=subprocess.DEVNULL,
+        # a project file may come from anyone: a program runs only if it is allowed on this computer
+        policy = self.program_policy if self.program_policy is not None else programs.policy
+        if not policy.authorise(found, str(arguments or ""), self.context):
+            raise ExprError(f"'{found}' was not run: it is not on this computer's list of programs allowed to "
+                            "run (a program from a project must be allowed once on each computer)")
+        proc = subprocess.Popen([found] + args, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # no shell, not waited for
         self.programs.append(proc)
         self._log_line(self.t, f"Program started: {exe}" + (f" {arguments}" if arguments else ""))

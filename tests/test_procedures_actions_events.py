@@ -22,7 +22,7 @@ from manymaze.core.iodevices import DeviceManager
 from manymaze.core.iodrivers import NotifyDevice
 from manymaze.core.live import LiveOccupancy, LiveRearing, LiveSession, is_disk_full
 from manymaze.core.measures import AnalysisSettings
-from manymaze.core.procedures import (ACTION_SPECS, EVENT_SPECS, ProcedureEngine, describe_statement, plugins,
+from manymaze.core.procedures import (ACTION_SPECS, EVENT_SPECS, ProcedureEngine, describe_statement, plugins, programs,
                                       spec_defaults, statement_fields, validate)
 from manymaze.core.project import Project
 from manymaze.core.session import END_USER, save_live_test
@@ -111,7 +111,9 @@ def test_catalogue_counts_and_every_new_spec_validates():
             assert statement_fields(st) == ACTION_SPECS[name]["params"]
             assert describe_statement(st).startswith("Do: ")
         ctx = {"zones": ["Centre", "Arena"], "points": ["Feeder"]}
-        assert validate([proc(*stmts)], ctx) == []
+        assert validate([proc(*stmts)], ctx, warnings=False) == []
+        assert [m for _pi, _p, m in validate([proc(*stmts)], ctx)] == [
+            "Do run a program: warning: runs a program on this computer — only if it is allowed on this computer"]
     finally:
         plugins.unregister("echo")
 
@@ -338,8 +340,9 @@ def test_run_program_is_not_blocking_and_plugins(tmp_path):
     out = tmp_path / "ran.txt"
     code = f"import time, pathlib; time.sleep(0.3); pathlib.Path(r'{out}').write_text('ok')"
     t0 = time.monotonic()
+    policy = programs.ProgramPolicy([sys.executable], persist=False)  # allowed on this computer
     eng = run([proc(DO("run_program", program=sys.executable, arguments=f'-c "{code}"'),
-                    DO("run_program", program="/no/such/program"))], 0.1)
+                    DO("run_program", program="/no/such/program"))], 0.1, program_policy=policy)
     assert time.monotonic() - t0 < 0.3  # the test did not wait for the program
     assert len(eng.programs) == 1 and any("program not found" in e for e in eng.errors)
     eng.programs[0].wait(10)
