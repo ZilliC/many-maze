@@ -90,7 +90,7 @@ FILL = {"zone": "Centre", "target": "Centre", "channel": "wheel", "cond": "time(
 
 
 def test_catalogue_counts_and_every_new_spec_validates():
-    assert len(EVENT_SPECS) == 89 and len(ACTION_SPECS) == 95
+    assert len(EVENT_SPECS) == 90 and len(ACTION_SPECS) == 99
     assert set(NEW_EVENTS) <= set(EVENT_SPECS) and set(NEW_ACTIONS) <= set(ACTION_SPECS)
     assert [p["name"] for p in ACTION_SPECS["end_test"]["params"]] == ["reason", "allow_continuation"]
     plugins.register("echo", lambda arg, info: arg)

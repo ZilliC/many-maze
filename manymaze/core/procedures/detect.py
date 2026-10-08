@@ -4,7 +4,7 @@ and the wait conditions of a thread."""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .catalog import EPS, EVENT_SPECS
 
@@ -354,14 +354,27 @@ class UntilWait:
 
 @dataclass
 class EventWait:
+    """Waiting for an event, or for the first of several (``others``): the local ``wait_event`` is then 1 for the
+    first event, 2 for the next … (0 after a timeout)."""
+
     det: _Detector
     timeout: float | None
+    others: list = field(default_factory=list)
+
+    @property
+    def dets(self) -> list:
+        return [self.det] + self.others
 
     def ready(self, eng, th, t) -> bool:
-        if self.det.hits:
-            t_occ, args = self.det.hits.pop(0)
+        first = None
+        for k, d in enumerate(self.dets):
+            if d.hits and (first is None or d.hits[0][0] < first[1].hits[0][0]):
+                first = (k, d)
+        if first is not None:
+            k, d = first
+            t_occ, args = d.hits.pop(0)
             th.resume_clock = t_occ
             th.locals.update(eng._event_locals(t_occ, args))
-            th.locals["timed_out"] = 0
+            th.locals["timed_out"], th.locals["wait_event"] = 0, k + 1
             return True
         return _timed_out(th, self.timeout, t)

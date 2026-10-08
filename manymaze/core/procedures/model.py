@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import re
 
-from .catalog import ACTION_SPECS, EVENT_SPECS, STOP_WHAT, WHEN_MODES, P
+from .catalog import ACTION_SPECS, EVENT_SPECS, KEEP_SCOPES, STOP_WHAT, WHEN_MODES, P
 from .expr import _fmt
 from .legacy import convert_rule, describe_rule, is_legacy_rule
 
@@ -52,7 +52,20 @@ def new_statement(type_: str) -> dict:
         d.update(text="")
     elif type_ == "var":
         d.update(name="", value=0, keep=False, result=False)
+    elif type_ == "call":
+        d.update(procedure="")
+    elif type_ == "label":
+        d.update(name="")
+    elif type_ == "goto":
+        d.update(label="")
+    elif type_ == "resolution":
+        d.update(ms=1)
     return d
+
+
+def new_elif() -> dict:
+    """An "else if" clause of an If statement (``st["elif"]``)."""
+    return {"cond": "", "body": []}
 
 
 def spec_defaults(spec: dict) -> dict:
@@ -122,7 +135,8 @@ def describe_statement(st: dict) -> str:
         if mode == "until":
             return f"Wait until {_short(st.get('until', ''))}{to}"
         if mode == "event":
-            return f"Wait for {describe_event(st)}{to}"
+            alts = "".join(f" or {describe_event(a)}" for a in wait_alternatives(st))
+            return f"Wait for {describe_event(st)}{alts}{to}"
         return f"Wait {_short(st.get('seconds', 0))} s"
     if t == "if":
         return f"If {_short(st.get('cond', '')) or '?'}"
@@ -133,6 +147,8 @@ def describe_statement(st: dict) -> str:
             return f"Repeat {_short(st.get('count', 0))} times{v}"
         if mode == "while":
             return f"Repeat while {_short(st.get('while', ''))}{v}"
+        if mode == "until":
+            return f"Repeat until {_short(st.get('until', ''))}{v}"
         return f"Repeat forever{v}"
     if t == "set":
         idx = f"[{st['index']}]" if st.get("index") not in (None, "") else ""
@@ -147,13 +163,42 @@ def describe_statement(st: dict) -> str:
         return STOP_WHAT.get(st.get("what", "handler"), "Stop")
     if t == "comment":
         return f"# {st.get('text', '')}"
+    if t == "call":
+        return f"Call sub-procedure {st.get('procedure') or '?'}"
+    if t == "label":
+        return f"Label {st.get('name') or '?'}"
+    if t == "goto":
+        return f"Go to {st.get('label') or '?'}"
+    if t == "resolution":
+        return f"Set timer resolution {_short(st.get('ms', 1))} ms"
     if t == "var":
         flags = [f for f, k in (("kept between tests", "keep"), ("saved as result", "result")) if st.get(k)]
+        if keep_scope(st) in ("animal", "apparatus"):
+            flags[0] = f"kept {KEEP_SCOPES[keep_scope(st)].lower()}"
         if record_mode(st) != "end":
             flags.append(f"recorded {RECORD_MODES[record_mode(st)].lower()}")
         return f"Variable {st.get('name', '?')} = {_short(st.get('value', 0))}" + (f"  ({', '.join(flags)})"
                                                                                    if flags else "")
     return f"Unknown statement '{t}'"
+
+
+def describe_elif(clause: dict) -> str:
+    return f"Else if {_short(clause.get('cond', '')) or '?'}"
+
+
+def keep_scope(st) -> str | None:
+    """How a variable is kept between tests: None (not kept), "experiment" (old projects: keep = true), "animal"
+    or "apparatus"."""
+    k = st.get("keep")
+    if not k:
+        return None
+    return k if isinstance(k, str) and k in KEEP_SCOPES else "experiment"
+
+
+def wait_alternatives(st) -> list[dict]:
+    """The other events a "wait for an event" also ends on (``st["or"]``: [{"event", <parameters>}])."""
+    alts = st.get("or")
+    return [a for a in alts if isinstance(a, dict)] if isinstance(alts, list) else []
 
 
 def describe(rule: dict) -> str:
@@ -190,7 +235,7 @@ def record_mode(st) -> str:
 
 def repeat_mode(st):
     m = st.get("mode")
-    if m in ("count", "while", "forever"):
+    if m in ("count", "while", "until", "forever"):
         return m
     if st.get("while") not in (None, ""):
         return "while"
@@ -205,6 +250,14 @@ _UNTIL = P("until", "expr", None, "Condition", True)
 _COUNT = P("count", "int", None, "Count", True)
 _WHILE = P("while", "expr", None, "Condition", True)
 _VALUE = P("value", "expr", None, "Value", True)
+_STATEMENT_FIELDS = {
+    "if": [_COND], "set": [_VALUE],
+    "call": [P("procedure", "procedure", "", "Sub-procedure", True)],
+    "label": [P("name", "label", "", "Label", True)],
+    "goto": [P("label", "label", "", "Go to label", True)],
+    "resolution": [P("ms", "number", 1, "Resolution (ms)", True,
+                     "accepted for ANY-maze protocols: waits and timers are already exact to the frame")],
+}
 
 
 def statement_fields(st: dict) -> list[dict]:
@@ -219,8 +272,8 @@ def statement_fields(st: dict) -> list[dict]:
     if t == "wait":
         return [_SECONDS if wait_mode(st) == "seconds" else _UNTIL]
     if t == "repeat":
-        return {"count": [_COUNT], "while": [_WHILE]}.get(repeat_mode(st), [])
-    return {"if": [_COND], "set": [_VALUE]}.get(t, [])
+        return {"count": [_COUNT], "while": [_WHILE], "until": [_UNTIL]}.get(repeat_mode(st), [])
+    return list(_STATEMENT_FIELDS.get(t, []))
 
 
 def iter_statements(stmts, path=()):
@@ -230,12 +283,17 @@ def iter_statements(stmts, path=()):
             continue
         p = path + (i,)
         yield p, st
-        for br in ("body", "else"):
-            if isinstance(st.get(br), list):
-                yield from iter_statements(st[br], p + (br,))
+        if isinstance(st.get("body"), list):
+            yield from iter_statements(st["body"], p + ("body",))
+        for k, clause in enumerate(st.get("elif") or [] if isinstance(st.get("elif"), list) else []):
+            if isinstance(clause, dict) and isinstance(clause.get("body"), list):
+                yield from iter_statements(clause["body"], p + ("elif", k, "body"))
+        if isinstance(st.get("else"), list):
+            yield from iter_statements(st["else"], p + ("else",))
 
 
 def statement_at(proc: dict, path: tuple) -> dict | None:
+    """The statement at a path (for the path of an If followed by ("elif", k): its k-th else-if clause)."""
     cur = proc.get("statements", [])
     st = None
     for k in path:
@@ -248,7 +306,19 @@ def statement_at(proc: dict, path: tuple) -> dict | None:
     return st
 
 
+def is_branch(path) -> bool:
+    """The path of an Else branch (``(..., "else")``) or of an else-if clause (``(..., "elif", k)``), not of a
+    statement."""
+    return bool(path) and (path[-1] == "else" or (len(path) >= 2 and path[-2] == "elif"))
+
+
+def branch_block(path: tuple) -> tuple:
+    """The block path of the statements inside a branch (see is_branch)."""
+    return path if path[-1] == "else" else path + ("body",)
+
+
 def path_text(path: tuple) -> str:
-    """(0, 'body', 2, 'else', 0) -> '1.3.else.1' (1-based for people)."""
+    """(0, 'body', 2, 'else', 0) -> '1.3.else.1', (0, 'elif', 1, 'body', 0) -> '1.elif.2.body.1' (1-based for
+    people)."""
     return ".".join(str(k + 1) if isinstance(k, int) else k for k in path)
 

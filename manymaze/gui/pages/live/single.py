@@ -17,7 +17,7 @@ from ....core.camhw import CameraHardware
 from ....core.camsources import is_native_source, list_native_cameras
 from ....core.live import LiveSession, draw_display_texts, open_devices
 from ....core.livegroup import ClockSchedule
-from ....core.procedures import Outputs
+from ....core.procedures import Outputs, test_context
 from ....core.project import INFO_COLUMNS
 from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_live_test
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
@@ -590,9 +590,8 @@ class SingleTestMixin:
                         record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
-                        outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test),
-                        context_extra={"test": test.id, "animal": test.animal_id, "apparatus": test.apparatus,
-                                       "stage": test.stage, "trial": test.trial})
+                        outputs_off_on_pause=self.pause_off.isChecked(), test_info=test_context(p, test),
+                        **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)
         return s

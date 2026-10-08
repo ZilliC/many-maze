@@ -518,11 +518,11 @@ class LiveSession(_Scoring):
     autosave_path: str | None = None  # crash-recovery side file (track, events, I/O log), rewritten periodically
     autosave_s: float = 5.0
     autosave_meta: dict | None = None  # test id, animal, apparatus … stored in the side file
-    context_extra: dict | None = None  # the test for the procedures: {"test", "animal", "apparatus", "stage", "trial"}
     record_from_start: bool = True  # False: only the procedures' "start video recording" starts the recording
     disk_low_mb: float = 1024.0  # "disk space low" below this much free space on the recording disk
     disk_full_mb: float = 50.0  # below this the recording stops ("disk full")
     disk_check_s: float = 5.0  # how often the free space is checked while recording (test time)
+    test_info: dict | None = None  # the test for the procedures (procedures.test_context): trial(), animal() …
 
     def __post_init__(self):
         self._base_apparatus = self.apparatus
@@ -540,7 +540,7 @@ class LiveSession(_Scoring):
         app = self.apparatus
         ctx = {"zones": [z.name for z in app.zones] + [g.name for g in app.groups] if app else [],
                "points": [p.name for p in app.points] if app else [], "keys": [],
-               "duration_s": self.duration_s, **(self.context_extra or {})}
+               "duration_s": self.duration_s, "apparatus_map": app, **(self.test_info or {})}
         # the legacy serial-port Outputs is accepted in place of a DeviceManager by the engine
         self.engine = ProcedureEngine(self.procedures, self.devices if self.devices is not None else self.outputs,
                                       on_mark=self._mark, on_end=self._procedure_end,
@@ -574,6 +574,7 @@ class LiveSession(_Scoring):
         self._frame_i = 0
         self._still_since: float | None = None
         self._start_requested = False
+        self._wait_ts0: float | None = None  # first frame while waiting to start (procedures' pre-test clock)
         self._resume_pending = False
         self._pause_ts: float | None = None
         self._last_ts: float | None = None
@@ -608,6 +609,7 @@ class LiveSession(_Scoring):
             app.calibration_line = tuple(cal["calibration_line"]) if cal["calibration_line"] else None
             app.calibration_length_cm = cal["calibration_length_cm"]
             self.apparatus = app
+            self.engine.context["apparatus_map"] = app
             self.occupancy.app = app
             self.stats.set_scale(app)
             self.calibration = cal
@@ -804,10 +806,13 @@ class LiveSession(_Scoring):
             return True
 
     def key(self, key: str, down: bool = True):
-        """Forward a key press to the procedures; also while paused (e.g. a "resume" key)."""
+        """Forward a key press to the procedures; also while paused (e.g. a "resume" key) and, for the "test is
+        waiting to start" handlers, while waiting to start."""
         with self.lock:
             if self.state in ("running", "paused"):
                 self._call_engine(self.engine.key, self.elapsed, key, down)
+            elif self.state == "waiting" and self.engine._pretest:
+                self._call_engine(self.engine.key, self.engine.t, key, down)
 
     def touch(self, area: str | None, x: float | None = None, y: float | None = None):
         """A touch on the stimulus screen (any thread): forwarded to the procedures under the session lock."""
@@ -831,6 +836,11 @@ class LiveSession(_Scoring):
         if self.state == "finished":
             return dets
         if self.state == "waiting":
+            if self._wait_ts0 is None:
+                self._wait_ts0 = ts
+            d = dets[0] if dets else Detection()
+            self._call_engine(self.engine.waiting_update, ts - self._wait_ts0,
+                              {"detected": bool(d.detected), "x": float(d.x), "y": float(d.y)})
             self._check_start(ts, dets, fg)
             if self.state != "running":
                 return dets
@@ -867,6 +877,8 @@ class LiveSession(_Scoring):
         return dets
 
     def _check_start(self, ts, dets, fg):
+        if not self.engine.start_allowed:  # a "test is waiting to start" procedure holds the start
+            return
         detected = any(d.detected for d in dets)
         mode = self.start_mode
         if self._start_requested or mode == "immediate":

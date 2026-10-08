@@ -147,7 +147,7 @@ class LiveState:
     def _when_ok(self, h, t_occ) -> bool:
         """The "when" options: only in some trials; only once the event happened N times within S seconds."""
         st = h.st
-        if st.get("trials") not in (None, "") and not trial_selected(st["trials"], (self.context or {}).get("trial")):
+        if st.get("trials") not in (None, "") and not trial_selected(st["trials"], self._test_info().get("trial")):
             return False
         try:
             times = int(st.get("times") or 0)

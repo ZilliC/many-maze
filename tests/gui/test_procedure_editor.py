@@ -188,6 +188,75 @@ def test_every_statement_event_and_action_form_builds():
     assert p.procedures[1]["statements"][1]["mode"] == "seconds"
 
 
+def test_editor_structure_statements_else_if_alternatives_and_options():
+    p = make_project()
+    ed = ProcedureEditor(p)
+    ed.add_procedure()
+    proc = p.procedures[1]
+    # an If with two else-if clauses: edit a clause's condition, add a statement inside it, remove one
+    ed.add_statement("if")
+    set_line(field(ed, "cond"), "1 > 2")
+    c0 = ed.add_elif()
+    c1 = ed.add_elif()
+    assert (c0, c1) == ((0, "elif", 0), (0, "elif", 1)) and ed._cur_path() == c1
+    set_line(field(ed, "cond"), "2 > 1")
+    assert ed.tree.currentItem().text(0) == "Else if 2 > 1" and ed.st_btns["del"].isEnabled()
+    assert ed.add_in_btn.isEnabled() and not ed.st_btns["dup"].isEnabled()
+    ed.add_statement("comment")
+    assert ed._cur_path() == (0, "elif", 1, "body", 0)
+    ed.tree.setCurrentItem(ed.tree.item_for(c0))
+    ed.remove_statement()
+    st = proc["statements"][0]
+    assert st["elif"] == [{"cond": "2 > 1", "body": [{"type": "comment", "text": ""}]}]
+    assert ed.tree.item_for((0, "elif", 0, "body", 0)) is not None
+    # label / go to / call / timer resolution
+    ed.tree.setCurrentItem(ed.tree.item_for((0,)))
+    ed.add_statement("label")
+    set_line(field(ed, "name"), "top")
+    ed.add_statement("goto")
+    assert "top" in [field(ed, "label").itemText(i) for i in range(field(ed, "label").count())]
+    set_line(field(ed, "label"), "top")
+    ed.add_statement("resolution")
+    ed.add_statement("call")
+    set_line(field(ed, "procedure"), "Helper")
+    assert any("unknown procedure 'Helper'" in m for _i, _p, m in ed.issues)
+    ed.add_procedure()
+    ed.proc_list.item(2).setText("Helper")
+    ed.sub_cb.setChecked(True)
+    ed.maths_cb.setChecked(True)
+    assert p.procedures[2]["sub"] is True and p.procedures[2]["anymaze_maths"] is True
+    ed.proc_list.setCurrentRow(1)
+    assert not ed.sub_cb.isChecked() and ed.issues == []
+    # a wait for one of several events
+    ed.tree.setCurrentItem(ed.tree.item_for((4,)))
+    ed.add_statement("wait")
+    m = field(ed, "mode")
+    m.setCurrentIndex(m.findData("event"))
+    app.processEvents()
+    ev = field(ed, "event")
+    ev.setCurrentIndex(ev.findData("key_down"))
+    app.processEvents()
+    field(ed, "or").click()
+    app.processEvents()
+    alt = field(ed, "or0")
+    alt.setCurrentIndex(alt.findData("zone_enter"))
+    app.processEvents()
+    wait = proc["statements"][5]
+    assert wait["or"] == [{"event": "zone_enter", "zone": ""}] and " or animal enters zone" in \
+        ed.tree.currentItem().text(0)
+    # a variable kept per animal
+    ed.add_statement("var")
+    set_line(field(ed, "name"), "seen")
+    keep = field(ed, "keep")
+    keep.setCurrentIndex(keep.findData("animal"))
+    assert proc["statements"][6]["keep"] == "animal"
+    keep.setCurrentIndex(keep.findData("experiment"))
+    assert proc["statements"][6]["keep"] is True
+    keep.setCurrentIndex(keep.findData(""))
+    assert "keep" not in proc["statements"][6]
+    assert pr.validate(p.procedures, ed.context()) == ed.issues == []
+
+
 def test_io_devices_dialog(monkeypatch):
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
     p = make_project()
