@@ -282,7 +282,13 @@ class PropertyPanel(QFrame):
                               tip="Investigation zone: the animal is in the zone while its head is within this "
                                   "distance of it (e.g. sniffing an object)")
         self.zone_inv.valueChanged.connect(lambda v: self._set("zone", investigation_distance_cm=float(v)))
-        for wdg in (self.zone_hidden, self.zone_moveable, self.zone_rule, self.zone_frac, self.zone_inv):
+        self.zone_orient = _spin(QSpinBox(), 0, 180, prefix="Entry only when facing it: within ", suffix="°",
+                                 special="Entry does not need facing the zone",
+                                 tip="An entry only counts once the animal is oriented towards the zone: its body "
+                                     "orientation within this angle of the direction to the zone centre (0 = off)")
+        self.zone_orient.valueChanged.connect(lambda v: self._set("zone", entry_orientation_deg=float(v)))
+        for wdg in (self.zone_hidden, self.zone_moveable, self.zone_rule, self.zone_frac, self.zone_inv,
+                    self.zone_orient):
             zl.addWidget(wdg)
         self.btn_zone_dup = QPushButton("Duplicate")
         self.btn_zone_dup.clicked.connect(lambda: page.duplicate_zone(sec.row))
@@ -522,7 +528,7 @@ class PropertyPanel(QFrame):
             z = self.selected("zone")
             self.zone.show(z)
             for w in (self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del, self.zone_rule, self.zone_inv,
-                      self.zone_hidden, self.zone_moveable):
+                      self.zone_hidden, self.zone_moveable, self.zone_orient):
                 w.setEnabled(z is not None)
             self.zone_info.setText(describe_shape(z.shape, app) if z else "—")
             self.zone_rule.setCurrentIndex(max(0, self.zone_rule.findData(z.entry_rule if z else "")))
@@ -532,6 +538,7 @@ class PropertyPanel(QFrame):
             self.zone_frac.setVisible(body)
             self.zone_inv.setValue(z.investigation_distance_cm if z else 0.0)
             self.zone_inv.setSuffix(f" {app.unit}" if app is not None else " cm")
+            self.zone_orient.setValue(int(round(z.entry_orientation_deg)) if z else 0)
             self.zone_hidden.setChecked(bool(z and z.hidden))
             self.zone_moveable.setChecked(bool(z and z.moveable))
             self.btn_grid_del.setVisible(z is not None and any(z.name in g.zones for g in app.grids))
