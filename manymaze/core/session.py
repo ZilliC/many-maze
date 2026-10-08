@@ -95,6 +95,10 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         from .apparatus import CALIBRATION_KEY
 
         test.zone_overrides = {**test.zone_overrides, CALIBRATION_KEY: dict(session.calibration)}
+    geometry = getattr(session, "geometry", None)
+    if geometry:  # the map moved during the test: the test's own position / zones, used by its analysis
+        test.zone_overrides = {**test.zone_overrides, **{k: (dict(v) if isinstance(v, dict) else v)
+                                                         for k, v in geometry.items()}}
     test.io_events = list(test.io_events) + session.io_events
     rv = session.result_variables
     if rv:
@@ -127,6 +131,12 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         notes.append("Live procedures: " + "; ".join(outs.log[:50]))
     for t_change, cal in getattr(session, "calibration_log", None) or []:
         notes.append(f"Calibration adjusted at {t_change:.2f} s: {cal['px_per_cm']:.4g} px/cm")
+    for t_change, _geo in getattr(session, "geometry_log", None) or []:
+        notes.append(f"Apparatus geometry adjusted at {t_change:.2f} s")
+    gaps = getattr(session, "capture_gaps", None) or []
+    if gaps:
+        notes.append("Video capture lost: " + "; ".join(
+            f"{a:.2f}–{b:.2f} s" if b is not None else f"from {a:.2f} s" for a, b in gaps))
     if session.pause_log:
         notes.append("Paused: " + "; ".join(f"at {p['t']:.2f} s for {p['duration_s']:.1f} s"
                                             for p in session.pause_log))

@@ -66,8 +66,12 @@ everything without a camera.
 ### Protocol tab
 
 * **Test duration** – analysed length of each test (0 = until the end of the video).
-* **Test starts** – at each test's *start time* (set per test) or automatically **when the animal is first
-  detected** in the apparatus.
+* **Test starts** – at each test's *start time* (set per test), automatically **when the animal is first
+  detected** in the apparatus, or **when the experimenter's hand has left the image**: the tracked object much
+  larger than the animal (more than 3 × its usual area, or above *Ignore objects larger than* when set) is the hand
+  putting the animal in; the test starts at the first frame showing the animal alone after the hand has gone (hand
+  frames up to 1 s apart count as one visit of the hand). Without any hand in the video the test starts at the first
+  detection, as noted in the track (`start`).
 * **Stages** – e.g. *Habituation, Day 1, Day 2, Probe*. Used for learning curves and repeated-measures
   statistics.
 * **Keys** (manually scored behaviours) – name, key stroke and how the key works (*Simple* while pressed, *Toggle*,
@@ -80,6 +84,14 @@ everything without a camera.
   **pose model** (deep learning, see §5.1).
 * **Analysis** – thresholds for mobility, freezing, zone entries, thigmotaxis, object exploration,
   social contact and time bins.
+* **Analysis ▸ Freezing ▸ Freezing thresholds** – *Set manually* (the default, also for experiments made with
+  older versions): freezing starts when the motion falls below *Freezing starts…* and ends when it rises above
+  *Freezing ends…*. *Automatic, from the motion of each test* (as ANY-maze 7): the thresholds are derived from the
+  distribution of the motion index of each test — the frames where only camera noise changes (the animal still)
+  are separated from the frames where it moves, on a log scale (Otsu's method) — and freezing ends at 1.5 × the
+  start threshold. The **sensitivity** (0–100, default 50) moves the automatic threshold: higher counts more frames
+  as freezing (+25 doubles the threshold), lower fewer. Tests with fewer than 50 motion samples use the manual
+  thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
   every measure, including the test duration, stops there.
@@ -117,6 +129,10 @@ from the real size you enter — or draw your own:
 **Import… / Export…** (Apparatus group) copy apparatus maps between experiments: *Import…* reads the apparatus
 of another experiment (choose its `project.json`) or an apparatus file; *Export…* writes the current
 apparatus (zones, points, lines, groups, sequences, grids and calibration) to a `.json` file you can share.
+**Export map image…** saves the zone map as a picture — **PNG**, **SVG** (editable vector drawing) or **PDF**,
+chosen by the file type: the arena, the zones filled in their colours (hidden zones dashed), points and lines, with
+their names when *Show labels* is on, and the apparatus name and calibration in the corner; drawn over the
+background frame when a video frame is shown.
 
 Several apparatus can share one video (e.g. four open fields filmed together) — tests that share a video and
 start time are tracked in a single pass.
@@ -457,6 +473,21 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
   and it is saved with the test (`zone_overrides["@calibration"]`, shown in the XML export), so the test's results
   are calculated with it; the apparatus map and the other tests keep their calibration. The change is noted in the
   test notes.
+- **Adjust apparatus** (ribbon ▸ Session) changes the geometry of the running test — of the selected panel with
+  several tests — when the apparatus or camera was nudged: move (px), rotate (°) or scale the whole map, and / or
+  move one zone. Zone occupancy, the arena mask, procedures and the live statistics use the new geometry at once;
+  it is saved with the test (`zone_overrides["@position"]` and the moved zone, as in *Apparatus position in a
+  test*), so the test's results are calculated with it, and noted in the test notes. The apparatus map and the
+  other tests are not changed.
+- **Free disk space** — arming a recorded test checks the disk of the recordings folder for the estimated size of
+  the recording; while tests record the space is checked every 30 s. A low (less than 2 GB left) or full disk
+  (less than 200 MB) is written to the log and shown in the test's warnings. Opening an experiment on such a disk
+  shows a warning as well.
+- **Camera drop-outs** — when a camera stops delivering frames (unplugged, driver or USB hiccup) it is reopened
+  automatically, after 0.5, 1, 2, 4 then every 8 s, for up to 2 minutes; the test carries on. The gap is logged
+  (*Video capture lost / restored*), marked in the track (the animal counts as not detected during it; the gaps
+  are kept in the track's `capture_gaps`) and in the test notes. A camera that does not come back ends the test
+  (*Camera or video failed*).
 
 If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
 test starts.
@@ -485,9 +516,20 @@ variables, pauses). The source / session layout is saved with the experiment.
 The **Monitor** tab shows the selected test (click a row or a camera image): distance, speed, whether the animal
 is moving / immobile / freezing, the current zone, a live table of **time, entries and latency per zone** (zone
 entry rules, entries that require facing the zone, investigation distances, hidden zones and the test's
-moveable-zone positions are applied as in the results), a **live chart** of speed, distance, motion, detection or freezing over the last 30 s – 5 min, the
-**status of I/O devices**, and **warnings**: animal lost for longer than *Warn if lost for*, dropped camera
-frames, recording errors and procedure errors.
+moveable-zone positions are applied as in the results), live tables of the **points** (distance now, time near
+— within the point's radius —, approaches and latency to the first), the **sequences** (completed, attempts, errors,
+latency to the first completion, from the zone visits so far) and the **inputs** of the I/O devices (current state,
+activations, time on and latency to the first activation; analogue inputs show their value) — each shown when the
+apparatus or the I/O log has any —, a **live chart** over the last 30 s – 5 min of any of the 40+ parameters of
+*Charts* (positions, distances to the centre / wall / zones / points, speed, acceleration, turn rate, head angle,
+body length, zone states, entries, time in zone, line crossings …; running totals such as entries or time in a zone
+are counted from the start of the test), the **status of I/O devices**, and **warnings**: animal lost for longer
+than *Warn if lost for*, dropped camera frames, camera drop-outs, low disk space, recording errors and procedure
+errors.
+
+**View ▸ Tracking indicators** chooses what is drawn on the camera images: the animal's track (trail), its
+**orientation** — a translucent "flashlight beam" from the head in the direction the animal faces (tail → head, or
+the body orientation) —, the zone the animal is in and the zone names.
 
 ### Camera options
 
@@ -1381,11 +1423,12 @@ values can be shown or hidden.
   **Copy table** and **Save table…** export it as CSV, TSV or xlsx.
 - **Categorical**: a contingency table of a text result (search strategy, first choice, found platform…) or a factor,
   by group. It reports a chi-square test of independence with Cramér's V, the G-test and, for 2 × 2 tables, Fisher's
-  exact test. It warns when expected counts are below 5. The graph shows stacked percentages.
+  exact test, and a chi-square goodness of fit of the overall counts against equal proportions (are some categories
+  more frequent than others?). It warns when expected counts are below 5. The graph shows stacked percentages.
 
 **Copy summary**, **Save figure…** and **Copy figure** work on every tab.
 
-#### Supported procedures (43)
+#### Supported procedures (47: 35 tests and 12 post-hoc tests)
 
 | Category | Procedures |
 |---|---|
@@ -1394,7 +1437,7 @@ values can be shown or hidden.
 | Several groups (5) | One-way ANOVA, Welch's ANOVA, Alexander-Govern, Kruskal-Wallis, Mood's median test |
 | Repeated measures (2) | Repeated-measures ANOVA (+ Greenhouse-Geisser), Friedman |
 | Two factors (5) | Two-way ANOVA, mixed two-way ANOVA, Scheirer-Ray-Hare, aligned rank transform ANOVA, ANCOVA |
-| Post-hoc (8) | Tukey HSD, Bonferroni, Holm, Šidák, Benjamini-Hochberg FDR, Dunnett, Games-Howell, Dunn |
+| Post-hoc (12) | Tukey HSD, Bonferroni, Holm, Šidák, Benjamini-Hochberg FDR, Dunnett, Games-Howell, Dunn, Duncan's multiple range, Fisher's LSD, Scheffé, Student-Newman-Keuls |
 | Categorical (4) | Chi-square independence, Fisher's exact, G-test, chi-square goodness of fit |
 | Correlation (4) | Pearson, Spearman, Kendall's tau, linear regression with confidence intervals |
 | Assumptions (6) | Shapiro-Wilk, D'Agostino-Pearson, Levene, Brown-Forsythe, Bartlett, Fligner-Killeen |

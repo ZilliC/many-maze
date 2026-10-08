@@ -14,9 +14,11 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from .apparatus import Apparatus, calibration_override
+from .apparatus import CALIBRATION_KEY, POSITION_KEY, Apparatus, calibration_override, position_args
 from .autosave import Autosaver
+from .freezing import LiveThresholds
 from .geometry import body_fraction_inside
+from .livemonitor import LivePoints
 from .measures import AnalysisSettings
 from .procedures import Outputs, ProcedureEngine
 from .session import END_DURATION, END_PROCEDURE, END_USER, Session
@@ -225,6 +227,9 @@ class LiveStats:
         self._xy = None
         self._slow_since: float | None = None
         self._first = True
+        self.visits: list[list] = []  # [zone, t_in, t_out or None] in order: the live sequence statistics
+        self._open_visit: dict[str, list] = {}
+        self.points = LivePoints(apparatus)
 
     def set_scale(self, apparatus: Apparatus | None):
         """Use the apparatus calibration; the distance and speed so far (tracked in pixels) are converted to it."""
@@ -235,6 +240,8 @@ class LiveStats:
             self.speed *= scale / old
         self.scale = scale
         self.unit = apparatus.unit if apparatus else "px"
+        if hasattr(self, "points"):
+            self.points.set_apparatus(apparatus)
 
     def update(self, t: float, d: Detection, zones: dict[str, bool], freezing: bool):
         dt = 0.0 if self._last_t is None else max(0.0, t - self._last_t)
@@ -247,6 +254,11 @@ class LiveStats:
                     self.entries[n] += 1
                     if self.latency[n] is None:
                         self.latency[n] = t
+                if now and not self.inside[n]:
+                    self._open_visit[n] = v = [n, t, None]
+                    self.visits.append(v)
+                elif not now and self.inside[n] and n in self._open_visit:
+                    self._open_visit.pop(n)[2] = t
                 self.inside[n] = now
             self._first = False
         if d.detected:
@@ -269,6 +281,7 @@ class LiveStats:
         for n in self.names:
             if self.inside[n]:
                 self.zone_time[n] += dt
+        self.points.update(t, dt, d.x, d.y, bool(d.detected))
         self.freezing = bool(freezing)
         if self.detected and self.speed < self.a.mobility_threshold:
             if self._slow_since is None:
@@ -402,6 +415,7 @@ class LiveSession(_Scoring):
     autosave_meta: dict | None = None  # test id, animal, apparatus … stored in the side file
 
     def __post_init__(self):
+        self._base_apparatus = self.apparatus  # the project's map, before this test's overrides
         if self.zone_overrides and self.apparatus is not None:
             self.apparatus = self.apparatus.with_overrides(self.zone_overrides)
         self.lock = threading.RLock()
@@ -429,6 +443,11 @@ class LiveSession(_Scoring):
         self.occupancy = LiveOccupancy(self.apparatus, self.analysis)
         self.calibration: dict | None = None  # set_calibration(): this test's own calibration
         self.calibration_log: list[tuple[float, dict]] = []
+        self.geometry: dict = {}  # set_geometry(): this test's own map position / moved zones (Test.zone_overrides)
+        self.geometry_log: list[tuple[float, dict]] = []
+        self.capture_gaps: list[list] = []  # [t_lost, t_restored or None]: the camera stopped delivering frames
+        self._gap_pending: float | None = None
+        self._freeze_thr = LiveThresholds(self.analysis)
         self.start_phase = ""  # experimenter_leaves: "experimenter" -> "leaving" -> "animal"
         self._frame_shape: tuple[int, int] | None = None
         self._detect_since: float | None = None
@@ -476,6 +495,77 @@ class LiveSession(_Scoring):
             self.calibration_log.append((round(t, 3), dict(cal)))
             self.log.append((t, f"Calibration adjusted: {cal['px_per_cm']:.4g} px/cm"))
         return cal
+
+    def set_geometry(self, position: dict | None = None, zones: dict | None = None) -> dict:
+        """Change the apparatus geometry while the test runs (or waits to start), e.g. the apparatus was nudged.
+        position {"dx", "dy" (px), "angle" (degrees, clockwise), "scale"} moves the whole map; zones {zone or point
+        name: shape dict / {"x", "y"}, or None to undo} moves single zones or points (as Test.zone_overrides).
+        Occupancy, the arena mask and the procedures use the new geometry from now on, and the saved test keeps it
+        (Test.zone_overrides) so that its analysis uses it. Returns this test's geometry overrides."""
+        with self.lock:
+            if self.state == "finished":
+                raise RuntimeError("The test has finished")
+            if self._base_apparatus is None:
+                raise ValueError("The test has no apparatus")
+            geo = dict(self.geometry)
+            if position is not None:
+                pos = position_args(position)
+                if pos == {"dx": 0.0, "dy": 0.0, "angle": 0.0, "scale": 1.0}:
+                    geo.pop(POSITION_KEY, None)
+                else:
+                    geo[POSITION_KEY] = pos
+            for name, v in (zones or {}).items():
+                if v is None:
+                    geo.pop(name, None)
+                else:
+                    geo[name] = dict(v)
+            ov = {**(self.zone_overrides or {}), **geo}
+            if self.calibration:
+                ov[CALIBRATION_KEY] = dict(self.calibration)
+            app = self._base_apparatus.with_overrides(ov)
+            app = app.copy() if app is self._base_apparatus else app  # never change the project's apparatus map
+            self.geometry = geo
+            self.apparatus = app
+            self.occupancy.app = app
+            self.stats.set_scale(app)
+            if self.tracker is not None and self._frame_shape is not None:
+                try:
+                    self.tracker.set_mask(app.arena_or_bounds().mask(self._frame_shape))
+                except ValueError:
+                    pass
+                self._band = None  # the experimenter-detection band follows the arena
+            t = self.elapsed if self.state in ("running", "paused") else 0.0
+            self.geometry_log.append((round(t, 3), dict(geo)))
+            self.log.append((t, "Apparatus geometry adjusted"))
+        return dict(geo)
+
+    # ------------------------------------------------------------------ capture drop-outs (source thread)
+    def capture_lost(self, msg: str = ""):
+        """The camera stopped delivering frames and is being reopened: logged as a warning; the gap is marked in
+        the track when frames arrive again."""
+        with self.lock:
+            if self.state not in ("running", "paused") or (self.capture_gaps and self.capture_gaps[-1][1] is None):
+                return
+            t = self.elapsed
+            self.capture_gaps.append([round(t, 3), None])
+            self.warn(f"Video capture lost{': ' + msg if msg else ''}", t)
+
+    def capture_restored(self, gap_s: float = 0.0):
+        """Frames arrive again after :meth:`capture_lost`: the next frame (whose time jumps over the gap) closes
+        it, preceded by an undetected track row (the animal was not seen during the gap)."""
+        with self.lock:
+            if self.capture_gaps and self.capture_gaps[-1][1] is None:
+                self._gap_pending = float(gap_s)
+
+    def _mark_gap(self, t: float):
+        gap = self.capture_gaps[-1]
+        self._gap_pending = None
+        gap[1] = round(t, 3)
+        t_mark = gap[0] + 1.0 / self.fps
+        if t_mark < t:
+            self._track.add(t_mark, Detection())
+        self.warn(f"Video capture restored: {t - gap[0]:.1f} s of the test not seen", t)
+        self.log.append((t, f"Video capture restored after {t - gap[0]:.1f} s"))
 
     def _ensure_tracker(self, frame):
         if self.tracker is None:
@@ -573,11 +663,13 @@ class LiveSession(_Scoring):
             real = time.monotonic() - self._pause_wall
             self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
             self.pause_log.append({"t": round(self._pause_t, 3), "duration_s": round(max(gap, real), 3)})
-        elif prev_ts is not None and self.cols["t"] and ts - prev_ts > 2.5 / self.fps:
+        elif prev_ts is not None and self.cols["t"] and ts - prev_ts > 2.5 / self.fps and self._gap_pending is None:
             n = int(round((ts - prev_ts) * self.fps)) - 1
             self.warn(f"{n} frame{'s' if n > 1 else ''} dropped")
         t = ts - self.t0
         d = dets[0] if dets else Detection()
+        if self._gap_pending is not None:  # the first frame after a capture drop-out
+            self._mark_gap(t)
         self._track.add(t, d)
         zones, head_zones = self.occupancy.update(d)
         freezing = self._freezing_now(d)
@@ -696,8 +788,8 @@ class LiveSession(_Scoring):
         pct = d.motion / max(d.area, 1) * 100
         t = self.cols["t"][-1]
         a = self.analysis
-        off = a.freeze_off_pct
-        self._frz_state = pct <= max(off, a.freeze_on_pct) if self._frz_state else pct < a.freeze_on_pct
+        on, off = self._freeze_thr.update(t, pct)  # manual, or automatic from the motion seen so far
+        self._frz_state = pct <= max(off, on) if self._frz_state else pct < on
         if self._frz_state:
             if self._still_since is None:
                 self._still_since = t
@@ -772,6 +864,8 @@ class LiveSession(_Scoring):
                  "log": list(self.log), "warnings": list(self.warnings),
                  "result_variables": self.result_variables, "calibration": self.calibration,
                  "calibration_log": [[t, dict(c)] for t, c in self.calibration_log],
+                 "geometry": dict(self.geometry), "geometry_log": [[t, dict(g)] for t, g in self.geometry_log],
+                 "capture_gaps": [list(g) for g in self.capture_gaps],
                  "end_reason": self.end_reason if self.state == "finished" else "",
                  "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
         d["cols"] = self._track.snapshot(n)
@@ -790,6 +884,8 @@ class LiveSession(_Scoring):
     def track(self) -> Track:
         tr = self._track.build(self.fps)
         tr.meta["source"] = "live"
+        if self.capture_gaps:
+            tr.meta["capture_gaps"] = [list(g) for g in self.capture_gaps]
         contrast = self.tracker.animal_contrast() if self.tracker is not None else ""
         if contrast:
             tr.meta["animal_contrast"] = contrast

@@ -66,8 +66,8 @@ def recording_path(project, test, size=(640, 480), fps=25.0) -> str:
 
 
 TRAIL_LEN = 250  # positions drawn behind the animal on the camera images
-VIEW_DEFAULTS = {"layout": "2x2", "fit": True, "trail": True, "zones": True, "labels": False, "hide_report": False,
-                 "hide_apparatus": False, "panel": {}}
+VIEW_DEFAULTS = {"layout": "2x2", "fit": True, "trail": True, "beam": True, "zones": True, "labels": False,
+                 "hide_report": False, "hide_apparatus": False, "panel": {}}
 
 
 def peek_frame(path) -> np.ndarray | None:

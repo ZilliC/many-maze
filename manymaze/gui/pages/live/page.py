@@ -6,6 +6,7 @@ import copy
 import datetime as _dt
 import json
 import threading
+import time
 
 import numpy as np
 from PySide6.QtCore import QSize, QTime, QTimer, Qt
@@ -13,7 +14,7 @@ from PySide6.QtGui import QAction, QActionGroup, QShortcut
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QInputDialog, QMenu, QMessageBox, QScrollArea, QSizePolicy,
                                QStackedWidget, QTabWidget, QToolButton)
 
-from ....core import autosave
+from ....core import autosave, diskspace
 from ....core import camsources
 from ....core.camera import CameraView
 from ....core.camhw import CameraHardware
@@ -71,6 +72,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._shown_state = None
         self._bg_mode_value = "frame"  # plain copies of widget state read from the grabber thread
         self._show_trail = True
+        self._show_beam = True  # the animal's orientation drawn as a "flashlight beam"
         self._source_is_file = False
         self._outputs: Outputs | None = None
         self._schedule: ClockSchedule | None = None  # single-test scheduled start
@@ -205,6 +207,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.calibrate_act = A("ruler", "Adjust calibration", "Change the scale (pixels per cm) of the running test "
                                "(the selected panel's with several tests); it is saved with the test and used for "
                                "its results.", self.adjust_calibration)
+        self.geometry_act = A("area", "Adjust apparatus", "Move, rotate or scale the apparatus map — or move one "
+                              "zone — of the running test (the selected panel's with several tests); it is saved "
+                              "with the test and used for its results.", self.adjust_geometry)
         # View
         self.layout_act = A("layout_grid", "Apparatus\nlayout", "How the test panels are arranged.")
         m = QMenu(self)
@@ -222,9 +227,11 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.indicators_act = A("highlighter", "Tracking\nindicators", "What is drawn on the camera images.")
         m = QMenu(self)
         self.trail_act = m.addAction("Animal's track (trail)")
+        self.beam_act = m.addAction("Animal's orientation (flashlight beam)")
         self.zones_act = m.addAction("Highlight the zone the animal is in")
         self.labels_act = m.addAction("Zone names")
-        for a, k in ((self.trail_act, "trail"), (self.zones_act, "zones"), (self.labels_act, "labels")):
+        for a, k in ((self.trail_act, "trail"), (self.beam_act, "beam"), (self.zones_act, "zones"),
+                     (self.labels_act, "labels")):
             a.setCheckable(True)
             a.triggered.connect(lambda on, k=k: self._set_pref(k, on))
         self.indicators_act.setMenu(m)
@@ -263,7 +270,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 ("Session", [(self.add_source_act, "large"), (self.add_panel_act, "small"),
                              (self.remove_panel_act, "small"), (self.capture_bg_act, "small"),
                              (self.camera_act, "small"), (self.cam_opts_act, "small"), (self.next_test_act, "small"),
-                             (self.calibrate_act, "small")]),
+                             (self.calibrate_act, "small"), (self.geometry_act, "small")]),
                 ("View", [(self.layout_act, "large"), (self.fit_act, "large"), (self.indicators_act, "large"),
                           (self.hide_report_act, "small"), (self.hide_app_act, "small"),
                           (self.panel_settings_act, "small")]),
@@ -453,8 +460,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
 
     def _apply_view_prefs(self):
         d = self.prefs
-        for a, k in ((self.fit_act, "fit"), (self.trail_act, "trail"), (self.zones_act, "zones"),
-                     (self.labels_act, "labels"), (self.hide_report_act, "hide_report"),
+        for a, k in ((self.fit_act, "fit"), (self.trail_act, "trail"), (self.beam_act, "beam"),
+                     (self.zones_act, "zones"), (self.labels_act, "labels"), (self.hide_report_act, "hide_report"),
                      (self.hide_app_act, "hide_apparatus")):
             a.setChecked(bool(d.get(k)))
         lay = d.get("layout") if d.get("layout") in LAYOUTS else "2x2"
@@ -462,6 +469,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.mosaic.set_layout_key(lay)
         self._show_trail = bool(d.get("trail", True))
         self.group.trail_len = TRAIL_LEN if self._show_trail else 0
+        self._show_beam = bool(d.get("beam", True))
+        self.group.beam = self._show_beam
         self.tabs.setVisible(not d.get("hide_report"))
         for p in self._all_panels():
             self._apply_prefs_to_panel(p)
@@ -481,6 +490,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.group.close()
         self.group = LiveGroup()
         self.group.trail_len = TRAIL_LEN if self._show_trail else 0
+        self.group.beam = self._show_beam
         self._panels = {}  # the panels of the previous experiment go with its session
         self._group_bgs = {}
         self.obs_stop(save=False)
@@ -497,7 +507,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.monitor.clear()
         if project is not None:
             self.duration.setValue(project.test_duration_s)
-            self.start_mode.setCurrentIndex(1 if project.start_mode == "on_detection" else 0)
+            self.start_mode.setCurrentIndex(max(0, self.start_mode.findData(project.start_mode))
+                                            if project.start_mode != "manual" else 0)
             self._load_live_settings()
             self._restore_group_layout()
             self._recover_interrupted(project)
@@ -727,6 +738,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             with s.lock:
                 rows, zones = s.stats.rows(), (s.stats.current_zones() if s.stats.detected else [])
             self.single_panel.set_zone_rows(rows, zones)
+        self._check_disk_space()
         if self.group.entries:
             self.group.tick(now)
             self._save_finished_entries()
@@ -734,6 +746,29 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 self._update_row_states()
                 self._update_buttons()
         self._refresh_monitor()
+
+    def _check_disk_space(self, every_s: float = 30.0):
+        """While tests record, check the free space of the recordings disk every `every_s` seconds: a low /
+        full disk is logged and shown as a warning of the recording tests (once per level)."""
+        mono = time.monotonic()
+        if mono - getattr(self, "_disk_checked", -1e9) < every_s:
+            return
+        self._disk_checked = mono
+        recording = [(s, None) for s in (self.session,) if s is not None and getattr(s, "recorder", None)]
+        recording += [(e.session, e) for e in self.group.entries
+                      if e.session is not None and getattr(e.session, "recorder", None)]
+        if not recording:
+            return
+        space = diskspace.check(recording[0][0].record_path)
+        if space.ok:
+            self._disk_level = "ok"
+            return
+        if space.level == getattr(self, "_disk_level", "ok"):
+            return
+        self._disk_level = space.level
+        self._log(f"Warning: {space.message}")
+        for s, _e in recording:
+            s.warn(space.message)
 
     def _refresh_mosaic(self):
         for key, r in list(self.group.runners.items()):
@@ -856,4 +891,5 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.camera_act.setEnabled(has and cams and single_free)
         self.next_test_act.setEnabled(has and mode != "multi" and not armed and (o is None or o.state == "finished"))
         self.calibrate_act.setEnabled(has and mode != "observe" and self._calibration_target()[0] is not None)
+        self.geometry_act.setEnabled(self.calibrate_act.isEnabled())
         self.obs_panel.show_session(self.obs, self.obs.duration_s if self.obs else 0.0)

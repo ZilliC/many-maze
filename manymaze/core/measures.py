@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .apparatus import Apparatus
+from .freezing import thresholds as freeze_thresholds
 from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
@@ -43,6 +44,8 @@ class AnalysisSettings:
     freeze_on_pct: float = 2.0  # motion (% of body area changing) below which freezing starts
     freeze_off_pct: float = 3.0  # motion above which freezing ends (hysteresis)
     min_freeze_s: float = 1.0
+    freeze_threshold_mode: str = "manual"  # "manual" (the two thresholds above) | "auto" (see core/freezing.py)
+    freeze_sensitivity: float = 50.0  # automatic thresholds: 0–100, higher = more freezing
     activity_threshold_pct: float = 5.0  # motion (% of body area changing) at or above which the animal is active
     min_inactive_s: float = 0.5  # inactive episodes shorter than this count as active
     rearing: bool = False  # detect rears automatically from the animal's shape (see rearing_mask)
@@ -158,14 +161,15 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
         motion_pct = track.motion / med_area * 100.0
         freezing = np.zeros(len(t), bool)
         state = False
+        on_pct, off_pct = freeze_thresholds(motion_pct, s)
         for i, mp in enumerate(motion_pct):
             if not math.isfinite(mp):
                 freezing[i] = state
                 continue
             if state:
-                state = mp <= s.freeze_off_pct
+                state = mp <= off_pct
             else:
-                state = mp < s.freeze_on_pct
+                state = mp < on_pct
             freezing[i] = state
         freezing = drop_short_runs(freezing, t, dur, s.min_freeze_s, value=True)
     else:

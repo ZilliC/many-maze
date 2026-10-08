@@ -537,8 +537,9 @@ def protocol_report(project: Project, path) -> Path:
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}.</p>")
     out.append("<h2>Protocol</h2>" + table(("Item", "Value"), [
         ("Protocol", p.protocol), ("Test duration (s)", p.test_duration_s or "until the end of the video"),
-        ("Test starts", "when the animal is first detected" if p.start_mode == "on_detection"
-         else "at the test's start time"),
+        ("Test starts", {"on_detection": "when the animal is first detected",
+                         "experimenter_leaves": "when the experimenter's hand has left the image"}.get(
+            p.start_mode, "at the test's start time")),
         ("Blind testing", "yes" if p.blind else "no"),
         ("Confirm the animal's ID", "yes" if p.settings_extra.get("confirm_id") else "no"),
         ("Stages", ", ".join(p.stages) or "—"), ("Treatments", ", ".join(g.name for g in p.groups) or "—"),

@@ -824,6 +824,24 @@ class MainWindow(QMainWindow):
         self._add_recent(p.path)
         self.set_project(p)
         self.status(f"Opened {p.path}")
+        self.check_disk_space()
+
+    def check_disk_space(self):
+        """Warn (without blocking) when the disk of the experiment is low on space or full."""
+        from ..core import diskspace
+
+        if self.project is None or self.project.path is None:
+            return None
+        space = diskspace.check(self.project.path)
+        if not space.ok:
+            self.status(space.message)
+            box = QMessageBox(QMessageBox.Warning, "Disk space", space.message + "\n\nFree some space before "
+                              "recording or tracking: recordings, tracks and the experiment file are written to "
+                              "this disk.", QMessageBox.Ok, self)
+            box.setAttribute(Qt.WA_DeleteOnClose)
+            box.open()
+            self._disk_box = box
+        return space
 
     def save(self) -> bool:
         if self.project is None:

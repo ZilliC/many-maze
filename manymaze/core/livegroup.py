@@ -111,6 +111,12 @@ class SourceRunner(SourceReader):
     def on_failed(self, msg: str):
         self.group.source_failed(self.key, msg)
 
+    def on_capture_lost(self, msg: str):
+        self.group.capture_lost(self.key, msg)
+
+    def on_capture_restored(self, gap_s: float):
+        self.group.capture_restored(self.key, gap_s)
+
 
 class LiveGroup:
     """Coordinates live sessions fed by one or more sources.
@@ -133,6 +139,7 @@ class LiveGroup:
         self._next_id = 1
         self._last_dets: dict[int, list] = {}
         self.trail_len = 250  # positions drawn behind each animal on the display images (0 = none)
+        self.beam = True  # draw each animal's orientation as a "flashlight beam"
 
     # ------------------------------------------------------------------ setup
     def add_source(self, spec: SourceSpec, key: str | None = None) -> str:
@@ -214,6 +221,19 @@ class LiveGroup:
                 e.aborted = s.state == "waiting" or not len(s.cols["t"])  # sources feed camera sessions
                 s.finish(END_SOURCE_FAILED)
 
+    def capture_lost(self, key: str, msg: str):
+        """A camera stopped delivering frames and is being reopened: its tests mark the gap."""
+        self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{key}: video capture lost ({msg}), reconnecting…"))
+        for e in self.entries_for(key):
+            if e.session is not None and hasattr(e.session, "capture_lost"):
+                e.session.capture_lost(msg)
+
+    def capture_restored(self, key: str, gap_s: float):
+        self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{key}: video capture restored after {gap_s:.1f} s"))
+        for e in self.entries_for(key):
+            if e.session is not None and hasattr(e.session, "capture_restored"):
+                e.session.capture_restored(gap_s)
+
     def source_ended(self, key: str):
         """End of a video file: running tests finish (and are saved), waiting tests are abandoned."""
         for e in self.entries_for(key):
@@ -241,7 +261,7 @@ class LiveGroup:
             s = e.session
             if s is not None:
                 draw_tracking(img, self._last_dets.get(e.id, []), s.trail(self.trail_len) if self.trail_len else None,
-                              copy=False)
+                              copy=False, beam=self.beam)
         return img
 
     # ------------------------------------------------------------------ control

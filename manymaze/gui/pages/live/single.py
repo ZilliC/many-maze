@@ -20,6 +20,7 @@ from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs
 from ....core.project import INFO_COLUMNS
 from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_live_test
+from ....core import diskspace
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
 from ...confirm_id import confirm_animal_id
@@ -34,6 +35,7 @@ class _GrabberSignals(QObject):
     background_ready = Signal(object)
     ended = Signal()
     failed = Signal(str)
+    capture = Signal(str)  # a camera drop-out / its recovery, for the log
 
 
 class FrameGrabber(SourceReader):
@@ -47,6 +49,7 @@ class FrameGrabber(SourceReader):
         self.handler = handler
         self.loop = True
         self._busy = False
+        self.session_of = None  # () -> the armed session, told about camera drop-outs (from the reader thread)
 
     def ack(self):
         self._busy = False
@@ -71,6 +74,17 @@ class FrameGrabber(SourceReader):
     def on_failed(self, msg: str):
         self.signals.failed.emit(msg)
 
+    def on_capture_lost(self, msg: str):
+        s = self.session_of() if self.session_of is not None else None
+        if s is not None and hasattr(s, "capture_lost"):
+            s.capture_lost(msg)
+        self.signals.capture.emit(f"Video capture lost ({msg}) — reconnecting the camera…")
+
+    def on_capture_restored(self, gap_s: float):
+        s = self.session_of() if self.session_of is not None else None
+        if s is not None and hasattr(s, "capture_restored"):
+            s.capture_restored(gap_s)
+        self.signals.capture.emit(f"Video capture restored after {gap_s:.1f} s.")
 
 
 def scan_all_cameras() -> tuple[list[tuple[str, object]], list[str]]:
@@ -260,10 +274,11 @@ class SingleTestMixin:
                           hardware=self._hardware if not self.simulating else CameraHardware())
         g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
         g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
+        g.session_of = lambda: self.session
         sig = g.signals
         for signal, slot in ((sig.frame_ready, self._on_frame), (sig.opened, self._on_opened),
                              (sig.background_ready, self._on_file_background), (sig.ended, self._on_source_ended),
-                             (sig.failed, self._on_grab_failed)):
+                             (sig.failed, self._on_grab_failed), (sig.capture, self._log)):
             # queued signals of a grabber already stopped (or replaced) are ignored
             signal.connect(lambda *a, slot=slot, g=g: slot(*a) if g is self.grabber else None)
         self.grabber = g
@@ -398,7 +413,7 @@ class SingleTestMixin:
                 zm = app.zone_membership(np.array([d.x]), np.array([d.y]))
                 zones = [k for k, v in zm.items() if bool(np.asarray(v).ravel()[0])]
             info["zones"] = zones
-        disp = draw_tracking(frame, [d] if d is not None else [], trail)
+        disp = draw_tracking(frame, [d] if d is not None else [], trail, beam=self._show_beam)
         return disp, info
 
     def _make_preview_tracker(self, frame, app):
@@ -588,6 +603,11 @@ class SingleTestMixin:
                         outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)
+        if s.record_path:  # room for the recording?
+            space = diskspace.check(s.record_path, diskspace.recording_bytes(size[0], size[1], fps, s.duration_s))
+            if not space.ok:
+                self._log(f"Warning: {space.message}", entry)
+                s.warn(space.message, 0.0)
         return s
 
     def _close_devices(self):

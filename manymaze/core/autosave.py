@@ -131,6 +131,9 @@ class RecoveredSession(Session):
         self.end_reason = str(d.get("end_reason") or "") or END_RECOVERED
         self.calibration = dict(d["calibration"]) if isinstance(d.get("calibration"), dict) else None
         self.calibration_log = [(float(t), dict(c)) for t, c in d.get("calibration_log") or []]
+        self.geometry = dict(d["geometry"]) if isinstance(d.get("geometry"), dict) else {}
+        self.geometry_log = [(float(t), dict(g)) for t, g in d.get("geometry_log") or []]
+        self.capture_gaps = [list(g) for g in d.get("capture_gaps") or []]
 
     @property
     def elapsed(self) -> float:

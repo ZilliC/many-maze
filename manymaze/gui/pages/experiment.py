@@ -127,6 +127,7 @@ class ExperimentPage(Page):
         self.start_mode = QComboBox()
         self.start_mode.addItem("At the test start time set for each test", "manual")
         self.start_mode.addItem("When the animal is first detected in the apparatus", "on_detection")
+        self.start_mode.addItem("When the experimenter's hand has left the image", "experimenter_leaves")
         self.start_mode.currentIndexChanged.connect(self._store)
         for w in (self.duration, self.start_mode):
             w.setMinimumWidth(320)

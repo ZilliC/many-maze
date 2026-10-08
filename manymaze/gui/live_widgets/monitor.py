@@ -1,4 +1,5 @@
-"""The real-time monitor: zone statistics, a live chart, the I/O status and warnings."""
+"""The real-time monitor: zone, point, sequence and input statistics, a live chart of any parameter, the I/O status
+and warnings."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                                QListWidget, QSizePolicy, QTableWidget, QVBoxLayout, QWidget)
 
-from ...core.live import LiveStats
+from ...core.livemonitor import CHART_PREFIX, FAST_PARAMS, LiveCharts, chart_parameters, input_rows, sequence_rows
 from ..widgets import fmt_time
 from .panels import ElidedLabel, table_item
 
@@ -86,11 +87,43 @@ class LiveChart(QWidget):
 
 
 # ====================================================================== monitor
-class MonitorPanel(QWidget):
-    """Real-time monitoring of one live session: state, distance / speed / freezing, per-zone statistics, a live
-    chart, the I/O device status and warnings.  Call :meth:`refresh` at ≤ 5 Hz."""
+def _stats_table(headers: list[str], min_h: int = 0) -> QTableWidget:
+    t = QTableWidget(0, len(headers))
+    t.setHorizontalHeaderLabels(headers)
+    t.verticalHeader().hide()
+    t.verticalHeader().setDefaultSectionSize(24)
+    t.setShowGrid(False)
+    t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    t.setSelectionMode(QAbstractItemView.NoSelection)
+    hh = t.horizontalHeader()
+    hh.setSectionResizeMode(0, QHeaderView.Stretch)
+    for c in range(1, len(headers)):
+        hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+    if min_h:
+        t.setMinimumHeight(min_h)
+    return t
 
-    CHART_UNITS = {"speed": "{u}/s", "distance": "{u}", "motion": "%", "detected": "", "freezing": ""}
+
+def _fill_rows(t: QTableWidget, rows: list[list[str]]):
+    if t.rowCount() != len(rows):
+        t.setRowCount(len(rows))
+    for r, row in enumerate(rows):
+        for c, txt in enumerate(row):
+            t.setItem(r, c, table_item(txt, c > 0))
+    hdr = t.horizontalHeader().sizeHint().height()
+    t.setFixedHeight(hdr + t.verticalHeader().defaultSectionSize() * min(max(len(rows), 1), 6) + 4)
+
+
+def _num(v, fmt="{:.1f}") -> str:
+    return "—" if v is None or (isinstance(v, float) and not math.isfinite(v)) else fmt.format(v)
+
+
+class MonitorPanel(QWidget):
+    """Real-time monitoring of one live session: state, distance / speed / freezing, per-zone, per-point,
+    per-sequence and per-input statistics, a live chart of any parameter (core.charts), the I/O device status and
+    warnings.  Call :meth:`refresh` at ≤ 5 Hz."""
+
+    CHART_UNITS = {k: u for k, (_lbl, u) in FAST_PARAMS.items()}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,12 +163,29 @@ class MonitorPanel(QWidget):
             hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.zones.setMinimumHeight(110)
         v.addWidget(self.zones, 2)
+        # points, sequences and inputs: shown when the apparatus / I/O log has any
+        self.points_box = QGroupBox("Points")
+        self.points = _stats_table(["Point", "Distance", "Time near (s)", "Approaches", "Latency (s)"])
+        self.seq_box = QGroupBox("Sequences")
+        self.sequences = _stats_table(["Sequence", "Completed", "Attempts", "Errors", "Latency (s)"])
+        self.inputs_box = QGroupBox("Inputs")
+        self.inputs = _stats_table(["Input", "Now", "Activations", "Time on (s)", "Latency (s)"])
+        for box, tbl in ((self.points_box, self.points), (self.seq_box, self.sequences),
+                         (self.inputs_box, self.inputs)):
+            bl = QVBoxLayout(box)
+            bl.setContentsMargins(6, 4, 6, 4)
+            bl.addWidget(tbl)
+            box.hide()
+            v.addWidget(box)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Chart"))
         self.param = QComboBox()
-        for k, lbl in LiveStats.CHART_PARAMS.items():
-            self.param.addItem(lbl, k)
+        self.param.setMaxVisibleItems(24)
+        self._param_units: dict[str, str] = {}
+        self._params_for = None  # the apparatus whose parameters the chart list holds
+        self._set_params(chart_parameters(None))
+        self.charts = LiveCharts()
         self.window = QComboBox()
         for c in (self.param, self.window):
             c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -175,11 +225,34 @@ class MonitorPanel(QWidget):
         v.addWidget(wb)
         self._n_warn = 0
 
+    def _set_params(self, params: list[tuple[str, str, str]]):
+        """The chart parameters: the fast ones, then those of core.charts for the apparatus."""
+        cur = self.param.currentData()
+        self.param.blockSignals(True)
+        self.param.clear()
+        self._param_units = {}
+        for k, lbl, unit in params:
+            self.param.addItem(lbl, k)
+            self._param_units[k] = unit
+        self.param.setCurrentIndex(max(0, self.param.findData(cur)))
+        self.param.blockSignals(False)
+
+    def set_chart_parameter(self, key: str) -> bool:
+        """Show this parameter in the chart ("speed" …, or "chart:<core.charts name>")."""
+        i = self.param.findData(key)
+        if i < 0:
+            i = self.param.findData(CHART_PREFIX + key)
+        if i >= 0:
+            self.param.setCurrentIndex(i)
+        return i >= 0
+
     def clear(self, title: str = "No live test"):
         self.title.setText(title)
         for lbl in self.vals.values():
             lbl.setText("—")
         self.zones.setRowCount(0)
+        for box in (self.points_box, self.seq_box, self.inputs_box):
+            box.hide()
         self.chart.set_data([], [])
 
     def refresh(self, session, title: str = "", devices=None, warnings: list[str] | None = None):
@@ -196,14 +269,26 @@ class MonitorPanel(QWidget):
                 self.zones.setRowCount(0)
                 self.chart.set_data([], [])
             else:
+                app = getattr(session, "apparatus", None)
+                if app is not self._params_for:
+                    self._params_for = app
+                    self._set_params(chart_parameters(app))
+                param = self.param.currentData() or "speed"
+                win = self.window.currentData() or 60.0
                 with session.lock:
                     rows = st.rows()
-                    param = self.param.currentData()
-                    win = self.window.currentData() or 60.0
-                    t, y = st.series(param, win)
+                    if not param.startswith(CHART_PREFIX):
+                        t, y = st.series(param, win)
                     zones = st.current_zones()
                     det, frz, imm = st.detected, st.freezing, st.immobile
                     dist, spd, unit = st.distance, st.speed, st.unit
+                    points = st.points.rows()
+                    visits = [list(v) for v in st.visits]
+                    now = session.elapsed
+                    io = list(getattr(session, "io_events", None) or [])
+                if param.startswith(CHART_PREFIX):  # computed from the track so far, outside the lock
+                    t, y = self.charts.series(session, param[len(CHART_PREFIX):], win)
+                self._refresh_extra(app, points, visits, io, now, unit)
                 self.vals["distance"].setText(f"{dist:.1f} {unit}")
                 self.vals["speed"].setText(f"{spd:.1f} {unit}/s")
                 self.vals["state"].setText("not detected" if not det else
@@ -218,7 +303,8 @@ class MonitorPanel(QWidget):
                     self.zones.setItem(r, 2, table_item(str(n), True))
                     self.zones.setItem(r, 3, table_item("—" if lat is None else f"{lat:.1f}", True))
                 self.chart.set_data(t, y, self.param.currentText(),
-                                    self.CHART_UNITS.get(param, "").format(u=unit), win)
+                                    self.CHART_UNITS[param].format(u=unit) if param in self.CHART_UNITS
+                                    else self._param_units.get(param, ""), win)
         self._refresh_io(devices)
         ws = list(warnings or [])
         if len(ws) != self._n_warn:
@@ -226,6 +312,19 @@ class MonitorPanel(QWidget):
             self.warnings.addItems(ws[-200:])
             self.warnings.scrollToBottom()
             self._n_warn = len(ws)
+
+    def _refresh_extra(self, app, points, visits, io, now, unit):
+        """The points, sequences and inputs tables (each hidden when there is nothing to show)."""
+        _fill_rows(self.points, [[n, f"{_num(d)} {unit}", _num(tn), str(k), _num(lat)]
+                                 for n, d, tn, k, lat in points])
+        self.points_box.setVisible(bool(points))
+        seqs = sequence_rows(app, visits, now)
+        _fill_rows(self.sequences, [[n, str(c), str(a), str(e), _num(lat)] for n, c, a, e, lat in seqs])
+        self.seq_box.setVisible(bool(seqs))
+        ins = input_rows(io, now)
+        _fill_rows(self.inputs, [[n, val, str(k) if math.isfinite(on) else "", _num(on), _num(lat)]
+                                 for n, val, k, on, lat in ins])
+        self.inputs_box.setVisible(bool(ins))
 
     def _refresh_io(self, devices):
         status = None

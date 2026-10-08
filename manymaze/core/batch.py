@@ -40,7 +40,7 @@ def tracking_batches(project, tests) -> list[list]:
         if not t.video:
             continue
         s = project.detection_for(t)
-        if project.start_mode == "on_detection":
+        if project.start_mode in ("on_detection", "experimenter_leaves"):
             key = ("single", t.id)
         else:
             key = (project.abs_path(t.video), round(s.start_time_s, 4), round(s.duration_s, 4), s.frame_step)

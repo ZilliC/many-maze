@@ -16,14 +16,14 @@ from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from ....core import templates
+from ....core import plots, templates
 from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, load_apparatus_file,
                                 make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
 from ....core.templates import PALETTE, TEMPLATES
 from ... import theme
 from ...icons import icon
-from ...widgets import hint, loading, separator
+from ...widgets import error_box, hint, loading, separator
 from ..base import Page
 from .background import BackgroundController
 from .dialogs import GridDialog, TemplateDialog
@@ -94,6 +94,9 @@ class ApparatusPage(Page):
                                        "apparatus file", self.import_apparatus)
         self.export_act = self._action("Export…", "save", "Save the current apparatus to a file to use it in "
                                        "other experiments or share it", self.export_apparatus)
+        self.map_img_act = self._action("Export map image…", "export", "Save the zone map of the current "
+                                         "apparatus as an image (PNG, SVG or PDF), optionally over the background "
+                                         "frame", self.export_map_image)
         self.ren_act = self._action("Rename", "edit", "Rename the current apparatus (tests that use it follow)",
                                     self.rename_apparatus)
         self.del_act = self._action("Delete", "delete", "Delete the current apparatus", self.delete_apparatus)
@@ -166,7 +169,7 @@ class ApparatusPage(Page):
         return [
             ("Apparatus", [(self.tpl_act, "large"), (self.new_act, "small"), (self.dup_act, "small"),
                            (self.ren_act, "small"), (self.del_act, "small"), (self.import_act, "small"),
-                           (self.export_act, "small")]),
+                           (self.export_act, "small"), (self.map_img_act, "small")]),
             ("Apparatus map", [(t["select"], "large"), (t["polygon"], "large"), (t["rect"], "small"),
                                (t["ellipse"], "small"), (t["line"], "small"), (self.select_all_act, "small"),
                                (self.delete_sel_act, "small"), (self.snap_act, "small")]),
@@ -338,8 +341,8 @@ class ApparatusPage(Page):
     def _set_enabled(self, on: bool):
         for a in list(self.tool_actions.values()) + [
                 self.undo_act, self.redo_act, self.grid_act, self.copy_act, self.paste_act, self.dup_act,
-                self.ren_act, self.del_act, self.export_act, self.bg_act, self.testvid_act, self.clear_cal_act,
-                self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
+                self.ren_act, self.del_act, self.export_act, self.map_img_act, self.bg_act, self.testvid_act,
+                self.clear_cal_act, self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
             a.setEnabled(on)
         for w in (self.panel.tabs, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
             w.setEnabled(on)
@@ -418,6 +421,30 @@ class ApparatusPage(Page):
                 return None
         out = save_apparatus_file([app], path)
         self.main.status(f"Saved {app.name} to {out}")
+        return out
+
+    def export_map_image(self, path: str | None = None, background: bool | None = None) -> str | None:
+        """Save the zone map as an image (PNG / SVG / PDF by extension); background: draw it over the background
+        frame (by default when a video frame is shown)."""
+        app = self.app
+        if app is None:
+            return None
+        if path is None:
+            base = self.project.path.parent if self.project.path else Path.home()
+            path, _ = QFileDialog.getSaveFileName(self, "Export the zone map as an image",
+                                                  str(base / f"{app.name} map.png"),
+                                                  "PNG image (*.png);;SVG drawing (*.svg);;PDF document (*.pdf)")
+            if not path:
+                return None
+        if background is None:
+            background = self.bg.real
+        frame = self.bg.frame if background and self.bg.real else None
+        try:
+            out = plots.save_zone_map(app, path, frame, labels=self.labels_act.isChecked())
+        except Exception as e:
+            error_box(self, "Export map image", e)
+            return None
+        self.main.status(f"Saved the map of {app.name} to {out}")
         return out
 
     def rename_apparatus(self, new_name: str | None = None) -> bool:

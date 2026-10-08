@@ -45,6 +45,7 @@ class BackgroundController(QObject):
         self.src: VideoSource | None = None
         self.path: str | None = None
         self.real = False  # a video frame is shown (not the placeholder)
+        self.frame = None  # that frame (BGR), for exporting the zone map over it
         self._loading = False
         self.test_combo = QComboBox()
         self.test_combo.setToolTip("Use a frame from the video of one of the experiment's tests")
@@ -97,6 +98,7 @@ class BackgroundController(QObject):
         self.src = None
         self.path = None
         self.real = False
+        self.frame = None
 
     # ---- showing ------------------------------------------------------------------------
     def show(self):
@@ -146,6 +148,7 @@ class BackgroundController(QObject):
                 QMessageBox.warning(self.page, "Background image", msg)
             return False
         self.real = True
+        self.frame = f
         self.page.view.set_frame(f)
         h, w = f.shape[:2]
         app = self.page.app

@@ -461,4 +461,13 @@ def categorical(project, rows: list[dict], rf: str, cf: str, period: str | None 
                 f"Cramér's V = {res['effect_size']:.3f}")
         if "fisher" in res:
             text += f"\n  Fisher's exact test: {format_p(res['fisher']['p'])}"
+    if len(cl) > 1:  # are the categories equally frequent overall? (also with a single row level)
+        gof = st.chi_square_gof(T.sum(axis=0))
+        res["goodness_of_fit"] = gof
+        if gof.get("p") == gof.get("p"):
+            html += (f"<div>Goodness of fit (equal proportions of {escape(label(cf))}): "
+                     f"χ²({gof['df']}) = {gof['statistic']:.3f}, {escape(p_text(gof['p']))}</div>")
+            piece = (f"Chi-square goodness of fit (equal proportions): chi-square({gof['df']}) = "
+                     f"{gof['statistic']:.3f}, {format_p(gof['p'])}")
+            text = f"{text}\n  {piece}" if text else piece
     return Analysis(f"{label(cf)} by {label(rf)}", context(period, filt), html, [table], fig, text, res)

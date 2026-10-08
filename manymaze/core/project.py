@@ -148,7 +148,9 @@ class Project:
     description: str = ""
     protocol: str = "open_field"
     test_duration_s: float = 300.0
-    start_mode: str = "manual"  # "manual" (start_s) | "on_detection" (first frame the animal is in the arena)
+    # "manual" (start_s) | "on_detection" (first frame the animal is in the arena) | "experimenter_leaves" (the
+    # first frame with the animal alone after the experimenter's hand left the image, see autostart.py)
+    start_mode: str = "manual"
     detection: DetectionSettings = field(default_factory=DetectionSettings)
     analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
     apparatus: list[Apparatus] = field(default_factory=list)
@@ -444,12 +446,20 @@ class Project:
         app = self.apparatus_of(test)
         settings = self.detection_for(test)
         video = self.abs_path(test.video)
-        if self.start_mode == "on_detection":
+        if self.start_mode in ("on_detection", "experimenter_leaves"):
             dur = settings.duration_s
             settings.duration_s = 0.0
             raw = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback)[0]
-            raw = _trim_all_on_detection(raw, dur)
-            tracks = raw
+            t0 = None
+            if self.start_mode == "experimenter_leaves" and raw:
+                from .autostart import experimenter_leaves_start
+
+                t0 = experimenter_leaves_start(raw[0], area_px=settings.max_area_px or 0)
+            tracks = _trim_all_on_detection(raw, dur, t0)
+            if self.start_mode == "experimenter_leaves":
+                for tr in tracks:
+                    tr.meta["start"] = ("experimenter left" if t0 is not None else
+                                        "first detection (no experimenter seen)")
         else:
             tracks = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback)[0]
         self.save_tracks(test, tracks)
@@ -632,12 +642,14 @@ class Project:
         return rows
 
 
-def _trim_all_on_detection(tracks: list[Track], duration: float) -> list[Track]:
-    """Trim every animal of a test at the earliest first detection of any of them (keeps tracks aligned)."""
-    firsts = [float(tr.t[np.flatnonzero(tr.detected)[0]]) for tr in tracks if len(tr) and tr.detected.any()]
-    if not firsts:
-        return list(tracks)
-    t0 = min(firsts)
+def _trim_all_on_detection(tracks: list[Track], duration: float, t0: float | None = None) -> list[Track]:
+    """Trim every animal of a test at t0, by default the earliest first detection of any of them (keeps tracks
+    aligned)."""
+    if t0 is None:
+        firsts = [float(tr.t[np.flatnonzero(tr.detected)[0]]) for tr in tracks if len(tr) and tr.detected.any()]
+        if not firsts:
+            return list(tracks)
+        t0 = min(firsts)
     return [_trim_on_detection(tr, duration, t0) for tr in tracks]
 
 

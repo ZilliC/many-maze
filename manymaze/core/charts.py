@@ -407,6 +407,17 @@ def compute(track: Track, app: Apparatus, names: list[str] | None = None, settin
     return out
 
 
+_RUNNING_TOTALS = {"Distance travelled", "Time mobile", "Time immobile", "Time freezing", "Absolute turn angle",
+                   "Cumulative rotation", "Distance from start", "Path efficiency"}
+
+
+def is_cumulative(p: Param) -> bool:
+    """A running total since the start of the test (counts, times, distance travelled …): its value at a moment
+    depends on the whole track up to it, not only on the last few seconds (live charts compute these over the
+    whole test)."""
+    return p.kind == COUNT or p.name in _RUNNING_TOTALS or p.name.endswith(": time in zone")
+
+
 def param_info(app: Apparatus, name: str, track: Track | None = None, behaviours=None, n_others: int = 3) -> Param:
     d = _definitions(app, track, behaviours, n_others)
     return d[name][0] if name in d else Param(name)

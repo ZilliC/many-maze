@@ -752,6 +752,87 @@ def message_figure(text: str, size=(4.2, 3.6), fig: Figure | None = None) -> Fig
     return fig
 
 
+# ---------------------------------------------------------------- the zone map
+def zone_map_figure(app: Apparatus, background=None, labels: bool = True, fill: bool = True,
+                    size: tuple | None = None, fig: Figure | None = None) -> Figure:
+    """The apparatus map as a figure: arena outline, zones (filled translucent in their colours), points and
+    lines with their names, the calibration in the corner; drawn over `background` (a BGR / grey video frame)
+    when given.  Image coordinates (y down), equal axes, no frame."""
+    if size is None:
+        try:
+            x0, y0, x1, y1 = app.arena_or_bounds().bounds()
+            w, h = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+        except ValueError:
+            w, h = 4.0, 3.0
+        if background is not None:
+            h, w = background.shape[:2]
+        size = (6.0, max(2.0, min(12.0, 6.0 * h / w)))
+    fig = fig or Figure(figsize=size, dpi=100)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if background is not None:
+        img = background[..., ::-1] if background.ndim == 3 else background
+        ax.imshow(img, cmap="gray" if img.ndim == 2 else None, interpolation="bilinear")
+    try:
+        arena = app.arena_or_bounds()
+        ax.add_patch(MplPolygon(arena.polygon(), closed=True, fill=False, ec="#334155", lw=1.6))
+    except ValueError:
+        arena = None
+    for z in app.zones:
+        poly = z.shape.polygon()
+        if fill:
+            ax.add_patch(MplPolygon(poly, closed=True, fc=z.color, ec="none", alpha=0.18))
+        ax.add_patch(MplPolygon(poly, closed=True, fill=False, ec=z.color, lw=1.2,
+                                ls="--" if z.hidden else "-"))
+        if labels:
+            cx, cy = z.shape.centroid()
+            ax.text(cx, cy, z.name, fontsize=7, ha="center", va="center", color=z.color,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7))
+    for ln in app.lines:
+        ax.plot([ln.x1, ln.x2], [ln.y1, ln.y2], "-", color=ln.color, lw=1.4)
+        if labels:
+            ax.text((ln.x1 + ln.x2) / 2, (ln.y1 + ln.y2) / 2, ln.name, fontsize=6, color=ln.color,
+                    ha="left", va="bottom")
+    for p in app.points:
+        ax.plot(p.x, p.y, "o", color=p.color, ms=5, mec="white", mew=0.6)
+        if labels:
+            ax.text(p.x, p.y, f"  {p.name}", fontsize=6, color=p.color, ha="left", va="center")
+    if background is not None:
+        h, w = background.shape[:2]
+        ax.set_xlim(0, w)
+        ax.set_ylim(h, 0)
+    else:
+        ax.autoscale_view()
+        if arena is not None:
+            x0, y0, x1, y1 = arena.bounds()
+            pad = 0.04 * max(x1 - x0, y1 - y0, 1)
+            pts = np.vstack([arena.polygon()] + [z.shape.polygon() for z in app.zones])
+            x0, y0 = pts.min(axis=0)
+            x1, y1 = pts.max(axis=0)
+            ax.set_xlim(x0 - pad, x1 + pad)
+            ax.set_ylim(y1 + pad, y0 - pad)
+    cal = f"{app.px_per_cm:.3g} px/cm" if app.px_per_cm else "not calibrated"
+    ax.text(0.01, 0.01, f"{app.name} · {cal}", transform=ax.transAxes, fontsize=6, color="#475569",
+            ha="left", va="bottom")
+    return fig
+
+
+def save_zone_map(app: Apparatus, path, background=None, labels: bool = True, fill: bool = True,
+                  dpi: int = 200) -> str:
+    """Save the zone map (:func:`zone_map_figure`) as an image; the format follows the extension (.png, .svg,
+    .pdf, .jpg …; none = .png).  Returns the path written."""
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.suffix:
+        p = p.with_suffix(".png")
+    fig = zone_map_figure(app, background, labels, fill)
+    fig.savefig(str(p), dpi=dpi, format=p.suffix[1:].lower().replace("jpg", "jpeg"),
+                facecolor="white", transparent=False)
+    return str(p)
+
+
 # ---------------------------------------------------------------- charts over time
 def chart_figure(track: Track, app: Apparatus, names: list[str], settings=None, events=None,
                  behaviours: list[Behaviour] | None = None,

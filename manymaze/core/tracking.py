@@ -222,6 +222,12 @@ class ArenaTracker:
             hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
         for c in settings.identity_colour_list():
             hex_to_hsv(c)
+        self.set_mask(arena_mask)
+
+    def set_mask(self, arena_mask: np.ndarray | None):
+        """The arena (pixels outside are ignored), e.g. after the apparatus moved during a live test."""
+        settings = self.s
+        self.mask = arena_mask
         if arena_mask is not None:
             ys, xs = np.nonzero(arena_mask)
             m = settings.arena_margin_px
@@ -765,6 +771,8 @@ TRAIL_BGR = (214, 120, 37)  # live images: blue trail, green centre, orange head
 CENTRE_BGR = (60, 200, 60)
 HEAD_BGR = (31, 138, 255)
 OUTLINE_BGR = (230, 230, 60)  # whole-body outline (cyan)
+BEAM_BGR = (80, 230, 255)  # orientation "flashlight beam" (light yellow)
+BEAM_HALF_ANGLE = 20.0  # degrees either side of the head direction
 
 
 def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
@@ -775,9 +783,45 @@ def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
         return (255, 255, 255)
 
 
-def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True) -> np.ndarray:
+def heading_of(d: Detection) -> float:
+    """The direction the animal faces (degrees, 0 = +x, clockwise as y points down): tail → head, else the body
+    orientation; NaN when unknown."""
+    if math.isfinite(d.hx) and math.isfinite(d.tx) and (d.hx, d.hy) != (d.tx, d.ty):
+        return math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
+    return d.angle if math.isfinite(d.angle) else math.nan
+
+
+def draw_beam(img: np.ndarray, d: Detection, alpha: float = 0.35) -> bool:
+    """The animal's orientation as a translucent "flashlight beam" wedge from its head, in place.  Returns False
+    when the orientation is unknown."""
+    ang = heading_of(d)
+    if not math.isfinite(ang) or not math.isfinite(d.x):
+        return False
+    ox, oy = (d.hx, d.hy) if math.isfinite(d.hx) else (d.x, d.y)
+    body = math.hypot(d.hx - d.tx, d.hy - d.ty) if math.isfinite(d.hx) and math.isfinite(d.tx) else math.nan
+    if not math.isfinite(body) or body < 2:
+        body = math.sqrt(d.area) if d.area and math.isfinite(d.area) else 20.0
+    length = max(3.0 * body, 0.06 * img.shape[1])
+    pts = [(ox, oy)] + [(ox + length * math.cos(math.radians(a)), oy + length * math.sin(math.radians(a)))
+                        for a in np.linspace(ang - BEAM_HALF_ANGLE, ang + BEAM_HALF_ANGLE, 9)]
+    poly = np.round(np.array(pts)).astype(np.int32)
+    h, w = img.shape[:2]
+    x0, y0 = np.clip(poly.min(axis=0), 0, [w, h])
+    x1, y1 = np.clip(poly.max(axis=0) + 1, 0, [w, h])
+    if x1 <= x0 or y1 <= y0:
+        return True
+    roi = img[y0:y1, x0:x1]
+    layer = roi.copy()
+    cv2.fillPoly(layer, [poly - [x0, y0]], BEAM_BGR, cv2.LINE_AA)
+    img[y0:y1, x0:x1] = cv2.addWeighted(layer, alpha, roi, 1.0 - alpha, 0)
+    return True
+
+
+def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True,
+                  beam: bool = False) -> np.ndarray:
     """The animal's position (green centre, orange head, cyan body outline) and trail drawn on a BGR copy of the frame (live camera
-    images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom)."""
+    images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom).  beam: the animal's
+    orientation as a "flashlight beam" from its head (:func:`draw_beam`)."""
     img = frame
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -791,6 +835,8 @@ def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy
     for d in dets or []:
         if not d.detected or not math.isfinite(d.x):
             continue
+        if beam:
+            draw_beam(img, d)
         if d.outline is not None and len(d.outline) > 2:
             cv2.polylines(img, [d.outline.reshape(-1, 1, 2)], True, OUTLINE_BGR, s, cv2.LINE_AA)
         cv2.circle(img, (int(d.x), int(d.y)), 2 + 2 * s, CENTRE_BGR, -1, cv2.LINE_AA)
