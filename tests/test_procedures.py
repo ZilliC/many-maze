@@ -622,7 +622,8 @@ def test_project_context_and_statement_fields():
     ctx = P.project_context(p)
     assert "Open arms" in ctx["zones"] and "Corner 1" in ctx["zones"] and ctx["zones"] == sorted(set(ctx["zones"]))
     assert ctx["devices"] == p.io_devices and ctx["areas"] == ["left"]
-    assert [f["name"] for f in P.statement_fields(DO("pellet"))] == ["device", "channel", "count", "pulse_width", "gap"]
+    assert [f["name"] for f in P.statement_fields(DO("pellet"))] == ["device", "channel", "count", "pulse_width", "gap",
+                                                                 "sensor", "timeout", "retries"]
     assert [f["name"] for f in P.statement_fields(WHEN("every", []))] == ["interval", "first"]
     assert [f["name"] for f in P.statement_fields({"type": "wait", "until": "x"})] == ["until"]
     assert [f["name"] for f in P.statement_fields({"type": "repeat", "mode": "forever"})] == []

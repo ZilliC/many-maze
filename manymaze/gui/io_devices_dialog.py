@@ -7,9 +7,9 @@ import copy
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-                               QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMenu,
-                               QMessageBox, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+                               QMenu, QMessageBox, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ..core import ioconfig
@@ -20,6 +20,26 @@ from .widgets import loading, value_text
 CH_COLS = [("name", "Name"), ("kind", "Kind"), ("pin", "Pin"), ("pin_b", "Pin B"), ("invert", "Invert"),
            ("on", "On text"), ("off", "Off text"), ("options", "Options")]
 _CH_KEYS = {"name", "kind", "pin", "pin_b", "invert", "on", "off"}
+
+
+# labels of the device fields without a widget of their own (shown as text fields)
+FIELD_LABELS = {"protocol": "Protocol", "device_id": "NI device", "identifier": "LabJack (serial / IP / ANY)",
+                "smtp_host": "SMTP server", "smtp_port": "SMTP port", "smtp_user": "SMTP user",
+                "smtp_password": "SMTP password", "from_addr": "From address", "email_to": "E-mail alerts to",
+                "sms_to": "SMS alerts to", "twilio_sid": "Twilio account SID", "twilio_token": "Twilio auth token",
+                "twilio_from": "Twilio phone number"}
+_SECRET = ("smtp_password", "twilio_token")
+
+
+def protocols_for(type_: str) -> dict:
+    """The protocols of syringe pumps and balances (id -> label)."""
+    if type_ == "syringe_pump":
+        from ..core.pumps import PUMP_PROTOCOLS
+        return dict(PUMP_PROTOCOLS)
+    if type_ == "scale":
+        from ..core.scales import SCALE_PROTOCOLS
+        return dict(SCALE_PROTOCOLS)
+    return {}
 
 
 def _parse_options(text: str) -> dict:
@@ -129,9 +149,25 @@ class IODevicesDialog(QDialog):
         f.addRow("Baud rate", self.f_baud)
         f.addRow("Watchdog", self.f_watchdog)
         f.addRow("Audio player", self.f_backend)
-        f.addRow("", self.f_enabled)
         # form rows of the device fields (core DEVICE_FIELDS)
         self._rows = {"port": prow, "baud": self.f_baud, "watchdog_ms": self.f_watchdog, "backend": self.f_backend}
+        self._extra: dict[str, QWidget] = {}  # the other fields: text (protocol: a list)
+        for fields in ioconfig.DEVICE_FIELDS.values():
+            for k in fields:
+                if k in self._rows:
+                    continue
+                if k == "protocol":
+                    w = QComboBox()
+                    w.setEditable(True)
+                    w.currentTextChanged.connect(lambda *_: self._save_device())
+                else:
+                    w = QLineEdit()
+                    if k in _SECRET:
+                        w.setEchoMode(QLineEdit.Password)
+                    w.editingFinished.connect(self._save_device)
+                f.addRow(FIELD_LABELS.get(k, k.replace("_", " ").capitalize()), w)
+                self._extra[k] = self._rows[k] = w
+        f.addRow("", self.f_enabled)
         self._form = f
         self.f_name.editingFinished.connect(self._save_device)
         for w in (self.f_type, self.f_backend):
@@ -151,17 +187,26 @@ class IODevicesDialog(QDialog):
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(len(CH_COLS) - 1, QHeaderView.Stretch)
         self.ch_table.itemChanged.connect(lambda *_: self._save_channels())
-        self.ch_table.setToolTip("Options (key=value, comma separated): pullup, debounce_ms, counts_per_rev, "
-                                 "cm_per_rev, scale, period_ms, deadband, role (shocker, speaker or light: the "
-                                 "output's results are grouped as such)")
+        self.ch_table.setToolTip(
+            "Options (key=value, comma separated): pullup, debounce_ms, counts_per_rev, cm_per_rev, scale, offset, "
+            "period_ms (1 = 1 kHz), deadband, filter (lowpass, highpass, bandpass, average) with cutoff_hz / low_hz "
+            "/ high_hz / order / window; sensors: sensor (weight, light, temperature, humidity), interface (analog, "
+            "hx711, dht22), units, alert_min, alert_max; role (shocker, speaker or light); intensity (the output "
+            "that sets a shocker's or laser's intensity) with calibration or max_ma; thermostat: sensor, heat, cool, "
+            "kp, ki, kd, band, max_temp, set_cmd; olfactometer: odours=name:valve|name:valve, blank, flow, max_flow; "
+            "pumps: address, syringe or diameter_mm; dripper: drop_ul")
         cv.addWidget(self.ch_table)
         cb = QHBoxLayout()
         b1 = QPushButton("Add channel")
         b1.clicked.connect(lambda: self.add_channel())
         b2 = QPushButton("Remove channel")
         b2.clicked.connect(self.remove_channel)
+        b3 = QPushButton("Calibrate…")
+        b3.setToolTip("Shocker or laser with an intensity output: measure the current / power at several levels")
+        b3.clicked.connect(self.calibrate_channel)
         cb.addWidget(b1)
         cb.addWidget(b2)
+        cb.addWidget(b3)
         cb.addStretch()
         cv.addLayout(cb)
         rv.addWidget(self.ch_box, 1)
@@ -249,6 +294,20 @@ class IODevicesDialog(QDialog):
             self.f_watchdog.setValue(ioconfig.watchdog_ms(c))
             self.f_backend.setCurrentIndex(max(0, self.f_backend.findData(c.get("backend", "auto"))))
             self.f_enabled.setChecked(c.get("enabled", True))
+            t = c.get("type", "virtual")
+            for k, w in self._extra.items():
+                v = c.get(k, ioconfig.DEVICE_FIELDS.get(t, {}).get(k, ""))
+                if isinstance(w, QComboBox):
+                    w.clear()
+                    for pid, label in protocols_for(t).items():
+                        w.addItem(f"{pid} — {label}", pid)
+                    i = w.findData(v)
+                    if i >= 0:
+                        w.setCurrentIndex(i)
+                    else:
+                        w.setCurrentText(str(v or ""))
+                else:
+                    w.setText(value_text(v) if v not in (None, "") else "")
             self._fill_channels(c)
         self._update_visibility()
 
@@ -263,7 +322,11 @@ class IODevicesDialog(QDialog):
         shown = {"name", "kind", "options", *ioconfig.CHANNEL_FIELDS.get(t, ())}
         for col, (key, _label) in enumerate(CH_COLS):
             self.ch_table.setColumnHidden(col, key not in shown)
-        self.ch_box.setVisible(t != "audio")
+        self.ch_box.setVisible(t not in ("audio", "notify"))
+        pin_col = [k for k, _l in CH_COLS].index("pin")
+        hdr = self.ch_table.horizontalHeaderItem(pin_col)
+        if hdr is not None:
+            hdr.setToolTip(ioconfig.PIN_HELP.get(t, ""))
 
     def _save_device(self, retype=False):
         c = self._cur()
@@ -284,11 +347,26 @@ class IODevicesDialog(QDialog):
                 c["baud"] = 115200
         if "backend" in fields:
             c["backend"] = self.f_backend.currentData()
+        for k, w in self._extra.items():
+            if k not in fields or retype:
+                continue
+            if isinstance(w, QComboBox):
+                v = w.currentData() if w.currentIndex() >= 0 and w.currentText() == w.itemText(w.currentIndex()) \
+                    else w.currentText().split(" — ")[0].strip()
+            else:
+                v = w.text().strip()
+                if isinstance(fields[k], int) and v.lstrip("-").isdigit():
+                    v = int(v)
+            c[k] = v
+        if retype:  # a new type: its own defaults for the fields it did not have
+            for k, v in ioconfig.DEVICE_FIELDS.get(c["type"], {}).items():
+                if v is not None and k not in c:
+                    c[k] = v
         it = self.dev_list.currentItem()
         if it is not None:
             it.setText(f"{c['name']}  ·  {ioconfig.DEVICE_TYPES.get(c['type'], c['type'])}")
         if retype:
-            self._update_visibility()
+            self._load_device()
 
     def _watchdog_changed(self, v):
         """Only an explicit change is stored: without the key the core default follows the board's outputs."""
@@ -307,7 +385,8 @@ class IODevicesDialog(QDialog):
         self.ch_table.insertRow(r)
         kind = QComboBox()
         for k, label in ioconfig.CHANNEL_KINDS.items():
-            kind.addItem(label, k)
+            if k != "status" or ch.get("kind") == "status":  # status channels are made by the drivers
+                kind.addItem(label, k)
         kind.setCurrentIndex(max(0, kind.findData(ch.get("kind", "input"))))
         kind.currentIndexChanged.connect(lambda *_: self._save_channels())
         inv = QTableWidgetItem()
@@ -370,6 +449,24 @@ class IODevicesDialog(QDialog):
         if "watchdog_ms" not in c:  # the default depends on whether the board has outputs
             with loading(self):
                 self.f_watchdog.setValue(ioconfig.watchdog_ms(c))
+
+    def calibrate_channel(self):
+        c = self._cur()
+        r = self.ch_table.currentRow()
+        if c is None or not 0 <= r < len(c.get("channels", [])):
+            QMessageBox.information(self, "Calibrate", "Select the shocker (or laser) channel first.")
+            return
+        ch = c["channels"][r]
+        if not ch.get("intensity"):
+            QMessageBox.information(self, "Calibrate", f"'{ch.get('name')}' has no intensity option: add "
+                                    "intensity=<the PWM / analogue output that sets its current> to its options.")
+            return
+        manager = self.manager if self.manager is not None and self.manager.has(c.get("name")) else None
+        dlg = CalibrationDialog(ch, c.get("name"), manager, self)
+        if dlg.exec() == QDialog.Accepted:
+            ch["calibration"] = dlg.table_text()
+            with loading(self):
+                self._fill_channels(c)
 
     # ------------------------------------------------------------------ live status
     def toggle_connection(self):
@@ -494,3 +591,78 @@ class IODevicesDialog(QDialog):
 
     def sizeHint(self):
         return QSize(860, 640)
+
+
+class CalibrationDialog(QDialog):
+    """Calibration of an intensity output (shocker current in mA, laser power): the output is set to each level in
+    turn (when connected) and the measured value is typed in; stored as the channel's ``calibration`` option."""
+
+    LEVELS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)
+
+    def __init__(self, ch: dict, device: str, manager=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Calibrate {ch.get('name')}")
+        self.ch, self.device, self.manager = ch, device, manager
+        pts = dict(ioconfig.calibration_points(ch.get("calibration"))) or {}
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(f"Set each level of <b>{ch['intensity']}</b>, measure the output (e.g. the shock "
+                           "current with a meter across a test resistor) and type the value in."
+                           + ("" if manager else "<br><i>Connect the devices to set the levels from here.</i>")))
+        v.itemAt(0).widget().setWordWrap(True)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Level (0–1)", "Measured (mA)", ""])
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for lv in sorted(set(self.LEVELS) | set(pts)):
+            self._add_row(lv, pts.get(lv))
+        v.addWidget(self.table)
+        hb = QHBoxLayout()
+        add = QPushButton("Add level")
+        add.clicked.connect(lambda: self._add_row(0.5, None))
+        hb.addWidget(add)
+        hb.addStretch()
+        v.addLayout(hb)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def _add_row(self, level, value):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        lv = QDoubleSpinBox()
+        lv.setRange(0, 1)
+        lv.setDecimals(3)
+        lv.setSingleStep(0.05)
+        lv.setValue(level)
+        val = QDoubleSpinBox()
+        val.setRange(-1, 1000)
+        val.setDecimals(3)
+        val.setSpecialValueText("—")
+        val.setValue(value if value is not None else -1)
+        b = QPushButton("Set")
+        b.setEnabled(self.manager is not None)
+        b.clicked.connect(lambda _=False, w=lv: self.set_level(w.value()))
+        self.table.setCellWidget(r, 0, lv)
+        self.table.setCellWidget(r, 1, val)
+        self.table.setCellWidget(r, 2, b)
+
+    def set_level(self, level: float):
+        if self.manager is not None:
+            self.manager.set_output(self.device, self.ch["intensity"], level)
+
+    def points(self) -> list[tuple[float, float]]:
+        out = {}
+        for r in range(self.table.rowCount()):
+            lv, val = self.table.cellWidget(r, 0).value(), self.table.cellWidget(r, 1).value()
+            if val >= 0:
+                out[round(lv, 4)] = round(val, 4)
+        return sorted(out.items())
+
+    def table_text(self) -> str:
+        return "|".join(f"{lv:g}:{v:g}" for lv, v in self.points())
+
+    def done(self, r):
+        if self.manager is not None:
+            self.set_level(0)
+        super().done(r)

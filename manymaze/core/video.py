@@ -15,6 +15,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .camhw import CameraHardware, OpenCVControls
+
 # a test filmed in several consecutive files (a recording split every N minutes, a camera that starts a new file
 # every 4 GB…) uses an M3U playlist listing the parts in order; it plays and tracks as one video
 PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
@@ -116,7 +118,9 @@ MAX_CAMERAS = 64  # camera indices offered (ANY-maze supports up to 48 cameras)
 
 
 def list_cameras(max_index: int = MAX_CAMERAS, max_gap: int = 4, opener=None) -> list[int]:
-    """Probe camera indices that can be opened, up to max_index; the scan stops after max_gap consecutive indices
+    """Probe OpenCV camera indices (webcams, UVC cameras and analogue capture cards / frame grabbers that show up
+    as a video device; industrial cameras are listed by core.camsources) that can be opened, up to max_index; the
+    scan stops after max_gap consecutive indices
     without a camera (indices can have gaps, e.g. Linux metadata nodes, but probing absent ones is slow).
     opener(i) -> a cv2.VideoCapture-like object (tests)."""
     if opener is None:
@@ -143,7 +147,8 @@ def list_cameras(max_index: int = MAX_CAMERAS, max_gap: int = 4, opener=None) ->
 class VideoSource:
     """A video file or a live camera.
 
-    Thread-safe for alternating seek/read from one consumer at a time.
+    Thread-safe for alternating seek/read from one consumer at a time.  Cameras have hardware settings
+    (core.camhw: exposure, gain, white balance …) that can be changed from another thread while frames are read.
     """
 
     def __init__(self, source: str | int, width: int | None = None, height: int | None = None,
@@ -174,6 +179,7 @@ class VideoSource:
         n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if not self.is_camera else 0
         self.frame_count = max(n, 0)
         self.pos = 0
+        self.controls = OpenCVControls(self.cap, self._lock) if self.is_camera else None
 
     @property
     def duration(self) -> float:
@@ -201,6 +207,21 @@ class VideoSource:
 
     def frame_at_time(self, t: float) -> np.ndarray | None:
         return self.frame_at(int(round(t * self.fps)))
+
+    # ---- camera hardware settings (core.camhw); files have none
+    def hardware_controls(self) -> list:
+        return self.controls.info() if self.controls is not None else []
+
+    def current_hardware(self) -> CameraHardware:
+        return self.controls.current() if self.controls is not None else CameraHardware()
+
+    def apply_hardware(self, hw: CameraHardware) -> dict:
+        """Set the settings of ``hw``; returns {setting: "ok" | "unsupported" | "adjusted:<value>"}."""
+        return self.controls.apply(hw) if self.controls is not None else {}
+
+    def reset_hardware(self) -> dict:
+        """Back to the settings the camera had when it was opened."""
+        return self.controls.reset() if self.controls is not None else {}
 
     def release(self):
         with self._lock:

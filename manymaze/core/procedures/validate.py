@@ -5,6 +5,7 @@ from __future__ import annotations
 import keyword
 import re
 
+from .. import ioconfig
 from ..operant import parse_spec
 from .catalog import ACTION_SPECS, CONSTANTS, EVENT_SPECS, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT, WHEN_MODES
 from .expr import _INTERP, check_expr
@@ -78,6 +79,10 @@ def _bad_var_name(n) -> str | None:
     return None
 
 
+def _a(word: str) -> str:
+    return "an" if word[:1] in "aeiou" else "a"
+
+
 def _check_param(p, v, names, ctx, st) -> list[str]:
     typ, label = p["type"], p["label"]
     empty = v is None or (isinstance(v, str) and not v.strip())
@@ -106,20 +111,20 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     elif typ in ("device", "audio"):
         if ctx["devices"] is not None and str(v) not in ctx["devices"]:
             errs = [f"unknown device '{v}'"]
-    elif typ in ("input", "output"):
+    elif typ in ("input", "output", "sensor", "thermostat", "odour", "pump"):
         chans = ctx["channels"]
+        what = {"thermostat": "temperature controller", "odour": "olfactometer"}.get(typ, typ)
         if chans is not None:
             dev = st.get("device") or ""
             pool = chans.get(dev, {}) if dev else {k: kd for d in chans.values() for k, kd in d.items()}
             if dev and dev not in chans:
                 pool = None
             if pool is not None and str(v) not in pool:
-                errs = [f"unknown {'input' if typ == 'input' else 'output'} channel '{v}'"]
+                errs = [f"unknown {what} channel '{v}'"]
             elif pool is not None:
                 kd = pool[str(v)]
-                want = ("input", "analog", "encoder") if typ == "input" else ("output", "pwm")
-                if kd not in want:
-                    errs = [f"'{v}' is an {kd} channel, not an {'input' if typ == 'input' else 'output'}"]
+                if kd not in ioconfig.channel_kinds_of(typ):
+                    errs = [f"'{v}' is {_a(kd)} {kd} channel, not {_a(what)} {what}"]
     elif typ == "var":
         e = _bad_var_name(v)
         errs = [e] if e else []

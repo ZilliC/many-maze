@@ -99,6 +99,16 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     rv = session.result_variables
     if rv:
         test.result_variables = {**test.result_variables, **rv}
+    weights = list(getattr(session.engine, "animal_weights", None) or []) if session.engine is not None else []
+    animal = project.get_animal(test.animal_id) if weights else None
+    if animal is not None:  # "Weigh the animal" during the test: kept in the animal's weight history
+        from .scales import record_weight
+
+        for _t, grams in weights:
+            try:
+                record_weight(project, animal, grams)
+            except ValueError:
+                pass
     kept = session.kept_variables
     if kept:  # procedure variables kept between tests: only from tests that are saved
         project.variables.update(copy.deepcopy(kept))

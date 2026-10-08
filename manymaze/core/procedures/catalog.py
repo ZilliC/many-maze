@@ -6,8 +6,9 @@ import math
 
 
 def P(name, type="number", default=None, label=None, req=False, help=""):
-    """Parameter spec. Types: number, int, expr, text, zone, key, device, input, output, audio, var, timer,
-    switch, area, name, procedure, file, schedule, spec, sequence, bool, choice:a|b|c."""
+    """Parameter spec. Types: number, int, expr, text, zone, key, device, input, output, sensor, thermostat,
+    odour, pump, audio, var, timer, switch, area, name, procedure, file, schedule, spec, sequence, bool,
+    choice:a|b|c."""
     return {"name": name, "type": type, "default": default, "label": label or name.replace("_", " ").capitalize(),
             "req": req, "help": help}
 
@@ -17,6 +18,11 @@ _IN = P("channel", "input", "", "Input", req=True)
 _OUT = P("channel", "output", "", "Output", req=True)
 _ZONE_ANY = P("zone", "zone", "", "Zone", help="empty = any zone")
 _ZONE = P("zone", "zone", "", "Zone", req=True)
+_SENSOR = P("channel", "sensor", "", "Sensor", req=True)
+_SENSOR_ANY = P("channel", "sensor", "", "Sensor", help="empty = any sensor")
+_THERMO = P("channel", "thermostat", "", "Temperature controller", req=True)
+_PUMP = P("channel", "pump", "", "Pump", req=True)
+_PUMP_ANY = P("channel", "pump", "", "Pump", help="empty = any pump")
 
 # name: (group, label, params). "generic" events are matched against occurrences; the others are detectors.
 EVENT_SPECS: dict[str, dict] = {}
@@ -75,8 +81,31 @@ _ev("analog_below", "Inputs", "Analogue input falls below", [_DEV, _IN, P("thres
 _ev("encoder_reaches", "Inputs", "Encoder count reaches", [_DEV, _IN, P("count", "int", 1000, "Counts", True)], False)
 _ev("encoder_every", "Inputs", "Every N encoder counts", [_DEV, _IN, P("count", "int", 1024, "Counts", True)], False,
     "e.g. once per wheel revolution")
+_ev("movement_start", "Inputs", "Movement detector: movement starts",
+    [_DEV, P("channel", "input", "", "Detector", help="empty = any movement detector (PIR)")])
+_ev("movement_end", "Inputs", "Movement detector: movement ends",
+    [_DEV, P("channel", "input", "", "Detector", help="empty = any movement detector (PIR)")])
+_ev("sensor_above", "Sensors", "Sensor rises above", [_DEV, _SENSOR, P("threshold", "number", 25, "Level", True)],
+    False)
+_ev("sensor_below", "Sensors", "Sensor falls below", [_DEV, _SENSOR, P("threshold", "number", 20, "Level", True)],
+    False)
+_ev("sensor_out_of_range", "Sensors", "Sensor leaves its alert range", [_DEV, _SENSOR_ANY],
+    help="the channel's alert_min / alert_max options; an alert is also sent if an alert device is configured")
+_ev("sensor_in_range", "Sensors", "Sensor back in its alert range", [_DEV, _SENSOR_ANY])
+_ev("temperature_reached", "Sensors", "Temperature controller reaches its target",
+    [_DEV, P("channel", "thermostat", "", "Temperature controller", help="empty = any")])
+_ev("pump_target_reached", "Pumps", "Pump reaches its target volume", [_DEV, _PUMP_ANY])
+_ev("pump_stalled", "Pumps", "Pump stalled", [_DEV, _PUMP_ANY])
+_ev("pump_volume_reaches", "Pumps", "Volume infused reaches",
+    [_DEV, _PUMP, P("volume", "number", 0.1, "Volume (ml)", True)], False)
 _ev("output_on", "Outputs", "Output switched on", [_DEV, P("channel", "output", "", "Output")])
 _ev("output_off", "Outputs", "Output switched off", [_DEV, P("channel", "output", "", "Output")])
+_ev("light_ramp_done", "Outputs", "Light ramp finished", [_DEV, P("channel", "output", "", "Light")])
+_ev("pulse_sequence_done", "Outputs", "Pulse sequence finished", [_DEV, P("channel", "output", "", "Output")])
+_ev("pellet_dropped", "Outputs", "Pellet detected", [_DEV, P("channel", "output", "", "Dispenser")],
+    help="the dispenser's pellet sensor saw the pellet (Dispense pellet with a sensor)")
+_ev("pellet_error", "Outputs", "Pellet dispenser error", [_DEV, P("channel", "output", "", "Dispenser")],
+    help="no pellet detected after the retries (jammed or empty dispenser)")
 _ev("variable_changed", "Logic", "Variable changes", [P("var", "var", "", "Variable", True)])
 _ev("condition_true", "Logic", "Condition becomes true", [P("cond", "expr", "", "Condition", True)], False)
 _ev("condition_false", "Logic", "Condition becomes false", [P("cond", "expr", "", "Condition", True)], False)
@@ -112,7 +141,22 @@ _ac("pulse_train_stop", "Outputs", "Stop pulse train", _OUTS)
 _ac("sync_pulse", "Outputs", "Sync pulse (e-phys / imaging)", _OUTS + [P("width", "number", 10, "Width (ms)", True)])
 _ac("pellet", "Operant", "Dispense pellet(s)",
     _OUTS + [P("count", "int", 1, "Pellets", True), P("pulse_width", "number", 50, "Pulse (ms)"),
-             P("gap", "number", 0.5, "Gap between pellets (s)")])
+             P("gap", "number", 0.5, "Gap between pellets (s)"),
+             P("sensor", "input", "", "Pellet sensor", help="optional: an input that sees each pellet drop"),
+             P("timeout", "number", 1.0, "Detection time (s)"), P("retries", "int", 2, "Retries")])
+_ac("dipper", "Operant", "Present liquid dipper", _OUTS + [P("duration", "number", 5, "Duration (s)", True)])
+_ac("liquid_drop", "Operant", "Deliver liquid drops (dripper)",
+    _OUTS + [P("count", "int", 1, "Drops", True), P("pulse_width", "number", 30, "Valve open (ms)"),
+             P("gap", "number", 0.3, "Gap between drops (s)")])
+_ac("odour", "Operant", "Present odour",
+    [_DEV, P("channel", "odour", "", "Olfactometer", True),
+     P("odour", "text", "", "Odour", help="a name from the olfactometer's odours option; empty or none = no odour"),
+     P("flow", "number", 0, "Air flow (l/min)", help="0 = unchanged")])
+_ac("odour_off", "Operant", "Stop odour", [_DEV, P("channel", "odour", "", "Olfactometer", True)])
+_ac("light_level", "Lights", "Set light level", _OUTS + [P("level", "number", 100, "Level (%)", True)])
+_ac("light_ramp", "Lights", "Ramp light level",
+    _OUTS + [P("level", "number", 100, "To level (%)", True), P("duration", "number", 10, "Over (s)", True),
+             P("start", "number", None, "From level (%)", help="empty = the current level")])
 _ac("light_on", "Operant", "Light on", _OUTS)
 _ac("light_off", "Operant", "Light off", _OUTS)
 _ac("door_open", "Operant", "Open door", _OUTS)
@@ -124,9 +168,40 @@ _ac("schedule_start", "Operant", "Start reinforcement schedule",
 _ac("schedule_response", "Operant", "Register response",
     [P("schedule", "schedule", "", "Schedule name", True), P("spec", "spec", "", "Schedule", help="if not started"),
      P("var", "var", "", "Store 1/0 (reinforced) in")])
-_ac("shock_on", "Shock", "Shock on", _OUTS + [P("max_duration", "number", 2, "Safety cut-off (s)", True)])
+_INTENSITY = P("intensity", "number", 0, "Intensity (mA)", help="0 = as set; needs the shocker's intensity option")
+_ac("shock_on", "Shock", "Shock on", _OUTS + [P("max_duration", "number", 2, "Safety cut-off (s)", True),
+                                              _INTENSITY])
 _ac("shock_off", "Shock", "Shock off", _OUTS)
-_ac("shock_pulse", "Shock", "Shock for a duration", _OUTS + [P("duration", "number", 1, "Duration (s)", True)])
+_ac("shock_pulse", "Shock", "Shock for a duration", _OUTS + [P("duration", "number", 1, "Duration (s)", True),
+                                                             _INTENSITY])
+_ac("shock_intensity", "Shock", "Set shock intensity", _OUTS + [P("intensity", "number", 0.3, "Intensity (mA)",
+                                                                  True)])
+_LEVEL = P("intensity", "number", None, "Intensity (%)", help="empty = unchanged; needs the intensity option")
+_ac("opto_train", "Optogenetics", "Laser pulse train (duty cycle)",
+    _OUTS + [P("frequency", "number", 20, "Frequency (Hz)", True), P("duty_cycle", "number", 10, "Duty cycle (%)",
+                                                                       True),
+             P("duration", "number", 1, "Duration (s)", True, "0 = until stopped"), _LEVEL])
+_ac("opto_sequence", "Optogenetics", "Laser pulse sequence from a file",
+    _OUTS + [P("file", "file", "", "File (CSV)", True, "one pulse per line: onset (s), duration (s)[, intensity %]"),
+             P("repeat", "int", 1, "Repeat", help="0 = until stopped"), _LEVEL])
+_ac("opto_intensity", "Optogenetics", "Set laser intensity", _OUTS + [P("intensity", "number", 50, "Intensity (%)",
+                                                                       True)])
+_ac("set_temperature", "Temperature", "Set temperature",
+    [_DEV, _THERMO, P("target", "number", 37, "Target (°C)", True),
+     P("ramp", "number", 0, "Ramp (°C/min)", help="0 = go to the target at once")])
+_ac("temperature_off", "Temperature", "Temperature control off", [_DEV, _THERMO])
+_ac("pump_infuse", "Pumps", "Infuse", [_DEV, _PUMP, P("rate", "number", 0.1, "Rate (ml/min)", True),
+                                       P("volume", "number", 0, "Volume (ml)", help="0 = until stopped")])
+_ac("pump_withdraw", "Pumps", "Withdraw", [_DEV, _PUMP, P("rate", "number", 0.1, "Rate (ml/min)", True),
+                                           P("volume", "number", 0, "Volume (ml)", help="0 = until stopped")])
+_ac("pump_stop", "Pumps", "Stop pump", [_DEV, _PUMP])
+_ac("pump_syringe", "Pumps", "Select syringe", [_DEV, _PUMP, P("syringe", "text", "", "Syringe", True,
+                                                               "a predefined syringe or an inner diameter in mm")])
+_ac("tare_sensor", "Sensors", "Tare sensor (zero)", [_DEV, _SENSOR])
+_ac("read_sensor", "Sensors", "Store sensor reading", [_DEV, _SENSOR, P("var", "var", "", "Store in", True)])
+_ac("weigh_animal", "Sensors", "Weigh the animal (balance)",
+    [P("device", "device", "", "Balance", help="empty = the first balance"), P("var", "var", "", "Store in")])
+_ac("send_alert", "Communication", "Send alert (e-mail / SMS)", [P("text", "text", "", "Message", True)])
 _AUD = P("device", "audio", "", "Audio device", help="empty = first audio device")
 _ac("tone", "Audio", "Play tone", [_AUD, P("frequency", "number", 2000, "Frequency (Hz)", True),
                                    P("duration", "number", 1, "Duration (s)", True),
@@ -135,7 +210,11 @@ _ac("white_noise", "Audio", "Play white noise", [_AUD, P("duration", "number", 1
                                                  P("volume", "number", 0.5, "Volume (0–1)")])
 _ac("play_sound", "Audio", "Play sound file", [_AUD, P("file", "file", "", "File (WAV)", True),
                                                P("duration", "number", 0, "Duration (s)", help="for the I/O log"),
-                                               P("volume", "number", 1.0, "Volume (0–1)")])
+                                               P("volume", "number", 1.0, "Volume (0–1)"),
+                                               P("repeat", "int", 1, "Play", help="times; 0 = until stopped")])
+_ac("loop_sound", "Audio", "Play sound file repeatedly", [_AUD, P("file", "file", "", "File (WAV)", True),
+                                                          P("volume", "number", 1.0, "Volume (0–1)")],
+    "until a Stop sounds action or the end of the test")
 _ac("stop_sound", "Audio", "Stop sounds", [_AUD])
 _ac("beep", "Audio", "Beep")
 _ac("serial_send", "Communication", "Send serial command", [P("device", "device", "", "Device"),

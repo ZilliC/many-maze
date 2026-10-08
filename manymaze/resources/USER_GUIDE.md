@@ -501,6 +501,35 @@ frames, recording errors and procedure errors.
 The options are saved per camera with the experiment. Draw the apparatus on the transformed image (the apparatus
 page shows what the camera delivers); changing the options later moves the image under the apparatus.
 
+**Camera settings** (second tab, for cameras) — exposure, gain, brightness, contrast, saturation, white balance
+and focus, each with **Auto** where the camera has an automatic mode (the check box's middle state leaves the
+camera's own setting). With the camera image on, every change applies at once; **Cancel** puts the camera back and
+**Reset to camera defaults** forgets the settings. They are saved per camera with the other options and applied
+every time the camera opens. Values are in the camera's own units: driver units for webcams and capture cards,
+µs of exposure and dB of gain for most industrial cameras. Many webcam drivers ignore some settings — and the macOS
+camera driver used through OpenCV accepts almost none — so the dialog marks what the camera refused
+(**Not supported**) or changed (**camera used …**), and the session log lists the settings a camera did not accept
+when it opened.
+
+### Cameras: webcams, capture cards and industrial cameras
+
+- **Webcams, USB (UVC) cameras and analogue capture cards** — a frame grabber or USB video converter for an
+  analogue (CCTV / IR) camera shows up as a video device: it is listed as *Camera 0, 1, …* like any webcam.
+- **Industrial GigE Vision / USB3 Vision cameras** are read through their vendor's SDK, when installed
+  (Add source ▸ **Industrial cameras…** shows which are and what to install):
+
+  | Cameras | Install |
+  |---|---|
+  | Basler | `pip install pypylon` |
+  | FLIR / Teledyne | the Spinnaker SDK and its PySpin wheel |
+  | IDS | the IDS peak SDK, then `pip install ids_peak ids_peak_ipl` |
+  | Any GenICam camera (Allied Vision, MATRIX VISION, Hikrobot, …) | `pip install harvesters` and add the GenTL producer (`.cti` file) of the vendor's SDK in Industrial cameras (or set `GENICAM_GENTL64_PATH`) |
+
+  **Scan** lists them after the OpenCV cameras (e.g. *Basler acA1300-60gm (40012345)*); they are remembered by
+  serial number. Their Camera settings add **pixel format** (Mono8, Bayer, RGB8: converted to colour images) and
+  an **external trigger** (one frame per pulse on the chosen input line; the camera waiting for its trigger is not
+  an error). Image size and frame rate (Setup ▸ Video source) are set on the camera.
+
 ### Recording
 
 **Record video of the test** saves one file per test in the experiment's `recordings` folder and links it to the
@@ -535,8 +564,12 @@ Procedures automate live tests: they switch lights, dispense pellets, deliver to
 optogenetic lasers, count lever presses, run reinforcement schedules, end the test when a criterion is met, and
 much more, reacting to the animal's position and behaviour, to keys, to hardware inputs and to the touch screen.
 Any number of procedures run at the same time. They are saved with the experiment (`Project.procedures`) and
-work with real hardware (an Arduino running the bundled firmware, any text-command serial device, the computer's
-speakers) or with simulated devices.
+work with real hardware (an Arduino running the bundled firmware, a Firmata board, National Instruments and LabJack
+devices, a USB-serial cable's control lines, any text-command serial device, syringe pumps, balances, the
+computer's speakers) or with simulated devices. Beyond inputs and outputs they control lights with ramps,
+optogenetic lasers (intensity, duty cycle, pulse sequences from a file), shock intensity, odours, liquid dippers
+and drippers, syringe pumps and temperature controllers, read sensors (weight, light, temperature, humidity) and
+movement detectors, and send e-mail / SMS alerts.
 
 ### The procedure editor
 
@@ -577,7 +610,10 @@ so a timed protocol is simply: *Wait 120 → Do tone 30 s → Wait 28 → Do sho
 **Timing.** Procedures are evaluated on every video frame. A wait ends on the first frame at or after its due
 time, and the next wait counts from the due time, so long sequences never drift. Pulses, pulse trains and pellet
 pulses on the Arduino are timed by the board itself (microsecond resolution), independently of the frame rate;
-the I/O log records their exact times. "Repeat N times" and "Repeat while" loops run instantly; a
+the I/O log records their exact times. Pulse sequences from a file are timed on the computer's clock by the I/O
+service thread (about 1 ms jitter; on the Arduino each pulse's width is timed by the board). Fast analogue inputs
+(up to 1 kHz) are sent by the board in batches with its own clock, and each sample is logged at its own time
+rather than at the frame's. "Repeat N times" and "Repeat while" loops run instantly; a
 "Repeat forever" loop whose block does not wait runs once per frame (a polling loop).
 
 **Several procedures at once.** Every When block that is running is independent: a procedure can wait for 30 s
@@ -628,8 +664,22 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 | Inputs | Analogue input falls below (`analog_below`) | Device *(optional)*, Input, Level |
 | Inputs | Encoder count reaches (`encoder_reaches`) | Device *(optional)*, Input, Counts |
 | Inputs | Every N encoder counts (`encoder_every`) — e.g. once per wheel revolution | Device *(optional)*, Input, Counts |
+| Inputs | Movement detector: movement starts (`movement_start`) | Device *(optional)*, Detector *(optional)* |
+| Inputs | Movement detector: movement ends (`movement_end`) | Device *(optional)*, Detector *(optional)* |
+| Sensors | Sensor rises above (`sensor_above`) | Device *(optional)*, Sensor, Level |
+| Sensors | Sensor falls below (`sensor_below`) | Device *(optional)*, Sensor, Level |
+| Sensors | Sensor leaves its alert range (`sensor_out_of_range`) — the channel's alert_min / alert_max options; an alert is also sent if an alert device is configured | Device *(optional)*, Sensor *(optional)* |
+| Sensors | Sensor back in its alert range (`sensor_in_range`) | Device *(optional)*, Sensor *(optional)* |
+| Sensors | Temperature controller reaches its target (`temperature_reached`) | Device *(optional)*, Temperature controller *(optional)* |
+| Pumps | Pump reaches its target volume (`pump_target_reached`) | Device *(optional)*, Pump *(optional)* |
+| Pumps | Pump stalled (`pump_stalled`) | Device *(optional)*, Pump *(optional)* |
+| Pumps | Volume infused reaches (`pump_volume_reaches`) | Device *(optional)*, Pump, Volume (ml) |
 | Outputs | Output switched on (`output_on`) | Device *(optional)*, Output *(optional)* |
 | Outputs | Output switched off (`output_off`) | Device *(optional)*, Output *(optional)* |
+| Outputs | Light ramp finished (`light_ramp_done`) | Device *(optional)*, Light *(optional)* |
+| Outputs | Pulse sequence finished (`pulse_sequence_done`) | Device *(optional)*, Output *(optional)* |
+| Outputs | Pellet detected (`pellet_dropped`) — the dispenser's pellet sensor saw the pellet (Dispense pellet with a sensor) | Device *(optional)*, Dispenser *(optional)* |
+| Outputs | Pellet dispenser error (`pellet_error`) — no pellet detected after the retries (jammed or empty dispenser) | Device *(optional)*, Dispenser *(optional)* |
 | Logic | Variable changes (`variable_changed`) | Variable |
 | Logic | Condition becomes true (`condition_true`) | Condition |
 | Logic | Condition becomes false (`condition_false`) | Condition |
@@ -659,7 +709,13 @@ sounds and virtual switches are switched off when the test ends.
 | Outputs | Pulse train (optogenetics) (`pulse_train`) | Device *(optional)*, Output, Frequency (Hz), Pulse width (ms), Duration (s) |
 | Outputs | Stop pulse train (`pulse_train_stop`) | Device *(optional)*, Output |
 | Outputs | Sync pulse (e-phys / imaging) (`sync_pulse`) | Device *(optional)*, Output, Width (ms) |
-| Operant | Dispense pellet(s) (`pellet`) | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)* |
+| Operant | Dispense pellet(s) (`pellet`) | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)*, Pellet sensor *(optional)*, Detection time (s) *(optional)*, Retries *(optional)* |
+| Operant | Present liquid dipper (`dipper`) | Device *(optional)*, Output, Duration (s) |
+| Operant | Deliver liquid drops (dripper) (`liquid_drop`) | Device *(optional)*, Output, Drops, Valve open (ms) *(optional)*, Gap between drops (s) *(optional)* |
+| Operant | Present odour (`odour`) | Device *(optional)*, Olfactometer, Odour *(optional)*, Air flow (l/min) *(optional)* |
+| Operant | Stop odour (`odour_off`) | Device *(optional)*, Olfactometer |
+| Lights | Set light level (`light_level`) | Device *(optional)*, Output, Level (%) |
+| Lights | Ramp light level (`light_ramp`) | Device *(optional)*, Output, To level (%), Over (s), From level (%) *(optional)* |
 | Operant | Light on (`light_on`) | Device *(optional)*, Output |
 | Operant | Light off (`light_off`) | Device *(optional)*, Output |
 | Operant | Open door (`door_open`) | Device *(optional)*, Output |
@@ -668,12 +724,27 @@ sounds and virtual switches are switched off when the test ends.
 | Operant | Retract lever (`lever_retract`) | Device *(optional)*, Output |
 | Operant | Start reinforcement schedule (`schedule_start`) | Schedule name, Schedule |
 | Operant | Register response (`schedule_response`) | Schedule name, Schedule *(optional)*, Store 1/0 (reinforced) in *(optional)* |
-| Shock | Shock on (`shock_on`) | Device *(optional)*, Output, Safety cut-off (s) |
+| Shock | Shock on (`shock_on`) | Device *(optional)*, Output, Safety cut-off (s), Intensity (mA) *(optional)* |
 | Shock | Shock off (`shock_off`) | Device *(optional)*, Output |
-| Shock | Shock for a duration (`shock_pulse`) | Device *(optional)*, Output, Duration (s) |
+| Shock | Shock for a duration (`shock_pulse`) | Device *(optional)*, Output, Duration (s), Intensity (mA) *(optional)* |
+| Shock | Set shock intensity (`shock_intensity`) | Device *(optional)*, Output, Intensity (mA) |
+| Optogenetics | Laser pulse train (duty cycle) (`opto_train`) | Device *(optional)*, Output, Frequency (Hz), Duty cycle (%), Duration (s), Intensity (%) *(optional)* |
+| Optogenetics | Laser pulse sequence from a file (`opto_sequence`) | Device *(optional)*, Output, File (CSV), Repeat *(optional)*, Intensity (%) *(optional)* |
+| Optogenetics | Set laser intensity (`opto_intensity`) | Device *(optional)*, Output, Intensity (%) |
+| Temperature | Set temperature (`set_temperature`) | Device *(optional)*, Temperature controller, Target (°C), Ramp (°C/min) *(optional)* |
+| Temperature | Temperature control off (`temperature_off`) | Device *(optional)*, Temperature controller |
+| Pumps | Infuse (`pump_infuse`) | Device *(optional)*, Pump, Rate (ml/min), Volume (ml) *(optional)* |
+| Pumps | Withdraw (`pump_withdraw`) | Device *(optional)*, Pump, Rate (ml/min), Volume (ml) *(optional)* |
+| Pumps | Stop pump (`pump_stop`) | Device *(optional)*, Pump |
+| Pumps | Select syringe (`pump_syringe`) | Device *(optional)*, Pump, Syringe |
+| Sensors | Tare sensor (zero) (`tare_sensor`) | Device *(optional)*, Sensor |
+| Sensors | Store sensor reading (`read_sensor`) | Device *(optional)*, Sensor, Store in |
+| Sensors | Weigh the animal (balance) (`weigh_animal`) | Balance *(optional)*, Store in *(optional)* |
+| Communication | Send alert (e-mail / SMS) (`send_alert`) | Message |
 | Audio | Play tone (`tone`) | Audio device *(optional)*, Frequency (Hz), Duration (s), Volume (0–1) *(optional)* |
 | Audio | Play white noise (`white_noise`) | Audio device *(optional)*, Duration (s), Volume (0–1) *(optional)* |
-| Audio | Play sound file (`play_sound`) | Audio device *(optional)*, File (WAV), Duration (s) *(optional)*, Volume (0–1) *(optional)* |
+| Audio | Play sound file (`play_sound`) | Audio device *(optional)*, File (WAV), Duration (s) *(optional)*, Volume (0–1) *(optional)*, Play *(optional)* |
+| Audio | Play sound file repeatedly (`loop_sound`) — until a Stop sounds action or the end of the test | Audio device *(optional)*, File (WAV), Volume (0–1) *(optional)* |
 | Audio | Stop sounds (`stop_sound`) | Audio device *(optional)* |
 | Audio | Beep (`beep`) | — |
 | Communication | Send serial command (`serial_send`) | Device *(optional)*, Command |
@@ -747,13 +818,75 @@ sending heartbeats, e.g. after a crash.
 |---|---|
 | **Arduino** | Any Arduino running `firmware/manymaze_io` (see `firmware/README.md` for wiring and the protocol): debounced digital inputs (levers, nose pokes, beams, TTL), digital outputs (lights, pellet dispensers, doors, shocker triggers, laser TTL, sync pulses) with optional maximum on-time, PWM outputs, analogue inputs, quadrature rotary encoders (running wheels) and a heartbeat watchdog. Pulses and pulse trains are generated on the board. |
 | **Serial port (text commands)** | Any device driven by text lines: each output channel has an *On* and an *Off* command; each input channel the lines the device sends when it switches on / off. *Send serial command* sends any text. |
-| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files. |
+| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files, once or repeated (*Play sound file* ▸ *Play* times, or *Play sound file repeatedly* until *Stop sounds*). |
+| **USB-serial cable control lines** | Any USB-serial adapter as a small TTL interface (the role of ANY-maze's USB TTL cable): outputs on RTS and DTR, inputs from CTS, DSR, RI and CD (the channel's *Pin* is the line name). |
+| **Firmata board** | A board running StandardFirmata (57600 baud): digital inputs with pull-up, movement detectors, digital and PWM outputs, analogue inputs and sensors. |
+| **National Instruments DAQ** | NI devices through NI-DAQmx (`pip install nidaqmx` and NI's driver): digital lines (`port0/line0`), analogue inputs (`ai0`), analogue outputs (`ao0`, level × `max_v`), counters (`ctr0`). |
+| **LabJack** | LabJack T4 / T7 / T8 through LJM (`pip install labjack-ljm`): `FIO`/`EIO` digital lines, `AIN` analogue inputs, `DAC` outputs, quadrature encoders on two `DIO` lines. |
+| **Syringe pump(s)** | One or several pumps (daisy-chained by address where the protocol allows): New Era / WPI Aladdin and OEMs, Harvard Apparatus (Ultra and legacy command sets), KD Scientific, Chemyx, Cavro-type pumps, a custom text protocol, or *simulated*. Channels of kind *Syringe pump* with `syringe=` (131 predefined syringes from 14 makers — check the inner diameter against your syringe's data sheet) or `diameter_mm=`. Each pump reports `<pump>.running`, `.stalled`, `.target_reached`, `.infused_ml` and `.withdrawn_ml`. |
+| **Balance** | Serial balances (Mettler Toledo MT-SICS, Ohaus, Sartorius, A&D, Kern, or any balance that sends its weight continuously): **Animals ▸ Weigh** records each animal's weight with the date (*Weight (g)* column and weight history), and the *Weigh the animal* action does it during a test. |
+| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device. |
 | **Simulated device** | For designing and testing procedures without hardware: outputs are shown, inputs are switched by hand (*Simulate*). |
 
-Channels have a name (used by procedures), a kind (digital input, digital output, PWM output, analogue input,
-rotary encoder), a pin, *Invert* for active-low hardware, and options such as `pullup=0`, `debounce_ms=20`,
-`counts_per_rev=1024`, `cm_per_rev=50`, `scale=0.0049`, `period_ms=50`, `deadband=2`, and `role=shocker` /
-`role=speaker` / `role=light` to group an output's results with that device type.
+Channels have a name (used by procedures), a kind (digital input, movement detector, digital output, PWM output,
+analogue input, sensor, rotary encoder, temperature controller, olfactometer, syringe pump), a pin, *Invert* for
+active-low hardware, and options such as `pullup=0`, `debounce_ms=20`, `counts_per_rev=1024`, `cm_per_rev=50`,
+`scale=0.0049`, `period_ms=50`, `deadband=2`, and `role=shocker` / `role=speaker` / `role=light` to group an
+output's results with that device type.
+
+**Fast and filtered analogue inputs.** `period_ms=1` samples at 1 kHz (the Arduino firmware sends batches of
+samples with its own time stamps). `filter=lowpass` with `cutoff_hz` (and `order`, default 2), `filter=highpass`
+(`cutoff_hz`), `filter=bandpass` (`low_hz`, `high_hz`) apply a Butterworth filter to each sample as it arrives;
+`filter=average` with `window` (samples) or `window_ms` a moving average. Filtered channels report every sample.
+
+**Sensors** (kind *Sensor*): `sensor=weight|light|temperature|humidity|generic`, `units`, and where the readings
+come from — `interface=analog` (an analogue pin: `scale`, `offset`), `interface=hx711` (a load cell through an
+HX711 amplifier: *Pin* = DOUT, *Pin B* = SCK, `scale` grams per count, `offset`) or `interface=dht22` (a DHT22
+temperature / humidity sensor: two channels on the same pin, one with `sensor=temperature`, one with
+`sensor=humidity`). `alert_min` / `alert_max` set the sensor's alert range: leaving it fires *Sensor leaves its
+alert range* and sends an alert (at most every `alert_repeat_s`, default 600 s; `alert=0` to only fire the
+event). *Tare sensor* zeroes a sensor (e.g. a food hopper on a load cell) and *Store sensor reading* keeps its value
+in a variable. Weight sensors give the food / liquid **intake** (what the container lost) in the results.
+
+**Movement detectors** (kind *Movement detector (PIR)*): a digital input (no pull-up by default: PIR modules drive
+their output high) with *Movement starts / ends* events and their own results.
+
+**Temperature controllers** (kind *Temperature controller*): `sensor` (a sensor channel in °C), `heat` and
+optionally `cool` (outputs: PWM outputs get a PID level, digital ones switch with a hysteresis), `kp`, `ki`, `kd`,
+`band` (°C, default 0.5: "at target"), `max_temp` / `min_temp` (safety: outputs off outside, and when the sensor
+stops reporting). A serial controller that regulates itself is driven with `set_cmd` (e.g. `SP {value:.1f}`) and
+`off_cmd`. *Set temperature* gives a target and optionally a ramp in °C/min; regulation runs in the background
+(also while a test is paused) and stops at the end of the test. *Temperature controller reaches its target* fires
+when the temperature is within `band` of the target.
+
+**Lights**: *Set light level* (in %) and *Ramp light level* (from the current or a given level to another, over a
+time; *Light ramp finished* fires at the end) on PWM outputs (digital outputs are on above 0 %).
+
+**Optogenetics and shock intensity**: give the laser / shocker output the option `intensity=<a PWM or analogue
+output that sets its power / current>`. *Laser pulse train (duty cycle)* takes a frequency, a duty cycle and an
+optional intensity (%); *Laser pulse sequence from a file* reads a text or CSV file with one pulse per line,
+`onset (s), duration (s)[, intensity %]` (header and `#` lines are skipped), repeated a number of times (0 = until
+stopped), and fires *Pulse sequence finished*. For shockers, *Calibrate…* in the I/O devices dialog sets each level
+of the intensity output in turn while you measure the current, and stores the table (`calibration=0:0|0.5:0.4|…`,
+level : mA; or `max_ma` for a linear output). *Set shock intensity* and the *Intensity (mA)* of *Shock on* / *Shock
+for a duration* then set the current; the results give each shocker's mean and maximum intensity.
+
+**Odours** (kind *Olfactometer*): `odours=vanilla:valve1|almond:valve2` (odour names and the output that opens each
+valve), optionally `blank` (the clean-air valve, open when no odour is presented), `flow` (a PWM / analogue output
+driving a mass-flow controller) and `max_flow` (l/min at full level). *Present odour* opens one odour's valve (the
+others close), with an optional air flow; *Stop odour* or the odour *none* returns to clean air.
+
+**Liquid rewards**: *Present liquid dipper* raises a dipper for a duration; *Deliver liquid drops (dripper)* opens
+a solenoid valve for each drop (`drop_ul` on the channel gives the volume in the results).
+
+**Pellet dispenser errors**: give *Dispense pellet(s)* a *Pellet sensor* (an input that sees each pellet land,
+e.g. a beam in the magazine): a pellet not seen within the *Detection time* is dispensed again up to *Retries*
+times; *Pellet detected* fires for each pellet seen and *Pellet dispenser error* when pellets are still missing
+(jammed or empty dispenser). The results count the pellets not dispensed and the retries.
+
+**Syringe pumps**: *Select syringe*, *Infuse* / *Withdraw* (rate in ml/min, optional target volume) and *Stop
+pump*; *Pump reaches its target volume*, *Pump stalled* and *Volume infused reaches* react to the pump. Pumps stop
+when the test ends or is paused.
 
 *Connect* opens the devices and shows every input and output live; *Toggle* switches an output, *Simulate*
 switches a simulated input, *Test* pulses the selected output for 0.5 s or plays a 1 kHz tone. pyserial
@@ -807,6 +940,18 @@ latencies of things that never happen follow *When an event never occurs, its la
   the time-weighted *mean level* (0–1). An output is a shocker when a shock action drove it, a speaker for the
   audio actions, a light for *Light on / off*; any output channel can also be given the option `role=shocker`,
   `role=speaker` or `role=light` in the I/O devices dialog;
+* **movement detectors** — movements, time moving / not moving, latency to first movement, mean movement;
+* **sensors** — initial and final value, mean (time-weighted), maximum, minimum, change, time out of the alert range
+  and times out of range; weight sensors also give the **intake** (initial − final);
+* **syringe pumps** — volume infused and withdrawn (ml; from the pump's own counters when it reports them, otherwise
+  from the rates and times), infusions, withdrawals, time pumping, latency to first start, stalls;
+* **temperature controllers** — time on, mean target, mean set-point, time at target, latency to target;
+* **odours** — for each odour: presentations, time presented, latency to first presentation; and the time with any
+  odour for each olfactometer;
+* **dippers and drippers** — presentations / drops, time on, latencies; drippers with `drop_ul` the volume (µl);
+* **shockers with an intensity output** — mean and maximum intensity (mA) of the shocks; **pellet dispensers with
+  a sensor** — pellets not dispensed (errors) and retries;
+* **animal weight** — the weight taken with *Weigh the animal* during the test (also stored on the animal);
 * **virtual switches** — distance travelled before the first activation (in the period; the whole distance if
   never, or blank) and distance travelled while the switch is on;
 * **touches** — activations per area (channel `touch <area>`);

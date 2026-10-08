@@ -1,6 +1,7 @@
 """Result measures from a test's I/O log (``Test.io_events``): inputs, outputs, encoders, analogue signals, pellets,
-pulse trains, shockers, speakers, lights, virtual switches, procedure result variables and the operant plantar
-assay (OPAD).
+pulse trains, shockers (with their intensity), speakers, lights, virtual switches, procedure result variables, the
+operant plantar assay (OPAD), movement detectors, sensors, syringe pumps, temperature controllers, odours, liquid
+dippers and drippers and the animal's weight.
 
 :func:`io_measures` needs only the log; :func:`io_track_measures` combines it with the track (distance travelled
 while a virtual switch is on, analogue values per zone visit) and is called by ``measures.analyse``.
@@ -14,7 +15,12 @@ import numpy as np
 
 ENCODER_TURN_GAP_S = 1.0  # an encoder is turning between two samples that differ and are at most this far apart
 ENCODER_REVERSAL_DEG = 10.0  # the encoder must turn back by more than this for a reversal (filters jitter)
-DEVICE_GROUPS = {"shocker": "Shocker", "speaker": "Speaker", "light": "Light"}
+DEVICE_GROUPS = {"shocker": "Shocker", "speaker": "Speaker", "light": "Light", "dipper": "Dipper",
+                 "dripper": "Dripper"}
+# derived channels "<channel>.<suffix>" reported by drivers / controllers / the engine; their measures are part of
+# their channel's (pump, thermostat, sensor, pellet dispenser)
+DERIVED = ("setpoint", "at_target", "running", "stalled", "target_reached", "infused_ml", "withdrawn_ml",
+           "out_of_range", "errors", "retries")
 
 
 def _label(device: str, channel: str, dup: set) -> str:
@@ -63,10 +69,16 @@ class _Log:
         return self.cfg.get((key[1], key[2]), {})
 
     def kind(self, key) -> str:
-        """encoder | analog | digital input | output | switch | variable."""
+        """encoder | analog | sensor | pir | input | weight | output | switch | odour | pump | thermostat | variable |
+        derived."""
         kind, ty, ck = key[0], self.types[key], self.conf(key).get("kind")
         if kind == "variable":
             return "variable"
+        if "." in key[2] and key[2].rsplit(".", 1)[1] in DERIVED:
+            return "derived"
+        for special in ("odour", "pump", "thermostat", "weight", "sensor", "pir"):
+            if special in ty or ck == special:
+                return special
         if kind == "input" and (ck == "encoder" or "encoder" in ty):
             return "encoder"
         if kind == "input" and (ck == "analog" or "analog" in ty):
@@ -88,7 +100,18 @@ class _Log:
             return "speaker"
         if "light" in ty:
             return "light"
+        if "dipper" in ty:
+            return "dipper"
+        if "drop" in ty:
+            return "dripper"
         return None
+
+    def derived(self, key, suffix) -> list:
+        """The series of a derived channel of this channel ("pump1" -> "pump1.infused_ml")."""
+        for k in (("input", key[1], f"{key[2]}.{suffix}"), ("output", key[1], f"{key[2]}.{suffix}")):
+            if k in self.series:
+                return self.series[k]
+        return []
 
     def find(self, channel: str, kinds=("input",)) -> tuple | None:
         """The series of a channel by name ("channel" or "device/channel")."""
@@ -180,6 +203,10 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
         lab = log.label(key)
         if kind == "variable":
             _variable(res, key[2], ev, t0, t1, end)
+        elif kind == "derived":
+            continue
+        elif kind in _SPECIAL:
+            _SPECIAL[kind](res, log, key, lab, ev, t0, t1, T, never)
         elif kind == "encoder":
             _encoder(res, lab, ev, log.conf(key), t0, t1, T)
         elif kind == "analog":
@@ -217,6 +244,10 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
         g, n_name, what = f"Shocker {lab}", "shocks", "shock"
     elif group == "speaker":
         g, n_name, what = f"Speaker {lab}", "sounds", "sound"
+    elif group == "dipper":
+        g, n_name, what = f"Dipper {lab}", "presentations", "presentation"
+    elif group == "dripper":
+        g, n_name, what = f"Dripper {lab}", "drops", "drop"
     else:
         g = f"Light {lab}" if group == "light" else lab
         n_name, what = "times on", None
@@ -238,11 +269,155 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: mean level"] = _r(sum((b - a) * v for a, b, v in seg) / tot if tot > 0 else math.nan)
     if "pellet" in ty:
         res[f"{g}: pellets dispensed"] = len(onsets)
+        errs = [v for t, v in log.derived(key, "errors") if t0 <= t <= t1]
+        if errs or log.derived(key, "retries"):
+            res[f"{g}: pellets not dispensed (errors)"] = int(sum(errs))
+            res[f"{g}: dispenser retries"] = sum(1 for t, _v in log.derived(key, "retries") if t0 <= t <= t1)
+    if group == "dripper" and log.conf(key).get("drop_ul"):
+        res[f"{g}: volume (µl)"] = _r(len(onsets) * float(log.conf(key)["drop_ul"]))
+    if group == "shocker":
+        ich = log.conf(key).get("intensity")
+        ma = [(float(e["t"]), float(e["ma"])) for e in log.events
+              if e.get("ma") is not None and str(e.get("device")) == key[1] and (not ich or e.get("channel") == ich)]
+        if ma:
+            vals = [_value_at(sorted(ma), x) for x in onsets]
+            vals = [v for v in vals if math.isfinite(v)]
+            res[f"{g}: mean intensity (mA)"] = _r(np.mean(vals) if vals else math.nan)
+            res[f"{g}: max intensity (mA)"] = _r(max(vals) if vals else math.nan)
     if "train" in ty:
         trains = [e for e in log.events if str(e.get("device")) == key[1] and str(e.get("channel")) == key[2]
                   and e.get("train_start") and t0 <= float(e.get("t", 0)) <= t1]
         res[f"{g}: pulse trains"] = len(trains)
         res[f"{g}: pulses"] = len(onsets)
+
+
+def _pir(res, log, key, lab, ev, t0, t1, T, never):
+    """A movement detector (PIR): each activation is a movement."""
+    spans, onsets, _offsets, _ = _digital(ev, t0, t1)
+    lens = [b - a for a, b in spans]
+    g = f"Movement detector {lab}"
+    res[f"{g}: movements"] = len(onsets)
+    res[f"{g}: time moving (s)"] = _r(sum(lens))
+    res[f"{g}: time not moving (s)"] = _r(max(0.0, T - sum(lens)))
+    res[f"{g}: latency to first movement (s)"] = _r(onsets[0] - t0 if onsets else never)
+    res[f"{g}: mean movement (s)"] = _r(sum(lens) / len(lens) if lens else 0.0)
+
+
+def _sensor(res, log, key, lab, ev, t0, t1, T, never):
+    """A sensor (weight, light, temperature, humidity): its values and the time it spent out of its alert range."""
+    c = log.conf(key)
+    seg = _steps(ev, t0, t1)
+    vals = [v for _, _, v in seg]
+    tot = sum(b - a for a, b, _ in seg)
+    first, last = (vals[0], vals[-1]) if vals else (math.nan, math.nan)
+    g = f"Sensor {lab}"
+    res[f"{g}: initial value"] = _r(first)
+    res[f"{g}: final value"] = _r(last)
+    res[f"{g}: mean"] = _r(sum((b - a) * v for a, b, v in seg) / tot if tot > 0 else first)
+    res[f"{g}: max"] = _r(max(vals) if vals else math.nan)
+    res[f"{g}: min"] = _r(min(vals) if vals else math.nan)
+    res[f"{g}: change"] = _r(last - first)
+    if c.get("sensor") == "weight":  # food / liquid intake: what the container lost
+        res[f"{g}: intake"] = _r(max(0.0, first - last) if vals else math.nan)
+    oor = log.derived(key, "out_of_range")
+    if oor or c.get("alert_min") not in (None, "") or c.get("alert_max") not in (None, ""):
+        spans, onsets, _, _ = _digital(oor, t0, t1)
+        res[f"{g}: time out of range (s)"] = _r(sum(b - a for a, b in spans))
+        res[f"{g}: times out of range"] = len(onsets)
+
+
+def _pump(res, log, key, lab, ev, t0, t1, T, never):
+    """A syringe pump: the commands (infuse / withdraw at a rate, up to a volume) and, when the pump reports them,
+    the volumes it delivered; without reports the volumes are computed from the rates and times."""
+    cmds = sorted(((float(e["t"]), e) for e in log.events
+                   if e.get("type") == "pump" and str(e.get("device")) == key[1] and str(e.get("channel")) == key[2]),
+                  key=lambda te: te[0])  # stable: same-time commands keep their logged order
+    runs = []  # (start, end, direction, rate, volume target)
+    cur = None
+    for t, e in cmds:
+        if cur is not None:
+            runs.append((cur[0], t, *cur[1:]))
+            cur = None
+        if e.get("value"):
+            cur = (t, e.get("direction", "infuse"), float(e.get("rate", 0) or 0), float(e.get("volume", 0) or 0))
+    if cur is not None:
+        runs.append((cur[0], math.inf, *cur[1:]))
+    g = f"Pump {lab}"
+    for direction, word in (("infuse", "infused"), ("withdraw", "withdrawn")):
+        rep = log.derived(key, f"{word}_ml")
+        if rep:  # counters reported by the pump, with their values when each command was given as baselines
+            base = [(t, 0, float(e[f"{word}_ml"])) for t, e in cmds if e.get(f"{word}_ml") is not None]
+            pts = [(t, v) for t, _o, v in sorted(base + [(t, 1, v) for t, v in rep])]  # baselines first
+            before = [v for t, v in pts if t < t0]
+            vol = _value_at(pts, t1) - (before[-1] if before else pts[0][1])
+        else:
+            vol = 0.0
+            for a, b, d, rate, target in runs:
+                if d != direction:
+                    continue
+                end = min(b, a + target / rate * 60.0) if target > 0 and rate > 0 else b
+                vol += rate / 60.0 * max(0.0, min(end, t1) - max(a, t0))
+        res[f"{g}: volume {word} (ml)"] = _r(vol, 4)
+        mine = [r for r in runs if r[2] == direction and r[0] < t1 and r[1] > t0]
+        res[f"{g}: {'infusions' if direction == 'infuse' else 'withdrawals'}"] = sum(1 for r in mine if r[0] >= t0)
+    running = log.derived(key, "running")
+    if running:
+        spans = _digital(running, t0, t1)[0]
+    else:
+        spans = [(max(a, t0), min(b if b != math.inf else t1, t1,
+                                   a + target / rate * 60.0 if target > 0 and rate > 0 else math.inf))
+                 for a, b, _d, rate, target in runs]
+    res[f"{g}: time pumping (s)"] = _r(sum(max(0.0, b - a) for a, b in spans))
+    starts = [r[0] for r in runs if t0 <= r[0] <= t1]
+    res[f"{g}: latency to first start (s)"] = _r(starts[0] - t0 if starts else never)
+    res[f"{g}: stalls"] = len(_digital(log.derived(key, "stalled"), t0, t1)[1])
+
+
+def _thermostat(res, log, key, lab, ev, t0, t1, T, never):
+    """A temperature controller: its targets and the time the temperature was at the target."""
+    on = [(a, b, v) for a, b, v in _steps(ev, t0, t1) if v]
+    tot = sum(b - a for a, b, _ in on)
+    g = f"Temperature controller {lab}"
+    res[f"{g}: time on (s)"] = _r(tot)
+    res[f"{g}: mean target"] = _r(sum((b - a) * v for a, b, v in on) / tot if tot > 0 else math.nan, 2)
+    at = log.derived(key, "at_target")
+    spans, onsets, _, _ = _digital(at, t0, t1)
+    res[f"{g}: time at target (s)"] = _r(sum(b - a for a, b in spans))
+    starts = [t for t, v in ev if v and t0 <= t <= t1]
+    first = next((x for x in onsets if starts and x >= starts[0]), None)
+    res[f"{g}: latency to target (s)"] = _r(first - starts[0] if first is not None else never)
+    sp = log.derived(key, "setpoint")
+    if sp:
+        seg = [(a, b, v) for a, b, v in _steps(sp, t0, t1) if v]
+        st = sum(b - a for a, b, _ in seg)
+        res[f"{g}: mean set-point"] = _r(sum((b - a) * v for a, b, v in seg) / st if st > 0 else math.nan, 2)
+
+
+def _odour(res, log, key, lab, ev, t0, t1, T, never):
+    """An olfactometer: presentations of each odour (the odour's name is logged with each change)."""
+    per: dict[str, list] = {}
+    for e in sorted((e for e in log.events if e.get("type") == "odour" and str(e.get("device")) == key[1]
+                     and str(e.get("channel")) == key[2]), key=lambda e: e.get("t", 0)):
+        per.setdefault(str(e.get("odour", "?")), []).append((float(e["t"]), float(e.get("value", 0) or 0)))
+    tot_all = 0.0
+    for name, s in sorted(per.items()):
+        spans, onsets, _, _ = _digital(s, t0, t1)
+        tot = sum(b - a for a, b in spans)
+        tot_all += tot
+        g = f"Odour {name}"
+        res[f"{g}: presentations"] = len(onsets)
+        res[f"{g}: time presented (s)"] = _r(tot)
+        res[f"{g}: latency to first presentation (s)"] = _r(onsets[0] - t0 if onsets else never)
+    res[f"Olfactometer {lab}: time with an odour (s)"] = _r(tot_all)
+
+
+def _weight(res, log, key, lab, ev, t0, t1, T, never):
+    vals = [v for t, v in ev if t0 <= t <= t1]
+    res["Animal weight (g)"] = _r(vals[-1] if vals else math.nan, 2)
+
+
+_SPECIAL = {"pir": _pir, "sensor": _sensor, "pump": _pump, "thermostat": _thermostat, "odour": _odour,
+            "weight": _weight}
 
 
 def _variable(res, name, ev, t0, t1, end):

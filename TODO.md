@@ -2,16 +2,20 @@
 
 Features ANY-maze has that mANY-MAZE does not (yet), from the ANY-maze feature pages and its complete measure list
 (<https://www.any-maze.com/features/>, <https://www.any-maze.com/support/guides/results-available-in-any-maze/>),
-checked against the code on 2026-10-06. Roughly in order of impact within each section.
+checked against the code on 2026-10-06 and updated on 2026-10-08. Roughly in order of impact within each section.
+Hardware support below is tested against fake devices and simulated replies only; items marked *(untested on
+hardware)* still need a check with the real device.
 
 ## 1. Tracking and video
 
 - [x] Automatic rearing detection, with measures: number of rears, time rearing, latency to first rear,
       mean / max / min rear duration — whole test and per zone
 - [x] Zone entry that requires the animal to be oriented towards the zone
-- [ ] (Hardware, not done) Camera hardware settings: exposure, gain, brightness, white balance
-- [ ] (Hardware, not done) Native industrial camera support (GigE / USB3 Vision: Basler, FLIR, IDS …) and analogue capture cards
-      (today only OpenCV camera indices)
+- [x] Camera hardware settings: exposure, gain, brightness, contrast, saturation, white balance, focus (auto / manual),
+      saved per camera and adjustable live; unsupported settings are reported (macOS' AVFoundation accepts few)
+      *(untested on hardware)*
+- [x] Native industrial cameras (GigE / USB3 Vision through harvesters / GenTL, Basler pypylon, FLIR Spinnaker, IDS
+      peak; external trigger) and analogue capture cards (UVC / OpenCV devices) *(untested on hardware)*
 - [x] Verify / support ANY-maze's scale: up to 48 cameras and 40 simultaneous apparatus
 - [x] Adjust apparatus calibration during a running test
 - [x] Whole-body outline tracking and display
@@ -108,24 +112,32 @@ Today: Test, Animal, Group, Sex, Stage, Trial, Apparatus, Period.
 
 ## 7. Hardware and devices
 
-- [ ] Drivers for ANY-maze's own interfaces: operant, digital, optogenetic, synchronisation, relay, audio,
-      touch and analogue interfaces, USB TTL cable, multifunction remote, ANY-box
-- [ ] Analogue signal filters (high-pass, low-pass, band-pass, averaging) and sample rate up to 1 kHz
-- [ ] Sensors (weight for food / liquid intake, light, temperature, humidity) with initial / mean / max / min /
-      change measures and out-of-range alerts (SMS / email)
-- [ ] Movement detectors (PIR) with count, time moving, latency to first movement
-- [ ] Animal scale integration (record weights automatically)
-- [ ] Syringe pumps: 20+ manufacturers, 120+ predefined syringes, custom syringes, flow rate, direction,
-      target volume, stall detection; volume infused / withdrawn measures
-- [ ] Temperature controllers (heat / cool, ramping)
-- [ ] Lighting controllers (light levels, ramping; only basic PWM today)
-- [ ] Odour delivery (choose odour or none, air flow)
-- [ ] Liquid dippers / drippers
-- [ ] Pellet dispenser error detection (jam / no pellet dropped)
-- [ ] Shock intensity control (mA) and shocker calibration
-- [ ] Optogenetic laser intensity, duty cycle, pulse sequences from a file
-- [ ] Play a sound file repeatedly (loop)
-- [ ] Procedure events / actions for all of the above (ANY-maze: 50+ events, 70+ actions; mANY-MAZE: 48 / 51)
+- [x] Interfaces with the roles of ANY-maze's own (operant, digital, optogenetic, synchronisation, relay, audio, touch,
+      analogue, USB TTL cable, remote): the Arduino firmware, Firmata boards, National Instruments (NI-DAQmx), LabJack,
+      a USB-serial cable's control lines, text-command serial devices, the speakers, the touch screen and keys /
+      presenter remotes. ANY-maze's own boxes (AMi, ANY-box) use an undocumented protocol and cannot be driven
+      *(NI, LabJack, Firmata, serial lines untested on hardware)*
+- [x] Analogue signal filters (low-pass, high-pass, band-pass Butterworth, moving average) and sampling at up to
+      1 kHz (batched by the firmware, samples logged at their own times)
+- [x] Sensors (weight through an HX711 load cell, light, temperature / humidity through a DHT22, any analogue sensor)
+      with initial / final / mean / max / min / change / intake / time out of range measures and out-of-range alerts by
+      e-mail (SMTP) and SMS (Twilio or e-mail gateway)
+- [x] Movement detectors (PIR) with movements, time moving, latency to first movement
+- [x] Animal scale integration: serial balances (MT-SICS, Ohaus, Sartorius, A&D, Kern, continuous), Animals ▸ Weigh
+      with weight history, *Weigh the animal* during a test *(untested on hardware)*
+- [x] Syringe pumps: 18 manufacturers (20 families incl. DIY / other), 131 predefined syringes, custom syringes, rate,
+      direction, target volume, stall detection, daisy chains; volume infused / withdrawn measures *(untested on
+      hardware; some protocols and syringe diameters flagged as unverified in pumps.py)*
+- [x] Temperature controllers (PID heat / cool from a sensor, or a serial controller's set-point; ramps; safety
+      limits)
+- [x] Lighting controllers (light levels, ramps)
+- [x] Odour delivery (olfactometer valves, clean air, air flow through a mass-flow controller)
+- [x] Liquid dippers / drippers
+- [x] Pellet dispenser error detection (pellet sensor, retries, error event and measures)
+- [x] Shock intensity control (mA) and shocker calibration (I/O devices ▸ Calibrate…)
+- [x] Optogenetic laser intensity, duty cycle, pulse sequences from a file
+- [x] Play a sound file repeatedly (loop)
+- [x] Procedure events / actions for all of the above (mANY-MAZE now: 62 events, 72 actions)
 
 ## 8. Specific apparatus
 
@@ -142,7 +154,7 @@ Today: Test, Animal, Group, Sex, Stage, Trial, Apparatus, Period.
 
 ## 10. Results and data transfer
 
-- [ ] Open native ANY-maze experiment files: the .szd format is proprietary and undocumented, so it is not read;
+- [ ] (Not possible) Open native ANY-maze experiment files: the .szd format is proprietary and undocumented, so it is not read;
       File ▸ Import from ANY-maze now reads ANY-maze's documented exports instead (experiment XML export, zone maps,
       SYLK / dBase data) — the XML reader is still unverified against a real ANY-maze file
 - [x] Save as SYLK and dBase III/IV
@@ -154,7 +166,8 @@ Today: Test, Animal, Group, Sex, Stage, Trial, Apparatus, Period.
 - [x] Check for updates from inside the app
 - [x] Signed and notarised macOS build when Developer ID secrets are set (see README; untested until a certificate
       is available — without secrets the build stays ad-hoc signed)
-- [ ] (Not applicable to a GPL project) licence tiers such as TakeNote-only and network licences
+- [ ] (Not applicable to a GPL project) licence tiers such as TakeNote-only and network licences — the TakeNote
+      functionality itself is the observation-only live mode
 
 ---
 

@@ -1,8 +1,10 @@
 # mANY-MAZE I/O firmware
 
 `manymaze_io/manymaze_io.ino` turns an Arduino (Uno, Nano, Mega, Leonardo, Due, Zero, RP2040, ESP32…)
-into an I/O box for live tests: levers, nose pokes, beam breaks, TTL inputs, lights, pellet dispensers,
-doors, shocker triggers, optogenetic lasers, sync pulses, running wheels and analogue sensors. It is the
+into an I/O box for live tests: levers, nose pokes, beam breaks, movement detectors (PIR), TTL inputs, lights,
+pellet dispensers, doors, shocker triggers, optogenetic lasers, sync pulses, running wheels, analogue signals
+sampled at up to 1 kHz, load cells (food / water weight, through an HX711) and DHT22 temperature / humidity
+sensors. It is the
 libre equivalent of the AMi / ANY-maze interface boxes.
 
 ## Installing
@@ -22,6 +24,9 @@ pyserial is needed on the computer: `pip install pyserial`.
 | Digital output (`output`) | LED / house light, pellet dispenser, door, solenoid, shocker trigger, laser TTL, sync pulse | Pin → TTL input of the device, or → a logic-level MOSFET / relay module / opto-isolator for anything that draws more than ~10 mA. **Never drive motors, solenoids or relays directly from a pin**; use a driver with a flyback diode. `invert` for active-low inputs. |
 | PWM output (`pwm`) | dimmable light, LED intensity, analogue level via an RC filter | PWM-capable pin (marked `~`). Level 0–1 from procedures. |
 | Analogue input (`analog`) | force sensor, photodiode, lickometer, temperature | Sensor output (0–5 V or 0–3.3 V, as the board) → A*n*; the channel `pin` is *n* (0 = A0). `scale` converts the 0–1023 reading (e.g. 0.00489 for volts on a 5 V board). `deadband` (counts) limits reports. |
+| Movement detector (`pir`) | PIR module, other active-high detector | Module output → pin, module V+ and GND (no pull-up: the module drives the line high while it sees movement). |
+| Load cell (`sensor`, `interface=hx711`) | food hopper, water bottle, animal platform | HX711 board: DOUT → `pin`, SCK → `pin_b`, VCC, GND; the load cell on the HX711's channel A (gain 128). `scale` (grams per count) and `offset` from a two-point calibration; *Tare sensor* zeroes it. |
+| Temperature / humidity (`sensor`, `interface=dht22`) | home cage, room | DHT22 / AM2302 data → `pin` (10 kΩ pull-up to V+ if the module has none), V+, GND. One channel with `sensor=temperature` and one with `sensor=humidity` on the same pin; read every 2 s at most. |
 | Rotary encoder (`encoder`) | running wheel, rotarod, treadmill | Quadrature A → `pin`, B → `pin_b`, encoder V+ and GND. Interrupt pins (Uno: 2 and 3) are best; other pins are polled. `counts_per_rev` (4 × the encoder's pulses per revolution) and `cm_per_rev` (wheel circumference) give revolutions and distance. |
 
 Shockers: use a commercial constant-current shocker with a TTL *enable* input; the box only sends the
@@ -52,7 +57,9 @@ Computer → board:
 | `P pin 0..255` | PWM level |
 | `T pin period_ms width_ms count` | pulse train (count 0 = until stopped); decimals allowed, e.g. `T 9 50 5 200` = 20 Hz, 5 ms, 10 s |
 | `X pin` | stop a pulse train, output off |
-| `A n period_ms deadband` | report analogue input A*n* every period when it changed by more than deadband |
+| `A n period_ms deadband [batch]` | report analogue input A*n* every period when it changed by more than deadband; with `batch` > 1 every sample is sent, `batch` samples per `S` line (mANY-MAZE uses this below 10 ms, e.g. `A 1 1 0 10` = 1 kHz) |
+| `L dout sck period_ms` | HX711 load cell (period ≥ 100 ms) |
+| `U pin period_ms` | DHT22 temperature / humidity sensor (period ≥ 2000 ms) |
 | `E pinA pinB` | quadrature encoder (count reset to 0) |
 | `R` | all outputs off, pulse trains stopped (configuration kept) |
 | `Q` | report all inputs now |
@@ -65,6 +72,9 @@ Board → computer:
 |---|---|
 | `D pin level ms` | digital input level changed (raw level; with the pull-up, 0 = switch closed) |
 | `A n value ms` | analogue reading 0–1023 |
+| `S n first_ms period_us v1 v2 …` | a batch of analogue samples, the first one at `first_ms`, then every `period_us` |
+| `L dout raw ms` | HX711 reading (24-bit signed) |
+| `U pin temperature×10 humidity×10 ms` | DHT22 reading (e.g. `U 7 215 553` = 21.5 °C, 55.3 %) |
 | `E pinA count ms` | encoder count (signed, at most every 20 ms) |
 | `WATCHDOG` | the watchdog switched all outputs off |
 | `ERR text` | the last command was invalid |

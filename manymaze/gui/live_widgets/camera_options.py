@@ -1,23 +1,356 @@
-"""The camera options dialog: region, digital zoom / pan, rotation, flip, merging two cameras."""
+"""The camera options dialog: region, digital zoom / pan, rotation, flip, merging two cameras and the camera's
+hardware settings (exposure, gain, white balance … changed live while the camera runs); the Industrial cameras
+dialog (GenICam / vendor SDK backends and GenTL producer files)."""
 
 from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPen
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGraphicsRectItem,
-                               QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+                               QFormLayout, QGraphicsRectItem, QGridLayout, QHBoxLayout, QLabel, QListWidget,
+                               QPushButton, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
+from ...core import camsources
 from ...core.camera import CameraView, merge_frames
+from ...core.camhw import (ADJUSTED, CONTROLS, OK, PIXEL_FORMATS, UNSUPPORTED, CameraHardware, describe_report)
 from ..widgets import FrameView
+
+_SLIDER_STEPS = 1000
+
+
+class HardwarePanel(QWidget):
+    """Camera hardware settings: a row per control (Auto check box, slider, value — "Camera default" leaves the
+    camera's own setting) and, for GenICam cameras, pixel format and external trigger.
+
+    ``camera`` is the open camera (VideoSource / NativeCamera: hardware_controls, apply_hardware,
+    reset_hardware) or None; with a camera every change is applied at once and its result shown, and
+    :meth:`restore` puts back the settings the dialog started with (Cancel)."""
+
+    def __init__(self, hardware: CameraHardware | dict | None = None, camera=None, genicam: bool = False,
+                 parent=None):
+        super().__init__(parent)
+        self.initial = hardware if isinstance(hardware, CameraHardware) else CameraHardware.from_dict(hardware)
+        self.hw = self.initial.to_dict()
+        self.camera = camera
+        self.changed_live = False
+        self._loading = True
+        info = {}
+        if camera is not None:
+            try:
+                info = {c.name: c for c in camera.hardware_controls()}
+            except Exception:
+                info = {}
+        try:
+            self.defaults = camera.current_hardware().to_dict() if camera is not None else {}
+        except Exception:
+            self.defaults = {}
+
+        grid = QGridLayout(self)
+        grid.setColumnStretch(2, 1)
+        for col, txt in enumerate(("", "Auto", "", "Value", "")):
+            if txt:
+                grid.addWidget(QLabel(txt), 0, col)
+        self.rows = {}
+        for r, c in enumerate(CONTROLS, start=1):
+            ci = info.get(c.name)
+            lo = ci.minimum if ci is not None and ci.minimum is not None else c.range[0]
+            hi = ci.maximum if ci is not None and ci.maximum is not None else c.range[1]
+            if hi <= lo:
+                lo, hi = c.range
+            step = 10 ** -c.decimals
+            auto = None
+            if c.auto and (ci is None or ci.has_auto):
+                auto = QCheckBox()
+                auto.setToolTip(f"Automatic {c.label.lower()} (the camera adjusts it)")
+                auto.setTristate(True)
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, _SLIDER_STEPS)
+            spin = QDoubleSpinBox()
+            spin.setDecimals(c.decimals)
+            spin.setRange(lo - step, hi)  # the minimum shows "Camera default"
+            spin.setSingleStep(max(step, (hi - lo) / 100) if c.decimals else max(1.0, round((hi - lo) / 100)))
+            spin.setSpecialValueText("Camera default")
+            spin.setMinimumWidth(130)
+            status = QLabel()
+            status.setObjectName("Hint")
+            lbl = QLabel(c.label)
+            grid.addWidget(lbl, r, 0)
+            if auto is not None:
+                grid.addWidget(auto, r, 1)
+            grid.addWidget(slider, r, 2)
+            grid.addWidget(spin, r, 3)
+            grid.addWidget(status, r, 4)
+            row = {"control": c, "auto": auto, "slider": slider, "spin": spin, "status": status, "lo": lo,
+                   "hi": hi, "step": step, "label": lbl}
+            self.rows[c.name] = row
+            if ci is not None:
+                cur = "" if ci.value is None else f"camera: {ci.value:g}"
+                status.setText(cur)
+                if ci.supported is False:
+                    self._mark(c.name, UNSUPPORTED)
+            spin.valueChanged.connect(lambda v, n=c.name: self._spin_changed(n))
+            slider.valueChanged.connect(lambda v, n=c.name: self._slider_changed(n))
+            if auto is not None:
+                auto.stateChanged.connect(lambda st, n=c.name: self._auto_changed(n))
+        r = len(CONTROLS) + 1
+        self.pixel_format = self.trigger = self.trigger_source = None
+        if genicam:
+            self.pixel_format = QComboBox()
+            self.pixel_format.addItem("Camera default", None)
+            for f in PIXEL_FORMATS:
+                self.pixel_format.addItem(f, f)
+            self.trigger = QComboBox()
+            self.trigger.addItem("Camera default", None)
+            self.trigger.addItem("Off (free running)", False)
+            self.trigger.addItem("On: one frame per external trigger", True)
+            self.trigger_source = QComboBox()
+            self.trigger_source.setEditable(True)
+            self.trigger_source.addItem("Camera default", None)
+            for ln in ("Line0", "Line1", "Line2", "Line3", "Software"):
+                self.trigger_source.addItem(ln, ln)
+            for lbl, w in (("Pixel format", self.pixel_format), ("External trigger", self.trigger),
+                           ("Trigger input", self.trigger_source)):
+                grid.addWidget(QLabel(lbl), r, 0)
+                grid.addWidget(w, r, 2, 1, 2)
+                r += 1
+        self.reset_btn = QPushButton("Reset to camera defaults")
+        self.reset_btn.setToolTip("Forget these settings: the camera uses its own (as when it was opened)")
+        self.reset_btn.clicked.connect(self.reset)
+        self.report = QLabel()
+        self.report.setWordWrap(True)
+        self.report.setObjectName("Hint")
+        grid.addWidget(self.reset_btn, r, 0, 1, 2)
+        grid.addWidget(self.report, r + 1, 0, 1, 5)
+        hint = QLabel("Values are in the camera's own units (driver units for webcams and capture cards; µs of "
+                      "exposure and dB of gain for most industrial cameras). "
+                      + ("Changes apply to the running camera at once." if camera is not None else
+                         "Turn the camera image on to see changes at once; they apply when the camera opens."))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:palette(mid)")
+        grid.addWidget(hint, r + 2, 0, 1, 5)
+        self._load()
+        if genicam:
+            for w in (self.pixel_format, self.trigger):
+                w.currentIndexChanged.connect(self._genicam_changed)
+            self.trigger_source.currentTextChanged.connect(self._genicam_changed)
+        self._loading = False
+
+    # ---- widgets ↔ settings
+    def _slider_pos(self, name: str, v: float) -> int:
+        row = self.rows[name]
+        return int(round((v - row["lo"]) / max(1e-9, row["hi"] - row["lo"]) * _SLIDER_STEPS))
+
+    def _load(self):
+        self._loading = True
+        for name, row in self.rows.items():
+            c = row["control"]
+            v = self.hw.get(name)
+            row["spin"].setValue(row["spin"].minimum() if v is None else v)
+            row["slider"].setValue(0 if v is None else self._slider_pos(name, v))
+            if row["auto"] is not None:
+                a = self.hw.get(c.auto)
+                row["auto"].setCheckState(Qt.PartiallyChecked if a is None else Qt.Checked if a else Qt.Unchecked)
+            self._enable_row(name)
+        if self.pixel_format is not None:
+            self.pixel_format.setCurrentIndex(max(0, self.pixel_format.findData(self.hw.get("pixel_format"))))
+            self.trigger.setCurrentIndex(max(0, self.trigger.findData(self.hw.get("trigger"))))
+            src = self.hw.get("trigger_source")
+            if src and self.trigger_source.findData(src) < 0:
+                self.trigger_source.addItem(src, src)
+            self.trigger_source.setCurrentIndex(max(0, self.trigger_source.findData(src)))
+        self._loading = False
+
+    def _enable_row(self, name: str):
+        row = self.rows[name]
+        manual = row["auto"] is None or row["auto"].checkState() != Qt.Checked
+        ok = row.get("supported", True)
+        row["slider"].setEnabled(manual and ok)
+        row["spin"].setEnabled(manual and ok)
+        if row["auto"] is not None:
+            row["auto"].setEnabled(ok)
+
+    def _spin_changed(self, name: str):
+        if self._loading:
+            return
+        row = self.rows[name]
+        v = row["spin"].value()
+        value = None if v <= row["spin"].minimum() else v
+        self._loading = True
+        row["slider"].setValue(0 if value is None else self._slider_pos(name, value))
+        self._loading = False
+        self._set({name: value})
+
+    def _slider_changed(self, name: str):
+        if self._loading:
+            return
+        row = self.rows[name]
+        v = row["lo"] + row["slider"].value() / _SLIDER_STEPS * (row["hi"] - row["lo"])
+        self._loading = True
+        row["spin"].setValue(round(v, row["control"].decimals))
+        self._loading = False
+        self._set({name: row["spin"].value()})
+
+    def _auto_changed(self, name: str):
+        row = self.rows[name]
+        self._enable_row(name)
+        if self._loading:
+            return
+        st = row["auto"].checkState()
+        self._set({row["control"].auto: None if st == Qt.PartiallyChecked else st == Qt.Checked})
+
+    def _genicam_changed(self, *_):
+        if self._loading:
+            return
+        src = self.trigger_source.currentData() if self.trigger_source.currentIndex() > 0 else None
+        text = self.trigger_source.currentText().strip()
+        if self.trigger_source.currentIndex() <= 0 and text and text != "Camera default":
+            src = text
+        self._set({"pixel_format": self.pixel_format.currentData(), "trigger": self.trigger.currentData(),
+                   "trigger_source": src})
+
+    def _set(self, changes: dict):
+        """Record changes (None = camera default) and apply them to the running camera."""
+        for k, v in changes.items():
+            if v is None:
+                self.hw.pop(k, None)
+            else:
+                self.hw[k] = v
+        if self.camera is None:
+            return
+        # a setting back to "Camera default" gets the value the camera had when the dialog opened
+        live = {k: (v if v is not None else self.defaults.get(k)) for k, v in changes.items()}
+        live = CameraHardware.from_dict({k: v for k, v in live.items() if v is not None})
+        if live.is_empty:
+            return
+        try:
+            report = self.camera.apply_hardware(live)
+        except Exception as e:
+            report = {k: UNSUPPORTED for k in live.to_dict()}
+            self.report.setText(f"The camera refused the change: {e}")
+        self.changed_live = True
+        self.show_report(report)
+
+    def _mark(self, name: str, status: str):
+        row = self.rows.get(name)
+        if row is None:
+            for r in self.rows.values():
+                if r["control"].auto == name:
+                    row = r
+            if row is None:
+                return
+        if status == UNSUPPORTED:
+            row["supported"] = False
+            row["status"].setText("Not supported")
+            row["status"].setToolTip("This camera / driver does not accept this setting")
+            self._enable_row(row["control"].name)
+        elif str(status).startswith(ADJUSTED):
+            row["status"].setText(f"camera used {status.split(':', 1)[1]}")
+        elif status == OK:
+            row["status"].setText("✓")
+
+    def show_report(self, report: dict):
+        for k, v in (report or {}).items():
+            self._mark(k, v)
+        txt = describe_report(report)
+        if txt:
+            self.report.setText(txt)
+
+    def reset(self):
+        """Back to the camera's own settings (forget every setting)."""
+        self.hw = {}
+        for row in self.rows.values():
+            row.pop("supported", None)
+        self._load()
+        if self.camera is not None:
+            try:
+                self.show_report(self.camera.reset_hardware())
+                self.changed_live = True
+            except Exception as e:
+                self.report.setText(f"Could not reset the camera: {e}")
+        self.report.setText("Camera defaults: the camera's own settings are used.")
+
+    def restore(self):
+        """Cancel: put the running camera back as it was when the dialog opened."""
+        if self.camera is None or not self.changed_live:
+            return
+        try:
+            self.camera.reset_hardware()
+            if not self.initial.is_empty:
+                self.camera.apply_hardware(self.initial)
+        except Exception:
+            pass
+
+    def result(self) -> CameraHardware:
+        return CameraHardware.from_dict(self.hw)
+
+
+class IndustrialCamerasDialog(QDialog):
+    """Industrial camera backends (installed or what to install) and the GenTL producer (.cti) files used by the
+    GenICam backend."""
+
+    def __init__(self, cti=(), parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Industrial cameras")
+        self.resize(640, 420)
+        v = QVBoxLayout(self)
+        intro = QLabel("GigE Vision / USB3 Vision cameras are read through their vendor's SDK. Webcams, UVC cameras "
+                       "and analogue capture cards (frame grabbers showing up as a video device) need nothing: they "
+                       "are listed as Camera 0, 1, …")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+        self.status_lbl = QLabel()
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.status_lbl)
+        v.addWidget(QLabel("GenTL producers (.cti) for the GenICam backend (harvesters):"))
+        self.cti = QListWidget()
+        for f in cti:
+            self.cti.addItem(str(f))
+        v.addWidget(self.cti, 1)
+        row = QHBoxLayout()
+        add = QPushButton("Add .cti file…")
+        add.clicked.connect(self._add)
+        rem = QPushButton("Remove")
+        rem.clicked.connect(lambda: [self.cti.takeItem(self.cti.row(i)) for i in self.cti.selectedItems()])
+        row.addWidget(add)
+        row.addWidget(rem)
+        row.addStretch(1)
+        v.addLayout(row)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self.refresh_status()
+
+    def refresh_status(self):
+        lines = []
+        for _, vendor, ok, msg in camsources.backend_status():
+            lines.append(f"{'✓' if ok else '–'} {msg if not ok else vendor + ': ' + msg}")
+        self.status_lbl.setText("\n".join(lines))
+
+    def _add(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "GenTL producer", "", "GenTL producers (*.cti);;All files (*)")
+        for p in paths:
+            if not self.cti.findItems(p, Qt.MatchExactly):
+                self.cti.addItem(p)
+
+    def files(self) -> list[str]:
+        return [self.cti.item(i).text() for i in range(self.cti.count())]
 
 
 class CameraOptionsDialog(QDialog):
     """Region of interest (drag a rectangle on the image), digital zoom / pan, rotation, flip and merging with a
-    second camera.  ``second_choices`` is a list of (label, source) for the merge."""
+    second camera.  ``second_choices`` is a list of (label, source) for the merge.
+
+    For a camera (``is_camera``, or an open ``camera`` object) a Camera settings tab holds its hardware settings
+    (:class:`HardwarePanel`; ``genicam`` adds pixel format and trigger); with an open camera they apply live and
+    Cancel puts them back."""
 
     def __init__(self, frame: np.ndarray | None, view: CameraView, second=None, layout: str = "side",
-                 second_choices=(), second_frame: np.ndarray | None = None, parent=None, title="Camera options"):
+                 second_choices=(), second_frame: np.ndarray | None = None, parent=None, title="Camera options",
+                 hardware: CameraHardware | dict | None = None, camera=None, is_camera: bool = False,
+                 genicam: bool = False):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(900, 560)
@@ -105,8 +438,21 @@ class CameraOptionsDialog(QDialog):
         bb.button(QDialogButtonBox.Reset).clicked.connect(self._reset)
         v = QVBoxLayout(self)
         v.addLayout(views, 1)
-        v.addLayout(form)
-        v.addWidget(hint)
+        self.hardware = None
+        if is_camera or camera is not None:
+            self.resize(900, 720)
+            self.tabs = QTabWidget()
+            image = QWidget()
+            iv = QVBoxLayout(image)
+            iv.addLayout(form)
+            iv.addWidget(hint)
+            self.tabs.addTab(image, "Image")
+            self.hardware = HardwarePanel(hardware, camera, genicam)
+            self.tabs.addTab(self.hardware, "Camera settings")
+            v.addWidget(self.tabs)
+        else:
+            v.addLayout(form)
+            v.addWidget(hint)
         v.addWidget(bb)
 
         self._load()
@@ -151,9 +497,18 @@ class CameraOptionsDialog(QDialog):
                                      "pan": [self.pan_x.value() / 100, self.pan_y.value() / 100]})
 
     def result(self) -> dict:
-        """{"view": CameraView dict, "second": source or None, "layout": "side" | "stack"}."""
-        return {"view": self.result_view().to_dict(), "second": self.second.currentData(),
-                "layout": self.layout_combo.currentData()}
+        """{"view": CameraView dict, "second": source or None, "layout": "side" | "stack", and for cameras
+        "hardware": CameraHardware dict}."""
+        res = {"view": self.result_view().to_dict(), "second": self.second.currentData(),
+               "layout": self.layout_combo.currentData()}
+        if self.hardware is not None:
+            res["hardware"] = self.hardware.result().to_dict()
+        return res
+
+    def reject(self):
+        if self.hardware is not None:
+            self.hardware.restore()
+        super().reject()
 
     def _full(self):
         h, w = self._base().shape[:2]
