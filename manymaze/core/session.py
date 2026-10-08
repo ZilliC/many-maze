@@ -10,6 +10,16 @@ from pathlib import Path
 
 from .video import playlist_parts, recorded_video
 
+# why a live test ended (Test.end_reason, the "Reason for test end" results column). END_ZONE is decided by the
+# analysis (AnalysisSettings.end_zone), for live and video tests alike
+END_DURATION = "Test duration reached"
+END_USER = "Stopped by user"
+END_PROCEDURE = "Ended by procedure"
+END_SOURCE = "End of the video"
+END_SOURCE_FAILED = "Camera or video failed"
+END_RECOVERED = "Interrupted (recovered after a crash)"
+END_ZONE = "Animal reached the end zone"
+
 
 class Session:
     """The defaults of sessions without a camera, procedures or crash-recovery file.  (Every session also has an
@@ -21,6 +31,7 @@ class Session:
     outputs = None  # procedures.Outputs (legacy serial port and action log)
     devices = None
     stats = None  # live.LiveStats
+    end_reason = ""  # why the test ended (END_* values), set by finish()
 
     @property
     def elapsed(self) -> float:
@@ -87,6 +98,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     if kept:  # procedure variables kept between tests: only from tests that are saved
         project.variables.update(copy.deepcopy(kept))
     test.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
+    test.end_reason = session.end_reason or END_USER
+    if getattr(project, "current_user", ""):
+        test.experimenter = project.current_user  # who ran the test
     try:
         from .workflow import refresh_status
         refresh_status(project, test)

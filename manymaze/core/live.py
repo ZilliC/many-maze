@@ -19,7 +19,7 @@ from .autosave import Autosaver
 from .geometry import body_fraction_inside
 from .measures import AnalysisSettings
 from .procedures import Outputs, ProcedureEngine
-from .session import Session
+from .session import END_DURATION, END_PROCEDURE, END_USER, Session
 from .track import Track
 from .tracking import ArenaTracker, Detection, DetectionSettings, TrackBuilder, postprocess, to_gray
 from .video import SplitRecorder, VideoRecorder
@@ -408,7 +408,8 @@ class LiveSession(_Scoring):
                "points": [p.name for p in app.points] if app else [], "keys": []}
         # the legacy serial-port Outputs is accepted in place of a DeviceManager by the engine
         self.engine = ProcedureEngine(self.procedures, self.devices if self.devices is not None else self.outputs,
-                                      on_mark=self._mark, on_end=self.finish, on_log=self._engine_log,
+                                      on_mark=self._mark, on_end=lambda: self.finish(END_PROCEDURE),
+                                      on_log=self._engine_log,
                                       variables=self.variables if self.variables is not None else {}, context=ctx,
                                       on_pause=lambda t: self.pause(), on_resume=lambda t: self.resume(),
                                       on_stimulus=self.on_stimulus,
@@ -553,7 +554,7 @@ class LiveSession(_Scoring):
             self._record(frame, t)
         self._update_engine(t, d, zones, head_zones, freezing)
         if self.duration_s and t >= self.duration_s:
-            self.finish()
+            self.finish(END_DURATION)
         elif self._autosaver is not None and t - self._autosave_last >= self.autosave_s:
             self._autosave_last = t
             self._autosaver.request()
@@ -691,10 +692,12 @@ class LiveSession(_Scoring):
                 self.warn(f"Cannot record: {e}", 0.0)
         self._call_engine(self.engine.start, 0.0, t=0.0)
 
-    def finish(self):
+    def finish(self, reason: str = END_USER):
+        """End the test (any thread); reason: why (Test.end_reason), by default stopped by the user."""
         with self.lock:
             if self.state == "finished":
                 return
+            self.end_reason = reason
             if self.state == "paused":
                 self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
                 self.pause_log.append({"t": round(self._pause_t, 3),
@@ -735,6 +738,7 @@ class LiveSession(_Scoring):
                  "pause_log": [dict(p) for p in self.pause_log], "io_events": self.io_events,
                  "log": list(self.log), "warnings": list(self.warnings),
                  "result_variables": self.result_variables,
+                 "end_reason": self.end_reason if self.state == "finished" else "",
                  "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
         d["cols"] = self._track.snapshot(n)
         return d
@@ -752,6 +756,9 @@ class LiveSession(_Scoring):
     def track(self) -> Track:
         tr = self._track.build(self.fps)
         tr.meta["source"] = "live"
+        contrast = self.tracker.animal_contrast() if self.tracker is not None else ""
+        if contrast:
+            tr.meta["animal_contrast"] = contrast
         return postprocess(tr, self.settings)
 
 
@@ -839,12 +846,13 @@ class ObservationSession(_Scoring):
         with self.lock:
             if self.state == "running" and self.duration_s and self.elapsed >= self.duration_s:
                 self._frozen = float(self.duration_s)
-                self.finish()
+                self.finish(END_DURATION)
 
-    def finish(self):
+    def finish(self, reason: str = END_USER):
         with self.lock:
             if self.state == "finished":
                 return
+            self.end_reason = reason
             if self.state == "paused":
                 self.resume()
             if self._frozen is None:

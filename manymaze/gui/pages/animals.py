@@ -336,9 +336,9 @@ class AnimalsPage(Page):
         """Column titles of the Animals sheet (kinds in self._cols)."""
         p = self.project
         self._cols = ([("number", ""), ("id", ""), ("status", ""), ("treatment", "")]
-                      + [("field", f) for f in p.animal_fields] + [("sex", ""), ("tests", "")])
+                      + [("field", f) for f in p.animal_fields] + [("sex", ""), ("tests", ""), ("notes", "")])
         titles = {"number": "Animal", "id": "Animal ID", "status": "Status", "treatment": "Treatment", "sex": "Sex",
-                  "tests": "Tests"}
+                  "tests": "Tests", "notes": "Notes"}
         return [f if k == "field" else titles[k] for k, f in self._cols]
 
     def _col_kind(self, c: int) -> str | None:
@@ -371,7 +371,7 @@ class AnimalsPage(Page):
         fm = self.table.fontMetrics()
         longest = max([len(treatment_text(p, g.name)) for g in p.groups] + [10])
         widths = {"number": 80, "id": 150, "status": 130, "treatment": min(320, 60 + 9 * longest), "sex": 120,
-                  "tests": 70}
+                  "tests": 70, "notes": 260}
         for c, (k, f) in enumerate(self._cols):
             hh.setSectionResizeMode(c, QHeaderView.Interactive)
             self.table.setColumnWidth(c, widths.get(k) or max(130, fm.horizontalAdvance(f) + 40))
@@ -394,7 +394,9 @@ class AnimalsPage(Page):
         num.setData(Qt.UserRole, a)
         items = {"number": num, "id": self._item(a.id),
                  "status": self._item("Retired" if a.retired else "Normal"),
-                 "sex": self._item(a.sex)}
+                 "sex": self._item(a.sex), "notes": self._item(a.notes)}
+        if a.notes:
+            items["notes"].setToolTip(a.notes)
         if a.retired and a.retired_reason:
             items["status"].setToolTip(f"Retired: {a.retired_reason}")
         g = self._item(treatment_text(p, a.group) if p.blind else a.group, editable=not p.blind)
@@ -670,6 +672,11 @@ class AnimalsPage(Page):
             elif kind == "sex":
                 a.sex = text
                 self._changed()
+            elif kind == "notes":
+                if text != a.notes:
+                    a.notes = text
+                    item.setToolTip(text)
+                    self._changed()
             elif kind == "field":
                 a.fields[self._cols[item.column()][1]] = text
                 self._changed()

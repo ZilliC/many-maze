@@ -217,6 +217,7 @@ class ArenaTracker:
         self._flip_votes = [0] * max(1, settings.n_animals)
         self._history: list[list[tuple[float, float]]] = [[] for _ in range(max(1, settings.n_animals))]
         self._single_area: float | None = None
+        self.contrast_votes = [0, 0]  # frames in which the animal was lighter / darker than the background
         if settings.method == "colour":
             hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
         for c in settings.identity_colour_list():
@@ -280,8 +281,34 @@ class ArenaTracker:
         else:
             diff = cv2.absdiff(g, bg)
         thr = s.threshold if s.threshold > 0 else self._otsu(diff)
-        fg = (diff > thr).astype(np.uint8) * 255
-        return self._clean(fg)
+        fg = self._clean((diff > thr).astype(np.uint8) * 255)
+        if s.contrast not in ("dark", "light"):
+            self._vote_contrast(g, bg, fg)
+        return fg
+
+    def _vote_contrast(self, g: np.ndarray, bg: np.ndarray, fg: np.ndarray):
+        """With contrast "auto": count the frames in which the detected pixels are lighter / darker than the
+        background (see :meth:`animal_contrast`)."""
+        if not cv2.countNonZero(fg):
+            return
+        d = cv2.mean(g, mask=fg)[0] - cv2.mean(bg, mask=fg)[0]
+        if d > 0:
+            self.contrast_votes[0] += 1
+        elif d < 0:
+            self.contrast_votes[1] += 1
+
+    def animal_contrast(self) -> str:
+        """"lighter" or "darker" (than the apparatus floor): the contrast setting, or with "auto" what most frames
+        showed; "" for colour tracking or when unknown."""
+        s = self.s
+        if s.method == "colour":
+            return ""
+        if s.contrast == "light":
+            return "lighter"
+        if s.contrast == "dark" or s.method == "threshold":
+            return "darker"
+        light, dark = self.contrast_votes
+        return "" if light == dark else ("lighter" if light > dark else "darker")
 
     def _erase_thin(self, g: np.ndarray) -> np.ndarray:
         """Grey-level closing then opening that removes dark and light structures thinner than erase_thin_px
@@ -715,12 +742,14 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         if progress:
             progress(1.0)
     out = []
-    for job, bl in zip(jobs, builders):
+    for job, trk, bl in zip(jobs, trackers, builders):
         tracks = []
         for b in bl:
             tr = b.build(fps / step)
             tr.meta["video"] = str(video_path)
             tr.meta["video_start_s"] = s0.start_time_s
+            if trk.animal_contrast():
+                tr.meta["animal_contrast"] = trk.animal_contrast()
             tr.meta["decoder"] = reader.backend
             if job.settings.body_parts == "pose" and pose is not None:
                 tr.meta["pose_model"] = job.settings.pose_model

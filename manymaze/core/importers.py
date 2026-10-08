@@ -23,6 +23,7 @@ ANIMAL_ROLES = {
            r"^(rat|mouse)( id| no| number)?$"],
     "group": [r"^treatment", r"^group", r"^condition", r"^genotype"],
     "sex": [r"^sex$", r"^gender$"],
+    "notes": [r"^(animal )?notes?$", r"^comments?$", r"^remarks?$"],
 }
 TEST_ROLES = {
     "test": [r"^test( no| number| #)?$", r"^trial id$"],
@@ -132,7 +133,8 @@ def _cell(row, idx):
 
 
 def import_animals(project, header, rows, mapping: dict, extra_fields: list[int] | None = None) -> list[str]:
-    """Create / update animals from a table. Other mapped columns become custom animal fields."""
+    """Create / update animals from a table (ID, treatment, sex, notes). The extra_fields columns become custom
+    animal fields."""
     ids = []
     for r in rows:
         aid = _cell(r, mapping.get("id"))
@@ -144,6 +146,8 @@ def import_animals(project, header, rows, mapping: dict, extra_fields: list[int]
             a.group = group
         if mapping.get("sex") is not None:
             a.sex = _cell(r, mapping["sex"])
+        if mapping.get("notes") is not None:
+            a.notes = _cell(r, mapping["notes"])
         for i in extra_fields or []:
             name = header[i]
             if name not in project.animal_fields:

@@ -97,7 +97,7 @@ def test_animals_sheet_cells(win):
     page = win.goto("AnimalsPage")
     page.add_field("Animal weight")
     heads = [page.table.horizontalHeaderItem(c).text() for c in range(page.table.columnCount())]
-    assert heads == ["Animal", "Animal ID", "Status", "Treatment", "Animal weight", "Sex", "Tests"]
+    assert heads == ["Animal", "Animal ID", "Status", "Treatment", "Animal weight", "Sex", "Tests", "Notes"]
     assert page.table.item(0, 0).data(Qt.DisplayRole) == 1
     assert page.table.verticalHeader().defaultSectionSize() >= 30
     d = page.table.itemDelegate()

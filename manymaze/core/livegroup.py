@@ -12,7 +12,7 @@ from typing import Callable
 import numpy as np
 
 from .camera import SourceReader, SourceSpec
-from .session import Session
+from .session import END_SOURCE, END_SOURCE_FAILED, Session
 from .tracking import draw_tracking
 
 DEFAULT_START_KEYS = ["Space", "PageDown", "F5"]
@@ -212,7 +212,7 @@ class LiveGroup:
             s = e.session
             if s is not None and s.state != "finished":
                 e.aborted = s.state == "waiting" or not len(s.cols["t"])  # sources feed camera sessions
-                s.finish()
+                s.finish(END_SOURCE_FAILED)
 
     def source_ended(self, key: str):
         """End of a video file: running tests finish (and are saved), waiting tests are abandoned."""
@@ -222,7 +222,7 @@ class LiveGroup:
                 continue
             if s.state == "waiting":
                 e.aborted = True
-            s.finish()
+            s.finish(END_SOURCE)
 
     # ------------------------------------------------------------------ frames
     def process(self, key: str, frame: np.ndarray, ts: float):
