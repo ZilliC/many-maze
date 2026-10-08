@@ -1230,7 +1230,11 @@ maps, group heat maps, results and statistics.
   there are then no separate *path rotations*). As in ANY-maze, the distance travelled does not include where the
   animal went while hidden (no distance is counted from where it disappeared to where it reappears), path
   efficiency and tortuosity are blank when the animal was hidden, and the latency to the last mobile / immobile
-  episode is blank when there is no such episode.
+  episode is blank when there is no such episode. No turn or rotation is counted across a pause or from where the
+  animal was hidden to where it reappears; turns and rotations are found on the whole test, so the values of the
+  time bins add up to the whole test's (a rotation counts in the bin in which it is completed). An animal that was
+  never detected is neither immobile nor outside the arena. No zone exit, entry or grid crossing is counted across a
+  pause.
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
   (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
   twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
@@ -1355,7 +1359,10 @@ maps, group heat maps, results and statistics.
 | Several animals | mean inter-animal distance, time in contact |
 | Manual scoring | per behaviour: count, duration, duration %, latency, mean bout (state) or count, latency, rate (point) |
 
-The novel object and the social side can be set per test (test variables) or as experiment defaults.
+The novel object and the social side can be set per test (test variables) or as experiment defaults. Escape /
+choice / primary latencies, *found platform* and the path length to the platform count the entries the zone
+measures count (minimum entry duration, whether a start in the zone is an entry) and, when the animal never gets
+there, follow *When an event never occurs, its latency is*.
 
 #### More test-specific measures
 
@@ -1425,7 +1432,7 @@ to the selected test:
 - **Split by period**: shows one small track plot per time period (time bins, custom periods or event-anchored
   periods), all on the same colour scale. If the experiment has no periods, the test is split into quarters.
 
-Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time periods) limits the track plot and heat map to that period.
+Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time periods) limits the track plot and heat map to that period. Periods are in test time, as the results: the frames recorded while the test was paused are left out of the plots and heat maps (the whole test too).
 
 **Animated playback**: the bar under the track plot replays the track — ▶ draws the path progressively with the
 animal's current position as an orange dot (markers appear when their time is reached), at **0.25× to 16×** real
@@ -1466,10 +1473,12 @@ Available parameters:
   efficiency, mobile / immobile, time mobile / immobile, immobile episodes.
 - **Freezing**: motion (% of the body), freezing, time freezing, freezing episodes.
 - **Direction**: movement direction, turn rate, absolute turn angle, head angle, angular velocity, cumulative
-  rotation.
+  rotation. As the results: the head angle is the direction from the centre to the head (else a tracked body
+  angle, else the direction of travel), and the absolute turn angle adds up the turns while the animal is mobile.
 - **Body**: head speed, body length, body area, elongation.
 - **Each zone and zone group**: in zone, head in zone, distance to zone, time in zone, entries.
-- **Each point**: distance, head distance, near, head-to-point angle.
+- **Each point**: distance, head distance, near (the head within the point's radius when the head is tracked, as
+  the results), head-to-point angle.
 - **Each line**: distance, crossings.
 - **Each scored behaviour**: active, or count for point behaviours.
 - **Each other animal**: distance.
@@ -1622,7 +1631,9 @@ values can be shown or hidden.
   - You can also pick a test yourself. One-sample tests compare every group with a **Test value**, for example 50 %
     alternation or a discrimination index of 0.
   - **Post-hoc** offers Tukey, Bonferroni, Holm, Šidák, FDR, Dunnett (against the chosen **Control**), Games-Howell
-    or Dunn.
+    or Dunn. With repeated measures, Tukey, Games-Howell and Dunn are run as paired tests with a Bonferroni
+    correction, and Dunnett as paired tests of each condition against the control (Bonferroni over those
+    comparisons); the results name the test actually run.
   - Results include the effect sizes (Cohen's d, Hedges' g, rank-biserial r, eta², omega², epsilon², Kendall's W,
     partial eta²), the descriptive statistics (n, mean, SD, SEM, 95 % CI, median, range) and assumption checks
     (Shapiro-Wilk, D'Agostino-Pearson, Levene, Brown-Forsythe, Bartlett, Fligner-Killeen).

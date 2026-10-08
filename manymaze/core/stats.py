@@ -326,6 +326,22 @@ def _error_term_posthoc(names, data, method: str, paired: bool = False, stepwise
     return out
 
 
+# post-hoc tests for independent groups only: on paired (repeated-measures) data they are run as paired tests
+# adjusted by Bonferroni (Dunnett: only the comparisons with the control)
+_UNPAIRED_ONLY = {"tukey": "bonferroni", "games_howell": "bonferroni", "dunn": "bonferroni",
+                  "dunnett": "dunnett_paired"}
+
+
+def effective_posthoc(method: str, paired: bool = False) -> str:
+    """The post-hoc test posthoc() actually runs for `method` (paired data: Tukey, Games-Howell and Dunn become
+    Bonferroni-adjusted paired tests, Dunnett paired tests of each condition against the control)."""
+    if paired and method in _UNPAIRED_ONLY:
+        return _UNPAIRED_ONLY[method]
+    if method in ERROR_TERM_POSTHOC or method in ("tukey", "games_howell", "dunn", "dunnett"):
+        return method
+    return method if method in ("bonferroni", "holm", "sidak", "fdr", "none") else "bonferroni"
+
+
 @_quiet
 def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: bool = True, paired: bool = False,
             control: str | None = None) -> list[dict]:
@@ -334,7 +350,9 @@ def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: 
     tukey / games_howell / dunnett (vs `control`, default first group) / dunn; the ANOVA-error-term tests lsd
     (Fisher's LSD), scheffe, snk (Student-Newman-Keuls) and duncan (Duncan's multiple range test; these use the
     repeated-measures error term when paired); or pairwise tests (t-tests, Welch t, paired t; Mann-Whitney / Wilcoxon
-    when non-parametric) adjusted by bonferroni / holm / sidak / fdr.
+    when non-parametric) adjusted by bonferroni / holm / sidak / fdr. Tukey, Games-Howell and Dunn assume
+    independent groups: on paired data they run as Bonferroni-adjusted paired tests, and Dunnett as paired tests
+    of each condition against the control (Bonferroni over those k - 1 tests); see effective_posthoc().
     """
     names = [k for k, v in groups.items() if len(_clean(v)) > 0]
     data = _clean_rows([groups[k] for k in names]) if paired else [_clean(groups[k]) for k in names]
@@ -360,8 +378,12 @@ def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: 
         return [{"a": names[i], "b": names[ci], "diff": float(data[i].mean() - data[ci].mean()),
                  "p": float(p), "test": "Dunnett"} for i, p in zip(others, r.pvalue)]
     adjust = method if method in ("bonferroni", "holm", "sidak", "fdr", "none") else "bonferroni"
+    combos = list(itertools.combinations(range(len(data)), 2))
+    if method == "dunnett":  # paired: the conditions against the control only (Bonferroni over k - 1 tests)
+        ci = names.index(control) if control in names else 0
+        combos = [(i, ci) for i in range(len(data)) if i != ci]
     pairs, ps = [], []
-    for i, j in itertools.combinations(range(len(data)), 2):
+    for i, j in combos:
         a, b = data[i], data[j]
         if paired:
             if parametric:
@@ -377,7 +399,8 @@ def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: 
     adj = p_adjust(ps, adjust)
     label = "Mann-Whitney (Bonferroni)" if (not parametric and not paired and adjust == "bonferroni") else None
     return [{"a": names[i], "b": names[j], "diff": float(data[i].mean() - data[j].mean()), "p": float(pa),
-             "p_unadjusted": float(pu), "test": label or f"{name} ({_ADJ_NAMES[adjust]})"}
+             "p_unadjusted": float(pu),
+             "test": label or f"{name}{' vs control' if method == 'dunnett' else ''} ({_ADJ_NAMES[adjust]})"}
             for (i, j, name), pa, pu in zip(pairs, adj, ps)]
 
 
@@ -564,8 +587,12 @@ def compare_groups(groups: "dict[str, np.ndarray]", parametric: bool = True, pai
                                "omega²": float((ssb - (k - 1) * msw) / (sst + msw)) if msw == msw and sst > 0
                                else math.nan}
     elif method == "median":
-        r = sps.median_test(*data)
-        out.update(test="Mood's median test", statistic=float(r.statistic), p=float(r.pvalue), df=k - 1)
+        try:
+            r = sps.median_test(*data)
+            stat, pv = float(r.statistic), float(r.pvalue)
+        except ValueError:  # all values on one side of the grand median (e.g. constant data): undefined
+            stat = pv = math.nan
+        out.update(test="Mood's median test", statistic=stat, p=pv, df=k - 1)
         default_ph = "bonferroni"
     else:
         r = sps.kruskal(*data)
@@ -583,7 +610,8 @@ def compare_groups(groups: "dict[str, np.ndarray]", parametric: bool = True, pai
                                          control=control)
         except Exception as e:  # pragma: no cover - surfaced in the result
             out["posthoc_error"] = str(e)
-    out["posthoc_method"] = ph
+    # the test actually run (e.g. Tukey on paired data is run as Bonferroni-adjusted paired tests)
+    out["posthoc_method"] = effective_posthoc(ph, paired) if ph not in ("none", "mw_bonferroni") else ph
     return out
 
 
