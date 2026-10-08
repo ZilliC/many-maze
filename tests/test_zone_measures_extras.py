@@ -125,7 +125,7 @@ def test_investigation_measures():
     assert res["Investigated zones"] == "Object"
     assert res["Other: investigation bouts"] == 0
     assert res["Other: latency to first investigation (s)"] == res["Test duration (s)"]
-    assert res["Other: distance before first investigation (cm)"] == res["Total distance (cm)"]
+    assert math.isnan(res["Other: distance before first investigation (cm)"])  # as ANY-maze: undefined
     # the animal stands still while investigating, apart from the last approach steps
     assert res["Object: time immobile while investigating (s)"] > 2.0
     assert res["Object: time mobile while investigating (s)"] + res["Object: time immobile while investigating (s)"] \
@@ -161,7 +161,7 @@ def test_head_measures():
     assert res["Z: time head in zone with centre outside (s)"] >= 2.0
     # steps into frames with the head in the zone: 2 on the way in, 1 on the way out (85/29 px each)
     assert res["Z: head distance (cm)"] == pytest.approx(3 * 85 / 29 / 10, abs=0.02)
-    assert res["Z: min head distance from zone when outside (cm)"] < 0.5
+    assert res["Z: min head distance from zone (cm)"] == 0  # as ANY-maze: the head entered the zone
     assert res["Z: max head distance from zone (cm)"] == pytest.approx(8.0, abs=0.01)  # head 80 px away
     assert res["Z: mean head distance to border when inside (cm)"] <= 0.5
     # inside, the centre and head distances to the border
@@ -172,7 +172,7 @@ def test_head_measures():
     assert res["Big: min distance to border when inside (cm)"] == pytest.approx(10.0)
     assert res["Big: mean head distance to border when inside (cm)"] == pytest.approx(9.0)
     assert res["Big: mean head distance from zone (cm)"] == 0
-    assert math.isnan(res["Big: max head distance from zone (cm)"])
+    assert res["Big: max head distance from zone (cm)"] == 0  # as ANY-maze: the head never left the zone
     assert res["Big: latency to first head exit (s)"] == res["Test duration (s)"]
 
 
@@ -189,14 +189,14 @@ def test_towards_away_and_heading_errors():
     assert res["B: time moving away (s)"] == pytest.approx(49 / FPS, abs=0.1)
     assert res["B: initial heading error (deg)"] == 0 and res["B: signed initial heading error (deg)"] == 0
     assert res["B: mean absolute heading error (deg)"] == pytest.approx(90, abs=3)
-    # setting off 45 deg clockwise (on screen) of the zone direction
+    # setting off 45 deg clockwise (on screen) of the zone direction: the zone is to the animal's left
     pts2 = line((50, 200), (150, 300), 50)
     res2 = analyse(make_track(pts2, head=False), app, S)
-    assert res2["B: signed initial heading error (deg)"] == pytest.approx(45, abs=0.5)
+    assert res2["B: signed initial heading error (deg)"] == pytest.approx(-45, abs=0.5)  # zone to its left
     assert res2["B: initial heading error (deg)"] == pytest.approx(45, abs=0.5)
     pts3 = line((50, 200), (150, 100), 50)
     res3 = analyse(make_track(pts3, head=False), app, S)
-    assert res3["B: signed initial heading error (deg)"] == pytest.approx(-45, abs=0.5)
+    assert res3["B: signed initial heading error (deg)"] == pytest.approx(45, abs=0.5)  # zone to its right
     assert res3["B: initial heading error (deg)"] == pytest.approx(45, abs=0.5)  # ANY-maze: the absolute angle
 
 
@@ -235,9 +235,9 @@ def test_cipl_straight_vs_detour():
     c2 = analyse(make_track(detour, head=False), app, S)["Goal: corrected integrated path length (cm·s)"]
     assert abs(c1) < 3.0  # sampled once a second, a straight swim at constant speed is (almost) ideal
     assert c2 > 20 + c1
-    # never reaching the zone: still defined; never moving: not
-    assert math.isfinite(analyse(make_track(line((50, 200), (50, 50), 100), head=False), app, S)
-                         ["Goal: corrected integrated path length (cm·s)"])
+    # as ANY-maze: undefined when the animal never reaches the zone (or never moves)
+    assert math.isnan(analyse(make_track(line((50, 200), (50, 50), 100), head=False), app, S)
+                      ["Goal: corrected integrated path length (cm·s)"])
     assert math.isnan(analyse(make_track(hold((50, 200), 100), head=False), app, S)
                       ["Goal: corrected integrated path length (cm·s)"])
 

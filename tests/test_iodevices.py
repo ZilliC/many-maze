@@ -193,7 +193,8 @@ def test_io_measures():
     assert m["pellet: times on"] == 1 and m["pellet: pellets dispensed"] == 1
     assert m["pellet: time on (s)"] == pytest.approx(0.05)
     assert m["wheel: encoder counts"] == 250 and m["wheel: revolutions"] == 2.5
-    assert m["wheel: distance (cm)"] == 100 and m["wheel: max rate (counts/s)"] == 250
+    # as ANY-maze: complete rotations (2) × the circumference
+    assert m["wheel: distance (cm)"] == 80 and m["wheel: max rate (counts/s)"] == 250
     assert m["wheel: mean rate (rev/min)"] == 25
     assert m["force: mean"] == 25 and m["force: min"] == 10 and m["force: max"] == 40
     assert m["sw: times on"] == 1 and m["sw: time on (s)"] == 5.5 and m["sw: latency to first on (s)"] == 0.5

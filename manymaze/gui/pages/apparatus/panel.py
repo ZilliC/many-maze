@@ -287,8 +287,13 @@ class PropertyPanel(QFrame):
                                  tip="An entry only counts once the animal is oriented towards the zone: its body "
                                      "orientation within this angle of the direction to the zone centre (0 = off)")
         self.zone_orient.valueChanged.connect(lambda v: self._set("zone", entry_orientation_deg=float(v)))
+        self.zone_whishaw = _spin(QDoubleSpinBox(), 0, 10000, 1, "Whishaw's corridor: ",
+                                  special="No Whishaw's corridor",
+                                  tip="Width of the zone's Whishaw's corridor, a band from the animal's start "
+                                      "position to the zone centre (time and distance in the corridor; 0 = none)")
+        self.zone_whishaw.valueChanged.connect(lambda v: self._set("zone", whishaw_width_cm=float(v)))
         for wdg in (self.zone_hidden, self.zone_moveable, self.zone_rule, self.zone_frac, self.zone_inv,
-                    self.zone_orient):
+                    self.zone_orient, self.zone_whishaw):
             zl.addWidget(wdg)
         self.btn_zone_dup = QPushButton("Duplicate")
         self.btn_zone_dup.clicked.connect(lambda: page.duplicate_zone(sec.row))
@@ -528,7 +533,7 @@ class PropertyPanel(QFrame):
             z = self.selected("zone")
             self.zone.show(z)
             for w in (self.btn_zone_dup, self.btn_zone_arena, self.btn_zone_del, self.zone_rule, self.zone_inv,
-                      self.zone_hidden, self.zone_moveable, self.zone_orient):
+                      self.zone_hidden, self.zone_moveable, self.zone_orient, self.zone_whishaw):
                 w.setEnabled(z is not None)
             self.zone_info.setText(describe_shape(z.shape, app) if z else "—")
             self.zone_rule.setCurrentIndex(max(0, self.zone_rule.findData(z.entry_rule if z else "")))
@@ -539,6 +544,8 @@ class PropertyPanel(QFrame):
             self.zone_inv.setValue(z.investigation_distance_cm if z else 0.0)
             self.zone_inv.setSuffix(f" {app.unit}" if app is not None else " cm")
             self.zone_orient.setValue(int(round(z.entry_orientation_deg)) if z else 0)
+            self.zone_whishaw.setValue(z.whishaw_width_cm if z else 0.0)
+            self.zone_whishaw.setSuffix(f" wide ({app.unit})" if app is not None else " wide (cm)")
             self.zone_hidden.setChecked(bool(z and z.hidden))
             self.zone_moveable.setChecked(bool(z and z.moveable))
             self.btn_grid_del.setVisible(z is not None and any(z.name in g.zones for g in app.grids))

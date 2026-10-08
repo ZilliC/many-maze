@@ -304,11 +304,10 @@ def test_route_to_zone_measures():
     assert r["Goal: latency to first entry (s)"] == pytest.approx(6.0)
     assert r["Goal: distance before first entry (px)"] == pytest.approx(60.0)
     assert r["Goal: path efficiency to first entry"] == pytest.approx(1.0)
-    # as ANY-maze: the mean distance to the zone's nearest edge over the frames outside it
-    out = (x < 60) | (x >= 80)  # the rectangle is half-open: x = 80 is outside (at 0 from its edge)
-    d = np.where(x < 60, 60 - x, x - 80)
-    assert r["Goal: mean distance from zone (px)"] == pytest.approx(d[out].mean(), abs=0.01)
-    assert r["Far: distance before first entry (px)"] == pytest.approx(r["Total distance (px)"])
+    # as ANY-maze: the distance to the zone's nearest edge while outside (0 inside), weighted by time, over the test
+    d = np.where((x >= 60) & (x <= 80), 0.0, np.where(x < 60, 60 - x, x - 80))
+    assert r["Goal: mean distance from zone (px)"] == pytest.approx(d.mean(), abs=0.01)
+    assert math.isnan(r["Far: distance before first entry (px)"])  # as ANY-maze: undefined if never entered
     assert math.isnan(r["Far: path efficiency to first entry"])
     # a detour halves the efficiency
     y = np.where(x < 30, 50 + x, 50 + 60 - x)  # up 30 px, then back down by the time it reaches x = 60
@@ -525,7 +524,7 @@ def test_episode_exit_and_first_zone_measures():
     assert r["Total line crossings"] == r["Mid: crossings"] + r["Quarter: crossings"] == 2
     assert r["Right: initial distance from zone (cm)"] == pytest.approx(230, abs=1)
     assert r["Right: max distance from zone (cm)"] == pytest.approx(230, abs=1)
-    assert 0 < r["Right: min distance from zone when outside (cm)"] < 30
+    assert r["Right: min distance from zone (cm)"] == 0  # as ANY-maze: 0 once the animal entered the zone
     assert r["Mobile episodes"] == 2
     assert r["Shortest mobile episode (s)"] <= r["Longest mobile episode (s)"]
     assert r["Shortest immobile episode (s)"] <= r["Longest immobile episode (s)"]

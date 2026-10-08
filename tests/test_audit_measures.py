@@ -15,6 +15,7 @@ from manymaze.core.geometry import rect
 from manymaze.core.iomeasures import io_measures
 from manymaze.core.measures import AnalysisSettings, analyse
 from manymaze.core.project import Behaviour
+from manymaze.core.track import Track
 
 from test_zone_measures_extras import FPS, S, box_app, hold, line, make_track, nums
 
@@ -52,8 +53,9 @@ def test_average_position():
     app = box_app()
     pts = np.vstack([hold((100, 100), 50), hold((300, 200), 50)])
     res = analyse(make_track(pts, head=False), app, S)
-    assert res["Average position X (cm)"] == pytest.approx(20.0, abs=0.01)  # 10 px / cm
-    assert res["Average position Y (cm)"] == pytest.approx(15.0, abs=0.01)
+    # as ANY-maze: % of the apparatus width / height from its left / top side, weighted by time
+    assert res["Average X position (%)"] == pytest.approx(50.0, abs=0.01)
+    assert res["Average Y position (%)"] == pytest.approx(37.5, abs=0.01)
 
 
 def _circling(n_turns=3, n=300, r=50.0):
@@ -70,12 +72,16 @@ def test_total_rotations_and_body_orientation():
     assert res["Rotations anticlockwise"] == 2 and res["Rotations clockwise"] == 0
     assert res["Total rotations"] == 2
     assert res["Path rotations clockwise"] >= 2
-    # no body angle, but head and tail tracked: the tail → head axis is the body orientation
-    tr = make_track(pts, angle=body)
-    tr.angle[:] = np.nan
+    # as ANY-maze, the body is the vector from the centre to the head: a tracked body angle disagreeing with it
+    # is not used when the head is tracked
+    tr = make_track(pts, angle=body.copy())
+    tr.angle[:] = 0.0
     res2 = analyse(tr, app, S)
     assert res2["Rotations anticlockwise"] == 2 and res2["Total rotations"] == 2
     assert "Path rotations clockwise" in res2
+    # no head: the tracked body angle (e.g. an imported orientation)
+    tr_a = Track(t=np.arange(len(pts)) / FPS, x=pts[:, 0], y=pts[:, 1], angle=body, fps=FPS)
+    assert analyse(tr_a, app, S)["Rotations anticlockwise"] == 2
     # nothing but the centre: the direction of travel
     res3 = analyse(make_track(pts, head=False), app, S)
     assert res3["Rotations clockwise"] >= 2 and res3["Total rotations"] == res3["Rotations clockwise"]
@@ -97,19 +103,22 @@ def test_zone_activity():
     assert "A: time active (s)" not in analyse(make_track(walk_a_then_b(), head=False), app, S)
 
 
-def test_mean_distance_from_zone_only_while_outside():
+def test_mean_distance_from_zone_time_weighted_over_the_period():
     app = box_app(Zone("G", rect(0, 0, 100, 400)))
-    pts = np.vstack([hold((50, 200), 100), hold((300, 200), 100)])  # half the time inside, then 200 px away
+    # 1 s inside, 3 s 200 px (20 cm) away, 1 s 100 px away: ANY-maze sums distance × time while outside and divides
+    # by the whole period (so an animal inside the zone all the time is 0 from it)
+    pts = np.vstack([hold((50, 200), 25), hold((300, 200), 75), hold((200, 200), 25)])
     res = analyse(make_track(pts, head=False), app, S)
-    assert res["G: mean distance from zone (cm)"] == pytest.approx(20.0, abs=0.01)  # not 10 (inside = 0)
-    assert math.isnan(analyse(make_track(hold((50, 200), 50), head=False), app, S)["G: mean distance from zone (cm)"])
+    assert res["G: mean distance from zone (cm)"] == pytest.approx((20 * 3 + 10 * 1) / 5, abs=0.01)
+    assert analyse(make_track(hold((50, 200), 50), head=False), app, S)["G: mean distance from zone (cm)"] == 0
 
 
 def test_initial_heading_error_absolute_and_signed():
     app = box_app(Zone("B", rect(300, 150, 50, 100)))
     res = analyse(make_track(line((50, 200), (150, 100), 50), head=False), app, S)
     assert res["B: initial heading error (deg)"] == pytest.approx(45, abs=0.5)
-    assert res["B: signed initial heading error (deg)"] == pytest.approx(-45, abs=0.5)
+    # heading up-right, zone straight right: as ANY-maze, positive = the zone is to the animal's right
+    assert res["B: signed initial heading error (deg)"] == pytest.approx(45, abs=0.5)
     assert "B: initial absolute heading error (deg)" not in res
 
 
@@ -120,16 +129,19 @@ def test_whishaw_corridor_seconds_and_any_zone():
     res = analyse(make_track(straight, head=False), app, AnalysisSettings())
     assert res["Whishaw corridor time (%)"] == 100
     assert res["Whishaw corridor time (s)"] > 2.0
-    # any zone: the corridor from the release point to the zone centre, up to the first entry
-    app2 = box_app(Zone("Goal", rect(340, 180, 40, 40)))
-    direct = np.vstack([line((50, 200), (360, 200), 50), hold((360, 200), 25)])
-    r = analyse(make_track(direct, head=False), app2, S)
-    assert r["Goal: Whishaw corridor time (%)"] == 100 and r["Goal: Whishaw corridor path (%)"] == 100
-    assert r["Goal: Whishaw corridor time (s)"] == pytest.approx(r["Goal: latency to first entry (s)"], abs=0.05)
-    detour = np.vstack([line((50, 200), (200, 395), 50), line((200, 395), (360, 200), 50)])  # corridor: 20 cm
-    r2 = analyse(make_track(detour, head=False), app2, S)
-    assert r2["Goal: Whishaw corridor time (%)"] < 50
-    assert r2["Goal: Whishaw corridor distance (cm)"] < 0.5 * r2["Total distance (cm)"]
+    # any zone with a corridor width (as ANY-maze): from the animal's start position to the zone centre, the time
+    # spent and the distance travelled in it over the whole period
+    goal = Zone("Goal", rect(340, 180, 40, 40), whishaw_width_cm=10.0)
+    app2 = box_app(goal, Zone("Plain", rect(0, 0, 40, 40)))
+    pts = np.vstack([line((50, 200), (360, 200), 50), hold((360, 200), 25),  # straight there, wait 1 s
+                     line((360, 200), (360, 50), 25)])  # leave the corridor sideways
+    r = analyse(make_track(pts, head=False), app2, S)
+    assert "Plain: time in Whishaw's corridor (s)" not in r
+    # 75 frames on the way and waiting, then 9 frames (up to 50 px = 5 cm sideways) leaving
+    assert r["Goal: time in Whishaw's corridor (s)"] == pytest.approx(84 / FPS, abs=1e-3)
+    # the step out of the corridor counts, the step into it not (as the distance in a zone)
+    assert r["Goal: distance in Whishaw's corridor (cm)"] == pytest.approx(31.0 + 5.0 + 0.625, abs=0.1)
+    assert Zone.from_dict(goal.to_dict()).whishaw_width_cm == 10.0
 
 
 def test_grid_cells_get_the_advanced_zone_measures():
@@ -212,7 +224,9 @@ def test_encoder_total_rotations_and_max_rpm():
         ev.append(E(5 + i / 10, "wheel", v, "input", typ="encoder"))
     m = io_measures(ev, 10.0, devices=cfg)
     assert m["wheel: revolutions"] == 1.3  # net
-    assert m["wheel: total rotations"] == pytest.approx(3.7)  # 2.5 + 1.2, either direction
+    # ANY-maze's number of rotations: complete rotations in either direction (2 clockwise + 1 anticlockwise)
+    assert m["wheel: total rotations"] == 3
+    # maximum RPM: counts over windows of at least 0.2 s, averaged over 10 windows - 125 counts/s at the fastest
     assert m["wheel: max rate (rev/min)"] == pytest.approx(125 / 100 * 60)
 
 
@@ -230,14 +244,14 @@ def test_devices_per_zone():
     assert res["lever in A: activations"] == 1 and res["lever in B: activations"] == 1
     assert res["lever in A: time on (s)"] == pytest.approx(0.5, abs=0.05)
     assert res["lever in B: latency to first activation (s)"] == pytest.approx(6.0)
-    assert res["lever in A: activations per minute"] == pytest.approx(7.5)
+    assert res["lever in A: activations per minute"] == pytest.approx(15.0)  # 1 activation in 4 s in the zone
     assert res["pellet in A: pellets dispensed"] == 1 and res["pellet in B: pellets dispensed"] == 0
     assert res["Shocker shock in B: shocks"] == 1 and res["Shocker shock in A: shocks"] == 0
     assert res["Shocker shock in A: latency to first shock (s)"] == pytest.approx(8.0)  # never: the test length
     assert res["laser in A: time on (s)"] == pytest.approx(4.0, abs=0.05)
     assert res["laser in B: time on (s)"] == pytest.approx(2.0, abs=0.05)
     assert res["wheel in A: encoder counts"] == 50 and res["wheel in B: encoder counts"] == 200
-    assert res["wheel in B: total rotations"] == 2.0
+    assert res["wheel in B: total rotations"] == 2
 
 
 def test_keys_per_zone():
@@ -249,7 +263,8 @@ def test_keys_per_zone():
     pts = np.vstack([line((50, 200), (150, 200), 100), line((250, 200), (350, 200), 100)])
     res = analyse(make_track(pts, head=False), app, s, events=ev, behaviours=beh)
     assert res["Groom in A: count"] == 2 and res["Groom in B: count"] == 1
-    assert res["Groom in A: longest bout (s)"] == 1.0 and res["Groom in A: shortest bout (s)"] == 0.5
+    assert res["Groom in A: longest bout (s)"] == pytest.approx(1.0, abs=0.05)
+    assert res["Groom in A: shortest bout (s)"] == pytest.approx(0.5, abs=0.05)
     assert res["Groom in A: latency to first release (s)"] == 1.5
     assert res["Groom in B: latency to first release (s)"] == 7.0
     assert nums(res["Groom in A: press durations (s)"]) == [0.5, 1.0]
@@ -269,7 +284,7 @@ def test_whole_test_measures_are_general():
     names = {"zones": {"A"}, "points": set(), "lines": set(), "behaviours": set(), "io": set()}
     for col in ("Mobile episodes", "Latency to last mobile episode (s)", "Longest mobile episode (s)",
                 "Mean speed when not hidden (cm/s)", "Path tortuosity", "First zone entered", "Visited zones",
-                "Total rotations", "Average position X (cm)", "Time not hidden (s)", "Arena quadrant NE: time (%)",
+                "Total rotations", "Average X position (%)", "Time not hidden (s)", "Arena quadrant NE: time (%)",
                 "Zone transitions", "Total line crossings"):
         assert measure_category(col, names) == ("General", ""), col
     assert measure_category("A: time (s)", names) == ("Zones", "A")

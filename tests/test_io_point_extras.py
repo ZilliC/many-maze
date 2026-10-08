@@ -188,9 +188,9 @@ def test_encoder_extras():
     assert m["wheel: time turning (s)"] == pytest.approx(3.0)  # 0-2 s and 5-6 s
     assert m["wheel: mean rate while turning (rev/min)"] == pytest.approx((2.5 + 1.2) / 3 * 60)
     assert m["wheel: min rate while turning (rev/min)"] == pytest.approx(72.0)  # 120 counts/s in the last second
-    # jitter of a count does not make reversals
+    # as ANY-maze, every count in the other direction is a reversal (29 changes back and forth: 28 reversals)
     ev2 = [E(0.0, "wheel", 0, typ="encoder")] + [E(i / 10, "wheel", (i % 2), typ="encoder") for i in range(1, 30)]
-    assert io_measures(ev2, 5.0, devices=cfg)["wheel: reversals"] == 0
+    assert io_measures(ev2, 5.0, devices=cfg)["wheel: reversals"] == 28
     # without counts per revolution only the counts-based measures
     m = io_measures(ev, 10.0)
     assert "wheel: degrees clockwise" not in m and m["wheel: reversals"] == 1
@@ -216,7 +216,8 @@ def test_analog_baseline_and_deviations():
     assert m["force: mean deviation from baseline"] == pytest.approx((2 * 19 + 7 + 9) / 10)
     # a period
     m = io_measures(ev, 20.0, t_range=(10.0, 20.0), settings=s)
-    assert m["force: baseline"] == pytest.approx((2 * 10 + 2 * 30 + 2 * 10 + 2 + 3 * 10) / 10)
+    # as ANY-maze: the average of the samples in the baseline period (10, 30, 10, 2, 10)
+    assert m["force: baseline"] == pytest.approx((10 + 30 + 10 + 2 + 10) / 5)
 
 
 def test_analog_per_zone_visit():
