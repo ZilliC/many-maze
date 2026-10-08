@@ -10,8 +10,11 @@ can start right away — **Protocol → Experiment → Test → Results**.
   grouped like in ANY-maze (e.g. *Apparatus map*, *Navigation*, *Clipboard*, *Spreadsheet*, *All apparatus*). The
   commands change with the page you are on. The save button is at the top right (⌘S / Ctrl+S).
 * **File** (the blue tab) — new / open / demo experiment, save, close, recent experiments, *Import from ANY-maze*
-  (animals, treatments and test schedules from spreadsheets saved by ANY-maze), *Protocol report*, *Restore a
-  backup*, *Archive experiment* / *Open archive*, user guide.
+  (animals, treatments and test schedules from spreadsheets saved by ANY-maze, ANY-maze's experiment XML export and
+  zone maps — see *Importing from ANY-maze* in section 9), *Protocol report*, *Restore a backup*, *Archive
+  experiment* / *Open archive*, user guide.
+* **Help** — the user guide, *Check for updates* (asks GitHub for the latest release and offers to open its page;
+  *Check for updates at startup*, off by default, does so at most once a week) and *About*.
 * **Explorer** — the list on the left of each tab: the protocol elements (Protocol, Animal tracking, Stages, Keys,
   Procedures, Analysis, Hardware), each apparatus, the treatments and animals, the test schedule / run tests /
   review pages, the result views (Spreadsheet, Track plots, Heat maps, Charts, Video export) and the statistical
@@ -414,6 +417,12 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
   interrupted by a crash is restored (marked in its notes) the next time the experiment is opened. Recordings are
   fragmented MP4, playable up to the last fragment even if the app did not close them.
 - **Stop** ends the test early (Save keeps the data, Discard deletes the test).
+- **Adjust calibration** (ribbon ▸ Session) changes the scale of the running test — of the selected panel with
+  several tests — by typing the real length of the apparatus's calibration line or the number of pixels per cm.
+  Live distances and speeds use it at once (the distance so far is converted, positions being tracked in pixels),
+  and it is saved with the test (`zone_overrides["@calibration"]`, shown in the XML export), so the test's results
+  are calculated with it; the apparatus map and the other tests keep their calibration. The change is noted in the
+  test notes.
 
 If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
 test starts.
@@ -429,6 +438,11 @@ test starts.
    the ▶ ❚❚ ■ buttons of a row act on that test only (▶ arms, starts now or resumes).
 
 The mosaic shows every camera image with the zones, the animal, its recent path and a state label per test.
+Like ANY-maze, up to **48 cameras and 40 simultaneous apparatus** are supported (*Scan for cameras* probes camera
+numbers 0–63; *Add source ▸ Camera…* accepts any of them). **View ▸ Apparatus layout** arranges the panels in up to
+8 × 6 columns × rows, or *Automatic (fit all)*; when the panels no longer fit, the grid scrolls. Every camera is
+read in its own thread, so the frame rate each test gets depends on the computer: track at a lower camera
+resolution or frame rate when running dozens of tests.
 Each test is saved independently as soon as it finishes (track, recording, events, I/O events, procedure result
 variables, pauses). The source / session layout is saved with the experiment.
 
@@ -842,6 +856,11 @@ to the selected test:
 
 Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time periods) limits the track plot and heat map to that period.
 
+**Animated playback**: the bar under the track plot replays the track — ▶ draws the path progressively with the
+animal's current position as an orange dot (markers appear when their time is reached), at **0.25× to 16×** real
+time; drag the **time slider** to show the track up to any moment. At the end (or when paused at the end) the whole
+track is shown again. Playback is not available with *Split by period*.
+
 ### Heat maps (Results ▸ Data ▸ Heat maps)
 
 - **Heat map of**: where the animal spent its time, or only the frames where a behaviour happened: freezing, immobile,
@@ -888,6 +907,8 @@ That is 37 general parameters plus 5 per zone, 4 per point, 2 per line and 1 per
 
 Chart tools:
 
+- **Mouse wheel** over a chart zooms the time axis of all charts around the pointer (wheel forward to zoom in);
+  **double-click** or **Reset zoom** shows the whole time range again.
 - Use the matplotlib toolbar to zoom, pan and go back.
 - **Period** zooms to a time period.
 - **Measure interval**: drag across a chart to get the mean, SD, minimum, maximum (with its time) and change of every
@@ -920,7 +941,13 @@ From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", O
   Right-clicking the table also offers *Copy without headers* and *Save selected cells…*.
 - **Export → CSV file / Tab-separated text / Excel workbook**: the shown rows and columns. The Excel workbook has extra
   sheets for time periods, animals, tests and settings.
-- **Export → Selected cells…**: the selected range as CSV, TSV or xlsx (chosen by the file extension).
+- **Export → SYLK spreadsheet / dBase table**: the formats ANY-maze also offers. SYLK (`.slk`) is a text spreadsheet
+  that Excel opens directly (numbers stay numbers, the heading row is bold). dBase III (`.dbf`, readable as dBase
+  IV) is read by databases, SPSS, R (`foreign::read.dbf`), LibreOffice and GIS software: number columns become
+  numeric fields, true/false columns logical fields, other columns text (at most 254 characters); text is
+  Windows-1252 and **field names are limited to 10 characters** (e.g. `Total distance (cm)` → `TOTAL_DIST`, a second
+  one → `TOTAL_DI_2`), so keep a CSV or Excel copy for the full column names.
+- **Export → Selected cells…**: the selected range as CSV, TSV, xlsx, SYLK or dBase (chosen by the file extension).
 - **Export → Experiment as XML (with raw tracks)…**: the whole experiment in one file, described below.
 - **Export → Raw data per test (CSV)…**: one file per test and animal, with time, the raw track columns (pixels) and
   every per-frame parameter from the Charts view in calibrated units.
@@ -933,6 +960,24 @@ From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", O
   exits, key presses (on / off), I/O inputs and outputs, pauses — with the test, stage, trial and animal.
 - **HTML report…**: you can also set the heat-map scale (including one scale for all tests) and add charts of the
   parameters ticked in the Charts view.
+
+### Importing from ANY-maze
+
+ANY-maze keeps an experiment in a `.szd` file whose format is proprietary, compressed and undocumented ("virtually
+impossible for any other programs to read", says ANY-maze's help), so mANY-MAZE cannot open it directly. Export
+the data from ANY-maze instead (ANY-maze ▸ **File ▸ Export**) and import it with **File ▸ Import from ANY-maze**:
+
+| In ANY-maze | Import as | What you get |
+|---|---|---|
+| *Export zone maps* (individual or combined, CSV) | **Zone maps (apparatus zones)…** — select all the files | an apparatus per ANY-maze apparatus, with its zones traced from the pixels (border maps are filled; a moveable zone gets its first position). An existing apparatus of the same name keeps its other elements and calibration |
+| *Export experiment as XML* (with the default top-left coordinates) | **Experiment exported as XML…** | the animals (ID or *Animal N*, treatment, notes), every performed test with its stage, trial, date and time, notes, reason for ending, its track (centre, head, tail; frames without a position stay undetected) and its scaling as calibration; zones moved in a test become moveable-zone positions |
+| *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand) |
+
+Import the zone maps first: an apparatus that does not exist yet is otherwise created from the zones' bounding
+boxes (rectangles), which is all the XML export contains about zone shapes. Positions exported relative to the
+apparatus centre (ANY-maze's option) are recognised by their negative coordinates. ANY-maze's documentation names
+only the result tags of the XML file, so the other fields are recognised by name (case and separators do not
+matter); if a field of your file is not picked up, the import keeps the rest and you can complete it by hand.
 
 #### XML format (`format-version="1"`)
 
@@ -1046,7 +1091,7 @@ manymaze                                  # GUI
 manymaze demo ~/Desktop/demo.mmaze        # demo experiment
 manymaze track video.mp4 --template epm --bbox 100,40,520,520 --size-cm 75 -o results.csv
 manymaze project ~/exp.mmaze track        # batch-track untracked tests in parallel (--workers N)
-manymaze project ~/exp.mmaze results -o results.xlsx --bins
+manymaze project ~/exp.mmaze results -o results.xlsx --bins   # also .csv .tsv .slk (SYLK) .dbf (dBase) .xml
 manymaze project ~/exp.mmaze results --wide -o by_animal.xlsx   # one row per animal
 manymaze project ~/exp.mmaze report -o report.html
 manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
