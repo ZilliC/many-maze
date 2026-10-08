@@ -160,7 +160,8 @@ all cells.
 Ordered steps of zones/groups. Options: must begin at the first step (off = rotations such as ABC/BCA/CAB count —
 spontaneous alternation), other zones allowed between steps, both directions, overlapping, complete on entering or
 leaving the last step, time limit. Entering a step zone out of order is an error and ends the attempt. Measures:
-completed, attempts, incomplete, errors, completion %, latency to first, first/mean/min/max duration, mean time
+completed, attempts, incomplete, errors, completion %, latency to first (to its completion) and latency to the
+start of the first (entry into its first step), first/mean/min/max duration, mean time
 between, rate, total time in sequences, completed reversed, and the distance travelled during the completed
 sequences (from entering the first step to completing the last; total, mean, max, min) and the mean speed during
 them (total distance / total time in sequences).
@@ -928,11 +929,14 @@ latencies of things that never happen follow *When an event never occurs, its la
   more than 10°, so a count of jitter is not one); with *counts_per_rev*: **degrees clockwise / anticlockwise**
   (positive counts are clockwise; swap the encoder's A / B pins to change it), **clockwise / anticlockwise
   rotations** (completed 360° turns within each run in one direction), **half and quarter rotations** (completed
-  180° / 90° turns per run, both directions), **minimum RPM** (the slowest whole second of turning) and **mean RPM
-  while turning** (revolutions turned in either direction / time turning);
+  180° / 90° turns per run, both directions), **total rotations** (revolutions turned in either direction; the
+  *revolutions* are net, clockwise positive), **maximum RPM** (the fastest whole second of the period), **minimum
+  RPM** (the slowest whole second of turning) and **mean RPM while turning** (revolutions turned in either
+  direction / time turning);
 * **outputs, virtual switches, sounds and touch-screen stimuli** — times on, time on, latency to first on,
-  longest / shortest time on, latency to first off, plus pellets dispensed for pellet dispensers and pulse trains /
-  pulses for optogenetic outputs;
+  longest / shortest / mean time on (the average activation duration), latency to first off, activations per
+  minute, plus pellets dispensed for pellet dispensers and pulse trains / pulses for optogenetic outputs (lasers);
+  shockers, speakers, lights, dippers and drippers also give their activations per minute;
 * **shockers, speakers and lights** have their own measure groups, named after the device type: *Shocker
   shock: shocks, time on, latency to first shock, longest / shortest / mean shock, latency to first off*;
   *Speaker tone: sounds, time on, latency to first sound, longest / shortest / mean sound, …*; *Light house: times
@@ -954,6 +958,12 @@ latencies of things that never happen follow *When an event never occurs, its la
 * **animal weight** — the weight taken with *Weigh the animal* during the test (also stored on the animal);
 * **virtual switches** — distance travelled before the first activation (in the period; the whole distance if
   never, or blank) and distance travelled while the switch is on;
+* **per zone** (and zone group) for inputs, outputs (shockers, speakers, lights, lasers, pellet dispensers…),
+  virtual switches and rotary encoders: the activations that start while the animal is in the zone (count,
+  latency to the first, activations per minute; *pellets dispensed* for pellet dispensers), the time the channel is
+  on while the animal is in the zone, and for encoders the counts (and total rotations, with *counts_per_rev*)
+  turned while the animal is in the zone — `lever in Centre: activations`, `Shocker shock in Dark: shocks`, `wheel
+  in Nest: total rotations`, …;
 * **touches** — activations per area (channel `touch <area>`);
 * **result variables** — the final value of each *Save as a test result* variable (`Variable: name`). A variable
   whose *Record the value* is *Every time it changes* or *Every time it is set* also logs each numeric value with
@@ -1008,11 +1018,15 @@ maps, group heat maps, results and statistics.
 
 ### Measures
 
-* **Whole apparatus** (~40): duration, detection %, time not detected, time hidden, distance, mean / max / mobile
-  speed, mobile & immobile time / episodes / mean & longest episode, latency to immobility, freezing (time, %,
-  episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity, meander,
-  body and path rotations, thigmotaxis, distance from wall and centre, time outside the arena, arena quadrants,
-  zone transitions, grid crossings.
+* **Whole apparatus** (~45): duration, detection %, time not detected, time hidden / not hidden, distance, mean /
+  max / mobile speed, mobile & immobile time / episodes / mean & longest episode, latency to immobility, freezing
+  (time, %, episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity,
+  meander, body and path rotations (clockwise, anticlockwise and total), average position (time-weighted mean X /
+  Y of the tracked positions, in units from the top-left of the image), thigmotaxis, distance from wall and centre,
+  time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the body
+  orientation, as in ANY-maze: the tracked body angle, else the tail → head axis when the head and tail are
+  tracked; only when neither is tracked do they follow the direction of travel (and there are then no separate
+  *path rotations*).
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
   (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
   twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
@@ -1020,7 +1034,8 @@ maps, group heat maps, results and statistics.
   speed): average freezing score (the mean motion, % of body, that freezing is detected from), time active /
   inactive, active and inactive episodes, longest / shortest active and inactive episode. The animal is active when
   its motion reaches *The animal is active when movement reaches*; inactive episodes shorter than *Shortest
-  inactive episode* count as active (Protocol ▸ Analysis ▸ Activity).
+  inactive episode* count as active (Protocol ▸ Analysis ▸ Activity). Per zone: time active / inactive in the zone
+  and inactive episodes (an episode belongs to the zone it starts in).
 * **Head** (when the head is tracked): head distance (smoothed like the centre), head turn angle — absolute,
   clockwise and anticlockwise — the cumulative change of the head direction (tail → head). A jump of more than 90°
   between two frames is a head / tail swap of the tracker and is not counted.
@@ -1035,7 +1050,8 @@ maps, group heat maps, results and statistics.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
   time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean
-  distance from the zone (0 while inside), and:
+  distance from the zone (as ANY-maze: over the frames the animal is outside it; blank if it never is), time
+  active / inactive and inactive episodes, and:
   * **visit durations** – the duration of each visit, as a comma-separated list (text, so statistics skip it);
   * **investigation** (investigation zones): bouts, time, latency to the first investigation and to its end, *was
     first zone investigated*, longest / shortest / mean bout, list of bout durations, distance and mean speed while
@@ -1048,9 +1064,10 @@ maps, group heat maps, results and statistics.
   * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
     increasing, outside it), time moving towards / away (mobile, outside, direction of travel within the
     *exploration facing angle* of the direction to the zone centre, or of the opposite direction);
-  * **heading error**: initial heading error, signed (positive = clockwise of the zone direction on screen) and
-    absolute — the direction from the first position to the position 1 s later against the direction to the zone
-    centre (blank if the animal starts in the zone) — and the mean absolute heading error while moving outside;
+  * **heading error**: *initial heading error* (absolute, 0–180°, as ANY-maze) and *signed initial heading error*
+    (positive = clockwise of the zone direction on screen) — the direction from the first position to the position
+    1 s later against the direction to the zone centre (blank if the animal starts in the zone) — and the mean
+    absolute heading error while moving outside;
   * **time oriented towards the zone centre when inside** (body orientation within the facing angle);
   * **absolute turn angle** and **absolute head turn angle** (body orientation) while in the zone;
   * **corrected integrated path length** (CIPL, Gallagher): the distance from the zone sampled every second from
@@ -1058,7 +1075,15 @@ maps, group heat maps, results and statistics.
     straight to the zone at the animal's mean speed;
   * **line crossings** while in the zone (all lines), and for **hidden zones** the number of *partial exits* (the
     animal seen between two times it is hidden in the zone, never further from it than the hidden-zone distance,
-    e.g. peeking out of the nest) and the time partially exited.
+    e.g. peeking out of the nest) and the time partially exited;
+  * **Whishaw's corridor** (zones): time (s and %), path % and distance inside a corridor from the release point
+    (a *Release point* / *Start* point, else the first position) to the zone centre, *Whishaw corridor width* wide
+    (20 cm by default), up to the first entry — as the water maze's corridor to the platform.
+
+  Grid cells get all of these except Whishaw's corridor and the distance-from-zone measures (they are not listed
+  among the visited zones). Zone groups get them all except the investigation, hidden-zone, Whishaw and
+  distance-from-zone measures: their border is the outline of their zones (an edge shared by two zones of the
+  group is not a border) and their centre is the centre of their area.
 * **Whole test** lists: **Visited zones** (in the order of their first entry) and **Investigated zones** (order of
   the first investigation), as comma-separated text.
 * **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
@@ -1076,7 +1101,10 @@ maps, group heat maps, results and statistics.
   time and episodes following, approaches / approached by.
 * **Keys** (scored behaviours): point – count, latency, rate; state and hold – count, duration, %, latency, mean &
   longest bout, rate, list of press durations (`1.5, 0.25, …`); both – distance travelled before the first press
-  (the whole distance if never pressed, or blank, as latencies); optionally per zone.
+  (the whole distance if never pressed, or blank, as latencies); optionally per zone (*Split the scored
+  behaviours by zone*): count, latency, rate, distance before the first press and, for state / hold keys,
+  duration, mean / longest / shortest bout, latency to the first release and the list of press durations (a press
+  belongs to the zone the animal was in when it started).
 * **I/O** measures (inputs, outputs, shockers, speakers, lights, encoders, analogue signals, virtual switches, OPAD)
   and **result variables** (`Variable: name`, and their recorded values) from procedures — see *I/O results*; they
   have their own *I/O* category in the measure chooser.
@@ -1103,8 +1131,8 @@ The novel object and the social side can be set per test (test variables) or as 
 
 #### More test-specific measures
 
-* **Water maze**: Whishaw corridor time, path % and distance (release point → platform, 20 cm wide) and *Left
-  Whishaw corridor*.
+* **Water maze**: Whishaw corridor time (s and %), path % and distance (release point → platform, 20 cm wide) and
+  *Left Whishaw corridor* (the same corridor is available towards any zone, see the zone measures).
 * **Novel tank diving test**: latency to top, top entries, top/bottom time %, top/bottom ratio, mean depth, erratic
   movements.
 * **Multi-well plate** (6/12/24/48/96): one apparatus per well (Well, Centre, Edge) — larval zebrafish.
