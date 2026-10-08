@@ -227,7 +227,9 @@ class PlotViewsMixin:
             options = self.video_opts.options()  # the options shown on the Video export view
         if options is None:
             dlg = VideoExportDialog(self)
-            if dlg.exec() != QDialog.Accepted:
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
                 return
             options = dlg.options()
         if path is None:

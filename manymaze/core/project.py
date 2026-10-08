@@ -312,6 +312,10 @@ class Project:
     def get_apparatus(self, name: str) -> Apparatus | None:
         return next((a for a in self.apparatus if a.name == name), self.apparatus[0] if self.apparatus else None)
 
+    def find_apparatus(self, name: str) -> Apparatus | None:
+        """The apparatus called exactly `name`, or None (no fallback to the first one, unlike get_apparatus)."""
+        return next((a for a in self.apparatus if a.name == name), None)
+
     def apparatus_of(self, test: Test) -> Apparatus | None:
         """The test's apparatus as the analysis uses it: per-test zone positions (Test.zone_overrides) applied."""
         app = self.get_apparatus(test.apparatus)

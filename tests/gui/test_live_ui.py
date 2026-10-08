@@ -41,6 +41,18 @@ def win(demo_dir, tmp_path, monkeypatch):
     w.close()
 
 
+def wait_armed(page, timeout=20.0):
+    """Tests armed while their camera / video opens get their session once it delivers images (page._tick)."""
+    import time
+
+    t0 = time.monotonic()
+    while page._pending_entries() and time.monotonic() - t0 < timeout:
+        app.processEvents()
+        page._tick()
+        time.sleep(0.02)
+    return not page._pending_entries()
+
+
 def section(w, page):
     return w.sections[w._page_section[id(page)]]
 
@@ -132,6 +144,8 @@ def test_several_tests_panels_and_explorer(win):
     # control a single panel from its toolbar, then everything from the ribbon
     page.start_mode.setCurrentIndex(page.start_mode.findData("manual"))
     page.mosaic.panels[e1.id].arm_clicked.emit()
+    assert e1.meta.get("arm_pending") and e1.session is None  # the video is opening: armed once it is open
+    assert wait_armed(page)
     assert e1.state == "waiting" and e2.state == "idle"
     page.mosaic.panels[e1.id].stop_clicked.emit()
     assert e1.state == "finished"
@@ -257,11 +271,13 @@ def test_daily_schedule_does_not_pile_up(win):
     page.start_mode.setCurrentIndex(page.start_mode.findData("scheduled"))
     page.sched_daily.setChecked(True)
     assert page.arm_all() == 1
+    assert wait_armed(page)
     assert len(page.group.schedules) == 1
     sch, ents = page.group.schedules[0], list(page._entries())
     for e in ents:
         page.group.stop(e, save=False)
     page._on_group_schedule(sch, ents)  # the next day: the finished tests are armed again and started
+    assert wait_armed(page)
     assert len(page.group.schedules) == 1
     assert all(e.session is not None and e.state != "finished" for e in ents)
     page.stop_all_clicked()  # Discard
