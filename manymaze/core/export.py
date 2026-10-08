@@ -574,7 +574,9 @@ def protocol_report(project: Project, path) -> Path:
                                            (f"investigate {z.investigation_distance_cm:g} cm",
                                             z.investigation_distance_cm > 0),
                                            (f"entry facing the zone (±{z.entry_orientation_deg:g}°)",
-                                            z.entry_orientation_deg > 0)) if on))
+                                            z.entry_orientation_deg > 0),
+                                           (f"Whishaw's corridor {z.whishaw_width_cm:g} {app.unit}",
+                                            z.whishaw_width_cm > 0)) if on))
                 for z in app.zones]))
         if app.groups:
             out.append(table(("Zone group", "Zones", "Excluding"),

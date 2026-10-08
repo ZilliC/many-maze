@@ -15,6 +15,8 @@ import numpy as np
 
 ENCODER_TURN_GAP_S = 1.0  # an encoder is turning between two samples that differ and are at most this far apart
 ENCODER_REVERSAL_DEG = 10.0  # the encoder must turn back by more than this for a reversal (filters jitter)
+ENCODER_IRV_WINDOW_S = 0.2  # instantaneous RPM (as ANY-maze): counts turned over windows of at least this length…
+ENCODER_IRV_AVERAGE = 10  # … averaged over this many windows
 DEVICE_GROUPS = {"shocker": "Shocker", "speaker": "Speaker", "light": "Light", "dipper": "Dipper",
                  "dripper": "Dripper"}
 # derived channels "<channel>.<suffix>" reported by drivers / controllers / the engine; their measures are part of
@@ -473,6 +475,47 @@ def _encoder(res, lab, ev, c, t0, t1, T):
     res[f"{lab}: time turning (s)"] = _r(t_turn)
     # reversals: the direction changes after turning back by more than ENCODER_REVERSAL_DEG (any change without a
     # counts per revolution); each run in one direction contributes its completed rotations
+    runs_cw, runs_acw, reversals = _encoder_runs(deltas, cpr)
+    res[f"{lab}: reversals"] = reversals
+    if cpr > 0:
+        revs = counts / cpr
+        res[f"{lab}: revolutions"] = _r(revs)
+        # unsigned: revolutions turned in either direction (revolutions above are net, clockwise positive)
+        res[f"{lab}: mean rate (rev/min)"] = _r(abs(revs) / (T / 60) if T > 0 else math.nan)
+        cm = float(c.get("cm_per_rev", 0) or 0)
+        if cm > 0:
+            res[f"{lab}: distance (cm)"] = _r(abs(revs) * cm, 2)
+        d = np.asarray(deltas, float)
+        res[f"{lab}: degrees clockwise"] = _r(d[d > 0].sum() * 360 / cpr, 1)
+        res[f"{lab}: degrees anticlockwise"] = _r(-d[d < 0].sum() * 360 / cpr, 1)
+        eps = 1e-9
+        n_cw = int(sum(math.floor(x / cpr + eps) for x in runs_cw))
+        n_acw = int(sum(math.floor(x / cpr + eps) for x in runs_acw))
+        res[f"{lab}: clockwise rotations"] = n_cw
+        res[f"{lab}: anticlockwise rotations"] = n_acw
+        res[f"{lab}: total rotations"] = n_cw + n_acw  # ANY-maze's number of rotations (either direction)
+        res[f"{lab}: half rotations"] = int(sum(math.floor(2 * x / cpr + eps) for x in runs_cw + runs_acw))
+        res[f"{lab}: quarter rotations"] = int(sum(math.floor(4 * x / cpr + eps) for x in runs_cw + runs_acw))
+        # minimum RPM: the slowest 1-s window of the period during which the encoder turned throughout (a change
+        # logged at t happened during the sample interval ending at t)
+        nb = max(1, int(math.ceil(T - 1e-9)))
+        fb = np.zeros(nb)
+        for (t, v), pv in zip(inside, [start] + [v for _, v in inside[:-1]]):
+            fb[min(nb - 1, max(0, int(math.ceil(t - t0 - 1e-9)) - 1))] += abs(v - pv)
+        full = [i for i in range(nb) if t0 + i + 1 <= t1 + 1e-9
+                and any(a <= t0 + i + 1e-9 and b >= t0 + i + 1 - 1e-9 for a, b in turning)]
+        moving = fb[full] if full else fb[fb > 0]
+        res[f"{lab}: min rate while turning (rev/min)"] = _r(moving.min() / cpr * 60 if len(moving) else math.nan)
+        irv = _encoder_irv(ev, t0, t1, cpr)
+        res[f"{lab}: max rate (rev/min)"] = _r(max(v for _, v in irv) if irv else 0.0)
+        res[f"{lab}: mean rate while turning (rev/min)"] = _r(np.abs(d).sum() / cpr / (t_turn / 60) if t_turn > 0
+                                                             else math.nan)
+
+
+def _encoder_runs(deltas, cpr: float) -> tuple[list, list, int]:
+    """Runs of an encoder in one direction: (counts turned in each clockwise run, in each anticlockwise run, number
+    of reversals). The direction changes after turning back by more than ENCODER_REVERSAL_DEG (any change without a
+    counts per revolution)."""
     hyst = cpr * ENCODER_REVERSAL_DEG / 360 if cpr > 0 else 0.0
     runs_cw, runs_acw = [], []
     pos, ref, ext, direction, reversals = 0.0, 0.0, 0.0, 0, 0
@@ -494,38 +537,39 @@ def _encoder(res, lab, ev, c, t0, t1, T):
         runs_cw.append(ext - ref)
     elif direction < 0:
         runs_acw.append(ref - ext)
-    res[f"{lab}: reversals"] = reversals
-    if cpr > 0:
-        revs = counts / cpr
-        res[f"{lab}: revolutions"] = _r(revs)
-        # unsigned: revolutions turned in either direction (revolutions above are net, clockwise positive)
-        res[f"{lab}: total rotations"] = _r(sum(abs(x) for x in deltas) / cpr)
-        res[f"{lab}: mean rate (rev/min)"] = _r(abs(revs) / (T / 60) if T > 0 else math.nan)
-        cm = float(c.get("cm_per_rev", 0) or 0)
-        if cm > 0:
-            res[f"{lab}: distance (cm)"] = _r(abs(revs) * cm, 2)
-        d = np.asarray(deltas, float)
-        res[f"{lab}: degrees clockwise"] = _r(d[d > 0].sum() * 360 / cpr, 1)
-        res[f"{lab}: degrees anticlockwise"] = _r(-d[d < 0].sum() * 360 / cpr, 1)
-        eps = 1e-9
-        res[f"{lab}: clockwise rotations"] = int(sum(math.floor(x / cpr + eps) for x in runs_cw))
-        res[f"{lab}: anticlockwise rotations"] = int(sum(math.floor(x / cpr + eps) for x in runs_acw))
-        res[f"{lab}: half rotations"] = int(sum(math.floor(2 * x / cpr + eps) for x in runs_cw + runs_acw))
-        res[f"{lab}: quarter rotations"] = int(sum(math.floor(4 * x / cpr + eps) for x in runs_cw + runs_acw))
-        # minimum RPM: the slowest 1-s window of the period during which the encoder turned throughout (a change
-        # logged at t happened during the sample interval ending at t)
-        nb = max(1, int(math.ceil(T - 1e-9)))
-        fb = np.zeros(nb)
-        for (t, v), pv in zip(inside, [start] + [v for _, v in inside[:-1]]):
-            fb[min(nb - 1, max(0, int(math.ceil(t - t0 - 1e-9)) - 1))] += abs(v - pv)
-        full = [i for i in range(nb) if t0 + i + 1 <= t1 + 1e-9
-                and any(a <= t0 + i + 1e-9 and b >= t0 + i + 1 - 1e-9 for a, b in turning)]
-        moving = fb[full] if full else fb[fb > 0]
-        res[f"{lab}: min rate while turning (rev/min)"] = _r(moving.min() / cpr * 60 if len(moving) else math.nan)
-        # maximum RPM: the fastest 1-s window of the period
-        res[f"{lab}: max rate (rev/min)"] = _r(fb.max() / cpr * 60 if len(fb) else math.nan)
-        res[f"{lab}: mean rate while turning (rev/min)"] = _r(np.abs(d).sum() / cpr / (t_turn / 60) if t_turn > 0
-                                                             else math.nan)
+    return runs_cw, runs_acw, reversals
+
+
+def _encoder_irv(ev, t0, t1, cpr: float) -> list[tuple[float, float]]:
+    """Instantaneous rotational velocity of an encoder (rev/min) as ANY-maze computes it, at the end of each
+    window: a window starts with a change of the count and takes the following changes in the same direction until
+    at least ENCODER_IRV_WINDOW_S has elapsed (the counts turned / the time); each value is the moving average of
+    the last ENCODER_IRV_AVERAGE windows. A change logged at t happened during the sample interval ending at t (or
+    one typical interval, after a still spell)."""
+    gaps = np.diff([t for t, _ in ev])
+    gaps = gaps[(gaps > 0) & (gaps <= ENCODER_TURN_GAP_S)]
+    typical = float(np.median(gaps)) if len(gaps) else ENCODER_TURN_GAP_S
+    raw = []  # (end time, rev/min)
+    start, counts, sign = None, 0.0, 0
+    prev_t, prev_v = None, None
+    for t, v in ev:
+        if prev_v is not None and t0 < t <= t1 and v != prev_v:
+            dv = v - prev_v
+            if start is not None and (np.sign(dv) != sign or t - prev_t > ENCODER_TURN_GAP_S):
+                start = None  # the direction changed, or the encoder stopped: the window ends with its last change
+            if start is None:
+                start = max(t0, prev_t if t - prev_t <= ENCODER_TURN_GAP_S else t - typical)
+                counts, sign = 0.0, np.sign(dv)
+            counts += abs(dv)
+            if t - start >= ENCODER_IRV_WINDOW_S - 1e-9:
+                raw.append((t, counts / cpr / (t - start) * 60))
+                start, counts = t, 0.0
+        prev_t, prev_v = t, v
+    out = []
+    for i, (t, _v) in enumerate(raw):
+        w = [v for _, v in raw[max(0, i - ENCODER_IRV_AVERAGE + 1):i + 1]]
+        out.append((t, sum(w) / len(w)))
+    return out
 
 
 def _analog(res, lab, ev, t0, t1, settings):
@@ -685,9 +729,9 @@ def io_track_measures(io_events: list, t: np.ndarray, dur: np.ndarray, step: np.
 
 def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never):
     """A device's activity per zone: the activations that start while the animal is in the zone (their count,
-    latency, rate), the time the channel is on while the animal is in the zone; pellets dispensed in the zone;
-    for a rotary encoder the counts (and, with counts per revolution, the revolutions in either direction) turned
-    while the animal is in the zone. Measures are named "<channel> in <zone>: …" (groups as in io_measures:
+    latency, and their rate per minute spent in the zone), the time the channel is on while the animal is in the
+    zone; pellets dispensed in the zone; for a rotary encoder the counts turned while the animal is in the zone
+    and, with counts per revolution, the rotations made entirely in it and the maximum RPM in it. Measures are named "<channel> in <zone>: …" (groups as in io_measures:
     "Shocker <channel> in <zone>: shocks", …)."""
     t0, t1 = float(t_range[0]), float(t_range[1])
     T = max(0.0, t1 - t0)
@@ -703,16 +747,29 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
         cpr = float(log.conf(key).get("counts_per_rev", 0) or 0)
         start = [v for x, v in ev if x <= t0]
         prev = start[-1] if start else 0.0
-        moved = []  # (frame, counts) of each change
+        moved = []  # (frame, change) of each change
         for x, v in ev:
-            if x > t0:
-                moved.append((frame(x), abs(v - prev)))
+            if x > t0 and v != prev:
+                moved.append((frame(x), v - prev))
             prev = v
+        irv = [(frame(x), v) for x, v in _encoder_irv(ev, t0, t1, cpr)] if cpr > 0 else []
         for zn, m in zones.items():
-            c = sum(d for j, d in moved if j >= 0 and m[j])
-            res[f"{lab} in {zn}: encoder counts"] = _r(c, 0)
+            inz = [j >= 0 and bool(m[j]) for j, _ in moved]
+            res[f"{lab} in {zn}: encoder counts"] = _r(sum(abs(d) for (_, d), i in zip(moved, inz) if i), 0)
             if cpr > 0:
-                res[f"{lab} in {zn}: total rotations"] = _r(c / cpr)
+                # a rotation counts in the zone when the animal was in it for the whole rotation: the runs are found
+                # in each stretch of changes made while it was in the zone
+                n_rot, seg = 0, []
+                for (_, d), i in zip(moved + [(-1, 0.0)], inz + [False]):
+                    if i:
+                        seg.append(d)
+                    elif seg:
+                        r_cw, r_acw, _ = _encoder_runs(seg, cpr)
+                        n_rot += int(sum(math.floor(x / cpr + 1e-9) for x in r_cw + r_acw))
+                        seg = []
+                res[f"{lab} in {zn}: total rotations"] = n_rot
+                vz = [v for j, v in irv if j >= 0 and m[j]]
+                res[f"{lab} in {zn}: max rate (rev/min)"] = _r(max(vz) if vz else 0.0)
         return
     if kind == "input":
         g, n_name, what = lab, "activations", "activation"
@@ -730,7 +787,8 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
         res[f"{p}: {n_name}"] = len(zo)
         res[f"{p}: time on (s)"] = _r(dur[on & m].sum())
         res[f"{p}: latency to first {what or 'on'} (s)"] = _r(zo[0] - t0 if zo else never)
-        res[f"{p}: activations per minute"] = _r(len(zo) / (T / 60) if T > 0 else math.nan)
+        tz = float(dur[m].sum())  # as ANY-maze: the activations in the zone per minute spent in the zone
+        res[f"{p}: activations per minute"] = _r(len(zo) / (tz / 60) if tz > 0 else math.nan)
         if pellets:
             res[f"{p}: pellets dispensed"] = len(zo)
 

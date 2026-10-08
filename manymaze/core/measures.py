@@ -27,7 +27,7 @@ from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
 from .pauses import drop_pauses, shift_events
 from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs, seg_moving_average, segments
-from .template_measures import TemplateData, template_measures, whishaw_corridor
+from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides
 from .track import Track
 
@@ -489,8 +489,8 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
             cw, acw = cw + c1, acw + c2
         return cw, acw
 
-    # body rotations follow the body orientation (as ANY-maze): the tracked body angle, else the tail → head axis
-    # when the head and tail are tracked; only without either do they follow the direction of travel
+    # body rotations follow the body (as ANY-maze: the vector from the centre to the head), else the tracked body
+    # angle (e.g. an imported orientation); only without either do they follow the direction of travel
     angle = _body_angle(p.track)
     body = angle is not None
     cw, acw = rotations(angle if body else h)
@@ -502,30 +502,32 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
 
 
 def _body_angle(tr: Track) -> np.ndarray | None:
-    """The body orientation (deg) used for body rotations: the tracked body angle, else the tail → head axis, or
-    None when neither is tracked (in more than 2 frames)."""
-    if np.isfinite(tr.angle).sum() > 2:
-        return tr.angle
+    """The body orientation (deg) used for body rotations: the direction from the centre to the head (ANY-maze's
+    definition), in the frames where the head is tracked, else the tracked body angle, or None when neither is
+    tracked (in more than 2 frames)."""
     with np.errstate(invalid="ignore"):
-        axis = np.degrees(np.arctan2(tr.hy - tr.ty, tr.hx - tr.tx))
-    return axis if np.isfinite(axis).sum() > 2 else None
+        axis = np.degrees(np.arctan2(tr.hy - tr.y, tr.hx - tr.x))
+    axis[np.hypot(tr.hy - tr.y, tr.hx - tr.x) < 1e-9] = np.nan  # head on the centre: no direction
+    if np.isfinite(axis).sum() > 2:
+        return axis
+    return tr.angle if np.isfinite(tr.angle).sum() > 2 else None
 
 
 def _arena_position(res, p: _Period):
     """Average position, thigmotaxis and position in the arena."""
     s, k, app, u = p.P.s, p.k, p.P.app, p.P.app.unit
-    # average position: time-weighted mean of the positions tracked (not while hidden), in units from the top-left
-    # of the image like a point's X / Y
-    ok = np.isfinite(p.track.x) & np.isfinite(p.track.y)
-    w = float(p.dur[ok].sum())
-    res[f"Average position X ({u})"] = _r(float((p.track.x[ok] * p.dur[ok]).sum()) / w * k.scale if w > 0
-                                          else math.nan, 2)
-    res[f"Average position Y ({u})"] = _r(float((p.track.y[ok] * p.dur[ok]).sum()) / w * k.scale if w > 0
-                                          else math.nan, 2)
     try:
         arena = app.arena_or_bounds()
     except ValueError:
         return
+    # average position (as ANY-maze): each position weighted by the time the animal stayed there (it stays where it
+    # was last seen while hidden or lost), as a % of the apparatus width / height from its left / top side
+    x0, y0, x1, y1 = arena.bounds()
+    ok = np.isfinite(k.x) & np.isfinite(k.y)
+    w = float(p.dur[ok].sum())
+    for axis, v, a, b in (("X", k.x, x0, x1), ("Y", k.y, y0, y1)):
+        mean = float((v[ok] * p.dur[ok]).sum()) / w if w > 0 else math.nan
+        res[f"Average {axis} position (%)"] = _r(100 * (mean - a) / (b - a) if b > a else math.nan, 2)
     dwall = arena.distance_to_edge(k.x, k.y) * k.scale
     thr = s.thigmotaxis_distance
     if not thr or thr <= 0:
@@ -623,9 +625,11 @@ def _zones(res, p: _Period):
         if zobj is not None and zn not in grid_cells:
             dz_full = P.cached(("dist", zn), lambda z=zobj, m=P.memb[zn]: np.where(m, 0.0, _edge(P, z)))
             dzs = dz_full[p.sl]
-            # as ANY-maze: the mean over the frames the animal is outside the zone (blank if it never is)
-            dzo = dzs[~P.memb[zn][p.sl] & np.isfinite(dzs)]
-            res[f"{zn}: mean distance from zone ({u})"] = _r(dzo.mean() if len(dzo) else math.nan, 2)
+            # as ANY-maze: the distance while outside (0 inside) weighted by the time spent at it, over the period
+            fin = np.isfinite(dzs)
+            t_fin = float(dur[fin].sum())
+            res[f"{zn}: mean distance from zone ({u})"] = _r(float((dzs[fin] * dur[fin]).sum()) / t_fin if t_fin > 0
+                                                             else math.nan, 2)
             out_d = dzs[~vm & np.isfinite(dzs)]
             fin = np.flatnonzero(np.isfinite(dzs))
             res[f"{zn}: initial distance from zone ({u})"] = _r(dzs[fin[0]] if len(fin) else math.nan, 2)
@@ -638,8 +642,8 @@ def _zones(res, p: _Period):
             diff = _angle_diff(np.arctan2(zy - hyf, zx - hxf), ang_body)
             head_in = p.head_memb[zn] if p.head_memb is not None and zn in p.head_memb else np.zeros(p.n, bool)
             res[f"{zn}: time facing (s)"] = _r(dur[(diff <= s.exploration_facing_deg) & ~head_in & ~p.hid_any].sum())
-        if zobj is not None and zn not in grid_cells:
-            _zone_whishaw(res, p, zobj, visits)
+        if zobj is not None and zobj.whishaw_width_cm > 0:
+            _zone_whishaw(res, p, zobj)
         _zone_more(res, p, zn, fm, vm, visits, vdur)
     for hz in p.hidden:
         res[f"{hz}: time hidden (s)"] = _r(dur[p.hidden[hz]].sum())
@@ -648,18 +652,25 @@ def _zones(res, p: _Period):
         res["Zone transitions"] = int(np.count_nonzero((tr_at >= p.i0) & (tr_at < p.i1)))
 
 
-def _zone_whishaw(res, p: _Period, z, visits: list):
-    """Whishaw's corridor towards any zone: the band from the release point to the zone centre, up to the first
-    entry into the zone in the period (or the end of the period), as the water maze's corridor to the platform."""
-    zx, zy = z.shape.centroid()
-    w = whishaw_corridor(p.k, p.P.app, p.P.s, zx, zy, visits[0][0] if visits else p.n - 1)
-    if w is None:
-        return
-    zn, u = z.name, p.P.app.unit
-    res[f"{zn}: Whishaw corridor time (s)"] = w["time"]
-    res[f"{zn}: Whishaw corridor time (%)"] = w["time_pct"]
-    res[f"{zn}: Whishaw corridor path (%)"] = w["path_pct"]
-    res[f"{zn}: Whishaw corridor distance ({u})"] = w["distance"]
+def _zone_whishaw(res, p: _Period, z):
+    """Whishaw's corridor of a zone (as ANY-maze): a band z.whishaw_width_cm wide centred on the line from the
+    animal's first position in the test to the zone centre; the time spent in it in the period and the distance
+    travelled in it (the step into the corridor is not counted, as the distance in a zone)."""
+    P, zn, u = p.P, z.name, p.P.app.unit
+
+    def make():
+        K = P.k
+        ok = np.flatnonzero(np.isfinite(K.x))
+        if not len(ok):
+            return np.zeros(len(K.t), bool)
+        zx, zy = z.shape.centroid()
+        d = point_segment_distance(K.x, K.y, K.x[ok[0]], K.y[ok[0]], zx, zy) * K.scale
+        with np.errstate(invalid="ignore"):
+            return d <= z.whishaw_width_cm / 2
+    inside = P.cached(("whishaw", zn), make)
+    prev = np.r_[False, inside[:-1]][p.sl]
+    res[f"{zn}: time in Whishaw's corridor (s)"] = _r(p.dur[inside[p.sl]].sum())
+    res[f"{zn}: distance in Whishaw's corridor ({u})"] = _r(p.k.step[inside[p.sl] & prev].sum(), 2)
 
 
 def _transitions(P: _Prepared) -> np.ndarray:
@@ -1014,7 +1025,8 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
         tdx, tdy = zx * k.scale - k.ux[i0], zy * k.scale - k.uy[i0]
         start_in = bool(z.shape.contains(np.array([k.ux[i0] / k.scale]), np.array([k.uy[i0] / k.scale]))[0])
         if not start_in and math.hypot(hdx, hdy) > 1e-9 and math.hypot(tdx, tdy) > 0:
-            signed = (math.degrees(math.atan2(hdy, hdx) - math.atan2(tdy, tdx)) + 180.0) % 360.0 - 180.0
+            # positive: the zone is to the animal's right (clockwise of its heading on screen, y pointing down)
+            signed = (math.degrees(math.atan2(tdy, tdx) - math.atan2(hdy, hdx)) + 180.0) % 360.0 - 180.0
     # as ANY-maze: the initial heading error is the absolute angle, the signed one is a separate measure
     res[f"{zn}: initial heading error (deg)"] = _r(abs(signed), 1)
     res[f"{zn}: signed initial heading error (deg)"] = _r(signed, 1)

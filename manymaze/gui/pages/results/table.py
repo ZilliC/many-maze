@@ -24,9 +24,9 @@ GENERAL_PREFIXES = ("Test duration", "Detection", "Total distance", "Mean speed"
                     "Mean immobile episode", "Longest immobile", "Shortest immobile", "Longest mobile",
                     "Shortest mobile", "Latency to first mobile", "Latency to last mobile", "Latency to last immobile",
                     "Longest freezing", "Shortest freezing", "Path tortuosity", "Mean turn angle", "Angular velocity",
-                    "Total rotations", "Path rotations", "Average position", "Mean distance from centre",
-                    "Max distance from centre", "Arena quadrant", "First zone entered", "Visited zones",
-                    "Investigated zones", "Zone transitions", "Total line crossings")
+                    "Total rotations", "Path rotations", "Average X position", "Average Y position",
+                    "Mean distance from centre", "Max distance from centre", "Arena quadrant", "First zone entered",
+                    "Visited zones", "Investigated zones", "Zone transitions", "Total line crossings")
 CATEGORY_ORDER = ["Information", "General", "Zones", "Points of interest", "Lines", "Test-specific", "Behaviours",
                   "Social", "I/O", "Other"]
 COLUMN_LABELS = {"Group": "Treatment"}
