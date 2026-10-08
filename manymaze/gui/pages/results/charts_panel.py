@@ -10,7 +10,7 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QSizePolicy, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QToolButton, QVBoxLayout, QWidget)
 
 from ....core import charts, plots
 from ....core.export import display_text, write_table
@@ -89,8 +89,17 @@ class ChartsPanel(QWidget):
         self.measure_check.setToolTip("Drag across a chart to measure the selected time interval")
         self.measure_check.toggled.connect(self._attach_spans)
         self.measure_check.hide()  # shown as “Measure interval” in the ribbon (Chart group)
+        self.canvas.mpl_connect("scroll_event", self._wheel)
+        self.canvas.mpl_connect("button_press_event", self._click)
+        self._home_xlim: tuple[float, float] | None = None
+        self.reset_zoom_btn = QToolButton()
+        self.reset_zoom_btn.setText("Reset zoom")
+        self.reset_zoom_btn.setToolTip("Show the whole time range again (or double-click the chart)")
+        self.reset_zoom_btn.clicked.connect(self.reset_zoom)
+        self.reset_zoom_btn.setEnabled(False)
         tb = QHBoxLayout()
         tb.addWidget(self.toolbar)
+        tb.addWidget(self.reset_zoom_btn)
         tb.addStretch()
         tb.addWidget(self.measure_check)
         self.meas_table = QTableWidget(0, 8)
@@ -102,8 +111,9 @@ class ChartsPanel(QWidget):
         self.meas_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.meas_table.verticalHeader().setDefaultSectionSize(22)
         self.meas_table.setMaximumHeight(130)
-        self.meas_lbl = QLabel("Click “Measure interval” in the ribbon and drag across the chart to measure; use "
-                               "the toolbar to zoom and pan.")
+        self.meas_lbl = QLabel("Click “Measure interval” in the ribbon and drag across the chart to measure; turn "
+                               "the mouse wheel over the chart to zoom the time axis (double-click: whole range), "
+                               "or use the toolbar to zoom and pan.")
         self.meas_lbl.setStyleSheet("color:palette(mid);")
         self.meas_lbl.setWordWrap(True)
         right = QWidget()
@@ -273,8 +283,52 @@ class ChartsPanel(QWidget):
                             show_events=self.events_check.isChecked(), t_range=self.period_combo.currentData(),
                             data=self.data, title=title, fig=self.figure, other_tracks=self.others or None)
         self._attach_spans()
+        axes = self.figure.axes
+        self._home_xlim = tuple(float(v) for v in axes[0].get_xlim()) if axes and names else None
+        self.reset_zoom_btn.setEnabled(False)
         self.canvas.draw_idle()
         self.toolbar.update()
+
+    # ------------------------------------------------------------------ wheel zoom
+    def zoom_time(self, factor: float, centre: float | None = None):
+        """Zoom the (shared) time axis by factor (< 1 zooms in) about the time centre (default: the middle),
+        within the charted time range."""
+        if not self.figure.axes or self._home_xlim is None:
+            return
+        ax = self.figure.axes[0]
+        x0, x1 = ax.get_xlim()
+        h0, h1 = self._home_xlim
+        c = (x0 + x1) / 2 if centre is None else min(max(centre, x0), x1)
+        full = h1 - h0
+        dt = 1.0 / max(1.0, self.track.fps if self.track is not None else 25.0)
+        width = min(full, max((x1 - x0) * factor, 5 * dt))  # at least a few frames, at most everything
+        a = c - (c - x0) / (x1 - x0) * width if x1 > x0 else c - width / 2
+        a = min(max(a, h0), h1 - width)
+        for axis in self.figure.axes:  # also the axes that do not share x (e.g. zone bands)
+            axis.set_xlim(a, a + width)
+        self.reset_zoom_btn.setEnabled(bool(width < full - 1e-9))
+        self.canvas.draw_idle()
+
+    def reset_zoom(self):
+        if self._home_xlim is None:
+            return
+        for axis in self.figure.axes:
+            axis.set_xlim(*self._home_xlim)
+        self.reset_zoom_btn.setEnabled(False)
+        self.canvas.draw_idle()
+
+    def time_range(self) -> tuple[float, float] | None:
+        """The time range shown (the x limits of the charts)."""
+        return tuple(self.figure.axes[0].get_xlim()) if self.figure.axes else None
+
+    def _wheel(self, event):
+        if event.inaxes is None or event.xdata is None:
+            return
+        self.zoom_time(0.8 ** event.step, event.xdata)  # step > 0: wheel forward / up = zoom in
+
+    def _click(self, event):
+        if event.dblclick and event.inaxes is not None and not self.measure_check.isChecked():
+            self.reset_zoom()
 
     def _attach_spans(self, *_):
         from matplotlib.widgets import SpanSelector

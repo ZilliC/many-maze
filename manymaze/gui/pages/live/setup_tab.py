@@ -67,7 +67,12 @@ class SetupMixin:
         v.setSpacing(4)
         self.mosaic = PanelGrid()
         self.mosaic.panel_clicked.connect(self._panel_clicked)
-        v.addWidget(self.mosaic, 1)
+        # many panels (up to 40 apparatus) do not shrink below their minimum size: the grid scrolls instead
+        self.mosaic_scroll = QScrollArea()
+        self.mosaic_scroll.setWidget(self.mosaic)
+        self.mosaic_scroll.setWidgetResizable(True)
+        self.mosaic_scroll.setFrameShape(QScrollArea.NoFrame)
+        v.addWidget(self.mosaic_scroll, 1)
         self.group_lbl = QLabel()
         self.group_lbl.setObjectName("Hint")
         self.group_lbl.setWordWrap(True)

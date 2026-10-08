@@ -5,7 +5,7 @@
     manymaze demo DIR             # create a demo project with synthetic videos
     manymaze track VIDEO --template open_field --bbox X,Y,W,H [--size-cm 40] [-o results.csv]
     manymaze project DIR track [--all]
-    manymaze project DIR results -o results.xlsx [--bins]
+    manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
     manymaze project DIR report -o report.html
     manymaze templates
 """
@@ -17,6 +17,10 @@ import sys
 from pathlib import Path
 
 from . import __version__
+
+
+TABLE_OUTPUT_HELP = ("the format follows the extension: .csv, .tsv / .txt, .xlsx, .slk (SYLK) or .dbf (dBase III); "
+                     "results also .xml")
 
 
 def _progress(prefix):
@@ -31,7 +35,6 @@ def _progress(prefix):
 
 def cmd_track(a):
     from .core import templates
-    from .core.export import write_csv
     from .core.measures import AnalysisSettings, analyse_segmented
     from .core.tracking import ArenaJob, DetectionSettings, track_video
     from .core.video import VideoSource
@@ -71,12 +74,9 @@ def cmd_track(a):
         for label, res in analyse_segmented(tr, app, an, other_tracks=[t for t in tracks if t is not tr] or None):
             rows.append({"Video": a.video, "Animal": i + 1, "Period": label, **res})
     if a.output:
-        if a.output.endswith(".xlsx"):
-            from .core.export import write_xlsx
+        from .core.export import write_table
 
-            write_xlsx({"Results": rows}, a.output)
-        else:
-            write_csv(rows, a.output)
+        write_table(rows, a.output)
         print(f"Wrote {a.output}")
     elif not rows:
         sys.exit("No animal was detected in the video (check --template/--bbox and the detection settings).")
@@ -112,7 +112,21 @@ def cmd_project(a):
             wide = wide_rows(rows, [c for c in result_columns(rows) if c not in info])
             write_table(wide, out, result_columns(wide), sheet="By animal")
         else:
-            export_results(p, out, segmented=a.bins)
+            cols = None
+            if a.column:  # the information columns, then the chosen measures
+                from .core.project import INFO_COLUMNS
+
+                rows = p.results(segmented=a.bins)
+                have = {k for r in rows for k in r}
+                missing = [c for c in a.column if c not in have]
+                if missing:
+                    sys.exit(f"Unknown measure(s): {', '.join(missing)}")
+                info = [c for c in (*INFO_COLUMNS, "Period", *p.animal_fields) if c in have and c not in a.column]
+                cols = list(dict.fromkeys(info + a.column))
+            try:
+                export_results(p, out, segmented=a.bins, columns=cols)
+            except ValueError as e:  # e.g. more columns than a dBase table can hold
+                sys.exit(str(e))
         print(f"Wrote {out}")
     elif a.action == "events":
         from .core.export import event_log_rows, write_table
@@ -182,7 +196,7 @@ def main(argv=None):
     t.add_argument("--duration", type=float)
     t.add_argument("--bin", type=float, help="time bin length (s)")
     t.add_argument("--save-track", help="write per-frame track CSV")
-    t.add_argument("-o", "--output")
+    t.add_argument("-o", "--output", help=TABLE_OUTPUT_HELP)
     pr = sub.add_parser("project", help="batch operations on a project")
     pr.add_argument("dir")
     pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive"])
@@ -190,7 +204,9 @@ def main(argv=None):
     pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")
     pr.add_argument("--wide", action="store_true", help="results: one row per animal, stages / trials as columns")
-    pr.add_argument("-o", "--output")
+    pr.add_argument("--column", action="append", metavar="MEASURE",
+                    help="results: export only this measure (repeat for several; the information columns are kept)")
+    pr.add_argument("-o", "--output", help="output file; for results and events " + TABLE_OUTPUT_HELP)
     d = sub.add_parser("demo", help="create a demo project with synthetic videos")
     d.add_argument("dir")
     sub.add_parser("templates", help="list apparatus templates")

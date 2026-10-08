@@ -37,19 +37,21 @@ can switch without retraining. Screenshots: [protocol](docs/screenshots/protocol
 | **Apparatus designer** | Arenas, rectangle/ellipse/polygon zones, points, lines, zone groups (union − exclusion), square / concentric / radial grids in real-world units, sequences, hidden / investigation / moveable zones, entry by centre, head, tail or % of body, copy/paste, calibration; 20+ templates fitted to your video (incl. novel tank, multi-well plates, place preference, hole board, thermal gradient, home cage); several apparatus per video |
 | **Video tracking** | Background subtraction (median / empty-arena frame / adaptive) or thresholding; dark, light or auto contrast; body centre, **head and tail**; tracking by colour; multiple animals per arena with identity maintenance (or identification by colour marks); multiple arenas per video in one pass; erasing of thin wires / cage bars; gap interpolation & smoothing; motion index for freezing; videos split over several files (M3U playlists) |
 | **AI body parts** | Optional deep-learning pose model (DeepLabCut SuperAnimal-TopViewMouse, 27 keypoints) for nose / centre / tail base, robust to shadows and reflections; runs on the **Neural Engine / GPU via Core ML**; bring-your-own ONNX models |
-| **Live testing** | Up to dozens of **simultaneous tests** from several cameras and/or several apparatus per camera, collective start / pause / stop, start on detection / when the experimenter leaves the view / on a key or remote / at a clock time, real-time zone statistics, live charts, I/O status and warnings, camera region / zoom / rotate / two-camera merge, recording with optional burned-in labels (split into consecutive files for 24 h tests), observation-only (TakeNote) mode |
+| **Live testing** | Up to **48 cameras and 40 simultaneous tests** (ANY-maze's scale) from several cameras and/or several apparatus per camera, grid layouts up to 8 × 6 panels, collective start / pause / stop, start on detection / when the experimenter leaves the view / on a key or remote / at a clock time, real-time zone statistics, live charts, I/O status and warnings, camera region / zoom / rotate / two-camera merge, recording with optional burned-in labels (split into consecutive files for 24 h tests), calibration adjustable while a test runs (stored with that test), observation-only (TakeNote) mode |
 | **Procedures & hardware** | Visual procedure editor (when / wait / if / repeat / set / do), 48 events, 51 actions, safe expressions with maths and random functions, variables and arrays kept between tests or saved as results, reinforcement schedules (FR, VR, FI, VI, PR…); open **Arduino firmware** for TTL inputs/outputs, levers, nose pokes, pellet dispensers, shockers, optogenetic pulse trains, running-wheel encoders, analogue inputs, sync pulses; serial devices; audio tones / noise; touch-screen stimuli |
 | **Manual scoring** | Keys (toggle, hold or point, up to 46), exclusive sets, on-screen / touch buttons, scoring during playback, live or by direct observation |
 | **Track tools** | Review with overlays, detection preview while tuning, track corrections, per-test moveable-zone positions, per-test apparatus position (camera moved), identity swaps for several animals, DeepLabCut CSV import |
 | **Measures** | Hundreds of measures: ~40 whole-apparatus, ~20 per zone, ~17 per point, per line, ~13 per sequence, per grid, social (contacts, nose-to-nose, following, approaches), per key (also per zone), I/O inputs/outputs/encoders, result variables; test-specific results for EPM/EZM, Y/T/radial mazes, water maze (incl. Whishaw corridor, strategies), Barnes, NOR, light/dark, three-chamber, CPP, novel tank, hole board… |
 | **Time segmentation** | Regular time bins, custom periods and **event-anchored periods** (e.g. the 30 s after first leaving a zone); pauses excluded |
-| **Visualisation** | Track plots coloured by speed / time / any parameter with behaviour markers and per-period panels; heat maps (normalised, per behaviour, group-averaged with alignment); charts of 40+ parameters over time with zone bands; **tracked-video export with overlays** |
+| **Visualisation** | Track plots coloured by speed / time / any parameter with behaviour markers and per-period panels; **animated track playback** at 0.25–16× speed; heat maps (normalised, per behaviour, group-averaged with alignment); charts of 40+ parameters over time with zone bands and mouse-wheel zoom; **tracked-video export with overlays** |
 | **Statistics** | 43 procedures: t / Welch / Mann-Whitney, one-way / Welch ANOVA, Kruskal-Wallis, repeated-measures and mixed ANOVA, two-way (incl. Scheirer–Ray–Hare and ART), post-hoc (Tukey, Bonferroni, Holm, Šidák, FDR, Dunnett, Games–Howell, Dunn), Friedman, chi-square / G / Fisher, correlations & regression, ANCOVA, assumption checks, effect sizes; grouping at up to 3 levels; column / line / scatter / box / violin graphs |
-| **Data transfer** | **Import from ANY-maze** (animals, treatments, test schedules and track data from spreadsheets saved by ANY-maze or other software, with automatic column matching), CSV, tab-separated, Excel, clipboard (any cell range), **XML of the whole experiment incl. raw tracks**, raw per-frame CSV with derived parameters, one row per animal (stages / trials as columns), test event logs, self-contained HTML reports |
+| **Data transfer** | **Import from ANY-maze**: its experiment XML export (animals, treatments, tests, tracks, zone positions, calibration), zone maps (apparatus zones) and spreadsheets (animals, treatments, test schedules and track data, from ANY-maze or other software, with automatic column matching); CSV, tab-separated, Excel, SYLK, dBase III/IV, clipboard (any cell range), **XML of the whole experiment incl. raw tracks**, raw per-frame CSV with derived parameters, one row per animal (stages / trials as columns), test event logs, self-contained HTML reports |
 | **Apple Silicon speed** | Parallel tracking across all cores, **VideoToolbox** hardware decoding / recording, Core ML inference |
 | **Automation** | `manymaze` command line for batch tracking, export and reports |
 
-See the full [user guide](manymaze/resources/USER_GUIDE.md) (also available in the app under *Help*).
+See the full [user guide](manymaze/resources/USER_GUIDE.md) (also available in the app under *Help*). *Help ▸ Check
+for updates* looks for a newer release on GitHub (optionally at startup, at most once a week; set
+`MANYMAZE_UPDATE_REPO=owner/name` to follow another repository).
 
 ## Install on an Apple Silicon Mac
 
@@ -67,6 +69,25 @@ you open it, macOS blocks it because it is not notarised: allow it in *System Se
 (or run `xattr -dr com.apple.quarantine dist/mANY-MAZE.app`), and it will ask for
 camera permission when you start a live test. GitHub Actions builds the same DMG on Apple Silicon runners
 (`.github/workflows/ci.yml`).
+
+#### Signed and notarised macOS builds
+
+With an Apple Developer ID the script signs every binary with the hardened runtime and
+`packaging/entitlements.plist` (camera; unsigned executable memory and disabled library validation, which the
+bundled Python and its extension modules need), notarises the app and the DMG with `xcrun notarytool submit --wait`
+and staples the tickets, so Gatekeeper opens the app without a warning. It reads these environment variables (in CI,
+repository secrets of the same names, passed to the *macos-app* job); without them it falls back to the ad-hoc
+signature:
+
+| Variable | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE` | base64 of the *Developer ID Application* certificate exported with its private key as `.p12` (`base64 -i cert.p12`) — imported into a temporary keychain that is deleted afterwards |
+| `MACOS_CERTIFICATE_PASSWORD` | the `.p12` password |
+| `MACOS_SIGN_IDENTITY` | optional: the identity name (default: the certificate's *Developer ID Application: …*); locally, setting only this signs with an identity already in your keychain |
+| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | notarisation with an App Store Connect API key: base64 of the `.p8` file, its key ID and the issuer ID |
+| `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | or notarisation with an Apple ID, its team ID and an app-specific password |
+
+Signed but without notarisation credentials, the build is signed only (Gatekeeper still asks on first launch).
 
 ### Option B — run from source
 
@@ -95,7 +116,7 @@ and *From template* → **Experiment**: add animals and treatments (or *Import a
 manymaze demo ~/Desktop/demo.mmaze
 manymaze track video.mp4 --template open_field --bbox 18,48,594,412 --size-cm 40 -o results.csv
 manymaze project ~/Experiments/EPM.mmaze track
-manymaze project ~/Experiments/EPM.mmaze results -o results.xlsx --bins
+manymaze project ~/Experiments/EPM.mmaze results -o results.xlsx --bins   # or .csv .tsv .slk .dbf .xml
 manymaze project ~/Experiments/EPM.mmaze report -o report.html
 ```
 

@@ -8,7 +8,8 @@ from PySide6.QtGui import QGuiApplication, QImage
 from ..core import plots
 
 FIG_FILTER = "PNG image (*.png);;PDF document (*.pdf);;SVG image (*.svg)"
-TABLE_FILTER = "CSV file (*.csv);;Tab-separated text (*.tsv *.txt);;Excel workbook (*.xlsx)"
+TABLE_FILTER = ("CSV file (*.csv);;Tab-separated text (*.tsv *.txt);;Excel workbook (*.xlsx);;SYLK spreadsheet (*.slk);;"
+                "dBase table (*.dbf)")
 
 
 def figure_to_clipboard(fig: Figure, dpi: int = 150) -> bool:

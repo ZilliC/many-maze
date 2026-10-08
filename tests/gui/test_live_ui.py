@@ -56,7 +56,8 @@ def test_ribbon_groups_and_modes(win):
               "Several tests", "Observation only"):
         assert t in texts, t
     assert [a.text() for a in page.start_all_act.menu().actions()] == ["Start all now", "Arm all"]
-    assert [a.text() for a in page.layout_act.menu().actions()] == ["One apparatus", "2 × 1", "2 × 2", "3 × 2"]
+    assert [a.text() for a in page.layout_act.menu().actions()][:4] == ["One apparatus", "2 × 1", "2 × 2", "3 × 2"]
+    assert "8 × 5 (40 apparatus)" in [a.text() for a in page.layout_act.menu().actions()]
     page.mode_acts["observe"].trigger()
     assert page.mode == "observe" and page.left_stack.currentWidget() is page.obs_panel
     assert page.next_test_act.isEnabled() and not page.add_source_act.isEnabled()

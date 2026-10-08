@@ -598,8 +598,21 @@ class TestPanel(QFrame):
         super().mousePressEvent(e)
 
 
-LAYOUTS = {"1": (1, 1), "2x1": (2, 1), "2x2": (2, 2), "3x2": (3, 2)}
-LAYOUT_LABELS = {"1": "One apparatus", "2x1": "2 × 1", "2x2": "2 × 2", "3x2": "3 × 2"}
+# (columns, rows of one screenful) — the rows are only indicative: every panel is shown, in as many rows as needed.
+# "auto": a near-square grid for any number of panels (ANY-maze: up to 40 apparatus at once).
+LAYOUTS = {"1": (1, 1), "2x1": (2, 1), "2x2": (2, 2), "3x2": (3, 2), "4x3": (4, 3), "5x4": (5, 4), "6x5": (6, 5),
+           "8x5": (8, 5), "8x6": (8, 6), "auto": (0, 0)}
+LAYOUT_LABELS = {"1": "One apparatus", "2x1": "2 × 1", "2x2": "2 × 2", "3x2": "3 × 2", "4x3": "4 × 3",
+                 "5x4": "5 × 4", "6x5": "6 × 5", "8x5": "8 × 5 (40 apparatus)", "8x6": "8 × 6 (48)",
+                 "auto": "Automatic (fit all)"}
+
+
+def grid_columns(layout_key: str, n: int) -> int:
+    """Columns of the panel grid for n panels shown with a layout."""
+    cols = LAYOUTS.get(layout_key, LAYOUTS["2x2"])[0]
+    if not cols:  # automatic: near-square
+        cols = math.ceil(math.sqrt(max(1, n)))
+    return max(1, min(cols, max(1, n)))
 
 
 class PanelGrid(QWidget):
@@ -658,9 +671,9 @@ class PanelGrid(QWidget):
     def arrange(self):
         for p in self.panels.values():
             self.grid.removeWidget(p)
-        for c in range(6):
+        for c in range(self.grid.columnCount()):
             self.grid.setColumnStretch(c, 0)
-        for r in range(12):
+        for r in range(self.grid.rowCount()):
             self.grid.setRowStretch(r, 0)
         ids = list(self.panels)
         self.empty.setVisible(not ids)
@@ -668,7 +681,7 @@ class PanelGrid(QWidget):
             show = [self.current] if self.current in self.panels else ids[:1]
         else:
             show = ids
-        cols = min(LAYOUTS[self.layout_key][0], max(1, len(show)))
+        cols = grid_columns(self.layout_key, len(show))
         for i, k in enumerate(ids):
             p = self.panels[k]
             if k in show:

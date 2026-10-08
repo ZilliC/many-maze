@@ -22,7 +22,7 @@ KINDS = {
               {"t": "Time", "x": "Centre X", "y": "Centre Y", "hx": "Head X", "hy": "Head Y", "tx": "Tail X",
                "ty": "Tail Y"}),
 }
-FILTER = "Spreadsheets (*.csv *.txt *.tsv *.xlsx);;All files (*)"
+FILTER = "Spreadsheets (*.csv *.txt *.tsv *.xlsx *.slk *.dbf);;All files (*)"
 
 
 class ImportDialog(QDialog):

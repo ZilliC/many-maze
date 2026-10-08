@@ -19,11 +19,13 @@ from ....core.live import LiveSession, ObservationSession
 from ....core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup
 from ....core.procedures import Outputs
 from ....core.tracking import ArenaTracker
+from ....core.video import MAX_CAMERAS
 from ...icons import icon
 from ...live_widgets import LAYOUT_LABELS, LAYOUTS, MonitorPanel, ObservationPanel, PanelSettingsDialog, TestPanel
 from ...touchscreen import TouchStimulusWindow
 from ...widgets import Worker, cv_to_qpixmap, fmt_time
 from ..base import Page
+from .calibration import CalibrationMixin
 from .common import MODE_ACTIONS, MODES, TRAIL_LEN, VIEW_DEFAULTS, parse_keys, serial_ports
 from .keys import KeysMixin
 from .multi import MultiTestMixin
@@ -32,7 +34,7 @@ from .setup_tab import SetupMixin
 from .single import FrameGrabber, SingleTestMixin
 
 
-class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, KeysMixin, Page):
+class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, KeysMixin, CalibrationMixin, Page):
     """Run tests: ANY-maze's Test page while tests run — a panel per test (toolbar, title, camera image with the
     apparatus, time slider, Session log / Video / Zones tabs), several panels in a grid, and a collapsible report
     (setup, real-time monitor, procedures, results, log) on the right.  Commands live in the ribbon."""
@@ -192,6 +194,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.camera_act = A("video", "Camera image", "Turn the camera image(s) on or off (preview before "
                             "the test).", self.camera_toggled, checkable=True)
         self.next_test_act = A("forward", "Next test", "Go to the next test of the test schedule.", self.next_test)
+        self.calibrate_act = A("ruler", "Adjust calibration", "Change the scale (pixels per cm) of the running test "
+                               "(the selected panel's with several tests); it is saved with the test and used for "
+                               "its results.", self.adjust_calibration)
         # View
         self.layout_act = A("layout_grid", "Apparatus\nlayout", "How the test panels are arranged.")
         m = QMenu(self)
@@ -249,7 +254,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                                    (self.resume_all_act, "small")]),
                 ("Session", [(self.add_source_act, "large"), (self.add_panel_act, "small"),
                              (self.remove_panel_act, "small"), (self.capture_bg_act, "small"),
-                             (self.camera_act, "small"), (self.cam_opts_act, "small"), (self.next_test_act, "small")]),
+                             (self.camera_act, "small"), (self.cam_opts_act, "small"), (self.next_test_act, "small"),
+                             (self.calibrate_act, "small")]),
                 ("View", [(self.layout_act, "large"), (self.fit_act, "large"), (self.indicators_act, "large"),
                           (self.hide_report_act, "small"), (self.hide_app_act, "small"),
                           (self.panel_settings_act, "small")]),
@@ -326,7 +332,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._update_buttons()
 
     def add_camera_clicked(self):
-        i, ok = QInputDialog.getInt(self, "Add camera", "Camera number (0 = first camera):", 0, 0, 63)
+        i, ok = QInputDialog.getInt(self, "Add camera", "Camera number (0 = first camera):", 0, 0, MAX_CAMERAS - 1)
         if not ok:
             return
         if self.mode == "multi":
@@ -811,4 +817,5 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.camera_act.setChecked(on)
         self.camera_act.setEnabled(has and cams and single_free)
         self.next_test_act.setEnabled(has and mode != "multi" and not armed and (o is None or o.state == "finished"))
+        self.calibrate_act.setEnabled(has and mode != "observe" and self._calibration_target()[0] is not None)
         self.obs_panel.show_session(self.obs, self.obs.duration_s if self.obs else 0.0)

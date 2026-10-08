@@ -16,6 +16,11 @@ from .geometry import (Ellipse, Polygon, Shape, clip_convex, concentric_rings, r
 # apparatus moved between recordings): {"dx", "dy" (px), "angle" (degrees, clockwise), "scale"}, about the centre
 # of the arena.
 POSITION_KEY = "@position"
+# Test.zone_overrides key holding the calibration of that test, when it differs from the apparatus map's (e.g. it was
+# adjusted while the live test ran): {"px_per_cm", "calibration_line" ([x1, y1, x2, y2] in video px or None),
+# "calibration_length_cm"}. Applied after POSITION_KEY: it is the scale of the test's own video.
+CALIBRATION_KEY = "@calibration"
+OVERRIDE_KEYS = (POSITION_KEY, CALIBRATION_KEY)  # zone_overrides keys that are not zone / point names
 
 ENTRY_RULES = {
     "": "Default (analysis settings)",
@@ -352,7 +357,8 @@ class Apparatus:
         """Copy with the per-test map position and positions of moveable zones / points applied.
 
         overrides: {zone name: shape dict} or {point name: {"x", "y"}}, plus optionally POSITION_KEY: {"dx",
-        "dy", "angle", "scale"} for the whole map (applied first; zone and point positions are in video pixels).
+        "dy", "angle", "scale"} for the whole map (applied first; zone and point positions are in video pixels) and
+        CALIBRATION_KEY: the test's own calibration (see calibration_override).
         Points lying inside a moved zone (e.g. "Platform centre" in "Platform") move with it.
         """
         if not overrides:
@@ -360,8 +366,15 @@ class Apparatus:
         pos = overrides.get(POSITION_KEY)
         app = self.positioned(**position_args(pos)) if isinstance(pos, dict) else self
         app = app.copy() if app is self else app
+        cal = overrides.get(CALIBRATION_KEY)
+        if isinstance(cal, dict) and cal.get("px_per_cm") and float(cal["px_per_cm"]) > 0:
+            app.px_per_cm = float(cal["px_per_cm"])
+            line = cal.get("calibration_line")
+            app.calibration_line = tuple(float(v) for v in line) if line else None
+            length = cal.get("calibration_length_cm")
+            app.calibration_length_cm = float(length) if length else None
         for name, v in overrides.items():
-            if not isinstance(v, dict) or name == POSITION_KEY:
+            if not isinstance(v, dict) or name in OVERRIDE_KEYS:
                 continue
             z = app.zone(name)
             if z is not None and "type" in v:
@@ -432,6 +445,14 @@ class Apparatus:
 
     def copy(self) -> "Apparatus":
         return Apparatus.from_dict(self.to_dict())
+
+
+def calibration_override(px_per_cm: float, line=None, length_cm: float | None = None) -> dict:
+    """The CALIBRATION_KEY value of Test.zone_overrides for a test-specific calibration."""
+    if not px_per_cm or px_per_cm <= 0:
+        raise ValueError("The calibration must be a positive number of pixels per cm")
+    return {"px_per_cm": float(px_per_cm), "calibration_line": [float(v) for v in line] if line else None,
+            "calibration_length_cm": float(length_cm) if length_cm else None}
 
 
 def position_args(pos: dict | None) -> dict:

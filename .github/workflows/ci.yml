@@ -39,7 +39,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: PYTHON=python scripts/build_macos.sh
+      # Developer ID signing and notarisation when the repository has these secrets (README: "Signed and
+      # notarised macOS builds"); without them (forks, pull requests) the app is ad-hoc signed as before.
+      - name: Build, sign and notarise the app and disk image
+        run: PYTHON=python scripts/build_macos.sh
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      - name: Show the signature
+        run: |
+          codesign -dv --verbose=2 dist/mANY-MAZE.app 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature|Runtime)' || true
+          xcrun stapler validate dist/mANY-MAZE.app || echo "not notarised (no Developer ID secrets)"
       - name: Download the pose model for testing
         run: curl -sSfL -o "$RUNNER_TEMP/rtmpose_s.pt" "$POSE_URL"
       - name: Smoke-test the bundled app (parallel workers, decoding, recording, Core ML pose model)

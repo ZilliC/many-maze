@@ -40,6 +40,9 @@ def main(project: str | None = None, argv_project: bool = True) -> int:
         project = sys.argv[-1]
     if project:
         w.load_project(project)
+    from .updates import startup_check
+
+    startup_check(w)  # only if turned on (Help ▸ Check for updates at startup), at most once a week
     return app.exec()
 
 

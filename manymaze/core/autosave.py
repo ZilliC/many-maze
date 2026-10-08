@@ -129,6 +129,8 @@ class RecoveredSession(Session):
         self.pauses = [list(p) for p in d.get("pauses") or []]
         self.pause_log = [dict(p) for p in d.get("pause_log") or []]
         self.end_reason = str(d.get("end_reason") or "") or END_RECOVERED
+        self.calibration = dict(d["calibration"]) if isinstance(d.get("calibration"), dict) else None
+        self.calibration_log = [(float(t), dict(c)) for t, c in d.get("calibration_log") or []]
 
     @property
     def elapsed(self) -> float:

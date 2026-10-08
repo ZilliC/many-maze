@@ -378,10 +378,22 @@ class MainWindow(QMainWindow):
             self.workspace.addWidget(sec)
         help_panel = self.ribbon.add_tab("Help")
         hg = help_panel.add_group("Help")
-        for text, ic, fn in (("User guide", "help", self._open_guide), (f"About {APP_NAME}", "info", self.about)):
+        for text, ic, fn in (("User guide", "help", self._open_guide), ("Check for\nupdates", "refresh",
+                                                                         self.check_updates),
+                             (f"About {APP_NAME}", "info", self.about)):
             a = QAction(icon(ic), text, self)
-            a.triggered.connect(fn)
+            a.triggered.connect(lambda _=False, fn=fn: fn())
             hg.add_large(a)
+        from .updates import startup_check_enabled
+
+        self.update_startup_act = QAction("Check for updates at startup", self)
+        self.update_startup_act.setCheckable(True)
+        self.update_startup_act.setChecked(startup_check_enabled(self.settings))
+        self.update_startup_act.setToolTip("Look for a new release when the program starts (at most once a week)")
+        self.update_startup_act.toggled.connect(self._set_update_startup)
+        hg.add_small(self.update_startup_act)
+        self._update_worker = None
+        self.last_update_info = None
         self._help_tab = self.ribbon.tabs.count() - 1
         self.save_quick = QToolButton()
         self.save_quick.setIcon(icon("save"))
@@ -452,6 +464,8 @@ class MainWindow(QMainWindow):
             a.setShortcutContext(Qt.ApplicationShortcut)
         hm = mb.addMenu("&Help")
         act(hm, "User guide", self._open_guide)
+        act(hm, "Check for updates…", lambda: self.check_updates())
+        hm.addAction(self.update_startup_act)
         act(hm, f"About {APP_NAME}", self.about)
         # the ribbon replaces the menu bar, except on macOS where the menu bar lives at the top of the screen
         mb.setVisible(sys.platform == "darwin")
@@ -460,6 +474,17 @@ class MainWindow(QMainWindow):
         from .help import show_user_guide
 
         show_user_guide(self)
+
+    def check_updates(self, silent: bool = False, checker=None):
+        """Help ▸ Check for updates: the latest release on GitHub, in the background (see gui.updates)."""
+        from .updates import check_updates
+
+        return check_updates(self, silent, checker)
+
+    def _set_update_startup(self, on: bool):
+        from .updates import set_startup_check
+
+        set_startup_check(self.settings, on)
 
     def about(self):
         QMessageBox.about(self, f"About {APP_NAME}",
@@ -866,6 +891,10 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         m.addAction(icon("animal"), "Animals and treatments…", lambda: self.import_table("animals"))
         m.addAction(icon("schedule"), "Test schedule…", lambda: self.import_table("tests"))
+        m.addSeparator()
+        m.addAction(icon("import"), "Experiment exported as XML (animals, tests, tracks)…",
+                    lambda: self.import_anymaze_xml())
+        m.addAction(icon("zone"), "Zone maps (apparatus zones)…", lambda: self.import_zone_maps())
         btn = self.welcome.side_buttons.get("import")
         m.exec(btn.mapToGlobal(btn.rect().topRight()) if btn is not None and btn.isVisible() else QCursor.pos())
 
@@ -880,6 +909,70 @@ class MainWindow(QMainWindow):
         self.status(f"Imported {n} {'animals' if kind == 'animals' else 'tests'}.")
         self.show_page(self.page("AnimalsPage" if kind == "animals" else "TestsPage"))
         return dlg.result
+
+    def import_anymaze_xml(self, path: str | None = None, origin: str = "auto"):
+        """ANY-maze ▸ File ▸ Export ▸ Export experiment as XML: its animals, tests and tracks (see core.anymaze;
+        ANY-maze's own .szd experiment files are in an undocumented binary format and cannot be read)."""
+        from ..core.anymaze import import_anymaze_xml, is_anymaze_xml
+
+        p = self.project
+        if p is None:
+            return None
+        if p.path is None and not self.save():
+            return None
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Open an experiment exported by ANY-maze as XML",
+                                                  self._last_dir(), "XML file (*.xml);;All files (*)")
+            if not path:
+                return None
+        if not is_anymaze_xml(path):
+            error_box(self, "Import from ANY-maze", "This is not an experiment exported by ANY-maze as XML (File ▸ "
+                      "Export ▸ Export experiment as XML).")
+            return None
+
+        def work(progress, stop):
+            return import_anymaze_xml(p, path, origin, progress)
+
+        def done(res):
+            self.mark_dirty()
+            self.save()
+            msg = (f"Imported {len(res['tests'])} tests of {len(res['animals'])} animals from ANY-maze"
+                   + (f"; new apparatus: {', '.join(res['apparatus'])} (zones from their bounding boxes — import "
+                      f"the zone maps for their exact shapes)" if res["apparatus"] else "") + ".")
+            self.status(msg)
+            if res["warnings"]:
+                QMessageBox.warning(self, "Import from ANY-maze", msg + "\n\n" + "\n".join(res["warnings"][:20]))
+            self.show_page(self.page("TestsPage"))
+            self.last_import = res
+
+        def fail(msg):
+            error_box(self, "Import from ANY-maze", msg)
+
+        return run_with_progress(self, "Importing the ANY-maze experiment", work, on_done=done, on_fail=fail,
+                                 cancellable=False)
+
+    def import_zone_maps(self, paths: list[str] | None = None):
+        """ANY-maze ▸ File ▸ Export ▸ Export zone maps (CSV): its apparatus zones, traced from the pixels."""
+        from ..core.anymaze import zone_maps_apparatus
+
+        p = self.project
+        if p is None:
+            return None
+        if paths is None:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Zone maps exported by ANY-maze", self._last_dir(),
+                                                    "Zone map (*.csv);;All files (*)")
+            if not paths:
+                return None
+        try:
+            apps = zone_maps_apparatus(paths, p)
+        except Exception as e:
+            error_box(self, "Import zone maps", e)
+            return None
+        self.mark_dirty()
+        n = sum(len(a.zones) for a in apps)
+        self.status(f"Imported {n} zones into {', '.join(a.name for a in apps)}. Calibrate the apparatus if needed.")
+        self.show_page(self.page("ApparatusPage"))
+        return apps
 
     def protocol_report(self, path: str | None = None):
         """Save a printable HTML description of the protocol (apparatus maps, keys, stages, settings, procedures)."""
