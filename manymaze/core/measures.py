@@ -13,6 +13,7 @@ Measures are grouped into:
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -34,6 +35,8 @@ from .track import Track
 
 if TYPE_CHECKING:
     from .project import Behaviour
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -265,6 +268,17 @@ class _Prepared:
         return self.cached(("visits",) + tuple(key) if isinstance(key, tuple) else ("visits", key),
                            lambda: drop_short_runs(inside, self.k.t, self.k.dur, self.s.entry_min_duration_s,
                                                    value=True))
+
+    def cuts(self) -> np.ndarray:
+        """Whole test: frames that follow a pause or where the animal is seen again after being hidden. As in
+        kinematics, no distance, turn or change of distance is counted into them and smoothing does not cross them."""
+        def make():
+            c = np.asarray(self.breaks, bool).copy()
+            h = self.hid_any
+            if len(c) > 1 and len(h) == len(c):
+                c[1:] |= h[:-1] & ~h[1:]
+            return c
+        return self.cached("cuts", make)
 
 
 def end_of_test(track: Track, app: Apparatus, s: AnalysisSettings) -> float | None:
@@ -622,7 +636,7 @@ def _zones(res, p: _Period):
             res[f"{zn}: head time (s)"] = _r(dur[hfm[p.sl]].sum())
             res[f"{zn}: latency to head entry (s)"] = _r(p.lat(hv))
         res[f"{zn}: latency to second entry (s)"] = _r(float(t[visits[1][0]] - p.t0) if len(visits) > 1 else p.never)
-        exits = [b for a, b in runs(fm) if p.i0 < b < p.i1]
+        exits = [b for a, b in runs(fm) if p.i0 <= b < p.i1 and b > 0]  # an exit on a bin's first frame is in it
         res[f"{zn}: time of last exit (s)"] = _r(float(K.t[exits[-1] - 1] + K.dur[exits[-1] - 1] - p.t0)
                                                 if exits else math.nan)
         res[f"{zn}: exits"] = len(exits)
@@ -853,19 +867,21 @@ def _group_zone(P: _Prepared, name: str) -> _GroupZone | None:
 
 def _head(P: _Prepared):
     """Whole test: (head x, head y in px forward filled, distance the head travels into each frame in units), or
-    None without a tracked head. The head path is smoothed like the centre's; nothing is counted across a pause."""
+    None without a tracked head. The head path is smoothed like the centre's; nothing is counted across a pause or
+    a reappearance."""
     def make():
         tr, K = P.track, P.k
         if not tr.has_head():
             return None
         hx, hy = ffill(tr.hx), ffill(tr.hy)
         win = max(1, int(round(P.s.speed_smoothing_s / max(tr.dt, 1e-6))))
-        ux = seg_moving_average(hx, win, P.breaks) * K.scale
-        uy = seg_moving_average(hy, win, P.breaks) * K.scale
+        cuts = P.cuts()
+        ux = seg_moving_average(hx, win, cuts) * K.scale
+        uy = seg_moving_average(hy, win, cuts) * K.scale
         step = np.zeros(len(hx))
         if len(hx) > 1:
             step[1:] = np.nan_to_num(np.hypot(np.diff(ux), np.diff(uy)))
-            step[P.breaks] = 0.0
+            step[cuts] = 0.0
         return hx, hy, step
     return P.cached("head", make)
 
@@ -1012,7 +1028,7 @@ def _zone_head(res, p: _Period, zn: str, z):
     hfm = P.visits_mask(("head", zn), P.head_memb[zn])
     hin = hfm[p.sl]
     ends = P.cached(("head_exits", zn), lambda: np.array([b for _, b in runs(hfm)], int))
-    exits = ends[(ends > p.i0) & (ends < p.i1)]
+    exits = ends[(ends >= p.i0) & (ends < p.i1) & (ends > 0)]
     res[f"{zn}: latency to first head exit (s)"] = _r(float(K.t[exits[0] - 1] + K.dur[exits[0] - 1] - p.t0)
                                                      if len(exits) else p.never)
     res[f"{zn}: head distance ({u})"] = _r(H[2][p.sl][hin].sum(), 2)
@@ -1060,7 +1076,8 @@ def _zone_border(res, p: _Period, z, vm: np.ndarray):
 
 
 def _zone_heading_arrays(P: _Prepared, z) -> dict:
-    """Whole test: change of the (smoothed) distance from the zone into each frame (0 across a pause), and the
+    """Whole test: change of the (smoothed) distance from the zone into each frame (0 across a pause or a
+    reappearance), and the
     signed heading error (direction of travel minus direction to the zone centre, -180..180 deg; positive =
     clockwise of the zone on screen)."""
     K = P.k
@@ -1070,7 +1087,7 @@ def _zone_heading_arrays(P: _Prepared, z) -> dict:
         dd = np.zeros(len(d))
         if len(d) > 1:
             dd[1:] = np.nan_to_num(np.diff(d))
-            dd[P.breaks] = 0.0
+            dd[P.cuts()] = 0.0
         zx, zy = z.shape.centroid()
         brg = np.degrees(np.arctan2(zy * K.scale - K.uy, zx * K.scale - K.ux))
         err = (K.heading - brg + 180.0) % 360.0 - 180.0
@@ -1410,8 +1427,9 @@ def _head_arrays(P: _Prepared) -> dict:
     tr, K, s = P.track, P.k, P.s
     n = len(K.t)
     win = max(1, int(round(s.speed_smoothing_s / max(tr.dt, 1e-6))))
-    hx = seg_moving_average(ffill(tr.hx), win, K.breaks) * K.scale
-    hy = seg_moving_average(ffill(tr.hy), win, K.breaks) * K.scale
+    cuts = P.cuts()  # nothing is counted across a pause or a reappearance
+    hx = seg_moving_average(ffill(tr.hx), win, cuts) * K.scale
+    hy = seg_moving_average(ffill(tr.hy), win, cuts) * K.scale
     step = np.zeros(n)
     turn = np.zeros(n)
     if n > 1:
@@ -1425,12 +1443,10 @@ def _head_arrays(P: _Prepared) -> dict:
             d = np.zeros(n)
             d[idx[1:]] = (np.diff(ang[idx]) + 180) % 360 - 180
             d[np.abs(d) > 90] = 0.0
-            if K.breaks is not None:
-                d[K.breaks] = 0.0
-            turn[1:] = np.diff(seg_moving_average(np.cumsum(d), win, K.breaks))
-    if K.breaks is not None:
-        step[K.breaks] = 0.0
-        turn[K.breaks] = 0.0
+            d[cuts] = 0.0
+            turn[1:] = np.diff(seg_moving_average(np.cumsum(d), win, cuts))
+    step[cuts] = 0.0
+    turn[cuts] = 0.0
     return {"step": step, "turn": turn}
 
 
@@ -1463,7 +1479,10 @@ def rearing_mask(track: Track, s: AnalysisSettings, t: np.ndarray, dur: np.ndarr
             base_l = float(np.median(L[ok_l]))
             if base_l > 0:
                 rear &= ~ok_l | (L < base_l * s.rear_length_pct / 100.0)
-    rear = drop_short_runs(rear, t, dur, 0.2, value=False)
+    # bridge gaps of up to 0.2 s with rears on both sides (not short non-rear runs at the start or end of the test)
+    for a, b in runs(~rear):
+        if 0 < a and b < n and dur[a:b].sum() < 0.2 - 1e-9:
+            rear[a:b] = True
     return drop_short_runs(rear, t, dur, s.min_rear_s, value=True)
 
 
@@ -1521,6 +1540,7 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
     p = _Period(P, i0, i1, t0, T, t_range)
     s = P.s
     res: OrderedDict[str, object] = OrderedDict()
+    warnings = []
     for section in _SECTIONS:
         section(res, p)
     if behaviours:
@@ -1531,20 +1551,24 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
         try:
             res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices, settings=s,
                                    test_end=P.k.t0 + P.k.duration, whole=p.whole))
-        except Exception:  # a malformed I/O log must not prevent the other measures
-            pass
+        except Exception as e:  # a malformed I/O log must not prevent the other measures
+            _log.exception("I/O measures failed")
+            warnings.append(f"I/O measures could not be calculated ({e})")
         try:
             res.update(_io_track(p, io_devices))
-        except Exception:
-            pass
+        except Exception as e:
+            _log.exception("I/O measures with the track failed")
+            warnings.append(f"I/O measures per zone could not be calculated ({e})")
     for name, v in (result_variables or {}).items():
         try:
             res[f"Variable: {name}"] = _r(float(v))
         except (TypeError, ValueError):
             res[f"Variable: {name}"] = str(v)
     if not P.app.px_per_cm:
-        res["Warnings"] = ("Apparatus not calibrated: distances, speeds and distance thresholds (mobility, "
+        warnings.insert(0, "Apparatus not calibrated: distances, speeds and distance thresholds (mobility, "
                            "thigmotaxis, contact, ...) are in pixels")
+    if warnings:
+        res["Warnings"] = "; ".join(warnings)
     if s.measure_filter:
         keep = set(s.measure_filter) | {"Test duration (s)", "Warnings"}
         res = OrderedDict((key, v) for key, v in res.items() if key in keep)
@@ -1587,7 +1611,7 @@ def _point_arrays(P: _Prepared, p) -> dict:
     dd = np.zeros(len(K.t))
     if len(dd) > 1:
         dd[1:] = np.nan_to_num(np.diff(ud))
-        dd[P.breaks] = 0.0
+        dd[P.cuts()] = 0.0
     out["dd"] = dd
     # heading error (deg): the direction of travel into each frame vs the direction from the previous position to
     # the point (ANY-maze: the vector to the next position vs the vector to the point)
@@ -1606,20 +1630,21 @@ def _point_arrays(P: _Prepared, p) -> dict:
         hxf, hyf = ffill(tr.hx), ffill(tr.hy)
         out["hdist"] = np.hypot((hxf - p.x) * K.scale, (hyf - p.y) * K.scale)
         win = max(1, int(round(s.speed_smoothing_s / max(tr.dt, 1e-6))))
-        hux = seg_moving_average(hxf, win, P.breaks) * K.scale
-        huy = seg_moving_average(hyf, win, P.breaks) * K.scale
+        cuts = P.cuts()
+        hux = seg_moving_average(hxf, win, cuts) * K.scale
+        huy = seg_moving_average(hyf, win, cuts) * K.scale
         hdd = np.zeros(len(K.t))
         hstep = np.zeros(len(K.t))
         h_err = np.full(len(K.t), np.nan)  # the head's direction of movement vs the direction to the point
         if len(hdd) > 1:
             hdd[1:] = np.nan_to_num(np.diff(np.hypot(hux - p.x * K.scale, huy - p.y * K.scale)))
             hstep[1:] = np.nan_to_num(np.hypot(np.diff(hux), np.diff(huy)))
-            hdd[P.breaks] = 0.0
-            hstep[P.breaks] = 0.0
+            hdd[cuts] = 0.0
+            hstep[cuts] = 0.0
             with np.errstate(invalid="ignore"):
                 h_err[1:] = _angle_diff(np.arctan2(np.diff(huy), np.diff(hux)),
                                         np.arctan2(p.y * K.scale - huy[:-1], p.x * K.scale - hux[:-1]))
-            h_err[(hstep < 1e-9) | P.breaks] = np.nan
+            h_err[(hstep < 1e-9) | cuts] = np.nan
         out["head_err"] = h_err
         dts = np.diff(K.t, prepend=K.t[0] - tr.dt)
         hspeed = hstep / np.where(dts <= 0, tr.dt, dts)
@@ -1672,10 +1697,32 @@ def grid_measures(g, memb: dict, t: np.ndarray, dur: np.ndarray, t0: float, T: f
     return out
 
 
+def _on_frames(o: Track, t: np.ndarray) -> Track:
+    """The other animal's track at frame times t (its nearest frame within half a frame; none: not detected). Its
+    track is a separate file (re-tracked, imported, live...), so the frames are paired by time, not by index; frames
+    after its last one are dropped."""
+    if len(o) == 0 or len(t) == 0:
+        return o.take(slice(0, 0))
+    tol = 0.5 * min(o.dt, float(np.median(np.diff(t))) if len(t) > 1 else o.dt) + 1e-9
+    t = t[:int(np.searchsorted(t, o.t[-1] + tol, "right"))]
+    j = np.clip(np.searchsorted(o.t, t), 1, max(1, len(o) - 1)) if len(o) > 1 else np.zeros(len(t), int)
+    if len(o) > 1:
+        j = np.where(np.abs(o.t[j - 1] - t) <= np.abs(o.t[j] - t), j - 1, j)
+    a = o.take(j)
+    a.t = np.asarray(t, float).copy()
+    miss = np.abs(o.t[j] - t) > tol
+    if miss.any():
+        for c in ("x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle"):
+            getattr(a, c)[miss] = np.nan
+        a.detected[miss] = False
+    return a
+
+
 def social_measures(track: Track, k: Kinematics, o: Track, app: Apparatus, s: AnalysisSettings,
                     label: str) -> "OrderedDict[str, object]":
     """Inter-animal measures for this animal relative to another animal tracked in the same arena."""
     out: OrderedDict[str, object] = OrderedDict()
+    o = _on_frames(o, track.t)
     n = min(len(o), len(track))
     if n == 0:
         return out

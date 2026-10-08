@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,7 +47,10 @@ def open_devices(project):
 
 class _RecordingThread:
     """Encodes a recording in its own thread, so the frame thread (holding the session lock) never waits for the
-    encoder.  The queue is bounded: a stalled encoder slows the frame thread down rather than filling the memory."""
+    encoder.  The queue is bounded: a stalled encoder slows the frame thread down rather than filling the memory.
+    Items are (frame, count): padding after a capture gap is one item repeated by the encoder, not count frames."""
+
+    CLOSE_TIMEOUT_S = 30.0
 
     def __init__(self, recorder: VideoRecorder, maxsize: int = 64):
         self.recorder = recorder
@@ -56,22 +60,37 @@ class _RecordingThread:
         self._thread.start()
 
     def write(self, frame: np.ndarray):
+        self.repeat(frame, 1)
+
+    def repeat(self, frame: np.ndarray, count: int):
+        """Write the frame count times (the encoder repeats it)."""
         if self.error is not None:
             raise self.error
-        self._queue.put(frame)
+        if count > 0:
+            self._queue.put((frame, int(count)))
 
-    def close(self):
-        """Encode what is queued, close the file; raises the encoder's error, if any."""
-        self._queue.put(None)
-        self._thread.join()
+    def close(self, timeout: float | None = None):
+        """Encode what is queued, close the file; raises the encoder's error, if any, or TimeoutError when the
+        encoder has not finished within timeout (it goes on and closes the file in the background)."""
+        timeout = self.CLOSE_TIMEOUT_S if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        try:
+            self._queue.put(None, timeout=timeout)
+        except queue.Full:
+            pass
+        self._thread.join(max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            raise TimeoutError(f"the video encoder did not finish within {timeout:g} s")
         if self.error is not None:
             raise self.error
 
     def _run(self):
-        while (frame := self._queue.get()) is not None:
+        while (item := self._queue.get()) is not None:
             if self.error is None:
+                frame, count = item
                 try:
-                    self.recorder.write(frame)
+                    for _ in range(count):
+                        self.recorder.write(frame)
                 except Exception as e:
                     self.error = e
         try:
@@ -449,6 +468,10 @@ class _Scoring(Session):
             fn(*args)
         except Exception as e:
             self.warn(f"Procedure error: {e}", t)
+        self._end_if_requested()
+
+    def _end_if_requested(self):
+        """Overridden by sessions whose procedures can end the test (after the engine call has returned)."""
 
     def score(self, behaviour: str, kind: str = "point", t: float | None = None) -> dict | None:
         """Score a behaviour now: a point event, or start / end of a state event. Returns the event, or None when
@@ -551,6 +574,9 @@ class LiveSession(_Scoring):
         self.cols = self._track.cols
         self._init_scoring()
         self.recorder: _RecordingThread | None = None
+        self._closing: list[_RecordingThread] = []  # recorders to close once the session lock is released
+        self._end_requested = False  # the "end the test" action fired: finish() once the engine call returns
+        self._finishing = False
         app = self.apparatus
         ctx = {"zones": [z.name for z in app.zones] + [g.name for g in app.groups] if app else [],
                "points": [p.name for p in app.points] if app else [], "keys": [],
@@ -732,8 +758,15 @@ class LiveSession(_Scoring):
 
     # ------------------------------------------------------------------ procedure callbacks (under the lock)
     def _procedure_end(self):
-        """The "end the test" action: the reason it gives is the test's end reason."""
-        self.finish(self.engine.end_reason or END_PROCEDURE)
+        """The "end the test" action: the reason it gives is the test's end reason.  The engine is mid-run here
+        (test-end handlers still to come), so the test ends when the engine call returns (_end_if_requested)."""
+        self._end_requested = True
+        self._end_if_requested()  # not from inside an engine call: now
+
+    def _end_if_requested(self):
+        if self._end_requested and self.state != "finished" and not self._finishing and not self.engine._busy:
+            self._end_requested = False
+            self.finish(self.engine.end_reason or END_PROCEDURE)
 
     def _end_pending(self, t: float):
         """"End the test" allowing continuation: the test is waiting for its end (see continue_test)."""
@@ -783,9 +816,7 @@ class LiveSession(_Scoring):
             elif self._video_paused:
                 self._video_cmd("unpause", {})
         elif cmd == "stop" and self.recorder is not None:
-            err = self._close_recorder()
-            if err is not None:
-                self.warn(f"Recording error: {err}", t)
+            self._close_recorder()
             msg = "recording stopped"
         elif cmd == "pause" and self.recorder is not None and not self._video_paused:
             self._video_paused, self._video_pause_t = True, t
@@ -830,16 +861,36 @@ class LiveSession(_Scoring):
             self.warn(f"Cannot record: {e}", t)
             self._system_event(t, "recording_error", {"value": str(e)})
 
-    def _close_recorder(self) -> Exception | None:
+    def _close_recorder(self):
+        """Stop recording; the file is closed (waiting for the encoder) once the session lock is released."""
         rec, self.recorder = self.recorder, None
         self._last_rec_frame = None
-        if rec is None:
-            return None
+        if rec is not None:
+            self._closing.append(rec)
+
+    def _close_pending_recorders(self):
+        """Close the recorders stopped under the lock, outside it (the encoder may take a while to finish)."""
+        if not self._closing or self.lock._is_owned():  # still inside a locked call: its caller closes them
+            return
+        with self.lock:
+            recs, self._closing = self._closing, []
+        for rec in recs:
+            close = getattr(rec, "close", None)
+            try:
+                if close is not None:
+                    close()
+            except Exception as e:
+                with self.lock:
+                    self.warn(f"Recording error: {e}")
+
+    @contextmanager
+    def _locked(self):
+        """The session lock, then the recorders stopped meanwhile are closed."""
         try:
-            rec.close()
-        except Exception as e:
-            return e
-        return None
+            with self.lock:
+                yield
+        finally:
+            self._close_pending_recorders()
 
     def _system_event(self, t: float, name: str, args: dict | None = None):
         if self.state in ("running", "paused"):
@@ -960,7 +1011,7 @@ class LiveSession(_Scoring):
             self.finish(END_USER)
 
     def pause(self) -> bool:
-        with self.lock:
+        with self._locked():
             if self.state != "running" or self.waiting_end:  # nothing to pause while waiting for the test end
                 return False
             self.state = "paused"
@@ -972,7 +1023,7 @@ class LiveSession(_Scoring):
             return True
 
     def resume(self) -> bool:
-        with self.lock:
+        with self._locked():
             if self.state != "paused":
                 return False
             self.state = "running"
@@ -983,7 +1034,7 @@ class LiveSession(_Scoring):
     def key(self, key: str, down: bool = True):
         """Forward a key press to the procedures; also while paused (e.g. a "resume" key) and, for the "test is
         waiting to start" handlers, while waiting to start."""
-        with self.lock:
+        with self._locked():
             if self.state in ("running", "paused"):
                 self._call_engine(self.engine.key, self.elapsed, key, down)
             elif self.state == "waiting" and self.engine._pretest:
@@ -991,14 +1042,14 @@ class LiveSession(_Scoring):
 
     def touch(self, area: str | None, x: float | None = None, y: float | None = None):
         """A touch on the stimulus screen (any thread): forwarded to the procedures under the session lock."""
-        with self.lock:
+        with self._locked():
             if self.state in ("running", "paused"):
                 self._call_engine(self.engine.touch, self.elapsed, area or None, x, y)
 
     # ------------------------------------------------------------------ frames (grabber thread)
     def process(self, frame: np.ndarray, timestamp: float | None = None) -> list[Detection]:
         """Process one frame. timestamp defaults to frame_index / fps."""
-        with self.lock:
+        with self._locked():
             return self._process(frame, timestamp)
 
     def _process(self, frame, timestamp):
@@ -1134,8 +1185,8 @@ class LiveSession(_Scoring):
                 return
             prev = self._last_rec_frame
             if prev is not None:
-                for _ in range(target - done - 1):
-                    self.recorder.write(prev)
+                if target - done - 1 > 0:  # repeated by the encoder thread, not queued frame by frame
+                    self.recorder.repeat(prev, target - done - 1)
                 self._rec_frames = target - 1
             self.recorder.write(img)
             self._rec_frames += 1
@@ -1156,6 +1207,7 @@ class LiveSession(_Scoring):
                                  "events": list(occ.events)})
         except Exception as e:
             self.warn(f"Procedure error: {type(e).__name__}: {e}", t)
+        self._end_if_requested()
         for msg in eng.errors[self._errors_seen:]:
             self.warn(f"Procedure error: {msg}", t)
         self._errors_seen = len(eng.errors)
@@ -1192,7 +1244,7 @@ class LiveSession(_Scoring):
 
     def finish(self, reason: str = END_USER):
         """End the test (any thread); reason: why (Test.end_reason), by default stopped by the user."""
-        with self.lock:
+        with self._locked():
             if self.state == "finished":
                 return
             eng = self.engine
@@ -1206,7 +1258,11 @@ class LiveSession(_Scoring):
                 self.pause_log.append({"t": round(self._pause_t, 3),
                                        "duration_s": round(time.monotonic() - self._pause_wall, 3)})
             if self.state in ("running", "paused"):
-                self._call_engine(eng.stop, self.elapsed)
+                self._finishing = True  # test-end handlers ending the test again: this finish() goes on
+                try:
+                    self._call_engine(eng.stop, self.elapsed)
+                finally:
+                    self._finishing = False
             if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9:
                 self._cut_data(end_at)
             self._close_states()
@@ -1218,9 +1274,7 @@ class LiveSession(_Scoring):
                 self.events = [dict(e, t_end=min(e["t_end"], c) if e.get("t_end") is not None else None)
                                for e in self.events if e["t"] <= c + 1e-9]
             self.state = "finished"
-            err = self._close_recorder()
-            if err is not None:
-                self.warn(f"Recording error: {err}")
+            self._close_recorder()
             release = getattr(self.devices, "release", None)  # a per-test DeviceView: its box off, unsubscribed
             if release is not None:
                 try:

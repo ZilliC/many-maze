@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .atomicfile import write_text_atomic
 from .geometry import (Ellipse, Polygon, Shape, clip_convex, concentric_rings, radial_sectors, shape_from_dict,
                        similarity_points, square_grid)
 
@@ -578,8 +579,8 @@ def save_apparatus_file(apps: list[Apparatus], path) -> Path:
     """Save apparatus maps (zones, points, lines, groups, sequences, grids, calibration) to a JSON file to share
     them between experiments or labs."""
     path = Path(path)
-    path.write_text(json.dumps({"format": APPARATUS_FILE_FORMAT, "version": 1,
-                                "apparatus": [a.to_dict() for a in apps]}, indent=1), encoding="utf-8")
+    write_text_atomic(path, json.dumps({"format": APPARATUS_FILE_FORMAT, "version": 1,
+                                        "apparatus": [a.to_dict() for a in apps]}, indent=1))
     return path
 
 

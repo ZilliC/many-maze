@@ -8,6 +8,7 @@ analysis settings, apparatus, animals). Segmented rows also serve non-segmented 
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 from dataclasses import asdict
@@ -100,13 +101,19 @@ def get_rows(project, segmented: bool, force: bool = False, progress=None) -> li
         rows = cached_rows(project, segmented, fp)
         if rows is not None:
             return rows
+    return _compute(id(project), project, segmented, fp, progress)
+
+
+def _compute(key: int, project, segmented: bool, fp, progress=None) -> list[dict]:
+    """Rows of `project` (the project itself, or a snapshot of the project `key` taken with fingerprint fp), cached
+    under `key`."""
     rows = project.results(segmented=segmented, progress=progress)
     with _lock:
-        for key in [k for k in _cache if k[0] != id(project)]:
-            del _cache[key]
-        _cache[(id(project), segmented)] = (fp, rows)
+        for k in [k for k in _cache if k[0] != key]:
+            del _cache[k]
+        _cache[(key, segmented)] = (fp, rows)
         if segmented:
-            _cache[(id(project), False)] = (fp, [r for r in rows if r.get("Period") == "Whole test"])
+            _cache[(key, False)] = (fp, [r for r in rows if r.get("Period") == "Whole test"])
     return rows
 
 
@@ -157,7 +164,9 @@ class RowsLoader(QObject):
                     w.gen = gen
                     self._set_busy(True)
                     return
-        w = Worker(lambda progress, stop: get_rows(project, segmented, force, progress), self)
+        # the worker reads a snapshot taken here: the pages go on editing the project while it computes
+        snap = copy.deepcopy(project)
+        w = Worker(lambda progress, stop: _compute(id(project), snap, segmented, fp, progress), self)
         w.key = (id(project), segmented, fp)
         w.gen = gen
         w.stopping = False

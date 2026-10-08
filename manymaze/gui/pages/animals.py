@@ -593,7 +593,7 @@ class AnimalsPage(Page):
             nid = unique_id(a.id, taken)
             taken.add(nid)
             b = Animal(nid, a.group, a.sex, dict(a.fields))
-            self.project.animals.insert(self.project.animals.index(a) + 1 + len(out), b)
+            self.project.animals.insert(self.project.animals.index(a) + 1, b)  # earlier copies already moved a
             out.append(b)
         if out:
             self._changed()

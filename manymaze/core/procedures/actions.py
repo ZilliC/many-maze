@@ -141,9 +141,14 @@ class Actions:
         old = self.outputs_state.get(key, 0)
         if not hw and (value != old or key not in self.outputs_state):
             try:
-                self.devices.set_output(dev, ch, value, max_s=max_s)
+                ok = self.devices.set_output(dev, ch, value, max_s=max_s) is not False
+                if not ok:
+                    self._error(None, (), f"output {dev}/{ch}: not sent (the device is not connected)")
             except Exception as e:  # pragma: no cover - hardware dependent
+                ok = False
                 self._error(None, (), f"output {dev}/{ch}: {e}")
+            if not ok:
+                return  # the state (and the log) keeps what the device really has
         if value != old or extra:
             self.outputs_state[key] = value
             self._log_io(t, dev, ch, "output", value, typ, **extra)
@@ -348,11 +353,14 @@ class Actions:
                 pass
         if tr.on:
             self._set_out(key[0], key[1], 0, t, tr.typ, hw=tr.hw)
-            if tr.hw:
-                try:
-                    self.devices.set_output(key[0], key[1], 0)
-                except Exception:  # pragma: no cover
-                    pass
+        if tr.hw:
+            # always: the board (or the device manager's clock) may have switched it on whatever tr.on says, and
+            # stop_train cancelled the scheduled off
+            try:
+                if self.devices.set_output(key[0], key[1], 0) is False:
+                    self._error(None, (), f"output {key[0]}/{key[1]}: could not switch it off")
+            except Exception as e:  # pragma: no cover - hardware dependent
+                self._error(None, (), f"output {key[0]}/{key[1]}: {e}")
 
     def _a_output_pulse(self, th, p, device, channel, duration, typ="pulse"):
         self._start_train(th, p, device, channel, duration, duration, 1, typ)

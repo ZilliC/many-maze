@@ -14,12 +14,24 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 
 from ..core import ioconfig
 from ..core import iodevices as iod
-from .widgets import loading, value_text
+from .widgets import loading, run_and_wait, value_text
 
 # channel table columns: (channel field, header); "options" holds the driver options as key=value text
 CH_COLS = [("name", "Name"), ("kind", "Kind"), ("pin", "Pin"), ("pin_b", "Pin B"), ("invert", "Invert"),
            ("on", "On text"), ("off", "Off text"), ("options", "Options")]
 _CH_KEYS = {"name", "kind", "pin", "pin_b", "invert", "on", "off"}
+
+
+def open_device_manager(parent, configs, title: str = "Connecting the I/O devices") -> tuple:
+    """A DeviceManager of `configs`, opened in a Worker (a board can take seconds to answer). Returns (manager or
+    None, problems to show the user: failures, device errors, or configured devices of which none opened)."""
+    m, err = run_and_wait(parent, title, lambda progress, stop: iod.DeviceManager(configs))
+    if m is None:
+        return None, [err or "The I/O devices could not be opened."]
+    problems = list(m.errors)
+    if m.devices and not any(d.connected for d in m.devices.values()):
+        problems.append("None of the configured I/O devices could be opened.")
+    return m, problems
 
 
 # labels of the device fields without a widget of their own (shown as text fields)
@@ -73,6 +85,7 @@ class IODevicesDialog(QDialog):
         self.project = project
         self.configs = copy.deepcopy(list(project.io_devices or []))
         self.manager: iod.DeviceManager | None = None  # while connected
+        self._output_errors: list[str] = []  # outputs that could not be set while connected
         self._loading = False
         self._status_keys: list = []
         self._build()
@@ -475,20 +488,27 @@ class IODevicesDialog(QDialog):
         else:
             self.connect_devices()
 
-    def connect_devices(self):
+    def connect_devices(self) -> bool:
         self._save_channels()
-        if self.manager is not None:
-            self.manager.close()
-        self.manager = iod.DeviceManager(self.configs)
+        self.disconnect_devices()
+        m, problems = open_device_manager(self, self.configs)
+        if m is None:
+            QMessageBox.warning(self, "I/O devices", "\n".join(problems))
+            return False
+        self.manager = m
         self.connect_btn.setText("Disconnect")
         self._refresh_status(force=True)
         self.timer.start()
+        if problems:
+            QMessageBox.warning(self, "I/O devices", "\n".join(problems[-10:]))
+        return True
 
     def disconnect_devices(self):
         self.timer.stop()
         if self.manager is not None:
             self.manager.close()
         self.manager = None
+        self._output_errors = []
         self.connect_btn.setText("Connect")
         self.status.setRowCount(0)
         self.conn_lbl.setText("Not connected")
@@ -526,9 +546,23 @@ class IODevicesDialog(QDialog):
             if it.text() != text:
                 it.setText(text)
                 it.setForeground(QBrush(QColor("#15803d" if v else "#6b7280")))
-        errs = m.errors
+        errs = m.errors + self._output_errors
         self.conn_lbl.setText("; ".join(errs[-3:]) if errs else f"Connected: {len(m.devices)} device(s)")
         self.conn_lbl.setStyleSheet("color:#dc2626" if errs else "color:#15803d")
+
+    def _set_output(self, m, device, channel, value) -> bool:
+        """Set an output of the connected manager `m`, unless it was disconnected meanwhile; failures are shown."""
+        if m is None or m is not self.manager:
+            return False
+        try:
+            ok = m.set_output(device, channel, value) is not False
+        except Exception as e:
+            ok, msg = False, f"{device} · {channel}: {e}"
+        else:
+            msg = f"{device} · {channel}: the output could not be set"
+        if not ok and msg not in self._output_errors:
+            self._output_errors.append(msg)
+        return ok
 
     def toggle_channel(self, device, channel, kind):
         m = self.manager
@@ -536,14 +570,14 @@ class IODevicesDialog(QDialog):
             return
         dev = m.devices.get(device)
         if kind in ioconfig.OUTPUT_KINDS:
-            m.set_output(device, channel, 0 if dev.outputs.get(channel) else 1)
+            self._set_output(m, device, channel, 0 if dev.outputs.get(channel) else 1)
         else:
             m.set_input(device, channel, 0 if dev.inputs.get(channel) else 1)
         self._poll()
 
     def test_selected(self):
-        if self.manager is None:
-            self.connect_devices()
+        if self.manager is None and not self.connect_devices():
+            return
         m = self.manager
         r = self.status.currentRow()
         c = self._cur()
@@ -562,8 +596,10 @@ class IODevicesDialog(QDialog):
         if k not in ioconfig.OUTPUT_KINDS:
             self.conn_lbl.setText(f"{ch} is an input: press the lever / break the beam to see it change")
             return
-        m.set_output(d, ch, 1)
-        QTimer.singleShot(500, lambda: (m.set_output(d, ch, 0), self._refresh_status()))
+        if self._set_output(m, d, ch, 1):
+            # switched off by the same manager only: it may have been disconnected (closed) within the 500 ms
+            QTimer.singleShot(500, lambda: m is self.manager and (self._set_output(m, d, ch, 0),
+                                                                  self._refresh_status()))
         self._refresh_status()
 
     # ------------------------------------------------------------------ close
@@ -647,9 +683,18 @@ class CalibrationDialog(QDialog):
         self.table.setCellWidget(r, 1, val)
         self.table.setCellWidget(r, 2, b)
 
-    def set_level(self, level: float):
-        if self.manager is not None:
-            self.manager.set_output(self.device, self.ch["intensity"], level)
+    def set_level(self, level: float, quiet: bool = False) -> bool:
+        if self.manager is None:
+            return False
+        try:
+            ok = self.manager.set_output(self.device, self.ch["intensity"], level) is not False
+        except Exception as e:
+            ok, msg = False, str(e)
+        else:
+            msg = "the output could not be set"
+        if not ok and not quiet:
+            QMessageBox.warning(self, "Calibrate", f"{self.device} · {self.ch['intensity']}: {msg}")
+        return ok
 
     def points(self) -> list[tuple[float, float]]:
         out = {}
@@ -664,5 +709,5 @@ class CalibrationDialog(QDialog):
 
     def done(self, r):
         if self.manager is not None:
-            self.set_level(0)
+            self.set_level(0, quiet=True)
         super().done(r)

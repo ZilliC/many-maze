@@ -288,18 +288,21 @@ class _LineDevice(Device):
             self.connected = False
 
     def write_line(self, line: str) -> bool:
+        """Send a line; False when it was not sent (not connected, or the write failed: the device is then marked
+        disconnected and its port closed, so that DeviceManager.open() opens it again)."""
         with self._io_lock:
             self.sent.append(line)
             if len(self.sent) > 5000:
                 del self.sent[:1000]
-            if self.transport is None:
+            if self.transport is None or not self.connected:
                 return False
             try:
                 self.transport.write((line + self.cfg.get("eol", "\n")).encode())
                 self._last_write = time.monotonic()
                 return True
-            except Exception as e:  # pragma: no cover - hardware dependent
+            except Exception as e:
                 self._error(f"{self.name}: write failed: {e}")
+                self.close()
                 return False
 
     def read_lines(self) -> list[str]:
@@ -325,17 +328,18 @@ class SerialDevice(_LineDevice):
     type = "serial"
 
     def send(self, text: str) -> bool:
-        self.write_line(text)
-        return True
+        return self.write_line(text)
 
-    def set_output(self, channel: str, value: float, max_s: float | None = None):
-        self.outputs[channel] = value
+    def set_output(self, channel: str, value: float, max_s: float | None = None) -> bool:
         c = self.channels.get(channel, {})
         cmd = c.get("on" if value else "off")
         if cmd is None:
             cmd = f"{channel} {'ON' if value else 'OFF'}" if not isinstance(value, float) or value in (0, 1) \
                 else f"{channel} {value:g}"
-        self.write_line(str(cmd))
+        if not self.write_line(str(cmd)):
+            return False
+        self.outputs[channel] = value
+        return True
 
     def _read(self):
         for line in self.read_lines():
@@ -531,37 +535,38 @@ class ArduinoDevice(_LineDevice):
         for line in self.read_lines():
             self._parse(line)
 
-    def set_output(self, channel: str, value: float, max_s: float | None = None):
+    def set_output(self, channel: str, value: float, max_s: float | None = None) -> bool:
+        """False when the command could not be sent (the output's state is then unchanged)."""
         pin = self._pin(channel)
-        self.outputs[channel] = value
         if pin is None:
-            return
+            self.outputs[channel] = value
+            return True
         if self.channels[channel].get("kind") == "pwm" and value not in (0, 1, True, False):
-            self.write_line(f"P {pin} {int(round(max(0.0, min(1.0, float(value))) * 255))}")
-            return
-        if self.channels[channel].get("kind") == "pwm":
-            self.write_line(f"P {pin} {255 if value else 0}")
-            return
-        extra = f" {int(max_s * 1000)}" if (value and max_s) else ""
-        self.write_line(f"W {pin} {1 if value else 0}{extra}")
+            line = f"P {pin} {int(round(max(0.0, min(1.0, float(value))) * 255))}"
+        elif self.channels[channel].get("kind") == "pwm":
+            line = f"P {pin} {255 if value else 0}"
+        else:
+            extra = f" {int(max_s * 1000)}" if (value and max_s) else ""
+            line = f"W {pin} {1 if value else 0}{extra}"
+        if not self.write_line(line):
+            return False
+        self.outputs[channel] = value
+        return True
 
     def pulse_train(self, channel, period_s, width_s, count):
         pin = self._pin(channel)
         if pin is None:
             return False
-        self.write_line(f"T {pin} {period_s * 1000:.3f} {width_s * 1000:.3f} {int(count)}")
-        return True
+        return self.write_line(f"T {pin} {period_s * 1000:.3f} {width_s * 1000:.3f} {int(count)}")
 
     def stop_train(self, channel):
         pin = self._pin(channel)
         if pin is None:
             return False
-        self.write_line(f"X {pin}")
-        return True
+        return self.write_line(f"X {pin}")
 
     def send(self, text: str) -> bool:
-        self.write_line(text)
-        return True
+        return self.write_line(text)
 
     def all_off(self):
         for th in self.thermostats.values():
@@ -881,8 +886,12 @@ class DeviceManager:
                 next_service = now + self.SERVICE_S
             with self._lock:
                 due = self._sched[0][0] if self._sched else None
-            if not periods and due is None:
-                return
+                if not periods and due is None:
+                    # exit under the lock: pulse_sequence (which queues under it) then sees no thread and
+                    # starts a new one, instead of a thread about to return
+                    if self._ka_thread is threading.current_thread():
+                        self._ka_thread = None
+                    return
             wait = max(0.02, min(periods) / 4) if periods else 0.5
             if due is not None:
                 wait = min(wait, max(0.0, due - time.monotonic()))
@@ -1009,8 +1018,9 @@ class DeviceManager:
         return out
 
     def set_output(self, device: str, channel: str, value: float, max_s: float | None = None):
+        """False when the device could not switch it (e.g. disconnected); None / True otherwise."""
         with self._lock:
-            self.device(device).set_output(channel, value, max_s=max_s)
+            return self.device(device).set_output(channel, value, max_s=max_s)
 
     def pulse_train(self, device, channel, period_s, width_s, count) -> bool:
         with self._lock:
@@ -1205,7 +1215,7 @@ class DeviceView:
         return fn(self.device(name))
 
     def set_output(self, device: str, channel: str, value: float, max_s: float | None = None):
-        self._call(device, lambda d: d.set_output(channel, value, max_s=max_s))
+        return self._call(device, lambda d: d.set_output(channel, value, max_s=max_s))
 
     def pulse_train(self, device, channel, period_s, width_s, count) -> bool:
         return self._call(device, lambda d: d.pulse_train(channel, period_s, width_s, count))

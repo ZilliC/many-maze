@@ -212,6 +212,17 @@ def test_output_mean_activation_and_frequency():
     assert m["Speaker tone: activations per minute"] == 1.0
 
 
+def test_io_event_on_bin_boundary_counts_in_one_bin():
+    ev = [E(5.0, "door", 1), E(5.5, "door", 0), E(5.0, "feed", 1, typ="pellet"),
+          E(5.2, "feed", 0, typ="pellet"), E(5.0, "beam", 1, "input"), E(6.0, "beam", 0, "input")]
+    a, b = io_measures(ev, 10.0, t_range=(0.0, 5.0)), io_measures(ev, 10.0, t_range=(5.0, 10.0))
+    assert a["door: times on"] == 0 and b["door: times on"] == 1
+    assert a["beam: activations"] == 0 and b["beam: activations"] == 1
+    assert a["feed: pellets dispensed"] == 0 and b["feed: pellets dispensed"] == 1
+    # an event at the very end of the test still counts in the last period
+    end = io_measures([E(10.0, "beam", 1, "input")], 10.0, t_range=(5.0, 10.0), test_end=10.0)
+    assert end["beam: activations"] == 1
+
 def test_encoder_total_rotations_and_max_rpm():
     cfg = [{"name": "box", "channels": [{"name": "wheel", "kind": "encoder", "counts_per_rev": 100}]}]
     ev = [E(0.0, "wheel", 0, "input", typ="encoder")]

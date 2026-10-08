@@ -561,56 +561,72 @@ class ProcedureEngine(Actions, LiveState):
             return
         self._busy = True
         try:
-            self.t = max(self.t, t)
-            t = self.t
-            self._tick(t)
-            self._emit("test_end", {}, t)
-            self._run(t, final=True)
-            for th in self.threads:
-                self._kill(th)
-            self.threads = []
-            for key in list(self._trains):
-                self._stop_train(key, t)
-            self._tasks, self._task_keys, self._cancelled = [], {}, set()
-            self._ramps.clear()
-            if self.outputs_off_at_end:
-                self._devices_off(t)
-                for (dev, ch), v in list(self.outputs_state.items()):
-                    if v:
-                        self._set_out(dev, ch, 0, t, "digital")
-                for key in list(self._audio_on):
-                    self._audio_off(key, t)
-                for name, v in list(self.switches.items()):
-                    if v:
-                        self._set_switch(name, 0, t)
-            for m in self.state_events:
-                if m["t_end"] is None:
-                    m["t_end"] = t
-            for pz in self.pauses:
-                if pz[1] is None:
-                    pz[1] = t
-            for name, flags in self.var_flags.items():
-                v = self.vars.get(name)
-                if flags.get("keep"):
-                    self._kept_store(self.kept_variables, flags["keep"], create=True)[name] = copy.deepcopy(v)
-                    if self.commit_kept:
-                        self._kept_store(self.variables, flags["keep"], create=True)[name] = copy.deepcopy(v)
-                if flags.get("result") and isinstance(v, (int, float)) and not isinstance(v, str):
-                    self.result_variables[name] = float(v) if isinstance(v, float) else int(v)
-            self.io_events.sort(key=lambda e: e["t"])
+            try:
+                self.t = max(self.t, t)
+                t = self.t
+                self._tick(t)
+                self._emit("test_end", {}, t)
+                self._run(t, final=True)
+            finally:
+                # every cleanup step on its own: one failing device must not leave the others on
+                for th in self.threads:
+                    self._safely("stop", self._kill, th)
+                self.threads = []
+                for key in list(self._trains):
+                    self._safely(f"output {key[0]}/{key[1]}", self._stop_train, key, t)
+                self._tasks, self._task_keys, self._cancelled = [], {}, set()
+                self._ramps.clear()
+                try:
+                    if self.outputs_off_at_end:
+                        self._devices_off(t)
+                        for (dev, ch), v in list(self.outputs_state.items()):
+                            if v:
+                                self._safely(f"output {dev}/{ch}", self._set_out, dev, ch, 0, t, "digital")
+                        for key in list(self._audio_on):
+                            self._safely("audio", self._audio_off, key, t)
+                        for name, v in list(self.switches.items()):
+                            if v:
+                                self._safely(f"switch {name}", self._set_switch, name, 0, t)
+                finally:
+                    self._finalise(t)
         finally:
             self._busy = False
             self.stopped = True
 
+    def _safely(self, what, fn, *args):
+        """A cleanup step at the end of the test: an error is reported and the next step still runs."""
+        try:
+            fn(*args)
+        except Exception as e:
+            self._error(None, (), f"{what}: {e}")
+
+    def _finalise(self, t):
+        """Close open state events and pauses; store the kept and result variables (end of the test)."""
+        for m in self.state_events:
+            if m["t_end"] is None:
+                m["t_end"] = t
+        for pz in self.pauses:
+            if pz[1] is None:
+                pz[1] = t
+        for name, flags in self.var_flags.items():
+            v = self.vars.get(name)
+            if flags.get("keep"):
+                self._kept_store(self.kept_variables, flags["keep"], create=True)[name] = copy.deepcopy(v)
+                if self.commit_kept:
+                    self._kept_store(self.variables, flags["keep"], create=True)[name] = copy.deepcopy(v)
+            if flags.get("result") and isinstance(v, (int, float)) and not isinstance(v, str):
+                self.result_variables[name] = float(v) if isinstance(v, float) else int(v)
+        self.io_events.sort(key=lambda e: e["t"])
+
     def _devices_off(self, t):
         """Pumps stopped, temperature control off and odours off (end of the test)."""
         for dev, ch in list(self._pumps_on):
-            self._a_pump_stop(None, (), dev, ch)
+            self._safely(f"pump {dev}/{ch}", self._a_pump_stop, None, (), dev, ch)
         for dev, ch in list(self._thermostats_on):
-            self._a_temperature_off(None, (), dev, ch)
+            self._safely(f"temperature {dev}/{ch}", self._a_temperature_off, None, (), dev, ch)
         for (dev, ch), name in list(self._odours.items()):
             if name:
-                self._a_odour_off(None, (), dev, ch)
+                self._safely(f"odour {dev}/{ch}", self._a_odour_off, None, (), dev, ch)
 
     # ------------------------------------------------------------------ internals: errors & helpers
     def _proc_name(self, pi):

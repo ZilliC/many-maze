@@ -44,6 +44,7 @@ class _Log:
 
     def __init__(self, io_events, devices=None):
         self.cfg, self.dev_type = {}, {}
+        self.end = None  # the end of the test, when known: an event at a period's end counts in it only then
         for d in devices or []:
             self.dev_type[d.get("name")] = d.get("type", "")
             for c in d.get("channels", []) or []:
@@ -125,16 +126,23 @@ class _Log:
         return None
 
 
-def _digital(ev, t0, t1):
+def _within(t, t0, t1, end=None) -> bool:
+    """t is in the period [t0, t1): half-open, so that an event exactly on a bin boundary counts in one bin only;
+    t == t1 counts only when t1 is the end of the test (end)."""
+    return t0 <= t < t1 or (end is not None and t == t1 and t1 >= end - 1e-9)
+
+
+def _digital(ev, t0, t1, end=None):
     """On spans [(on, off)] inside [t0, t1] (clipped; one carried in at t0 and one still on at t1 included),
-    onsets and offsets inside the period, and whether the channel was on at t0."""
+    onsets and offsets inside the period [t0, t1) (t1 included when it is the test's end), and whether the
+    channel was on at t0."""
     prior = [v for t, v in ev if t < t0]
     state = bool(prior[-1]) if prior else False
     on0 = state
     on_since = t0 if state else None
     spans, onsets, offsets = [], [], []
     for t, v in ev:
-        if t < t0 or t > t1:
+        if not _within(t, t0, t1, end):
             continue
         if v and not state:
             state, on_since = True, t
@@ -199,6 +207,7 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
     never = T if _setting(settings, "latency_if_never", "duration") == "duration" else math.nan
     end = t1 if test_end is None and t_range is None else (float(test_end) if test_end is not None else None)
     log = _Log(io_events, devices)
+    log.end = end
     res: dict[str, object] = {}
     for key in sorted(log.series, key=lambda k: (k[0] != "input", k[0] == "variable", k[1], k[2])):
         kind = log.kind(key)
@@ -213,9 +222,9 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
         elif kind == "encoder":
             _encoder(res, lab, ev, log.conf(key), t0, t1, T)
         elif kind == "analog":
-            _analog(res, lab, ev, t0, t1, settings)
+            _analog(res, lab, ev, t0, t1, settings, end)
         elif kind == "input":
-            spans, onsets, offsets, _ = _digital(ev, t0, t1)
+            spans, onsets, offsets, _ = _digital(ev, t0, t1, end)
             lens = [b - a for a, b in spans]
             total_on = sum(lens)
             n = len(onsets)
@@ -267,7 +276,7 @@ def _index_reversals(res, log, t0, t1):
 def _output(res, log, key, lab, ev, t0, t1, T, never):
     """Outputs, virtual switches, sounds and touch-screen stimuli; shockers, speakers and lights get measures named
     after their group ("Shocker <channel>: shocks", ...)."""
-    spans, onsets, offsets, _ = _digital(ev, t0, t1)
+    spans, onsets, offsets, _ = _digital(ev, t0, t1, log.end)
     lens = [b - a for a, b in spans]
     total_on = sum(lens)
     ty = log.types[key]
@@ -294,10 +303,10 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
     if "pellet" in ty:
         res[f"{g}: pellets dispensed"] = len(onsets)
         res[f"{g}: latency to first pellet (s)"] = _r(onsets[0] - t0 if onsets else never)
-        errs = [v for t, v in log.derived(key, "errors") if t0 <= t <= t1]
+        errs = [v for t, v in log.derived(key, "errors") if _within(t, t0, t1, log.end)]
         if errs or log.derived(key, "retries"):
             res[f"{g}: pellets not dispensed (errors)"] = int(sum(errs))
-            res[f"{g}: dispenser retries"] = sum(1 for t, _v in log.derived(key, "retries") if t0 <= t <= t1)
+            res[f"{g}: dispenser retries"] = sum(1 for t, _v in log.derived(key, "retries") if _within(t, t0, t1, log.end))
     if group == "dripper" and log.conf(key).get("drop_ul"):
         res[f"{g}: volume (µl)"] = _r(len(onsets) * float(log.conf(key)["drop_ul"]))
     if group == "shocker":
@@ -311,7 +320,7 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
             res[f"{g}: max intensity (mA)"] = _r(max(vals) if vals else math.nan)
     if "train" in ty:
         trains = [e for e in log.events if str(e.get("device")) == key[1] and str(e.get("channel")) == key[2]
-                  and e.get("train_start") and t0 <= float(e.get("t", 0)) <= t1]
+                  and e.get("train_start") and _within(float(e.get("t", 0)), t0, t1, log.end)]
         res[f"{g}: pulse trains"] = len(trains)
         res[f"{g}: pulses"] = len(onsets)
 
@@ -333,7 +342,7 @@ def _output_names(log, key, lab) -> tuple[str, str, str | None]:
 
 def _pir(res, log, key, lab, ev, t0, t1, T, never):
     """A movement detector (PIR): each activation is a movement."""
-    spans, onsets, _offsets, _ = _digital(ev, t0, t1)
+    spans, onsets, _offsets, _ = _digital(ev, t0, t1, log.end)
     lens = [b - a for a, b in spans]
     g = f"Movement detector {lab}"
     res[f"{g}: movements"] = len(onsets)
@@ -353,7 +362,7 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
     g = f"Sensor {lab}"
     res[f"{g}: initial value"] = _r(first)
     res[f"{g}: final value"] = _r(last)
-    smp = [v for t, v in ev if t0 <= t <= t1 and math.isfinite(v)]  # as ANY-maze: the average of the readings
+    smp = [v for t, v in ev if _within(t, t0, t1, log.end) and math.isfinite(v)]  # as ANY-maze: the average of the readings
     res[f"{g}: mean"] = _r(sum(smp) / len(smp) if smp else first)
     res[f"{g}: max"] = _r(max(vals) if vals else math.nan)
     res[f"{g}: min"] = _r(min(vals) if vals else math.nan)
@@ -362,7 +371,7 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: intake"] = _r(max(0.0, first - last) if vals else math.nan)
     oor = log.derived(key, "out_of_range")
     if oor or c.get("alert_min") not in (None, "") or c.get("alert_max") not in (None, ""):
-        spans, onsets, _, _ = _digital(oor, t0, t1)
+        spans, onsets, _, _ = _digital(oor, t0, t1, log.end)
         res[f"{g}: time out of range (s)"] = _r(sum(b - a for a, b in spans))
         res[f"{g}: times out of range"] = len(onsets)
 
@@ -403,15 +412,15 @@ def _pump(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: {'infusions' if direction == 'infuse' else 'withdrawals'}"] = sum(1 for r in mine if r[0] >= t0)
     running = log.derived(key, "running")
     if running:
-        spans = _digital(running, t0, t1)[0]
+        spans = _digital(running, t0, t1, log.end)[0]
     else:
         spans = [(max(a, t0), min(b if b != math.inf else t1, t1,
                                    a + target / rate * 60.0 if target > 0 and rate > 0 else math.inf))
                  for a, b, _d, rate, target in runs]
     res[f"{g}: time pumping (s)"] = _r(sum(max(0.0, b - a) for a, b in spans))
-    starts = [r[0] for r in runs if t0 <= r[0] <= t1]
+    starts = [r[0] for r in runs if _within(r[0], t0, t1, log.end)]
     res[f"{g}: latency to first start (s)"] = _r(starts[0] - t0 if starts else never)
-    res[f"{g}: stalls"] = len(_digital(log.derived(key, "stalled"), t0, t1)[1])
+    res[f"{g}: stalls"] = len(_digital(log.derived(key, "stalled"), t0, t1, log.end)[1])
 
 
 def _thermostat(res, log, key, lab, ev, t0, t1, T, never):
@@ -422,9 +431,9 @@ def _thermostat(res, log, key, lab, ev, t0, t1, T, never):
     res[f"{g}: time on (s)"] = _r(tot)
     res[f"{g}: mean target"] = _r(sum((b - a) * v for a, b, v in on) / tot if tot > 0 else math.nan, 2)
     at = log.derived(key, "at_target")
-    spans, onsets, _, _ = _digital(at, t0, t1)
+    spans, onsets, _, _ = _digital(at, t0, t1, log.end)
     res[f"{g}: time at target (s)"] = _r(sum(b - a for a, b in spans))
-    starts = [t for t, v in ev if v and t0 <= t <= t1]
+    starts = [t for t, v in ev if v and _within(t, t0, t1, log.end)]
     first = next((x for x in onsets if starts and x >= starts[0]), None)
     res[f"{g}: latency to target (s)"] = _r(first - starts[0] if first is not None else never)
     sp = log.derived(key, "setpoint")
@@ -442,7 +451,7 @@ def _odour(res, log, key, lab, ev, t0, t1, T, never):
         per.setdefault(str(e.get("odour", "?")), []).append((float(e["t"]), float(e.get("value", 0) or 0)))
     tot_all = 0.0
     for name, s in sorted(per.items()):
-        spans, onsets, _, _ = _digital(s, t0, t1)
+        spans, onsets, _, _ = _digital(s, t0, t1, log.end)
         tot = sum(b - a for a, b in spans)
         tot_all += tot
         g = f"Odour {name}"
@@ -453,7 +462,7 @@ def _odour(res, log, key, lab, ev, t0, t1, T, never):
 
 
 def _weight(res, log, key, lab, ev, t0, t1, T, never):
-    vals = [v for t, v in ev if t0 <= t <= t1]
+    vals = [v for t, v in ev if _within(t, t0, t1, log.end)]
     res["Animal weight (g)"] = _r(vals[-1] if vals else math.nan, 2)
 
 
@@ -464,7 +473,7 @@ _SPECIAL = {"pir": _pir, "sensor": _sensor, "pump": _pump, "thermostat": _thermo
 def _variable(res, name, ev, t0, t1, end, whole=False):
     """A procedure variable recorded during the test (every change / every time it is set). As ANY-maze, a
     variable never recorded in the whole test has a max / min of 0 (variables start at 0); in a period, blank."""
-    vals = [v for t, v in ev if t0 <= t < t1 or (end is not None and t == t1 and t1 >= end - 1e-9)]
+    vals = [v for t, v in ev if _within(t, t0, t1, end)]
     p = f"Variable: {name}"
     none = 0.0 if whole else math.nan
     res[f"{p} (count)"] = len(vals)
@@ -612,12 +621,12 @@ def _encoder_irv(ev, t0, t1, cpr: float) -> list[tuple[float, float]]:
     return out
 
 
-def _analog(res, lab, ev, t0, t1, settings):
+def _analog(res, lab, ev, t0, t1, settings, end=None):
     """Analogue signal: mean, min, max and their times, baseline and deviations from it. As ANY-maze, the mean,
     min, max and baseline are over the samples (their simple average); a period without a sample has the value
     held from before it."""
     seg = _steps(ev, t0, t1)
-    smp = [(t, v) for t, v in ev if t0 <= t <= t1 and math.isfinite(v)] or [(a, v) for a, _, v in seg[:1]]
+    smp = [(t, v) for t, v in ev if _within(t, t0, t1, end) and math.isfinite(v)] or [(a, v) for a, _, v in seg[:1]]
     vals = [v for _, v in smp]
     res[f"{lab}: mean"] = _r(sum(vals) / len(vals) if vals else math.nan)
     res[f"{lab}: min"] = _r(min(vals) if vals else math.nan)
@@ -663,8 +672,8 @@ def _opad(res, log, t0, t1, settings):
         return
     lk = log.find(str(_setting(settings, "opad_lick", "") or ""))
     tk = log.find(str(_setting(settings, "opad_temperature", "") or ""))
-    spans, made, broken, _ = _digital(log.series[ck], t0, t1)
-    licks = _digital(log.series[lk], t0, t1)[1] if lk is not None else []
+    spans, made, broken, _ = _digital(log.series[ck], t0, t1, log.end)
+    licks = _digital(log.series[lk], t0, t1, log.end)[1] if lk is not None else []
     res["OPAD: contacts made"] = len(made)
     res["OPAD: contacts broken"] = len(broken)
     res["OPAD: time in contact (s)"] = _r(sum(b - a for a, b in spans))

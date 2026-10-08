@@ -462,6 +462,25 @@ def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callab
     return w
 
 
+def run_and_wait(parent: QWidget, title: str, fn: Callable) -> tuple[object, str | None]:
+    """run_with_progress for callers that need the result now: the work runs in a Worker while a local event loop
+    keeps the window painting (the modal progress dialog blocks input). Returns (result, error message or None)."""
+    from PySide6.QtCore import QEventLoop
+
+    loop = QEventLoop()
+    out: dict = {}
+
+    def finish(key, value):
+        out[key] = value
+        loop.quit()
+
+    run_with_progress(parent, title, fn, on_done=lambda r: finish("result", r), on_fail=lambda m: finish("error", m),
+                      cancellable=False)
+    if not out:
+        loop.exec()
+    return out.get("result"), out.get("error")
+
+
 # ---------------------------------------------------------------- plotting
 class PlotCanvas(QWidget):
     """Hosts a matplotlib Figure produced by core.plots."""

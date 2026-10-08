@@ -4,7 +4,6 @@ the recordings folder; tests interrupted by a crash are rebuilt from these files
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 from pathlib import Path
@@ -12,6 +11,7 @@ from typing import Callable
 
 import numpy as np
 
+from .atomicfile import atomic_write
 from .session import END_RECOVERED, Session, save_live_test
 from .tracking import DetectionSettings, TrackBuilder, postprocess
 from .video import recorded_video
@@ -36,17 +36,9 @@ def _json_default(o):
 
 
 def write(path: str, data: dict):
-    """Atomically (write + rename) write a side file."""
-    p = Path(path)
-    tmp = p.with_name(p.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
+    """Atomically (write + fsync + rename) write a side file."""
+    with atomic_write(path) as fh:
         json.dump(data, fh, default=_json_default)
-        fh.flush()
-        try:
-            os.fsync(fh.fileno())
-        except OSError:  # pragma: no cover
-            pass
-    os.replace(tmp, p)
 
 
 def read(path: str) -> dict:

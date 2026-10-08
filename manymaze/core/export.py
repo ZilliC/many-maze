@@ -47,13 +47,20 @@ def display_text(v) -> str:
     return str(v)
 
 
+def _csv_text(v) -> str:
+    """value_text, with text that looks like a formula prefixed by ' so a spreadsheet keeps it as text (no formula
+    injection; as the xlsx writer). Numbers, negative ones included, are left alone."""
+    s = value_text(v)
+    return "'" + s if isinstance(v, str) and s[:1] in ("=", "+", "-", "@") and s != "-" else s
+
+
 def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimiter=","):
     cols = columns or result_columns(rows)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=delimiter)
-        w.writerow(cols)
+        w.writerow([_csv_text(c) for c in cols])
         for r in rows:
-            w.writerow([value_text(r.get(c)) for c in cols])
+            w.writerow([_csv_text(r.get(c)) for c in cols])
 
 
 def write_tsv(rows: list[dict], path, columns: list[str] | None = None):
@@ -678,7 +685,9 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
                 w.writerow(cols)
                 M = np.column_stack(arrays) if arrays and len(tr) else np.zeros((0, len(cols)))
                 for row in M:
-                    w.writerow(["" if not np.isfinite(v) else f"{v:.6g}" for v in row])
+                    # Time with fixed decimals: .6g would round it to 0.1 s past 10000 s
+                    w.writerow(["" if not np.isfinite(v) else (f"{v:.5f}" if j == 0 else f"{v:.6g}")
+                                for j, v in enumerate(row)])
             written.append(p)
         if progress:
             progress((k + 1) / max(1, len(tests)))
@@ -741,136 +750,142 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
         for r in rows:
             by_test.setdefault(r.get("Test"), []).append(r)
     tmp = path.with_name(path.name + ".part")
-    with open(tmp, "w", encoding="utf-8") as f:
-        w = f.write
-        w('<?xml version="1.0" encoding="UTF-8"?>\n')
-        w(f"<manymaze-experiment{_attrs(format_version=XML_FORMAT_VERSION, software=f'mANY-MAZE {__version__}', exported=_dt.datetime.now().isoformat(timespec='seconds'))}>\n")
-        w(f"  <experiment{_attrs(name=project.name, protocol=project.protocol, test_duration_s=float(project.test_duration_s), start_mode=project.start_mode, created=project.created, blind=bool(getattr(project, 'blind', False)))}>\n")
-        w(f"    <description>{_xesc(project.description or '')}</description>\n")
-        for tag, d in (("detection-settings", project.detection.to_dict()),
-                       ("analysis-settings", project.analysis.to_dict())):
-            w(f"    <{tag}>\n")
-            for k, v in d.items():
-                w(f"      <setting{_attrs(name=k, **_value_attrs(v))}/>\n")
-            w(f"    </{tag}>\n")
-        variables = project.variables
-        if variables:
-            w("    <variables>\n")
-            for k, v in variables.items():
-                w(f"      <variable{_attrs(name=k, **_value_attrs(v))}/>\n")
-            w("    </variables>\n")
-        w("  </experiment>\n")
-        w("  <groups>\n" + "".join(f"    <group{_attrs(name=g.name, color=g.color)}/>\n" for g in project.groups)
-          + "  </groups>\n")
-        w("  <stages>\n" + "".join(f"    <stage{_attrs(name=s)}/>\n" for s in project.stages) + "  </stages>\n")
-        if project.experimenters:
-            w("  <experimenters>\n" + "".join(f"    <experimenter{_attrs(name=u)}/>\n" for u in project.experimenters)
-              + "  </experimenters>\n")
-        w("  <behaviours>\n" + "".join(f"    <behaviour{_attrs(name=b.name, key=b.key, kind=b.kind)}/>\n"
-                                       for b in project.behaviours) + "  </behaviours>\n")
-        w("  <apparatus-list>\n")
-        for a in project.apparatus:
-            fs = a.frame_size or (None, None)
-            w(f"    <apparatus{_attrs(name=a.name, template=a.template, unit=a.unit, px_per_cm=a.px_per_cm, frame_width=fs[0], frame_height=fs[1])}>\n")
-            w(_shape_xml("arena", a.arena.to_dict() if a.arena else None, "      "))
-            for z in a.zones:
-                w(f"      <zone{_attrs(name=z.name, color=z.color)}>\n")
-                w(_shape_xml("shape", z.shape.to_dict(), "        "))
-                w("      </zone>\n")
-            for g in a.groups:
-                w(f"      <zone-group{_attrs(name=g.name)}>\n")
-                for zn in g.zones:
-                    w(f"        <member{_attrs(zone=zn)}/>\n")
-                for zn in g.exclude:
-                    w(f"        <exclude{_attrs(zone=zn)}/>\n")
-                w("      </zone-group>\n")
-            for p in a.points:
-                w(f"      <point{_attrs(name=p.name, x=p.x, y=p.y, radius_cm=p.radius_cm, color=p.color)}/>\n")
-            for ln in a.lines:
-                w(f"      <line{_attrs(name=ln.name, x1=ln.x1, y1=ln.y1, x2=ln.x2, y2=ln.y2, color=ln.color)}/>\n")
-            w("    </apparatus>\n")
-        w("  </apparatus-list>\n")
-        w("  <animals>\n")
-        for an in project.animals:
-            w(f"    <animal{_attrs(id=an.id, group=an.group, sex=an.sex, notes=an.notes or None)}")
-            if an.fields:
-                w(">\n" + "".join(f"      <field{_attrs(name=k, **_value_attrs(v))}/>\n" for k, v in an.fields.items())
-                  + "    </animal>\n")
-            else:
-                w("/>\n")
-        w("  </animals>\n")
-        w(f"  <tests{_attrs(count=len(tests))}>\n")
-        for k, t in enumerate(tests):
-            if should_stop and should_stop():
-                break
-            w(f"    <test{_attrs(id=t.id, animal=t.animal_id, stage=t.stage, trial=t.trial, apparatus=t.apparatus, video=t.video, start_s=float(t.start_s), duration_s=float(t.duration_s or project.test_duration_s), status=t.status, recorded_at=t.recorded_at, experimenter=t.experimenter or None, end_reason=t.end_reason or None)}>\n")
-            for ea in t.extra_animals:
-                w(f"      <extra-animal{_attrs(id=ea)}/>\n")
-            if t.notes:
-                w(f"      <notes>{_xesc(t.notes)}</notes>\n")
-            if t.variables:
-                w("      <variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
-                                                 for n, v in t.variables.items()) + "      </variables>\n")
-            ov = dict(t.zone_overrides)
-            pos = ov.pop(POSITION_KEY, None)
-            if isinstance(pos, dict):
-                w(f"      <apparatus-position{_attrs(**position_args(pos))}/>\n")
-            cal = ov.pop(CALIBRATION_KEY, None)
-            if isinstance(cal, dict):
-                x1, y1, x2, y2 = cal.get("calibration_line") or [None] * 4
-                w(f"      <calibration{_attrs(px_per_cm=cal.get('px_per_cm'), length_cm=cal.get('calibration_length_cm'), x1=x1, y1=y1, x2=x2, y2=y2)}/>\n")
-            if ov:
-                w("      <zone-overrides>\n")
-                for zn, sd in ov.items():
-                    w(f"        <zone{_attrs(name=zn)}>\n" + _shape_xml("shape", sd, "          ") + "        </zone>\n")
-                w("      </zone-overrides>\n")
-            pauses = t.pauses
-            if pauses:
-                w("      <pauses>\n" + "".join(f"        <pause{_attrs(start=float(a), end=float(b))}/>\n"
-                                              for a, b in pauses) + "      </pauses>\n")
-            w("      <events>\n" + "".join(
-                f"        <event{_attrs(behaviour=e.get('behaviour'), t=float(e['t']), t_end=None if e.get('t_end') is None else float(e['t_end']))}/>\n"
-                for e in t.events) + "      </events>\n")
-            io = t.io_events
-            if io:
-                w("      <io-events>\n" + "".join(
-                    f"        <io{_attrs(t=float(e.get('t', 0)), device=e.get('device'), channel=e.get('channel'), kind=e.get('kind'), value=e.get('value'))}/>\n"
-                    for e in io) + "      </io-events>\n")
-            rv = t.result_variables
-            if rv:
-                w("      <result-variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
-                                                        for n, v in rv.items()) + "      </result-variables>\n")
-            has = project.has_track(t)
-            if include_results and t.status not in INACTIVE_STATUSES:
-                trows = by_test.get(t.id) if rows is not None else None
-                if trows is None and project.has_results(t):
-                    try:
-                        trows = project.analyse_test(t, segmented)
-                    except Exception:
-                        trows = []
-                info = {*INFO_COLUMNS, *project.animal_fields}
-                for r in trows or []:
-                    w(f"      <results{_attrs(animal=r.get('Animal'), period=r.get('Period', 'Whole test'))}>\n")
-                    for c, v in r.items():
-                        if c in info:
-                            continue
-                        w(f"        <result{_attrs(name=c, **_value_attrs(v))}/>\n")
-                    w("      </results>\n")
-            if include_tracks and has:
-                ids = [t.animal_id] + list(t.extra_animals)
-                for i, tr in enumerate(project.load_tracks(t)):
-                    aid = ids[i] if i < len(ids) else f"{t.animal_id}#{i + 1}"
-                    w(f"      <track{_attrs(animal=aid, index=i + 1, fps=float(tr.fps), samples=len(tr), video_start_s=tr.meta.get('video_start_s'), units='px')}>\n")
-                    for c in COLUMNS:
-                        v = getattr(tr, c).astype(float)
-                        txt = " ".join("NaN" if not np.isfinite(x) else (f"{x:.5f}" if c == "t" else f"{x:.3f}")
-                                       for x in v) if c != "detected" else " ".join("1" if x else "0" for x in v)
-                        w(f"        <column{_attrs(name=c)}>{txt}</column>\n")
-                    w("      </track>\n")
-            w("    </test>\n")
-            if progress:
-                progress((k + 1) / max(1, len(tests)))
-        w("  </tests>\n</manymaze-experiment>\n")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            w = f.write
+            w('<?xml version="1.0" encoding="UTF-8"?>\n')
+            w(f"<manymaze-experiment{_attrs(format_version=XML_FORMAT_VERSION, software=f'mANY-MAZE {__version__}', exported=_dt.datetime.now().isoformat(timespec='seconds'))}>\n")
+            w(f"  <experiment{_attrs(name=project.name, protocol=project.protocol, test_duration_s=float(project.test_duration_s), start_mode=project.start_mode, created=project.created, blind=bool(getattr(project, 'blind', False)))}>\n")
+            w(f"    <description>{_xesc(project.description or '')}</description>\n")
+            for tag, d in (("detection-settings", project.detection.to_dict()),
+                           ("analysis-settings", project.analysis.to_dict())):
+                w(f"    <{tag}>\n")
+                for k, v in d.items():
+                    w(f"      <setting{_attrs(name=k, **_value_attrs(v))}/>\n")
+                w(f"    </{tag}>\n")
+            variables = project.variables
+            if variables:
+                w("    <variables>\n")
+                for k, v in variables.items():
+                    w(f"      <variable{_attrs(name=k, **_value_attrs(v))}/>\n")
+                w("    </variables>\n")
+            w("  </experiment>\n")
+            w("  <groups>\n" + "".join(f"    <group{_attrs(name=g.name, color=g.color)}/>\n" for g in project.groups)
+              + "  </groups>\n")
+            w("  <stages>\n" + "".join(f"    <stage{_attrs(name=s)}/>\n" for s in project.stages) + "  </stages>\n")
+            if project.experimenters:
+                w("  <experimenters>\n" + "".join(f"    <experimenter{_attrs(name=u)}/>\n" for u in project.experimenters)
+                  + "  </experimenters>\n")
+            w("  <behaviours>\n" + "".join(f"    <behaviour{_attrs(name=b.name, key=b.key, kind=b.kind)}/>\n"
+                                           for b in project.behaviours) + "  </behaviours>\n")
+            w("  <apparatus-list>\n")
+            for a in project.apparatus:
+                fs = a.frame_size or (None, None)
+                w(f"    <apparatus{_attrs(name=a.name, template=a.template, unit=a.unit, px_per_cm=a.px_per_cm, frame_width=fs[0], frame_height=fs[1])}>\n")
+                w(_shape_xml("arena", a.arena.to_dict() if a.arena else None, "      "))
+                for z in a.zones:
+                    w(f"      <zone{_attrs(name=z.name, color=z.color)}>\n")
+                    w(_shape_xml("shape", z.shape.to_dict(), "        "))
+                    w("      </zone>\n")
+                for g in a.groups:
+                    w(f"      <zone-group{_attrs(name=g.name)}>\n")
+                    for zn in g.zones:
+                        w(f"        <member{_attrs(zone=zn)}/>\n")
+                    for zn in g.exclude:
+                        w(f"        <exclude{_attrs(zone=zn)}/>\n")
+                    w("      </zone-group>\n")
+                for p in a.points:
+                    w(f"      <point{_attrs(name=p.name, x=p.x, y=p.y, radius_cm=p.radius_cm, color=p.color)}/>\n")
+                for ln in a.lines:
+                    w(f"      <line{_attrs(name=ln.name, x1=ln.x1, y1=ln.y1, x2=ln.x2, y2=ln.y2, color=ln.color)}/>\n")
+                w("    </apparatus>\n")
+            w("  </apparatus-list>\n")
+            w("  <animals>\n")
+            for an in project.animals:
+                w(f"    <animal{_attrs(id=an.id, group=an.group, sex=an.sex, notes=an.notes or None)}")
+                if an.fields:
+                    w(">\n" + "".join(f"      <field{_attrs(name=k, **_value_attrs(v))}/>\n" for k, v in an.fields.items())
+                      + "    </animal>\n")
+                else:
+                    w("/>\n")
+            w("  </animals>\n")
+            w(f"  <tests{_attrs(count=len(tests))}>\n")
+            for k, t in enumerate(tests):
+                if should_stop and should_stop():
+                    break
+                w(f"    <test{_attrs(id=t.id, animal=t.animal_id, stage=t.stage, trial=t.trial, apparatus=t.apparatus, video=t.video, start_s=float(t.start_s), duration_s=float(t.duration_s or project.test_duration_s), status=t.status, recorded_at=t.recorded_at, experimenter=t.experimenter or None, end_reason=t.end_reason or None)}>\n")
+                for ea in t.extra_animals:
+                    w(f"      <extra-animal{_attrs(id=ea)}/>\n")
+                if t.notes:
+                    w(f"      <notes>{_xesc(t.notes)}</notes>\n")
+                if t.variables:
+                    w("      <variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
+                                                     for n, v in t.variables.items()) + "      </variables>\n")
+                ov = dict(t.zone_overrides)
+                pos = ov.pop(POSITION_KEY, None)
+                if isinstance(pos, dict):
+                    w(f"      <apparatus-position{_attrs(**position_args(pos))}/>\n")
+                cal = ov.pop(CALIBRATION_KEY, None)
+                if isinstance(cal, dict):
+                    x1, y1, x2, y2 = cal.get("calibration_line") or [None] * 4
+                    w(f"      <calibration{_attrs(px_per_cm=cal.get('px_per_cm'), length_cm=cal.get('calibration_length_cm'), x1=x1, y1=y1, x2=x2, y2=y2)}/>\n")
+                if ov:
+                    w("      <zone-overrides>\n")
+                    for zn, sd in ov.items():
+                        w(f"        <zone{_attrs(name=zn)}>\n" + _shape_xml("shape", sd, "          ") + "        </zone>\n")
+                    w("      </zone-overrides>\n")
+                pauses = t.pauses
+                if pauses:
+                    # a pause still open (no end: [t, None] or [t]) is written with an empty end
+                    w("      <pauses>\n" + "".join(
+                        f"        <pause{_attrs(start=float(pz[0]), end=float(pz[1]) if len(pz) > 1 and pz[1] is not None else '')}/>\n"
+                        for pz in pauses) + "      </pauses>\n")
+                w("      <events>\n" + "".join(
+                    f"        <event{_attrs(behaviour=e.get('behaviour'), t=float(e['t']), t_end=None if e.get('t_end') is None else float(e['t_end']))}/>\n"
+                    for e in t.events) + "      </events>\n")
+                io = t.io_events
+                if io:
+                    w("      <io-events>\n" + "".join(
+                        f"        <io{_attrs(t=float(e.get('t', 0)), device=e.get('device'), channel=e.get('channel'), kind=e.get('kind'), value=e.get('value'))}/>\n"
+                        for e in io) + "      </io-events>\n")
+                rv = t.result_variables
+                if rv:
+                    w("      <result-variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
+                                                            for n, v in rv.items()) + "      </result-variables>\n")
+                has = project.has_track(t)
+                if include_results and t.status not in INACTIVE_STATUSES:
+                    trows = by_test.get(t.id) if rows is not None else None
+                    if trows is None and project.has_results(t):
+                        try:
+                            trows = project.analyse_test(t, segmented)
+                        except Exception:
+                            trows = []
+                    info = {*INFO_COLUMNS, *project.animal_fields}
+                    for r in trows or []:
+                        w(f"      <results{_attrs(animal=r.get('Animal'), period=r.get('Period', 'Whole test'))}>\n")
+                        for c, v in r.items():
+                            if c in info:
+                                continue
+                            w(f"        <result{_attrs(name=c, **_value_attrs(v))}/>\n")
+                        w("      </results>\n")
+                if include_tracks and has:
+                    ids = [t.animal_id] + list(t.extra_animals)
+                    for i, tr in enumerate(project.load_tracks(t)):
+                        aid = ids[i] if i < len(ids) else f"{t.animal_id}#{i + 1}"
+                        w(f"      <track{_attrs(animal=aid, index=i + 1, fps=float(tr.fps), samples=len(tr), video_start_s=tr.meta.get('video_start_s'), units='px')}>\n")
+                        for c in COLUMNS:
+                            v = getattr(tr, c).astype(float)
+                            txt = " ".join("NaN" if not np.isfinite(x) else (f"{x:.5f}" if c == "t" else f"{x:.3f}")
+                                           for x in v) if c != "detected" else " ".join("1" if x else "0" for x in v)
+                            w(f"        <column{_attrs(name=c)}>{txt}</column>\n")
+                        w("      </track>\n")
+                w("    </test>\n")
+                if progress:
+                    progress((k + 1) / max(1, len(tests)))
+            w("  </tests>\n</manymaze-experiment>\n")
+    except BaseException:  # no half-written .part left behind
+        tmp.unlink(missing_ok=True)
+        raise
     if should_stop and should_stop():
         tmp.unlink(missing_ok=True)
         return None

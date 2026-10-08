@@ -168,6 +168,16 @@ def sample_background(src, n: int = 21) -> np.ndarray | None:
     return median_background(frames) if frames else None
 
 
+def _frame_window(settings: DetectionSettings, fps: float, count: int) -> tuple[int, int]:
+    """Frames [start, end) of the analysis window. A frame count of 0 (unknown to OpenCV, e.g. some streams) ends
+    the window after its duration; with neither, end is 0 (unknown)."""
+    start = int(round(settings.start_time_s * fps))
+    if not settings.duration_s:
+        return start, count
+    end = start + int(round(settings.duration_s * fps))
+    return start, (min(count, end) if count > 0 else end)
+
+
 def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarray:
     with VideoSource(video_path) as v:
         if settings.background == "frame":
@@ -175,9 +185,7 @@ def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarr
             if f is None:
                 raise IOError("Could not read background frame")
             return to_gray(f)
-        start = int(settings.start_time_s * v.fps)
-        end = int((settings.start_time_s + settings.duration_s) * v.fps) if settings.duration_s else v.frame_count
-        end = min(end, v.frame_count) if v.frame_count else end
+        start, end = _frame_window(settings, v.fps, v.frame_count)
         n = max(3, settings.background_samples)
         idx = np.unique(np.linspace(start, max(start, end - 1), n).astype(int))
         frames = []
@@ -716,9 +724,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     tr.set_background(bg_cache[key])
             trackers.append(tr)
         fps = v.fps
-        start = int(round(s0.start_time_s * fps))
-        end = v.frame_count if not s0.duration_s else min(v.frame_count, start + int(round(s0.duration_s * fps)))
-        if end <= 0:
+        start, end = _frame_window(s0, fps, v.frame_count)
+        if end <= 0:  # neither a frame count nor a duration: read to the end of the video
             end = 10**12
         step = max(1, int(s0.frame_step))
         builders = [[TrackBuilder() for _ in range(max(1, j.settings.n_animals))] for j in jobs]

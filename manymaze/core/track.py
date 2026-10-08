@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .atomicfile import atomic_write
 from .series import moving_average
 
 COLUMNS = ["t", "x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle", "detected"]
@@ -142,29 +143,29 @@ class Track:
 
     # ------------------------------------------------------------------
     def to_csv(self, path_or_buf):
-        close = False
-        if isinstance(path_or_buf, (str, bytes)) or hasattr(path_or_buf, "__fspath__"):
-            f = open(path_or_buf, "w", newline="")
-            close = True
+        """Write the track as CSV to a file object, or atomically to a path (never left half-written)."""
+        if isinstance(path_or_buf, bytes):
+            path_or_buf = path_or_buf.decode()
+        if isinstance(path_or_buf, str) or hasattr(path_or_buf, "__fspath__"):
+            with atomic_write(path_or_buf, encoding=None, newline="") as f:
+                self._write_csv(f)
         else:
-            f = path_or_buf
-        try:
-            f.write(f"# fps={self.fps}\n")
-            for k, v in self.meta.items():
-                f.write(f"# {k}={v}\n")
-            w = csv.writer(f)
-            outline = self.outline if self.has_outline() else None
-            w.writerow(COLUMNS + (["outline"] if outline is not None else []))
-            arr = np.column_stack([getattr(self, c).astype(float) for c in COLUMNS])
-            for j, row in enumerate(arr):
-                cells = ["" if not np.isfinite(v) else (f"{v:.4f}" if i else f"{v:.5f}") for i, v in enumerate(row)]
-                if outline is not None:
-                    o = outline[j]
-                    cells.append("" if o is None else " ".join(map(str, o.ravel().tolist())))
-                w.writerow(cells)
-        finally:
-            if close:
-                f.close()
+            self._write_csv(path_or_buf)
+
+    def _write_csv(self, f):
+        f.write(f"# fps={self.fps}\n")
+        for k, v in self.meta.items():
+            f.write(f"# {k}={v}\n")
+        w = csv.writer(f)
+        outline = self.outline if self.has_outline() else None
+        w.writerow(COLUMNS + (["outline"] if outline is not None else []))
+        arr = np.column_stack([getattr(self, c).astype(float) for c in COLUMNS])
+        for j, row in enumerate(arr):
+            cells = ["" if not np.isfinite(v) else (f"{v:.4f}" if i else f"{v:.5f}") for i, v in enumerate(row)]
+            if outline is not None:
+                o = outline[j]
+                cells.append("" if o is None else " ".join(map(str, o.ravel().tolist())))
+            w.writerow(cells)
 
     @classmethod
     def from_csv(cls, path_or_buf) -> "Track":

@@ -19,6 +19,7 @@ from typing import Callable
 import numpy as np
 
 from .apparatus import Apparatus, from_known
+from .atomicfile import write_text_atomic
 from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures
 from .session import END_ZONE
 from .templates import apply_overrides
@@ -170,6 +171,8 @@ class Project:
     created: str = field(default_factory=lambda: _dt.datetime.now().isoformat(timespec="seconds"))
     path: Path | None = None
     current_user: str = ""  # who is using the app (not saved: set by the GUI); stamped on tests run or tracked
+    file_version: int = FORMAT_VERSION  # the version of the file it was loaded from (not saved)
+    unknown: dict = field(default_factory=dict)  # top-level keys this version does not know: written back as read
 
     # ---- persistence -----------------------------------------------------
     @staticmethod
@@ -184,13 +187,16 @@ class Project:
             self.path = self.project_dir(path)
         if self.path is None:
             raise ValueError("No project path")
+        if self.file_version > FORMAT_VERSION:
+            raise ValueError(f"This experiment was saved by a newer version of mANY-MAZE (file version "
+                             f"{self.file_version}, this version reads {FORMAT_VERSION}); saving it here would lose "
+                             f"what this version does not know. Update mANY-MAZE to save it.")
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / "tracks").mkdir(exist_ok=True)
-        tmp = self.path / (PROJECT_FILE + ".tmp")
-        tmp.write_text(json.dumps(self.to_dict(), indent=1))
+        text = json.dumps(self.to_dict(), indent=1)
         if self.settings_extra.get("backups", True):
             self.backup(min_interval_s=BACKUP_INTERVAL_S)
-        os.replace(tmp, self.path / PROJECT_FILE)
+        write_text_atomic(self.path / PROJECT_FILE, text)
 
     # ---- backups ---------------------------------------------------------------------------------
     def backups_dir(self) -> Path:
@@ -233,6 +239,7 @@ class Project:
 
     def to_dict(self) -> dict:
         return {
+            **self.unknown,
             "format": "manymaze-project",
             "version": FORMAT_VERSION,
             "name": self.name,
@@ -292,6 +299,12 @@ class Project:
             created=d.get("created", ""),
         )
         p.path = pdir
+        try:
+            p.file_version = int(d.get("version", FORMAT_VERSION))
+        except (TypeError, ValueError):
+            p.file_version = FORMAT_VERSION
+        known = set(cls().to_dict())
+        p.unknown = {k: v for k, v in d.items() if k not in known}
         return p
 
     # ---- lookup -----------------------------------------------------------

@@ -3,6 +3,7 @@ work area where each tab has an explorer list on the left and the selected page 
 
 from __future__ import annotations
 
+import copy
 import importlib
 import os
 import sys
@@ -182,7 +183,7 @@ class WelcomePage(QWidget):
         self.recent = QListWidget()
         self.recent.setStyleSheet("QListWidget{border:none;background:transparent;font-size:14px;}"
                                   "QListWidget::item{padding:8px 6px;}")
-        self.recent.itemActivated.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
+        # one click opens (connecting itemActivated too would load the experiment twice)
         self.recent.itemClicked.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
         bl.addWidget(self.recent, 1)
         lay.addWidget(body, 1)
@@ -200,6 +201,10 @@ class WelcomePage(QWidget):
         has = self.main.project is not None
         for k in ("save", "save_as", "close", "folder", "import", "protocol_report", "restore", "archive"):
             self.side_buttons[k].setEnabled(has)
+
+
+# project lists an ANY-maze XML import appends to (see MainWindow.import_anymaze_xml)
+_IMPORTED_LISTS = ("animals", "groups", "apparatus", "tests")
 
 
 def page_hook(page, hook: str, *args, on_error=None):
@@ -583,6 +588,7 @@ class MainWindow(QMainWindow):
     def set_project(self, project: Project | None):
         if self.project is not None and project is not self.project:
             self._hide_current()  # the old project's page flushes against the old project, not the new one
+            self._for_pages("end_scoring")  # a running observation is stopped, not dropped
             self._current_page = None
         self.project = project
         self.dirty = False
@@ -738,13 +744,22 @@ class MainWindow(QMainWindow):
         """Before the experiment closes: stop (and save) live tests still running, then offer to save changes."""
         if not self._stop_live_tests():
             return False
-        if self.project is None or not self.dirty:
+        if self.project is None:
             return True
-        r = QMessageBox.question(self, APP_NAME, f"Save changes to “{self.project.name}”?",
+        self._flush_edits()
+        tv = self.page("TestViewPage")
+        scoring = tv is not None and tv.scoring_in_progress()
+        if not self.dirty and not scoring:
+            return True
+        r = QMessageBox.question(self, APP_NAME, f"Save changes to “{self.project.name}”?" +
+                                 (f"\n\nTest {tv.test.id} is still being scored: saving stops the observation and "
+                                  "the behaviours still running." if scoring else ""),
                                  QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
         if r == QMessageBox.Cancel:
             return False
         if r == QMessageBox.Save:
+            if scoring:
+                page_hook(tv, "end_scoring")
             return self.save()
         self.dirty = False  # discarded: don't ask again on the way to the next experiment
         return True
@@ -843,10 +858,22 @@ class MainWindow(QMainWindow):
             self._disk_box = box
         return space
 
+    def _flush_edits(self):
+        """Store the edits not yet in the project: the field being typed in (most store on editingFinished, sent
+        when they lose focus; the focus is given back) and the pages' pending edits (their commit hook)."""
+        w = QApplication.focusWidget()
+        if w is not None and self.isAncestorOf(w):
+            w.clearFocus()
+            try:
+                w.setFocus()
+            except RuntimeError:  # the edit rebuilt the form: the field is gone
+                pass
+        self._for_pages("commit")
+
     def save(self) -> bool:
         if self.project is None:
             return False
-        self._for_pages("commit")
+        self._flush_edits()
         try:
             self.project.save()
         except Exception as e:
@@ -948,10 +975,21 @@ class MainWindow(QMainWindow):
                       "Export ▸ Export experiment as XML).")
             return None
 
+        # the import runs on a copy (the pages keep reading the experiment meanwhile); done() moves what it added
+        # into the experiment on the GUI thread
+        scratch = copy.deepcopy(p)
+        sizes = {f: len(getattr(p, f)) for f in _IMPORTED_LISTS}
+
         def work(progress, stop):
-            return import_anymaze_xml(p, path, origin, progress)
+            return import_anymaze_xml(scratch, path, origin, progress)
 
         def done(res):
+            for old, new in zip(p.animals, scratch.animals):  # existing animals get their group, notes, fields
+                vars(old).update(vars(new))
+            for f in _IMPORTED_LISTS:
+                getattr(p, f).extend(getattr(scratch, f)[sizes[f]:])
+            p.animal_fields[:] = scratch.animal_fields
+            p.stages[:] = scratch.stages
             self.mark_dirty()
             self.save()
             msg = (f"Imported {len(res['tests'])} tests of {len(res['animals'])} animals from ANY-maze"
@@ -1087,8 +1125,8 @@ class MainWindow(QMainWindow):
             return path if Path(path).exists() else None
         return w
 
-    def open_archive(self, path: str | None = None, dest: str | None = None):
-        """Unpack an experiment archive into a folder and open it."""
+    def open_archive(self, path: str | None = None, dest: str | None = None, wait: bool = False):
+        """Unpack an experiment archive into a folder (in the background) and open it."""
         from ..core.archive import extract_archive
 
         if not self.maybe_save():
@@ -1102,14 +1140,21 @@ class MainWindow(QMainWindow):
             dest = QFileDialog.getExistingDirectory(self, "Unpack the experiment into", self._last_dir())
             if not dest:
                 return None
-        try:
-            folder = extract_archive(path, dest)
-        except Exception as e:
-            error_box(self, "Open archive", e)
-            return None
-        self.dirty = False
-        self.load_project(str(folder))
-        return folder
+        out = {}
+
+        def done(folder):
+            out["folder"] = folder
+            self.dirty = False
+            self.load_project(str(folder))
+
+        w = run_with_progress(self, "Unpacking the experiment archive",
+                              lambda progress, stop: extract_archive(path, dest), on_done=done,
+                              on_fail=lambda msg: error_box(self, "Open archive", msg), cancellable=False)
+        if wait:  # scripting / tests: block until opened
+            w.wait()
+            QApplication.processEvents()
+            return out.get("folder")
+        return w
 
     def reveal_folder(self):
         if self.project and self.project.path:

@@ -79,6 +79,17 @@ def _clean(v) -> np.ndarray:
     return a[np.isfinite(a)]
 
 
+def _clean_rows(groups: list) -> list[np.ndarray]:
+    """Paired data (matched by position): only the rows where every group has a finite number, so that dropping a
+    missing value does not shift the pairing."""
+    cols = [np.asarray([float(x) if is_number(x) else math.nan for x in v], float) for v in groups]
+    n = min((len(c) for c in cols), default=0)
+    ok = np.ones(n, bool)
+    for c in cols:
+        ok &= np.isfinite(c[:n])
+    return [c[:n][ok] for c in cols]
+
+
 def is_number(v) -> bool:
     """A numeric value (not a bool); may be NaN or infinite."""
     return isinstance(v, (int, float, np.number)) and not isinstance(v, (bool, np.bool_))
@@ -321,7 +332,7 @@ def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: 
     when non-parametric) adjusted by bonferroni / holm / sidak / fdr.
     """
     names = [k for k, v in groups.items() if len(_clean(v)) > 0]
-    data = [_clean(groups[k]) for k in names]
+    data = _clean_rows([groups[k] for k in names]) if paired else [_clean(groups[k]) for k in names]
     if len(names) < 2:
         return []
     if paired:
@@ -439,10 +450,10 @@ def compare_groups(groups: "dict[str, np.ndarray]", parametric: bool = True, pai
     method: any key of METHODS_TWO / METHODS_K; posthoc_method: any key of POSTHOC.
     Paired data (paired=True or a repeated-measures method) are matched by position in each array.
     """
-    names = [k for k, v in groups.items() if len(_clean(v)) > 0]
-    data = [_clean(groups[k]) for k in names]
     if method in PAIRED_METHODS:
         paired = True
+    names = [k for k, v in groups.items() if len(_clean(v)) > 0]
+    data = _clean_rows([groups[k] for k in names]) if paired else [_clean(groups[k]) for k in names]
     if method in NONPARAMETRIC:
         parametric = False
     elif method != "auto":

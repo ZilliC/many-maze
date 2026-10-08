@@ -15,7 +15,7 @@ from ....core import autosave, diskspace
 from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
 from ....core.camhw import CameraHardware
 from ....core.camsources import is_native_source, list_native_cameras
-from ....core.live import LiveSession, draw_display_texts, open_devices
+from ....core.live import LiveSession, draw_display_texts
 from ....core.livemonitor import beam_angle
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs, test_context
@@ -24,6 +24,7 @@ from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_liv
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
 from ...confirm_id import confirm_animal_id
+from ...io_devices_dialog import open_device_manager
 from ...live_widgets import CameraOptionsDialog, short_time
 from ...widgets import Worker, error_box, fmt_time
 from .common import TRAIL_LEN, describe_view, peek_frame, recording_path
@@ -574,8 +575,18 @@ class SingleTestMixin:
         return test, new
 
     def _open_devices(self):
-        if self.devices is None:
-            self.devices = open_devices(self.project)
+        """The project's I/O devices, opened in a Worker (a board can take seconds); problems are shown and logged
+        (the tests still run, without the devices that failed)."""
+        p = self.project
+        if self.devices is None and p is not None and p.io_devices:
+            self.devices, problems = open_device_manager(self, p.io_devices)
+            if problems:
+                for msg in problems:
+                    self._log(f"I/O devices: {msg}")
+                box = QMessageBox(QMessageBox.Warning, "I/O devices", "\n".join(problems[-10:]), QMessageBox.Ok, self)
+                box.setModal(False)
+                box.setAttribute(Qt.WA_DeleteOnClose)
+                box.show()
         return self.devices
 
     def _autosave_args(self, test) -> dict:

@@ -130,6 +130,7 @@ class LiveGroup:
     def __init__(self, start_keys=None, stop_keys=None, clock: Callable[[], _dt.datetime] = _dt.datetime.now):
         self.sources: dict[str, SourceSpec] = {}
         self.runners: dict[str, SourceRunner] = {}
+        self._stopping: dict[str, SourceRunner] = {}  # stopped runners whose thread had not ended yet
         self.entries: tuple[LiveEntry, ...] = ()  # copy-on-write: runner threads iterate it without the lock
         self.schedules: list[ClockSchedule] = []
         self.start_keys = list(DEFAULT_START_KEYS if start_keys is None else start_keys)
@@ -196,6 +197,14 @@ class LiveGroup:
             r = self.runners.get(key)
             if r is not None and r.thread.is_alive():
                 continue
+            old = self._stopping.get(key)
+            if old is not None:
+                old.stop()  # wait for it again: never two threads reading the same camera
+                if old.thread.is_alive():
+                    self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}",
+                                          f"{key}: the previous capture has not stopped yet; not restarted"))
+                    continue
+                del self._stopping[key]
             r = SourceRunner(self, key, self.sources[key], opener, speed)
             self.runners[key] = r
             r.start()
@@ -205,6 +214,8 @@ class LiveGroup:
             r = self.runners.pop(key, None)
             if r is not None:
                 r.stop()
+                if r.thread.is_alive():  # the join timed out: kept until its thread really ends
+                    self._stopping[key] = r
 
     def restart_source(self, key: str):
         r = self.runners.get(key)
