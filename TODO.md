@@ -176,28 +176,28 @@ the 7.x release notes and the procedure help (<https://www.anymaze.co.uk/help/>)
 
 ## 12. Measures still missing (audit 2026-10-08)
 
-- [ ] Zone: time active, time inactive, inactive episodes (activity is whole-test only, measures.py:1132)
-- [ ] Time not hidden (only "Time hidden" today)
-- [ ] Total body rotations (only clockwise / anticlockwise columns)
-- [ ] Whishaw's corridor time in seconds, and the corridor for any zone (today a water-maze template measure, % only)
-- [ ] Average position (mean X / Y of the animal; ANY-maze 7.50)
-- [ ] Sequence: latency to start of first sequence (only latency to completion, sequences.py:181)
-- [ ] Average activation duration for plain outputs, light controllers, optogenetic lasers and virtual switches
+- [x] Zone: time active, time inactive, inactive episodes (activity is whole-test only, measures.py:1132)
+- [x] Time not hidden (only "Time hidden" today)
+- [x] Total body rotations (only clockwise / anticlockwise columns)
+- [x] Whishaw's corridor time in seconds, and the corridor for any zone (today a water-maze template measure, % only)
+- [x] Average position (mean X / Y of the animal; ANY-maze 7.50)
+- [x] Sequence: latency to start of first sequence (only latency to completion, sequences.py:181)
+- [x] Average activation duration for plain outputs, light controllers, optogenetic lasers and virtual switches
       (generic branch of `_output`, iomeasures.py:226)
-- [ ] Frequency of activations (per minute) for outputs, speakers, shockers, lights, lasers and virtual switches
-- [ ] Rotary encoder: total number of rotations (today net signed revolutions) and maximum RPM (today counts/s)
-- [ ] Per-zone device measures for inputs, outputs, speakers, shockers, lights, lasers, pellets, encoders and virtual
+- [x] Frequency of activations (per minute) for outputs, speakers, shockers, lights, lasers and virtual switches
+- [x] Rotary encoder: total number of rotations (today net signed revolutions) and maximum RPM (today counts/s)
+- [x] Per-zone device measures for inputs, outputs, speakers, shockers, lights, lasers, pellets, encoders and virtual
       switches (only analogue signals have them)
-- [ ] Per-zone key measures: longest / shortest press, latency to first release, distance before first press,
+- [x] Per-zone key measures: longest / shortest press, latency to first release, distance before first press,
       list of press durations (today only count, duration, latency, mean bout, rate)
-- [ ] Grid cells: the advanced zone measures (visit list, head, border, heading, turning, CIPL, line crossings);
+- [x] Grid cells: the advanced zone measures (visit list, head, border, heading, turning, CIPL, line crossings);
       zone groups: border, heading and CIPL measures (measures.py:616, 737)
-- [ ] Check definitions against ANY-maze:
-  - [ ] Average distance from zone: ANY-maze averages only while outside; we count inside frames as 0 (measures.py:596)
-  - [ ] Initial heading error: ANY-maze's "Initial heading error" is the absolute value and "Signed …" the signed
+- [x] Check definitions against ANY-maze:
+  - [x] Average distance from zone: ANY-maze averages only while outside; we count inside frames as 0 (measures.py:596)
+  - [x] Initial heading error: ANY-maze's "Initial heading error" is the absolute value and "Signed …" the signed
         one; our names are the other way round (matters for the ANY-maze import / column mapping)
-  - [ ] Body rotations fall back to direction of travel when no body angle is tracked; ANY-maze uses body orientation
-- [ ] Results table: add the missing whole-test measures (mobile episodes, latency to last mobile episode, longest
+  - [x] Body rotations fall back to direction of travel when no body angle is tracked; ANY-maze uses body orientation
+- [x] Results table: add the missing whole-test measures (mobile episodes, latency to last mobile episode, longest
       mobile episode, mean speed when not hidden, path tortuosity, first zone entered, visited zones …) to
       `GENERAL_PREFIXES` (gui/pages/results/table.py:13) so they are not grouped under "Other"
 
@@ -273,3 +273,20 @@ Variables and functions:
       exits; zone shapes fitted to ANY-maze's occupancy)
 - [x] Hardware-related procedure elements (sensors, pellet out / failed, syringe pumps, temperature, light ramps,
       laser intensity / pulse files, selectors, shock mA) belong to §7
+
+## 16. Left after the definitions audit (2026-10-08, ANY-maze's "A detailed description of the ANY-maze measures")
+
+Definitions that differed were changed to ANY-maze's (tests/test_anymaze_definitions.py cites the sections). Open:
+
+- [ ] Activity: ANY-maze means "mobile or doing a behaviour marked as activity"; ours is pixel-change based
+      (needs a "behaviour counts as activity" option)
+- [ ] Ambiguous in the PDF, kept as ours: turn angle mobility gate, angular velocity and average heading error
+      denominators, "moving towards" outside-only, freezing time in a zone by frames, 0 vs blank for undefined
+      averages, initial heading error's immobility / distance options
+- [ ] Partial rotations (2.34–2.36), tracking quality Good / Poor (2.51, formula unpublished), RAPC door measures
+      (2.54–2.56)
+- [ ] Per zone: encoder time turning / reversals / half and quarter rotations / min and mean RPM, analogue time of
+      max / min and integrals, pump volumes (17.x)
+- [ ] Event measures (21.x), heat-map points (4.17–4.19), movement-detector beam-repeat rule (11.1)
+- [ ] Investigation zones: use "investigating" rather than zone membership for zone-based I/O and key measures
+
