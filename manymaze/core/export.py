@@ -230,7 +230,7 @@ def event_log_rows(project: Project, test) -> list[dict]:
             rows.append({"Time (s)": float(e["t_end"]), "Animal": test.animal_id, "Event": "Key off",
                          "Detail": name})
     for e in test.io_events or []:
-        kind = "Input" if e.get("kind") == "input" else "Output"
+        kind = {"input": "Input", "variable": "Variable"}.get(e.get("kind"), "Output")
         ch = ":".join(str(x) for x in (e.get("device"), e.get("channel")) if x not in (None, ""))
         rows.append({"Time (s)": float(e.get("t", 0.0)), "Animal": test.animal_id, "Event": kind,
                      "Detail": f"{ch} = {value_text(e.get('value'))}"})

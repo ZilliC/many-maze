@@ -574,6 +574,29 @@ class ProcedureEditor(QWidget):
                                       help="number, 'text' or an array such as [0, 0, 0]"))
             self._check_field(st, "keep", "Keep the value between tests")
             self._check_field(st, "result", "Save as a test result")
+            self._record_field(st)
+
+    def _record_field(self, st):
+        """How a variable is recorded for the results: its final value only (old projects), or every value it
+        takes / is set to during the test (mean, max, min, sum, count and the list of values)."""
+        cb = _combo()
+        for k, v in pr.RECORD_MODES.items():
+            cb.addItem(v, k)
+        cb.setCurrentIndex(max(0, cb.findData(pr.record_mode(st))))
+        cb.setToolTip("Every time it changes / is set: each numeric value is recorded with its time and analysed "
+                      "into mean, max, min, sum, count and the list of values (also per time bin)")
+
+        def changed(_i):
+            if self._loading:
+                return
+            if cb.currentData() == "end":
+                st.pop("record", None)
+            else:
+                st["record"] = cb.currentData()
+            self._statement_edited()
+        cb.currentIndexChanged.connect(changed)
+        self.form.addRow("Record the value", cb)
+        self._form_widgets["record"] = cb
 
     def _help_row(self, text):
         if text:

@@ -333,3 +333,24 @@ def test_procedure_list_read_only_and_unique_rename():
     assert not flags & Qt.ItemIsEditable and not flags & Qt.ItemIsUserCheckable
     ed.set_read_only(False)
     assert ed.proc_list.item(0).flags() & Qt.ItemIsEditable
+
+
+def test_variable_record_mode():
+    """A variable's recording mode: stored as "record" only when it is not the default (old projects load)."""
+    p = make_project()
+    ed = ProcedureEditor(p)
+    ed.add_procedure()
+    ed.add_statement("var")
+    set_line(field(ed, "name"), "score")
+    rec = field(ed, "record")
+    assert rec.currentData() == "end"
+    st = p.procedures[1]["statements"][0]
+    assert "record" not in st
+    rec.setCurrentIndex(rec.findData("changes"))
+    app.processEvents()
+    assert st["record"] == "changes" and pr.record_mode(st) == "changes"
+    assert "recorded every time it changes" in ed.tree.item_for((0,)).text(0)
+    rec = field(ed, "record")
+    rec.setCurrentIndex(rec.findData("end"))
+    app.processEvents()
+    assert "record" not in st

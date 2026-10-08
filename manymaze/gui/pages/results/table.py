@@ -17,7 +17,7 @@ GENERAL_PREFIXES = ("Test duration", "Detection", "Total distance", "Mean speed"
                     "Path efficiency", "Absolute turn angle", "Meander", "Rotations", "Mean distance from wall",
                     "Thigmotaxis", "Time outside arena", "Time not detected")
 CATEGORY_ORDER = ["Information", "General", "Zones", "Points of interest", "Lines", "Test-specific", "Behaviours",
-                  "Social", "Other"]
+                  "Social", "I/O", "Other"]
 COLUMN_LABELS = {"Group": "Treatment"}
 
 
@@ -29,7 +29,12 @@ def _names(project) -> dict[str, set]:
         points.update(p.name for p in a.points)
         lines.update(l.name for l in a.lines)
     beh = {b.name for b in (project.behaviours if project else [])}
-    return {"zones": zones, "points": points, "lines": lines, "behaviours": beh}
+    io = set()
+    for d in getattr(project, "io_devices", None) or []:
+        for c in d.get("channels", []) or []:
+            if c.get("name"):
+                io.update((str(c["name"]), f"{d.get('name')}/{c['name']}"))
+    return {"zones": zones, "points": points, "lines": lines, "behaviours": beh, "io": io}
 
 
 def measure_category(col: str, names: dict) -> tuple[str, str]:
@@ -42,6 +47,15 @@ def measure_category(col: str, names: dict) -> tuple[str, str]:
                 return cat, prefix
         if prefix.startswith("Animal "):
             return "Social", ""
+        for word, sub in (("Shocker ", "Shockers"), ("Speaker ", "Speakers"), ("Light ", "Lights")):
+            if prefix.startswith(word):
+                return "I/O", sub
+        if prefix == "OPAD" or prefix.startswith("OPAD at "):
+            return "I/O", "OPAD"
+        if prefix == "Variable":
+            return "I/O", "Result variables"
+        if prefix in names.get("io", ()) or prefix.split(" in ")[0] in names.get("io", ()):
+            return "I/O", prefix
         return "Other", prefix
     if col.startswith(GENERAL_PREFIXES):
         return "General", ""
