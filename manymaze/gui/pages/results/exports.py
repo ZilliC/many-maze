@@ -10,7 +10,8 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QDialog, QFileDialog
 
 from ....core.export import (display_text, event_log_rows, export_raw_data, export_xml, html_report, results_workbook,
-                             table_text, trial_means, wide_rows, write_table, write_xlsx)
+                             TABLE_SUFFIXES, table_text, trial_means, wide_rows, write_table,
+                             write_xlsx)
 from ....core.project import result_columns
 from ....core.stats import is_number, numeric_columns
 from ...figures import TABLE_FILTER
@@ -19,7 +20,7 @@ from .._results_cache import info_columns
 from .dialogs import ReportDialog
 from .table import column_label, measure_category
 
-TABLE_FILTERS = dict(zip((".csv", ".tsv", ".xlsx"), TABLE_FILTER.split(";;")))
+TABLE_FILTERS = dict(zip((".csv", ".tsv", ".xlsx", ".slk", ".dbf"), TABLE_FILTER.split(";;")))
 
 
 class ExportsMixin:
@@ -31,8 +32,9 @@ class ExportsMixin:
         return str(p.exports_dir() / name) if p.path else name
 
     def save_table(self, path: str | None = None, selection: bool = False, suffix: str = ".csv"):
-        """Save the shown spreadsheet, or the selected cells, as CSV, tab-separated text or Excel (the format follows
-        the extension; a whole-table workbook also has the time periods, zone visits, animals, tests and settings)."""
+        """Save the shown spreadsheet, or the selected cells, as CSV, tab-separated text, Excel, SYLK or dBase (the
+        format follows the extension; a whole-table Excel workbook also has the time periods, zone visits, animals,
+        tests and settings)."""
         if not self.rows:
             return
         rows, cols = (self.selection_range() if selection else None) or (self.shown_rows(), self.shown_columns())
@@ -43,7 +45,7 @@ class ExportsMixin:
                                                   TABLE_FILTER, TABLE_FILTERS[suffix])
             if not path:
                 return
-        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+        if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += suffix
         try:
             if path.lower().endswith(".xlsx") and not selection:
@@ -76,7 +78,7 @@ class ExportsMixin:
                 TABLE_FILTER)
             if not path:
                 return None
-        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+        if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += ".xlsx"
         rows, cols = self.wide_rows()
         try:
@@ -97,7 +99,7 @@ class ExportsMixin:
                 self._default_path(".xlsx").replace(" results", " trial means"), TABLE_FILTER)
             if not path:
                 return None
-        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+        if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += ".xlsx"
         rows = trial_means(self.shown_rows(), self._measure_columns())
         try:
@@ -118,7 +120,7 @@ class ExportsMixin:
                 self, "Export event log", self._default_path(".csv").replace(" results", " event log"), TABLE_FILTER)
             if not path:
                 return None
-        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+        if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += ".csv"
         tests = self._shown_tests()
 

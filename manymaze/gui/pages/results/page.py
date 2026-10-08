@@ -222,6 +222,8 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         m.addAction("CSV file…", lambda: self.save_table(suffix=".csv"))
         m.addAction("Tab-separated text…", lambda: self.save_table(suffix=".tsv"))
         m.addAction("Excel workbook (.xlsx)…", lambda: self.save_table(suffix=".xlsx"))
+        m.addAction("SYLK spreadsheet (.slk)…", lambda: self.save_table(suffix=".slk"))
+        m.addAction("dBase table (.dbf)…", lambda: self.save_table(suffix=".dbf"))
         m.addAction("Selected cells…", lambda: self.save_table(selection=True))
         m.addAction("One row per animal (stages / trials as columns)…", lambda: self.export_wide())
         m.addAction("Mean of each animal's trials per stage…", lambda: self.export_trial_means())
@@ -327,6 +329,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
             self._fill_test_list()
             if key == "video":
                 self._update_video_panel()
+        self._sync_playback()
         self.count_lbl.setVisible(key == "spreadsheet")
         self._update_actions()
         if self.project is not None:

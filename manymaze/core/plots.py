@@ -171,6 +171,12 @@ def _series_for(track: Track, app, color_by: str, settings=None):
     return v, charts.param_info(app, color_by, track).label
 
 
+# gids of the artists of track_plot that animated playback (gui results ▸ track plot) updates
+TRACK_PATH_GID = "track-path"
+TRACK_END_GID = "track-end"
+TRACK_MARKER_GID = "track-marker:"
+
+
 def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: str = "", color_by: str = "time",
                ax=None, show_head: bool = False, size=(4, 4), part: str = "centre", values=None,
                value_label: str = "", colorbar: bool = False, markers: list | None = None, cmap: str = "viridis",
@@ -207,33 +213,34 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
         if norm is None:
             fin = vals[np.isfinite(vals)]
             norm = Normalize(float(fin.min()) if len(fin) else 0, float(fin.max()) if len(fin) else 1)
-        lc = LineCollection(segs, cmap=cmap, norm=norm, lw=lw)
+        lc = LineCollection(segs, cmap=cmap, norm=norm, lw=lw, gid=TRACK_PATH_GID)
         lc.set_array(vals)
         ax.add_collection(lc)
         mappable = lc
     else:
-        ax.plot(x, y, "-", lw=lw * 0.9, color="#2563eb")
+        ax.plot(x, y, "-", lw=lw * 0.9, color="#2563eb", gid=TRACK_PATH_GID)
     handles = {}
     for m in markers or []:
         idx = np.searchsorted(track.t, m["t"])
+        gid = f"{TRACK_MARKER_GID}{float(m['t'])!r}"  # animated playback shows a marker once its time is reached
         if m.get("t_end") is None:
             if idx >= len(x) or not np.isfinite(x[idx]):
                 continue
             h, = ax.plot(x[idx], y[idx], marker="D", ms=5, color=m["color"], mec="white", mew=0.6, ls="none",
-                         zorder=5)
+                         zorder=5, gid=gid)
         else:
             j = np.searchsorted(track.t, m["t_end"])
             if j <= idx:
                 continue
             h, = ax.plot(x[idx:j + 1], y[idx:j + 1], "-", lw=4.5, color=m["color"], alpha=0.45,
-                         solid_capstyle="round", zorder=4)
+                         solid_capstyle="round", zorder=4, gid=gid)
             if np.isfinite(x[idx]):
-                ax.plot(x[idx], y[idx], "o", ms=3.5, color=m["color"], zorder=5)
+                ax.plot(x[idx], y[idx], "o", ms=3.5, color=m["color"], zorder=5, gid=gid)
         handles.setdefault(m["label"], h)
     ok = np.flatnonzero(np.isfinite(x))
     if len(ok):
         ax.plot(x[ok[0]], y[ok[0]], "o", color="#16a34a", ms=6, label="start", zorder=6)
-        ax.plot(x[ok[-1]], y[ok[-1]], "s", color="#dc2626", ms=6, label="end", zorder=6)
+        ax.plot(x[ok[-1]], y[ok[-1]], "s", color="#dc2626", ms=6, label="end", zorder=6, gid=TRACK_END_GID)
     if show_head and track.has_head():
         ax.plot(track.hx, track.hy, ",", color="#f97316", alpha=0.5)
     _limits(ax, app, track, frame)

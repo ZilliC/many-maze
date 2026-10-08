@@ -14,7 +14,7 @@ from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
 import numpy as np
 
 from .. import __version__
-from .apparatus import ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
+from .apparatus import CALIBRATION_KEY, ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
 from .project import INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
 
@@ -61,6 +61,208 @@ def write_tsv(rows: list[dict], path, columns: list[str] | None = None):
     write_csv(rows, path, columns, delimiter="\t")
 
 
+def _cell_number(v):
+    """v as a finite int / float for a numeric cell, else None (text, bool, missing, NaN / inf)."""
+    if isinstance(v, (bool, np.bool_)) or not is_number(v):
+        return None
+    f = float(v)
+    return (int(f) if isinstance(v, (int, np.integer)) else f) if math.isfinite(f) else None
+
+
+def _sylk_text(s: str) -> str:
+    # one record per line; ';' separates fields so a literal ';' is doubled
+    return re.sub(r"[\x00-\x1f]", " ", s).replace(";", ";;")
+
+
+def write_sylk(rows: list[dict], path, columns: list[str] | None = None):
+    """SYLK (Symbolic Link, .slk): the plain-text spreadsheet format of Multiplan / Excel. Numbers are stored as
+    numbers, everything else as text; the column headings form the first row (bold). Written in Windows-1252, the
+    encoding Excel expects for SYLK."""
+    cols = columns or result_columns(rows)
+    out = ["ID;PmANY-MAZE;N;E", f"B;Y{len(rows) + 1};X{max(1, len(cols))};D0 0 {len(rows)} {max(0, len(cols) - 1)}",
+           "F;SD;R1"]  # SD R1: the heading row is bold
+    for x, c in enumerate(cols, 1):
+        out.append(f'C;Y1;X{x};K"{_sylk_text(str(c))}"')
+    for y, r in enumerate(rows, 2):
+        first = True
+        for x, c in enumerate(cols, 1):
+            v = r.get(c)
+            n = _cell_number(v)
+            if n is not None:
+                val = value_text(n)
+            elif isinstance(v, (bool, np.bool_)):
+                val = "TRUE" if v else "FALSE"
+            elif v is None or value_text(v) == "":
+                continue
+            else:
+                val = f'"{_sylk_text(value_text(v))}"'
+            out.append(f"C;{f'Y{y};' if first else ''}X{x};K{val}")
+            first = False
+    out.append("E")
+    with open(path, "w", encoding="cp1252", errors="replace", newline="\r\n") as f:
+        f.write("\n".join(out) + "\n")
+
+
+def read_sylk(path) -> list[list]:
+    """Cells of a SYLK file as a list of rows (numbers as float, text as str, empty cells None) — enough to read
+    back what write_sylk writes (and simple SYLK files of other programs)."""
+    grid: dict[tuple[int, int], object] = {}
+    y = x = 1
+    text = Path(path).read_bytes().decode("cp1252", errors="replace")
+    for line in text.splitlines():
+        fields = re.split(r"(?<!;);(?!;)", line)  # split on single ';', not ';;'
+        if not fields or fields[0] != "C":
+            continue
+        val = None
+        for f in fields[1:]:
+            if f[:1] == "Y":
+                y = int(f[1:])
+            elif f[:1] == "X":
+                x = int(f[1:])
+            elif f[:1] == "K":
+                k = f[1:].replace(";;", ";")
+                if k.startswith('"'):
+                    val = k[1:-1] if k.endswith('"') else k[1:]
+                elif k in ("TRUE", "FALSE"):
+                    val = k == "TRUE"
+                else:
+                    val = float(k)
+        grid[(y, x)] = val
+    if not grid:
+        return []
+    ny, nx = max(k[0] for k in grid), max(k[1] for k in grid)
+    return [[grid.get((j, i)) for i in range(1, nx + 1)] for j in range(1, ny + 1)]
+
+
+DBF_TEXT_MAX = 254
+DBF_MAX_FIELDS = 255  # dBase IV (dBase III: 128)
+_DBF_NUM_MAX = 19  # dBase III numeric field width limit (dBase IV: 20)
+
+
+def dbf_field_names(columns: list[str]) -> list[str]:
+    """dBase field names for column headings: letters, digits and '_', starting with a letter, at most 10 characters,
+    upper case and unique (e.g. 'Total distance (m)' -> 'TOTAL_DIST', then 'TOTAL_DI_2')."""
+    out: list[str] = []
+    for c in columns:
+        base = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", str(c))).strip("_").upper() or "FIELD"
+        if not base[0].isalpha():
+            base = "F" + base
+        name, k = base[:10], 1
+        while name in out:
+            k += 1
+            suffix = f"_{k}"
+            name = base[:10 - len(suffix)] + suffix
+        out.append(name)
+    return out
+
+
+def _dbf_field(values: list) -> tuple[str, int, int, list[bytes]]:
+    """(type, length, decimals, encoded values) of one column: N (numbers), L (true / false) or C (text)."""
+    present = [v for v in values if v is not None and value_text(v) != ""]
+    if present and all(isinstance(v, (bool, np.bool_)) for v in present):
+        return "L", 1, 0, [b"?" if v is None or value_text(v) == "" else (b"T" if v else b"F") for v in values]
+    nums = [_cell_number(v) for v in values]
+    if present and all(n is not None for v, n in zip(values, nums) if v is not None and value_text(v) != ""):
+        texts = [value_text(n) for n in nums if n is not None]
+        if not any("e" in t for t in texts):
+            ints = max(len(t.split(".")[0]) for t in texts)
+            dec = max((len(t.split(".")[1]) for t in texts if "." in t), default=0)
+            dec = min(dec, max(0, _DBF_NUM_MAX - ints - 1), 15)
+            width = ints + (dec + 1 if dec else 0)
+            if width <= _DBF_NUM_MAX:
+                enc = [(f"{n:.{dec}f}" if dec else str(int(round(n)))).rjust(width).encode("ascii")
+                       if n is not None else b" " * width for n in nums]
+                return "N", width, dec, enc
+    enc = [("" if v is None else re.sub(r"[\r\n\t]", " ", value_text(v))).encode("cp1252", errors="replace")
+           [:DBF_TEXT_MAX] for v in values]
+    width = max([1] + [len(b) for b in enc])
+    return "C", width, 0, [b.ljust(width) for b in enc]
+
+
+def write_dbf(rows: list[dict], path, columns: list[str] | None = None, date: _dt.date | None = None):
+    """dBase III table (.dbf, also read by dBase IV, Excel, LibreOffice, SPSS, R `foreign`, GIS software). Columns of
+    numbers become numeric (N) fields, true / false columns logical (L), others text (C, at most 254 characters,
+    Windows-1252). Field names are limited to 10 characters (see dbf_field_names); missing numbers are blank. At most
+    DBF_MAX_FIELDS columns (dBase IV's limit; dBase III's is 128)."""
+    cols = columns or result_columns(rows)
+    names = dbf_field_names(cols)
+    fields = [_dbf_field([r.get(c) for r in rows]) for c in cols]
+    if len(cols) > DBF_MAX_FIELDS:
+        raise ValueError(f"A dBase table holds at most {DBF_MAX_FIELDS} fields and this table has {len(cols)} "
+                         "columns: show fewer measures (Select data) or save as CSV / Excel")
+    record_len = 1 + sum(f[1] for f in fields)
+    if record_len > 65535:
+        raise ValueError("The rows are too wide for a dBase table")
+    header_len = 32 + 32 * len(fields) + 1
+    d = date or _dt.date.today()
+    head = bytearray(32)
+    head[0] = 0x03  # dBase III without memo
+    head[1:4] = bytes((d.year - 1900, d.month, d.day))
+    head[4:8] = len(rows).to_bytes(4, "little")
+    head[8:10] = header_len.to_bytes(2, "little")
+    head[10:12] = record_len.to_bytes(2, "little")
+    head[29] = 0x57  # language driver: Windows ANSI (code page 1252)
+    out = bytearray(head)
+    for name, (typ, length, dec, _) in zip(names, fields):
+        fd = bytearray(32)
+        fd[0:len(name)] = name.encode("ascii")
+        fd[11] = ord(typ)
+        fd[16] = length
+        fd[17] = dec
+        out += fd
+    out += b"\x0d"
+    for i in range(len(rows)):
+        out += b" " + b"".join(f[3][i] for f in fields)  # ' ': record not deleted
+    out += b"\x1a"
+    Path(path).write_bytes(bytes(out))
+
+
+def read_dbf(path) -> tuple[list[str], list[list]]:
+    """Field names and records of a dBase III / IV table (.dbf): numbers as float (None if blank), logicals as
+    bool (None if unknown), dates as 'YYYY-MM-DD', text as str; deleted records are skipped. Memo fields are not
+    read (blank)."""
+    raw = Path(path).read_bytes()
+    if len(raw) < 33:
+        raise ValueError(f"{Path(path).name} is not a dBase table")
+    n, hlen, rlen = int.from_bytes(raw[4:8], "little"), int.from_bytes(raw[8:10], "little"), \
+        int.from_bytes(raw[10:12], "little")
+    enc = {0x57: "cp1252", 0x03: "cp1252", 0x01: "cp437", 0x02: "cp850", 0x64: "cp852", 0x65: "cp866",
+           0xC8: "cp1250", 0xC9: "cp1251"}.get(raw[29], "cp1252")
+    fields, pos = [], 32
+    while pos + 32 <= hlen and raw[pos] != 0x0D:
+        fd = raw[pos:pos + 32]
+        fields.append((fd[:11].split(b"\0")[0].decode("ascii", "replace"), chr(fd[11]), fd[16]))
+        pos += 32
+    rows = []
+    for i in range(n):
+        rec = raw[hlen + i * rlen:hlen + (i + 1) * rlen]
+        if len(rec) < rlen or rec[:1] == b"*":
+            continue
+        off, vals = 1, []
+        for _, typ, length in fields:
+            b = rec[off:off + length]
+            off += length
+            txt = b.decode(enc, "replace").strip()
+            if typ in "NF":
+                try:
+                    vals.append(float(txt) if txt else None)
+                except ValueError:
+                    vals.append(None)
+            elif typ == "L":
+                vals.append(True if txt in ("T", "t", "Y", "y") else False if txt in ("F", "f", "N", "n") else None)
+            elif typ == "D":
+                vals.append(f"{txt[:4]}-{txt[4:6]}-{txt[6:8]}" if len(txt) == 8 and txt.isdigit() else "")
+            elif typ == "M":
+                vals.append("")
+            else:
+                vals.append(txt)
+        rows.append(vals)
+    return [f[0] for f in fields], rows
+
+
+TABLE_SUFFIXES = (".csv", ".tsv", ".txt", ".xlsx", ".slk", ".dbf")
+
+
 _ILLEGAL_XLSX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -104,11 +306,16 @@ def write_xlsx(sheets: dict[str, list[dict]], path, columns: dict[str, list[str]
 
 
 def write_table(rows: list[dict], path, columns: list[str] | None = None, sheet: str = "Results") -> Path:
-    """Write rows × columns; the format follows the extension: .csv, .tsv / .txt (tab-separated) or .xlsx."""
+    """Write rows × columns; the format follows the extension: .csv, .tsv / .txt (tab-separated), .xlsx, .slk (SYLK)
+    or .dbf (dBase III)."""
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".xlsx":
         write_xlsx({sheet: rows}, path, {sheet: columns} if columns else None)
+    elif ext == ".slk":
+        write_sylk(rows, path, columns)
+    elif ext == ".dbf":
+        write_dbf(rows, path, columns)
     elif ext in (".tsv", ".txt", ".tab"):
         write_tsv(rows, path, columns)
     else:
@@ -158,7 +365,7 @@ def results_workbook(project: Project, rows: list[dict], columns: list[str] | No
 
 
 def export_results(project: Project, path, segmented: bool = False, columns: list[str] | None = None) -> Path:
-    """Export project results; format chosen from the extension (.csv / .tsv / .txt / .xlsx / .xml)."""
+    """Export project results; format chosen from the extension (.csv / .tsv / .txt / .xlsx / .slk / .dbf / .xml)."""
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".xml":
@@ -168,7 +375,7 @@ def export_results(project: Project, path, segmented: bool = False, columns: lis
         sheets, cols = results_workbook(project, rows, columns, segmented)
         write_xlsx(sheets, path, cols)
     else:
-        write_csv(rows, path, columns, delimiter="\t" if ext in (".tsv", ".txt", ".tab") else ",")
+        write_table(rows, path, columns)
     return path
 
 
@@ -598,6 +805,10 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
             pos = ov.pop(POSITION_KEY, None)
             if isinstance(pos, dict):
                 w(f"      <apparatus-position{_attrs(**position_args(pos))}/>\n")
+            cal = ov.pop(CALIBRATION_KEY, None)
+            if isinstance(cal, dict):
+                x1, y1, x2, y2 = cal.get("calibration_line") or [None] * 4
+                w(f"      <calibration{_attrs(px_per_cm=cal.get('px_per_cm'), length_cm=cal.get('calibration_length_cm'), x1=x1, y1=y1, x2=x2, y2=y2)}/>\n")
             if ov:
                 w("      <zone-overrides>\n")
                 for zn, sd in ov.items():

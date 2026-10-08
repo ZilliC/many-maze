@@ -17,6 +17,7 @@ from ....core.videoexport import export_video
 from ...figures import FIG_FILTER, figure_to_clipboard
 from ...widgets import PlotCanvas, cv_to_qpixmap, error_box
 from .dialogs import VideoExportDialog
+from .playback import TrackPlayback
 
 POSITION = "Position (all time)"
 RIBBON_CONTROL_STYLE = "QComboBox, QDoubleSpinBox { padding-top: 1px; padding-bottom: 1px; min-height: 20px; }"
@@ -66,6 +67,9 @@ class PlotViewsMixin:
         ph.addWidget(self.mode_b)
         pl.addLayout(ph)
         pl.addWidget(self.tabs, 1)
+        self.playback = TrackPlayback()  # animated track: play / pause, speed, time slider
+        self.playback.setVisible(False)
+        pl.addWidget(self.playback)
         self.video_opts = VideoExportDialog(self).embed()
         self.video_lbl = QLabel()
         self.video_lbl.setObjectName("PlotCaption")
@@ -279,6 +283,7 @@ class PlotViewsMixin:
         self.align_combo.blockSignals(False)
         if not tracks or ai >= len(tracks):
             self._detail = None
+            self.playback.detach()
             self.detail_lbl.setText(f"{title} — no track")
             for c in (self.track_canvas, self.heat_canvas, self.speed_canvas):
                 c.set_figure(Figure(figsize=(3, 3)))
@@ -333,9 +338,17 @@ class PlotViewsMixin:
             combo.setCurrentIndex(i if i >= 0 else 0)
             combo.blockSignals(False)
 
+    def _sync_playback(self):
+        """The playback bar is shown under the (single) track plot only."""
+        on = self.tabs.currentIndex() == 0 and getattr(self, "view", None) == "track"
+        if not on:
+            self.playback.pause()
+        self.playback.setVisible(on)
+
     def _tab_changed(self, *_):
         i = self.tabs.currentIndex()
         self._sync_modes()
+        self._sync_playback()
         for w in self._track_opts:
             w.setEnabled(i == 0)
         for w in self._heat_opts:
@@ -422,6 +435,11 @@ class PlotViewsMixin:
                                            part=o["part"], markers=markers, colorbar=o["color_by"] != "none",
                                            settings=s)
                 self.track_canvas.set_figure(fig)
+                if o["split"]:
+                    self.playback.detach()
+                else:
+                    self.playback.attach(self.track_canvas, tr)
+                self._sync_playback()
             elif i == 1:
                 mask = self._mask(tr, app, o["heat_of"], test, d["events"])
                 label = plots._norm_label({"auto": "time", "fixed": "time"}.get(o["norm"], o["norm"]),

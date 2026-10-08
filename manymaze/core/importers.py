@@ -1,7 +1,7 @@
 """Import data exported by ANY-maze (or other tracking software) as spreadsheets.
 
 ANY-maze can save its spreadsheets (animals, test schedule, results) and per-test track data as CSV, tab-separated
-text or Excel files. Their exact columns depend on what the user selected, so imports work by mapping columns to
+text, Excel, SYLK or dBase files (all read here; its experiment XML export and zone maps: :mod:`.anymaze`). Their exact columns depend on what the user selected, so imports work by mapping columns to
 roles; :func:`guess_mapping` proposes a mapping from the header names (ANY-maze, EthoVision and generic names).
 """
 
@@ -67,6 +67,15 @@ def read_table(path: str | Path) -> tuple[list[str], list[list[str]]]:
 
         ws = load_workbook(p, read_only=True, data_only=True).worksheets[0]
         rows = [["" if v is None else str(v) for v in r] for r in ws.iter_rows(values_only=True)]
+    elif p.suffix.lower() in (".slk", ".dbf"):  # the other formats ANY-maze saves spreadsheets in
+        from .export import read_dbf, read_sylk, value_text
+
+        if p.suffix.lower() == ".slk":
+            rows = read_sylk(p)
+        else:
+            head, body = read_dbf(p)
+            rows = [head] + body
+        rows = [[value_text(v) if not isinstance(v, bool) else ("TRUE" if v else "FALSE") for v in r] for r in rows]
     else:
         text = _read_text(p)
         sample = text[:20000]
