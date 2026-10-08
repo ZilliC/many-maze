@@ -5,8 +5,9 @@ a sensitivity setting).
 The motion index is the pixel change between frames as a % of the animal's area.  Its distribution over a test
 is bimodal when the animal freezes: a peak near zero (only camera noise changes) and a broad hump while it moves.
 The automatic threshold separates the two on a log scale (Otsu's method, which maximises the between-class
-variance); the sensitivity moves it: 50 = the separation itself, every 25 points above doubles it (more frames
-count as freezing), every 25 points below halves it.  Freezing ends at 1.5 × the start threshold (hysteresis, as
+variance); the sensitivity moves it as in ANY-maze, where a higher sensitivity detects smaller movements: 50 =
+the separation itself, every 25 points above halves it (the animal must be stiller to count as freezing), every 25
+points below doubles it.  Freezing ends at 1.5 × the start threshold (hysteresis, as
 with the manual default 2 % / 3 %).
 """
 
@@ -39,7 +40,7 @@ def _otsu(values: np.ndarray, bins: int = 64) -> float:
 
 def auto_thresholds(motion_pct, sensitivity: float = 50.0) -> tuple[float, float] | None:
     """(start, end) freezing thresholds (% of body) from a motion-index series, or None with too few samples /
-    no spread.  sensitivity 0–100 (higher: more freezing)."""
+    no spread.  sensitivity 0–100 (higher: smaller movements end freezing, so less freezing)."""
     v = np.asarray(motion_pct, float)
     v = v[np.isfinite(v) & (v >= 0)]
     if len(v) < MIN_SAMPLES:
@@ -49,7 +50,7 @@ def auto_thresholds(motion_pct, sensitivity: float = 50.0) -> tuple[float, float
         return None
     thr = 10 ** _otsu(lv) - _EPS
     sens = float(np.clip(sensitivity if sensitivity is not None else 50.0, 0.0, 100.0))
-    on = float(np.clip(thr * 2.0 ** ((sens - 50.0) / 25.0), *_LIMITS))
+    on = float(np.clip(thr * 2.0 ** ((50.0 - sens) / 25.0), *_LIMITS))
     return round(on, 3), round(on * OFF_RATIO, 3)
 
 

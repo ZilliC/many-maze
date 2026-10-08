@@ -791,9 +791,10 @@ def heading_of(d: Detection) -> float:
     return d.angle if math.isfinite(d.angle) else math.nan
 
 
-def draw_beam(img: np.ndarray, d: Detection, alpha: float = 0.35) -> bool:
-    """The animal's orientation as a translucent "flashlight beam" wedge from its head, in place.  Returns False
-    when the orientation is unknown."""
+def draw_beam(img: np.ndarray, d: Detection, alpha: float = 0.35, half_angle: float = BEAM_HALF_ANGLE) -> bool:
+    """The animal's orientation as a translucent "flashlight beam" wedge from its head, in place (ANY-maze's shaded
+    orientation area): half_angle degrees either side of the direction it faces.  Returns False when the
+    orientation is unknown."""
     ang = heading_of(d)
     if not math.isfinite(ang) or not math.isfinite(d.x):
         return False
@@ -803,7 +804,7 @@ def draw_beam(img: np.ndarray, d: Detection, alpha: float = 0.35) -> bool:
         body = math.sqrt(d.area) if d.area and math.isfinite(d.area) else 20.0
     length = max(3.0 * body, 0.06 * img.shape[1])
     pts = [(ox, oy)] + [(ox + length * math.cos(math.radians(a)), oy + length * math.sin(math.radians(a)))
-                        for a in np.linspace(ang - BEAM_HALF_ANGLE, ang + BEAM_HALF_ANGLE, 9)]
+                        for a in np.linspace(ang - half_angle, ang + half_angle, 9)]
     poly = np.round(np.array(pts)).astype(np.int32)
     h, w = img.shape[:2]
     x0, y0 = np.clip(poly.min(axis=0), 0, [w, h])
@@ -818,10 +819,10 @@ def draw_beam(img: np.ndarray, d: Detection, alpha: float = 0.35) -> bool:
 
 
 def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True,
-                  beam: bool = False) -> np.ndarray:
+                  beam: bool | float = False) -> np.ndarray:
     """The animal's position (green centre, orange head, cyan body outline) and trail drawn on a BGR copy of the frame (live camera
     images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom).  beam: the animal's
-    orientation as a "flashlight beam" from its head (:func:`draw_beam`)."""
+    orientation as a "flashlight beam" from its head (:func:`draw_beam`); a number is the beam's half angle."""
     img = frame
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -836,7 +837,7 @@ def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy
         if not d.detected or not math.isfinite(d.x):
             continue
         if beam:
-            draw_beam(img, d)
+            draw_beam(img, d, half_angle=BEAM_HALF_ANGLE if beam is True else float(beam))
         if d.outline is not None and len(d.outline) > 2:
             cv2.polylines(img, [d.outline.reshape(-1, 1, 2)], True, OUTLINE_BGR, s, cv2.LINE_AA)
         cv2.circle(img, (int(d.x), int(d.y)), 2 + 2 * s, CENTRE_BGR, -1, cv2.LINE_AA)

@@ -4,18 +4,21 @@ statistics.  :class:`ObservationSession` is the camera-less variant (a clock and
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import math
 import queue
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 from .apparatus import CALIBRATION_KEY, POSITION_KEY, Apparatus, calibration_override, position_args
 from .autosave import Autosaver
+from .diskspace import free_mb as disk_free_mb, is_disk_full
 from .freezing import LiveThresholds
 from .geometry import body_fraction_inside
 from .livemonitor import LivePoints
@@ -92,6 +95,12 @@ class LiveOccupancy:
         self._lost = False
         self._oriented: dict[str, bool] = {}  # zones entered with the orientation rule (entry_orientation_deg)
         self._angle = math.nan  # last known body orientation
+        # for the procedures: zones investigated, angle to each zone / point, events (hidden-zone partial exits)
+        self.investigating: dict[str, bool] = {}
+        self.orientation: dict[str, float] = {}
+        self.events: list[tuple[str, dict]] = []
+        self._peek: tuple[str, float] | None = None  # (hidden zone, time seen again) of a possible partial exit
+        self._prev_hidden: str | None = None
 
     def _pos(self, d: Detection, part: str):
         if part == "head" and math.isfinite(d.hx):
@@ -107,8 +116,67 @@ class LiveOccupancy:
         b = min(area / (math.pi * a), a) if math.isfinite(area) and a > 0 else a / 2
         return a, b, d.angle if math.isfinite(d.angle) else 0.0
 
-    def update(self, d: Detection) -> tuple[dict[str, bool], dict[str, bool]]:
-        """(zone and group membership, head membership) for this frame."""
+    def update(self, d: Detection, t: float | None = None) -> tuple[dict[str, bool], dict[str, bool]]:
+        """(zone and group membership, head membership) for this frame; also updates :attr:`investigating`,
+        :attr:`orientation` and :attr:`events` (t: the test time, for the events)."""
+        memb, head = self._update(d)
+        self.events = []
+        if self.app is not None and self._last is not None:
+            self._procedure_state(d, t)
+        return memb, head
+
+    def _procedure_state(self, d: Detection, t: float | None):
+        """Investigation (head in the zone, or within its investigation distance while facing it, as the
+        investigation measures), the angle between the body's orientation and the direction to each zone centre
+        and point, and hidden-zone partial exits (seen near the hidden zone between two times hidden in it)."""
+        app, L, s = self.app, self._last, self.s
+        ang = self._angle
+        hx, hy = self._pos(L, "head")
+        hidden = self._hidden
+        for z in app.zones:
+            if hidden is not None or not d.detected:
+                inv = False
+            else:
+                inside = bool(z.shape.contains(hx, hy)[0])
+                inv = inside
+                if not inside and z.investigation_distance_cm and z.investigation_distance_cm > 0:
+                    near = float(z.shape.distance_to_edge(hx, hy)[0]) <= z.investigation_distance_cm / app.scale
+                    if near and math.isfinite(ang):
+                        zx, zy = z.shape.centroid()
+                        brg = math.degrees(math.atan2(zy - float(hy[0]), zx - float(hx[0])))
+                        near = abs((ang - brg + 180.0) % 360.0 - 180.0) <= s.exploration_facing_deg
+                    inv = near
+            self.investigating[z.name] = inv
+        targets = [(z.name, z.shape.centroid()) for z in app.zones] + [(p.name, (p.x, p.y)) for p in app.points]
+        self.orientation = {}
+        for name, (px, py) in targets:
+            if math.isfinite(ang) and math.isfinite(L.x):
+                brg = math.degrees(math.atan2(py - L.y, px - L.x))
+                self.orientation[name] = abs((ang - brg + 180.0) % 360.0 - 180.0)
+        # partial exits: seen again near the hidden zone, then hidden in it again
+        if d.detected:
+            if self._prev_hidden is not None:
+                self._peek = (self._prev_hidden, t if t is not None else 0.0)
+            if self._peek is not None:
+                z = app.zone(self._peek[0])
+                if z is None or not self._near_hidden(z, L):
+                    self._peek = None
+        elif self._prev_hidden is None and self._peek is not None:  # lost again
+            if self._peek[0] == hidden:
+                dur = (t - self._peek[1]) if t is not None else 0.0
+                self.events.append(("hidden_partial_exit", {"zone": hidden, "value": round(dur, 3)}))
+            self._peek = None
+        self._prev_hidden = hidden
+
+    def _hidden_margin(self, z) -> float:
+        return (self.s.hidden_zone_margin / self.app.scale if self.s.hidden_zone_margin
+                and self.s.hidden_zone_margin > 0 else 0.5 * math.sqrt(max(z.shape.area(), 1.0)))
+
+    def _near_hidden(self, z, L: Detection) -> bool:
+        x, y = np.array([L.x]), np.array([L.y])
+        return bool(z.shape.contains(x, y)[0]) or float(z.shape.distance_to_edge(x, y)[0]) <= self._hidden_margin(z)
+
+    def _update(self, d: Detection) -> tuple[dict[str, bool], dict[str, bool]]:
         app = self.app
         if app is None:
             return {}, {}
@@ -188,13 +256,63 @@ class LiveOccupancy:
             for z in self.app.zones:
                 if not z.hidden:
                     continue
-                margin = (self.s.hidden_zone_margin / self.app.scale if self.s.hidden_zone_margin
-                          and self.s.hidden_zone_margin > 0 else 0.5 * math.sqrt(max(z.shape.area(), 1.0)))
+                margin = self._hidden_margin(z)
                 dist = 0.0 if bool(z.shape.contains(x, y)[0]) else float(z.shape.distance_to_edge(x, y)[0])
                 if dist <= margin and (best is None or dist < best[0]):
                     best = (dist, z.name)
             self._hidden = best[1] if best else None
         return self._hidden
+
+
+# ====================================================================== live rearing
+class LiveRearing:
+    """Rearing frame by frame with the rules of the rearing measures (measures.rearing_mask): the body area falls
+    below rear_area_pct % of the animal's usual area and, with head and tail tracked, the body length below
+    rear_length_pct % of its usual length; rears shorter than min_rear_s are ignored and gaps up to 0.2 s inside
+    a rear are bridged. The usual area / length is the median over the last 30 s of frames that are not rears."""
+
+    BASELINE_S = 30.0
+    MIN_BASELINE_S = 1.0
+    GAP_S = 0.2
+
+    def __init__(self, analysis: AnalysisSettings, fps: float):
+        self.s = analysis
+        n = max(10, int(self.BASELINE_S * (fps or 25.0)))
+        self._areas: deque = deque(maxlen=n)
+        self._lengths: deque = deque(maxlen=n)
+        self._fps = fps or 25.0
+        self.rearing = False
+        self._cand_since: float | None = None
+        self._off_since: float | None = None
+
+    def update(self, t: float, d: Detection) -> bool:
+        cand = False
+        if d.detected and d.area and math.isfinite(d.area):
+            L = math.hypot(d.hx - d.tx, d.hy - d.ty) if math.isfinite(d.hx) and math.isfinite(d.tx) else math.nan
+            if len(self._areas) >= self.MIN_BASELINE_S * self._fps:
+                base_a = float(np.median(self._areas))
+                cand = d.area < base_a * self.s.rear_area_pct / 100.0
+                if cand and math.isfinite(L) and len(self._lengths) >= self.MIN_BASELINE_S * self._fps:
+                    cand = L < float(np.median(self._lengths)) * self.s.rear_length_pct / 100.0
+            if not cand and not self.rearing:
+                self._areas.append(float(d.area))
+                if math.isfinite(L):
+                    self._lengths.append(L)
+        if cand:
+            self._off_since = None
+            if self._cand_since is None:
+                self._cand_since = t
+            if not self.rearing and t - self._cand_since + 1e-9 >= self.s.min_rear_s:
+                self.rearing = True
+        else:
+            self._cand_since = None if not self.rearing else self._cand_since
+            if self.rearing:
+                if self._off_since is None:
+                    self._off_since = t
+                if t - self._off_since >= self.GAP_S:
+                    self.rearing = False
+                    self._cand_since = self._off_since = None
+        return self.rearing
 
 
 # ====================================================================== live statistics
@@ -413,9 +531,15 @@ class LiveSession(_Scoring):
     autosave_path: str | None = None  # crash-recovery side file (track, events, I/O log), rewritten periodically
     autosave_s: float = 5.0
     autosave_meta: dict | None = None  # test id, animal, apparatus … stored in the side file
+    record_from_start: bool = True  # False: only the procedures' "start video recording" starts the recording
+    disk_low_mb: float = 1024.0  # "disk space low" below this much free space on the recording disk
+    disk_full_mb: float = 50.0  # below this the recording stops ("disk full")
+    disk_check_s: float = 5.0  # how often the free space is checked while recording (test time)
+    test_info: dict | None = None  # the test for the procedures (procedures.test_context): trial(), animal() …
 
     def __post_init__(self):
         self._base_apparatus = self.apparatus  # the project's map, before this test's overrides
+        self.procedure_zone_overrides: dict = {}  # zones / points moved by the procedures ("set zone location")
         if self.zone_overrides and self.apparatus is not None:
             self.apparatus = self.apparatus.with_overrides(self.zone_overrides)
         self.lock = threading.RLock()
@@ -428,19 +552,33 @@ class LiveSession(_Scoring):
         self.recorder: _RecordingThread | None = None
         app = self.apparatus
         ctx = {"zones": [z.name for z in app.zones] + [g.name for g in app.groups] if app else [],
-               "points": [p.name for p in app.points] if app else [], "keys": []}
+               "points": [p.name for p in app.points] if app else [], "keys": [],
+               "duration_s": self.duration_s, "apparatus_map": app, **(self.test_info or {})}
         # the legacy serial-port Outputs is accepted in place of a DeviceManager by the engine
         self.engine = ProcedureEngine(self.procedures, self.devices if self.devices is not None else self.outputs,
-                                      on_mark=self._mark, on_end=lambda: self.finish(END_PROCEDURE),
+                                      on_mark=self._mark, on_end=self._procedure_end,
                                       on_log=self._engine_log,
                                       variables=self.variables if self.variables is not None else {}, context=ctx,
                                       on_pause=lambda t: self.pause(), on_resume=lambda t: self.resume(),
                                       on_stimulus=self.on_stimulus,
                                       outputs_off_on_pause=bool(self.outputs_off_on_pause), commit_kept=False)
+        self.engine.on_display, self.engine.on_video, self.engine.on_zone = \
+            self._display_cmd, self._video_cmd, self._zone_cmd
         if self.outputs is None:
             self.outputs = self.engine.outputs
         self.stats = LiveStats(self.apparatus, self.fps, self.analysis)
         self.occupancy = LiveOccupancy(self.apparatus, self.analysis)
+        self.rearing = LiveRearing(self.analysis, self.fps)
+        self.popups: list[dict] = []  # pop-up messages of the procedures not yet shown (take_popups)
+        self.recording_log: list[tuple[float, str]] = []  # what the procedures did to the recording
+        self.record_parts: list[str] = []  # the files recorded (more than one after a stop and a new start)
+        self._video_paused = False
+        self._video_pause_t = 0.0
+        self._rec_offset = 0.0  # test time not in the recording (recording paused / started late)
+        self._video_label: tuple[str, float | None] | None = None  # (text, until test time)
+        self._disk_last = -1e9
+        self._disk_low_sent = False
+        self._user_warnings_seen = 0
         self.calibration: dict | None = None  # set_calibration(): this test's own calibration
         self.calibration_log: list[tuple[float, dict]] = []
         self.geometry: dict = {}  # set_geometry(): this test's own map position / moved zones (Test.zone_overrides)
@@ -454,6 +592,7 @@ class LiveSession(_Scoring):
         self._frame_i = 0
         self._still_since: float | None = None
         self._start_requested = False
+        self._wait_ts0: float | None = None  # first frame while waiting to start (procedures' pre-test clock)
         self._resume_pending = False
         self._pause_ts: float | None = None
         self._last_ts: float | None = None
@@ -488,6 +627,7 @@ class LiveSession(_Scoring):
             app.calibration_line = tuple(cal["calibration_line"]) if cal["calibration_line"] else None
             app.calibration_length_cm = cal["calibration_length_cm"]
             self.apparatus = app
+            self.engine.context["apparatus_map"] = app
             self.occupancy.app = app
             self.stats.set_scale(app)
             self.calibration = cal
@@ -519,14 +659,8 @@ class LiveSession(_Scoring):
                     geo.pop(name, None)
                 else:
                     geo[name] = dict(v)
-            ov = {**(self.zone_overrides or {}), **geo}
-            if self.calibration:
-                ov[CALIBRATION_KEY] = dict(self.calibration)
-            app = self._base_apparatus.with_overrides(ov)
-            app = app.copy() if app is self._base_apparatus else app  # never change the project's apparatus map
             self.geometry = geo
-            self.apparatus = app
-            self.occupancy.app = app
+            app = self._rebuild_apparatus()
             self.stats.set_scale(app)
             if self.tracker is not None and self._frame_shape is not None:
                 try:
@@ -538,6 +672,18 @@ class LiveSession(_Scoring):
             self.geometry_log.append((round(t, 3), dict(geo)))
             self.log.append((t, "Apparatus geometry adjusted"))
         return dict(geo)
+
+    def _rebuild_apparatus(self) -> Apparatus:
+        """This test's map: the project's apparatus with the test's overrides, the geometry changed during the test
+        (set_geometry), the zones moved by the procedures and the adjusted calibration."""
+        ov = {**(self.zone_overrides or {}), **self.geometry, **self.procedure_zone_overrides}
+        if self.calibration:
+            ov[CALIBRATION_KEY] = dict(self.calibration)
+        app = self._base_apparatus.with_overrides(ov)
+        app = app.copy() if app is self._base_apparatus else app  # never change the project's apparatus map
+        self.apparatus = app
+        self.occupancy.app = app
+        return app
 
     # ------------------------------------------------------------------ capture drop-outs (source thread)
     def capture_lost(self, msg: str = ""):
@@ -578,6 +724,136 @@ class LiveSession(_Scoring):
 
     def _engine_log(self, msg: str, t: float | None = None):
         self.log.append((self.elapsed if t is None else t, str(msg)))
+
+    # ------------------------------------------------------------------ procedure callbacks (under the lock)
+    def _procedure_end(self):
+        """The "end the test" action: the reason it gives is the test's end reason."""
+        self.finish(self.engine.end_reason or END_PROCEDURE)
+
+    def _display_cmd(self, cmd: str, params: dict):
+        """Pop-up messages are queued for the GUI (take_popups); texts on the display are in display_texts."""
+        if cmd == "popup":
+            self.popups.append({"t": round(self.elapsed, 3), **params})
+
+    def take_popups(self) -> list[dict]:
+        """The pop-up messages of the procedures not shown yet ({"t", "title", "text"}); any thread."""
+        with self.lock:
+            out, self.popups = self.popups, []
+            return out
+
+    @property
+    def display_texts(self) -> dict[str, dict]:
+        """Texts the procedures put on the display: {name: {"text", "x", "y", "color"}}."""
+        return dict(self.engine.display_texts)
+
+    def _zone_cmd(self, cmd: str, params: dict):
+        if cmd != "move":
+            return  # zone labels: kept by the engine (zone_labels), stored with the test
+        name, x, y = params["zone"], float(params["x"]), float(params["y"])
+        app = self.apparatus
+        z = app.zone(name) if app is not None else None
+        if z is not None:
+            cx, cy = z.shape.centroid()
+            self.procedure_zone_overrides[name] = z.shape.translated(x - cx, y - cy).to_dict()
+        elif app is not None and app.point(name) is not None:
+            self.procedure_zone_overrides[name] = {"x": x, "y": y}
+        else:
+            raise ValueError(f"no zone or point called '{name}'")
+        self._rebuild_apparatus()
+
+    def _video_cmd(self, cmd: str, params: dict):
+        """The procedures' video recorder actions: start (a new file after a stop), stop, pause, unpause, label."""
+        t = self.elapsed if self.state in ("running", "paused") else 0.0
+        msg = ""
+        if cmd == "start":
+            if self.recorder is None:
+                if not self.record_path or self._frame_shape is None:
+                    raise RuntimeError("this test is not set to record video")
+                self._open_recorder(t)
+                msg = "recording started" if self.recorder is not None else ""
+            elif self._video_paused:
+                self._video_cmd("unpause", {})
+        elif cmd == "stop" and self.recorder is not None:
+            err = self._close_recorder()
+            if err is not None:
+                self.warn(f"Recording error: {err}", t)
+            msg = "recording stopped"
+        elif cmd == "pause" and self.recorder is not None and not self._video_paused:
+            self._video_paused, self._video_pause_t = True, t
+            msg = "recording paused"
+        elif cmd == "unpause" and self._video_paused:
+            self._video_paused = False
+            self._rec_offset += t - self._video_pause_t
+            msg = "recording resumed"
+        elif cmd == "label":
+            text, dur = str(params.get("text") or ""), float(params.get("duration") or 0)
+            self._video_label = (text, t + dur if dur > 0 else None) if text else None
+            msg = f"recording label “{text}”" if text else "recording label removed"
+        if msg:
+            self.recording_log.append((round(t, 3), msg))
+            self.log.append((t, f"Video: {msg}"))
+
+    def _open_recorder(self, t: float):
+        h, w = self._frame_shape
+        path = self.record_path
+        if self.record_parts:  # started again after a stop: a new file next to the first one
+            p = Path(path)
+            path = str(p.with_name(f"{p.stem}_part{len(self.record_parts) + 1}{p.suffix}"))
+        self._rec_frames = 0
+        self._last_rec_frame = None
+        self._rec_offset = t
+        self._video_paused = False
+        try:
+            if self.split_minutes > 0:
+                rec = SplitRecorder(path, self.fps, (w, h), int(round(self.split_minutes * 60 * self.fps)))
+            else:
+                rec = VideoRecorder(path, self.fps, (w, h), fragmented=True)
+            self.recorder = _RecordingThread(rec)
+            self.record_parts.append(path)
+        except Exception as e:
+            self.recorder = None
+            self.warn(f"Cannot record: {e}", t)
+            self._system_event(t, "recording_error", {"value": str(e)})
+
+    def _close_recorder(self) -> Exception | None:
+        rec, self.recorder = self.recorder, None
+        self._last_rec_frame = None
+        if rec is None:
+            return None
+        try:
+            rec.close()
+        except Exception as e:
+            return e
+        return None
+
+    def _system_event(self, t: float, name: str, args: dict | None = None):
+        if self.state in ("running", "paused"):
+            self._call_engine(self.engine.system_event, t, name, args or {}, t=t)
+
+    def _check_disk(self, t: float):
+        """While recording: "disk space low" once below disk_low_mb, "disk full" (the recording stops) below
+        disk_full_mb."""
+        if self.recorder is None or t - self._disk_last < self.disk_check_s:
+            return
+        self._disk_last = t
+        free = disk_free_mb(self.record_parts[-1] if self.record_parts else self.record_path)
+        if free is None:
+            return
+        if free <= self.disk_full_mb:
+            self._recording_failed(OSError(errno.ENOSPC, f"only {free:.0f} MB free"), t)
+        elif free <= self.disk_low_mb and not self._disk_low_sent:
+            self._disk_low_sent = True
+            self.warn(f"Disk space low: {free:.0f} MB free on the recording disk", t)
+            self._system_event(t, "disk_space_low", {"value": round(free, 1)})
+
+    def _recording_failed(self, e: Exception, t: float):
+        full = is_disk_full(e)
+        self.warn(("Disk full: recording stopped" if full else "Recording stopped") + f": {e}", t)
+        self._close_recorder()
+        self.recording_log.append((round(t, 3), "recording stopped: " + ("disk full" if full else str(e))))
+        if full:
+            self._system_event(t, "disk_full", {"value": str(e)})
+        self._system_event(t, "recording_error", {"value": str(e)})
 
     @property
     def elapsed(self) -> float:
@@ -623,10 +899,13 @@ class LiveSession(_Scoring):
             return True
 
     def key(self, key: str, down: bool = True):
-        """Forward a key press to the procedures; also while paused (e.g. a "resume" key)."""
+        """Forward a key press to the procedures; also while paused (e.g. a "resume" key) and, for the "test is
+        waiting to start" handlers, while waiting to start."""
         with self.lock:
             if self.state in ("running", "paused"):
                 self._call_engine(self.engine.key, self.elapsed, key, down)
+            elif self.state == "waiting" and self.engine._pretest:
+                self._call_engine(self.engine.key, self.engine.t, key, down)
 
     def touch(self, area: str | None, x: float | None = None, y: float | None = None):
         """A touch on the stimulus screen (any thread): forwarded to the procedures under the session lock."""
@@ -650,6 +929,11 @@ class LiveSession(_Scoring):
         if self.state == "finished":
             return dets
         if self.state == "waiting":
+            if self._wait_ts0 is None:
+                self._wait_ts0 = ts
+            d = dets[0] if dets else Detection()
+            self._call_engine(self.engine.waiting_update, ts - self._wait_ts0,
+                              {"detected": bool(d.detected), "x": float(d.x), "y": float(d.y)})
             self._check_start(ts, dets, fg)
             if self.state != "running":
                 return dets
@@ -671,13 +955,15 @@ class LiveSession(_Scoring):
         if self._gap_pending is not None:  # the first frame after a capture drop-out
             self._mark_gap(t)
         self._track.add(t, d)
-        zones, head_zones = self.occupancy.update(d)
+        zones, head_zones = self.occupancy.update(d, t)
         freezing = self._freezing_now(d)
         self.stats.update(t, d, zones, freezing)
+        rearing = self.rearing.update(t, d)
         self._check_lost(t, d.detected)
         if self.recorder is not None:
             self._record(frame, t)
-        self._update_engine(t, d, zones, head_zones, freezing)
+            self._check_disk(t)
+        self._update_engine(t, d, zones, head_zones, freezing, rearing)
         if self.duration_s and t >= self.duration_s:
             self.finish(END_DURATION)
         elif self._autosaver is not None and t - self._autosave_last >= self.autosave_s:
@@ -686,6 +972,8 @@ class LiveSession(_Scoring):
         return dets
 
     def _check_start(self, ts, dets, fg):
+        if not self.engine.start_allowed:  # a "test is waiting to start" procedure holds the start
+            return
         detected = any(d.detected for d in dets)
         mode = self.start_mode
         if self._start_requested or mode == "immediate":
@@ -741,11 +1029,20 @@ class LiveSession(_Scoring):
             self.warn(f"Animal lost for {self.lost_warning_s:g} s", t)
 
     def _record(self, frame, t):
+        if self._video_paused:
+            return
         try:
             img = annotate_recording(frame, t, self.recent_labels()) if self.record_overlay else frame
-            # constant frame rate: frame k shows test time k / fps. Late / dropped camera frames are padded by
-            # repeating the previous image; frames arriving faster than fps are skipped.
-            target = int(math.floor(t * self.fps + 0.5)) + 1
+            if self._video_label is not None:
+                text, until = self._video_label
+                if until is not None and t >= until:
+                    self._video_label = None
+                else:
+                    img = burn_label(img, text)
+            # constant frame rate: frame k shows test time k / fps (from the start of the recording, without the
+            # time it was paused). Late / dropped camera frames are padded by repeating the previous image;
+            # frames arriving faster than fps are skipped.
+            target = int(math.floor((t - self._rec_offset) * self.fps + 0.5)) + 1
             done = self._rec_frames
             if target <= done:
                 return
@@ -758,25 +1055,27 @@ class LiveSession(_Scoring):
             self._rec_frames += 1
             self._last_rec_frame = img
         except Exception as e:
-            self.warn(f"Recording stopped: {e}", t)
-            try:
-                self.recorder.close()
-            except Exception:
-                pass
-            self.recorder = None
+            self._recording_failed(e, t)
 
-    def _update_engine(self, t, d, zones, head_zones, freezing):
+    def _update_engine(self, t, d, zones, head_zones, freezing, rearing=False):
         eng = self.engine
+        occ = self.occupancy
         try:
             eng.update_state(t, {"zones": zones, "head_zones": head_zones, "detected": bool(d.detected),
                                  "freezing": freezing, "immobile": self.stats.immobile,
                                  "x": float(d.x), "y": float(d.y), "speed": self.stats.speed,
-                                 "distance": self.stats.distance})
+                                 "distance": self.stats.distance, "hx": float(d.hx), "hy": float(d.hy),
+                                 "tx": float(d.tx), "ty": float(d.ty), "rearing": bool(rearing),
+                                 "investigating": dict(occ.investigating), "orientation": dict(occ.orientation),
+                                 "events": list(occ.events)})
         except Exception as e:
             self.warn(f"Procedure error: {type(e).__name__}: {e}", t)
         for msg in eng.errors[self._errors_seen:]:
             self.warn(f"Procedure error: {msg}", t)
         self._errors_seen = len(eng.errors)
+        for tw, msg in eng.user_warnings[self._user_warnings_seen:]:
+            self.warn(msg, tw)
+        self._user_warnings_seen = len(eng.user_warnings)
 
     def _freezing_now(self, d: Detection) -> bool:
         """Freezing with the analysis rules (measures.kinematics): motion below freeze_on_pct starts it, it
@@ -801,20 +1100,8 @@ class LiveSession(_Scoring):
         self.state = "running"
         self.start_phase = ""
         self.t0 = ts
-        if self.record_path:
-            h, w = self._frame_shape
-            self._rec_frames = 0
-            self._last_rec_frame = None
-            try:
-                if self.split_minutes > 0:
-                    rec = SplitRecorder(self.record_path, self.fps, (w, h),
-                                        int(round(self.split_minutes * 60 * self.fps)))
-                else:
-                    rec = VideoRecorder(self.record_path, self.fps, (w, h), fragmented=True)
-                self.recorder = _RecordingThread(rec)
-            except Exception as e:
-                self.recorder = None
-                self.warn(f"Cannot record: {e}", 0.0)
+        if self.record_path and self.record_from_start:
+            self._open_recorder(0.0)
         self._call_engine(self.engine.start, 0.0, t=0.0)
 
     def finish(self, reason: str = END_USER):
@@ -822,6 +1109,8 @@ class LiveSession(_Scoring):
         with self.lock:
             if self.state == "finished":
                 return
+            if reason == END_USER and getattr(self.engine, "awaiting_continuation", False):
+                reason = self.engine.end_reason or END_PROCEDURE  # ended by a procedure, not continued
             self.end_reason = reason
             if self.state == "paused":
                 self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
@@ -834,13 +1123,9 @@ class LiveSession(_Scoring):
                 self.events.append({"behaviour": m["behaviour"], "t": m["t"],
                                     "t_end": m["t_end"] if m["t_end"] is not None else round(self.elapsed, 3)})
             self.state = "finished"
-            self._last_rec_frame = None
-            if self.recorder is not None:
-                try:
-                    self.recorder.close()
-                except Exception as e:
-                    self.warn(f"Recording error: {e}")
-                self.recorder = None
+            err = self._close_recorder()
+            if err is not None:
+                self.warn(f"Recording error: {err}")
             release = getattr(self.devices, "release", None)  # a per-test DeviceView: its box off, unsubscribed
             if release is not None:
                 try:
@@ -890,6 +1175,42 @@ class LiveSession(_Scoring):
         if contrast:
             tr.meta["animal_contrast"] = contrast
         return postprocess(tr, self.settings)
+
+
+def _put_text(img: np.ndarray, text: str, x: int, y: int, colour=(255, 255, 255), scale: float | None = None):
+    scale = scale or max(0.4, img.shape[1] / 1200)
+    th = max(1, int(round(scale * 1.5)))
+    (tw, tht), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, th)
+    cv2.rectangle(img, (x - 4, y - tht - 4), (x + tw + 4, y + base + 2), (0, 0, 0), -1)
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, colour, th, cv2.LINE_AA)
+
+
+def burn_label(frame: np.ndarray, text: str) -> np.ndarray:
+    """A copy of the frame with a procedure's recording label at the top left."""
+    img = frame.copy() if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    _put_text(img, str(text), 8, 8 + int(max(0.4, img.shape[1] / 1200) * 24))
+    return img
+
+
+def _bgr(colour: str) -> tuple[int, int, int]:
+    c = str(colour or "").strip().lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        return b, g, r
+    except (ValueError, IndexError):
+        return 0, 255, 255
+
+
+def draw_display_texts(frame: np.ndarray, texts: dict) -> np.ndarray:
+    """The procedures' texts on the display ("output text on the display") drawn on a copy of the frame."""
+    if not texts:
+        return frame
+    img = frame.copy() if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    for v in texts.values():
+        _put_text(img, str(v.get("text", "")), int(v.get("x") or 0), int(v.get("y") or 0), _bgr(v.get("color")))
+    return img
 
 
 def annotate_recording(frame: np.ndarray, t: float, labels: list[str] = ()) -> np.ndarray:

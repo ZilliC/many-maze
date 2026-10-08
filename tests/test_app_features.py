@@ -61,10 +61,10 @@ def test_auto_freezing_thresholds_from_the_motion_distribution():
     motion = _bimodal()
     on, off = freezing.auto_thresholds(motion)
     assert 0.6 < on < 8 and off == pytest.approx(1.5 * on, rel=1e-3)  # between the noise and the movement
-    # the sensitivity moves the threshold: +25 doubles it, -25 halves it
+    # the sensitivity moves the threshold (higher = stricter, as in ANY-maze): +25 halves it, -25 doubles it
     on_hi, _ = freezing.auto_thresholds(motion, 75)
     on_lo, _ = freezing.auto_thresholds(motion, 25)
-    assert on_hi == pytest.approx(2 * on, rel=0.01) and on_lo == pytest.approx(on / 2, rel=0.01)
+    assert on_hi == pytest.approx(on / 2, rel=0.01) and on_lo == pytest.approx(2 * on, rel=0.01)
     assert freezing.auto_thresholds(motion[:10]) is None and freezing.auto_thresholds(np.ones(100)) is None
 
 
@@ -192,6 +192,10 @@ def test_change_apparatus_geometry_during_live_test(tmp_path):
     moved = s.apparatus.zones[1].shape.translated(5, 5).to_dict()
     geo = s.set_geometry(zones={app.zones[1].name: moved})
     assert app.zones[1].name in geo and POSITION_KEY in geo
+    # a procedure moving another zone keeps the geometry changed by the user (and vice versa)
+    s._zone_cmd("move", {"zone": app.zones[2].name, "x": 60, "y": 60})
+    assert s.apparatus.zones[1].shape.centroid()[0] == pytest.approx(x0 + 25)
+    assert s.apparatus.zones[2].shape.centroid() == pytest.approx((60, 60))
     for i in range(10, 20):
         s.process(_frame(100, 100), i / 25)
     s.finish()

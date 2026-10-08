@@ -114,6 +114,8 @@ class Actions:
                     return
             elif typ == "text":
                 v = self._text(th, v if v is not None else "", p)
+            elif typ == "bool":
+                v = bool(v) and str(v).strip().lower() not in ("false", "0", "no", "")
             else:
                 v = "" if v is None else str(v).strip()
             args[prm["name"]] = v
@@ -147,11 +149,49 @@ class Actions:
             self._log_io(t, dev, ch, "output", value, typ, **extra)
             if bool(value) != bool(old):
                 self._emit("output_on" if value else "output_off", {"device": dev, "channel": ch, "value": value}, t)
+            if value != old and (typ == "pwm" or self.devices.channel_kind(dev, ch) == "pwm"):
+                self._emit("analog_output_changed", {"device": dev, "channel": ch, "value": value}, t)
 
     def _a_output_on(self, th, p, device, channel, typ="digital"):
         dev, ch = self._resolve(th, p, device, channel)
+        prm = self.output_params.get((dev, ch))
+        if prm and (prm.get("frequency") or prm.get("duration")):
+            self._output_with_params(th, p, dev, ch, prm)
+            return
         self._stop_train((dev, ch), self.t)
         self._set_out(dev, ch, 1, self.t, typ)
+
+    def _output_with_params(self, th, p, dev, ch, prm):
+        """Switch an output on with its settings (set output frequency / duty cycle / on-duration)."""
+        f, dur = float(prm.get("frequency") or 0), float(prm.get("duration") or 0)
+        if f > 0:
+            period = 1.0 / f
+            count = max(1, int(round(dur * f))) if dur > 0 else 0
+            self._start_train(th, p, dev, ch, period, period * float(prm.get("duty", 50.0)) / 100.0, count, "train")
+        else:
+            self._start_train(th, p, dev, ch, dur, dur, 1, "pulse")
+
+    def _output_setting(self, th, p, device, channel, **kw):
+        dev, ch = self._resolve(th, p, device, channel)
+        key = (dev, ch)
+        self.output_params.setdefault(key, {}).update(kw)
+        if key in self._trains or self.outputs_state.get(key):  # running: changes at once
+            self._output_with_params(th, p, dev, ch, self.output_params[key]) \
+                if (self.output_params[key].get("frequency") or self.output_params[key].get("duration")) \
+                else self._a_output_on(th, p, dev, ch)
+
+    def _a_set_output_frequency(self, th, p, device, channel, frequency):
+        if frequency is not None and frequency < 0:
+            raise ExprError("the frequency must not be negative")
+        self._output_setting(th, p, device, channel, frequency=float(frequency or 0))
+
+    def _a_set_output_duty(self, th, p, device, channel, duty_cycle):
+        if not 0 < duty_cycle <= 100:
+            raise ExprError("the duty cycle must be between 0 and 100 %")
+        self._output_setting(th, p, device, channel, duty=float(duty_cycle))
+
+    def _a_set_output_duration(self, th, p, device, channel, duration):
+        self._output_setting(th, p, device, channel, duration=max(0.0, float(duration or 0)))
 
     def _a_output_off(self, th, p, device, channel, typ="digital"):
         dev, ch = self._resolve(th, p, device, channel)
@@ -524,6 +564,8 @@ class Actions:
 
     def _audio(self, th, p, device, cmd, channel, value, duration, **kw):
         dev = self._audio_dev(device)
+        if "volume" in kw and kw["volume"] is not None:  # the "set speaker volume" level scales every sound
+            kw["volume"] = max(0.0, min(1.0, float(kw["volume"]) * self.volumes.get(dev, 1.0)))
         if self.devices.has(dev):
             try:
                 self.devices.audio(dev, cmd, duration=duration, **kw)
@@ -532,16 +574,25 @@ class Actions:
             for err in self.devices.device(dev).errors:
                 self._error(th, p, err)
         key = (dev, channel)
+        was_on = any(k[0] == dev for k in self._audio_on)
         self._audio_on[key] = value
         self._log_io(self.t, dev, channel, "output", value, "audio")
+        if not was_on:
+            self._emit("speaker_start", {"device": dev, "value": value}, self.t)
         if duration and duration > 0:
-            self._add_task(self.t + duration, lambda tt, key=key: self._audio_off(key, tt), ("audio",) + key)
+            self._add_task(self.t + duration, lambda tt, key=key: self._audio_off(key, tt, ended=True),
+                           ("audio",) + key)
 
-    def _audio_off(self, key, t):
+    def _audio_off(self, key, t, ended=False):
+        """A sound stops: stopped, or (ended) played to its end."""
         if key in self._audio_on:
             del self._audio_on[key]
             self._cancel_task(("audio",) + key)
             self._log_io(t, key[0], key[1], "output", 0, "audio")
+            if ended and key[1] == "sound":
+                self._emit("sound_file_end", {"device": key[0]}, t)
+            if not any(k[0] == key[0] for k in self._audio_on):
+                self._emit("speaker_stop", {"device": key[0]}, t)
 
     def _a_tone(self, th, p, device, frequency, duration, volume):
         self._audio(th, p, device, "tone", "tone", frequency, duration, frequency=frequency, volume=volume)
@@ -550,6 +601,9 @@ class Actions:
         self._audio(th, p, device, "noise", "noise", 1, duration, volume=volume)
 
     def _a_play_sound(self, th, p, device, file, duration, volume, repeat=1):
+        if (not duration or duration <= 0) and repeat and repeat > 0:
+            # the length of a WAV file: the end of the sound is logged and fires "sound file finished"
+            duration = wav_duration(file) * int(repeat)
         self._audio(th, p, device, "file", "sound", 1, duration, file=file, volume=volume, repeat=repeat)
 
     def _a_loop_sound(self, th, p, device, file, volume):
@@ -827,8 +881,17 @@ class Actions:
         if self.on_end:
             self.on_end()
 
-    def _a_end_test(self, th, p):
-        self._end_test(th)
+    def _a_end_test(self, th, p, reason="", allow_continuation=False):
+        """End the test (with a reason, stored as the test's end reason). With allow_continuation the test pauses
+        instead: continuing it fires "test continued"; stopping it ends it with the reason."""
+        self.end_reason = str(reason or "")
+        if allow_continuation and not self.paused:
+            self.awaiting_continuation = True
+            self._log_line(self.t, "Test ended by procedure" + (f" ({self.end_reason})" if self.end_reason else "")
+                           + " — it can be continued")
+            self._pause(self.t)
+        elif not allow_continuation:
+            self._end_test(th)
         raise _Stop()
 
     def _pause(self, t):
@@ -898,6 +961,10 @@ class Actions:
         if self.pauses and self.pauses[-1][1] is None:
             self.pauses[-1][1] = t
         self._emit("test_resumed", {}, t)
+        if self.awaiting_continuation:
+            self.awaiting_continuation = False
+            self.end_reason = ""
+            self._emit("test_continuation", {}, t)
         if self.on_resume:
             self.on_resume(t)
         self._dispatch_now(t)
@@ -947,6 +1014,152 @@ class Actions:
         self.stimuli.clear()
         self._stimulus("clear", {})
 
+    # -- callbacks the live test implements (pop-ups, display text, video recorder, zones)
+    def _callback(self, th, p, name, cmd, params):
+        fn = getattr(self, name, None)
+        if fn is None:
+            return False
+        try:
+            fn(cmd, params)
+        except Exception as e:
+            self._error(th, p, f"{cmd}: {e}")
+        return True
+
+    # -- test control
+    def _a_schedule_test(self, th, p, stage, apparatus, delay):
+        s = {"t": self.t, "stage": stage, "apparatus": apparatus, "delay_min": max(0.0, float(delay or 0))}
+        self.scheduled_tests.append(s)
+        self._log_line(self.t, "Another test scheduled for this animal"
+                       + (f" (stage {stage})" if stage else "") + (f" in {s['delay_min']:g} min" if delay else ""))
+
+    def _a_warning(self, th, p, text):
+        self.user_warnings.append((self.t, text))
+        self._log_line(self.t, f"Warning: {text}")
+
+    def _a_error(self, th, p, text, stop=False):
+        self._error(th, p, f"Error generated: {text}")
+        if stop:
+            self.end_reason = self.end_reason or f"Error: {text}"
+            self._end_test(th)
+            raise _Stop()
+
+    # -- zones
+    def _a_set_zone_label(self, th, p, zone, label):
+        self.zone_labels[zone] = label
+        self._log_line(self.t, f"Zone {zone} labelled “{label}”")
+        self._callback(th, p, "on_zone", "label", {"zone": zone, "label": label})
+
+    def _a_remove_zone_label(self, th, p, zone):
+        if self.zone_labels.pop(zone, None) is not None:
+            self._log_line(self.t, f"Zone {zone}: label removed")
+        self._callback(th, p, "on_zone", "label", {"zone": zone, "label": ""})
+
+    def _a_move_zone(self, th, p, zone, x, y):
+        self.zone_moves[zone] = (float(x), float(y))
+        self._log_line(self.t, f"Zone {zone} moved to ({float(x):g}, {float(y):g})")
+        self._callback(th, p, "on_zone", "move", {"zone": zone, "x": float(x), "y": float(y)})
+
+    # -- video recording
+    def _video(self, th, p, cmd, **params):
+        self.video_commands.append((self.t, cmd, params))
+        if not self._callback(th, p, "on_video", cmd, params):
+            self._log_line(self.t, f"Video recording: {cmd} (no recorder)")
+
+    def _a_video_start(self, th, p):
+        self._video(th, p, "start")
+
+    def _a_video_stop(self, th, p):
+        self._video(th, p, "stop")
+
+    def _a_video_pause(self, th, p):
+        self._video(th, p, "pause")
+
+    def _a_video_unpause(self, th, p):
+        self._video(th, p, "unpause")
+
+    def _a_video_label(self, th, p, text, duration):
+        self._video(th, p, "label", text=text, duration=float(duration or 0))
+
+    # -- display and messages
+    def _display(self, th, p, cmd, params):
+        self.display_log.append((self.t, cmd, params))
+        self._callback(th, p, "on_display", cmd, params)
+
+    def _a_popup(self, th, p, text, title):
+        self._log_line(self.t, f"Message: {text}")
+        self._display(th, p, "popup", {"text": text, "title": title or "Procedure"})
+
+    def _a_display_text(self, th, p, name, text, x, y, color):
+        self.display_texts[name] = {"text": text, "x": float(x or 0), "y": float(y or 0), "color": color}
+        self._display(th, p, "text", dict(self.display_texts[name], name=name))
+
+    def _a_display_remove(self, th, p, name):
+        self.display_texts.pop(name, None)
+        self._display(th, p, "remove", {"name": name})
+
+    def _a_display_clear(self, th, p):
+        self.display_texts.clear()
+        self._display(th, p, "clear", {})
+
+    def _send(self, kinds, subject, text, to):
+        notify = getattr(self.devices, "notify", None)
+        ok = False
+        if notify is not None:
+            ctx = self.context or {}
+            who = ", ".join(str(ctx[k]) for k in ("test", "animal", "apparatus") if ctx.get(k))
+            ok = notify(subject + (f" — {who}" if who else ""), text, kinds=kinds, to=to or None)
+        self._log_line(self.t, f"{'E-mail' if kinds == ('email',) else 'SMS'}{f' to {to}' if to else ''}: {text}"
+                       + ("" if ok else " (not sent: no alert device)"))
+        self.alerts.append((self.t, text))
+        if not ok:
+            raise ExprError("no alert (e-mail / SMS) device is configured")
+
+    def _a_send_email(self, th, p, text, subject, to):
+        self._send(("email",), subject or "mANY-MAZE", text, to)
+
+    def _a_send_sms(self, th, p, text, to):
+        self._send(("sms",), "mANY-MAZE", text, to)
+
+    # -- programs and plug-ins
+    def _a_run_program(self, th, p, program, arguments):
+        import shlex
+        import shutil
+        import subprocess
+
+        exe = str(program).strip()
+        found = exe if Path(exe).expanduser().is_file() else shutil.which(exe)
+        if not found:
+            raise ExprError(f"program not found: {exe}")
+        try:
+            args = shlex.split(str(arguments or ""))
+        except ValueError as e:
+            raise ExprError(f"arguments: {e}") from None
+        proc = subprocess.Popen([str(Path(found).expanduser())] + args, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # no shell, not waited for
+        self.programs.append(proc)
+        self._log_line(self.t, f"Program started: {exe}" + (f" {arguments}" if arguments else ""))
+
+    def _a_plugin(self, th, p, plugin, argument, var):
+        from . import plugins
+
+        fn = plugins.get(plugin)
+        if fn is None:
+            raise ExprError(f"no plug-in called '{plugin}'")
+        info = {"t": self.t, "variables": dict(self.vars), "context": dict(self.context or {}),
+                "log": lambda text: self._log_line(self.t, f"{plugin}: {text}")}
+        try:
+            v = fn(argument, info)
+        except Exception as e:
+            raise ExprError(f"plug-in '{plugin}' failed: {e}") from None
+        if var:
+            self._setvar(th, var, v if isinstance(v, (int, float, str, list)) else (0 if v is None else str(v)), p)
+
+    # -- speaker
+    def _a_set_volume(self, th, p, device, volume):
+        dev = self._audio_dev(device)
+        self.volumes[dev] = max(0.0, min(1.0, float(volume)))
+        self._log_line(self.t, f"Speaker {dev}: volume {self.volumes[dev]:g}")
+
 
 _NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
@@ -968,3 +1181,14 @@ def read_pulse_file(path) -> list[tuple[float, float, float | None]]:
             continue
         rows.append((a, b, float(nums[2]) if len(nums) > 2 else None))
     return sorted(rows)
+
+
+def wav_duration(path) -> float:
+    """The length of a WAV file in seconds (0 if it cannot be read, e.g. another format)."""
+    import wave
+
+    try:
+        with wave.open(str(Path(str(path)).expanduser()), "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        return 0.0

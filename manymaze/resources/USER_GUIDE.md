@@ -89,8 +89,9 @@ everything without a camera.
   *Freezing ends…*. *Automatic, from the motion of each test* (as ANY-maze 7): the thresholds are derived from the
   distribution of the motion index of each test — the frames where only camera noise changes (the animal still)
   are separated from the frames where it moves, on a log scale (Otsu's method) — and freezing ends at 1.5 × the
-  start threshold. The **sensitivity** (0–100, default 50) moves the automatic threshold: higher counts more frames
-  as freezing (+25 doubles the threshold), lower fewer. Tests with fewer than 50 motion samples use the manual
+  start threshold. The **sensitivity** (0–100, default 50) works as in ANY-maze: higher detects smaller movements,
+  so the animal must be stiller to count as freezing (+25 halves the threshold); lower lets it move a little more
+  (−25 doubles it). Tests with fewer than 50 motion samples use the manual
   thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
@@ -176,7 +177,8 @@ all cells.
 Ordered steps of zones/groups. Options: must begin at the first step (off = rotations such as ABC/BCA/CAB count —
 spontaneous alternation), other zones allowed between steps, both directions, overlapping, complete on entering or
 leaving the last step, time limit. Entering a step zone out of order is an error and ends the attempt. Measures:
-completed, attempts, incomplete, errors, completion %, latency to first, first/mean/min/max duration, mean time
+completed, attempts, incomplete, errors, completion %, latency to first (to its completion) and latency to the
+start of the first (entry into its first step), first/mean/min/max duration, mean time
 between, rate, total time in sequences, completed reversed, and the distance travelled during the completed
 sequences (from entering the first step to completing the last; total, mean, max, min) and the mean speed during
 them (total distance / total time in sequences).
@@ -479,10 +481,11 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
   it is saved with the test (`zone_overrides["@position"]` and the moved zone, as in *Apparatus position in a
   test*), so the test's results are calculated with it, and noted in the test notes. The apparatus map and the
   other tests are not changed.
-- **Free disk space** — arming a recorded test checks the disk of the recordings folder for the estimated size of
-  the recording; while tests record the space is checked every 30 s. A low (less than 2 GB left) or full disk
-  (less than 200 MB) is written to the log and shown in the test's warnings. Opening an experiment on such a disk
-  shows a warning as well.
+- **Free disk space** — opening an experiment on a disk with little room left (less than 2 GB; *full* below
+  200 MB) shows a warning. Arming a recorded test checks the disk of the recordings folder for the estimated size
+  of the recording (about 0.02 byte per pixel and frame) and writes a warning to the log and the test's warnings if
+  it does not fit comfortably. While a test records, the free space is checked every 5 s: below 1 GB a *Disk space
+  low* warning (and procedure event), below 50 MB the recording stops (*Disk full*); the test itself goes on.
 - **Camera drop-outs** — when a camera stops delivering frames (unplugged, driver or USB hiccup) it is reopened
   automatically, after 0.5, 1, 2, 4 then every 8 s, for up to 2 minutes; the test carries on. The gap is logged
   (*Video capture lost / restored*), marked in the track (the animal counts as not detected during it; the gaps
@@ -529,7 +532,9 @@ errors.
 
 **View ▸ Tracking indicators** chooses what is drawn on the camera images: the animal's track (trail), its
 **orientation** — a translucent "flashlight beam" from the head in the direction the animal faces (tail → head, or
-the body orientation) —, the zone the animal is in and the zone names.
+the body orientation) —, the zone the animal is in and the zone names. The beam is as wide as the analysis's
+*Exploring means facing the object within* angle on either side, so it shows what the animal counts as oriented
+towards.
 
 ### Camera options
 
@@ -619,7 +624,9 @@ The editor has three panes:
 
 * **Procedures** (left) — every ticked procedure runs during each live test. *Add* creates an empty procedure
   or one of the examples (fear conditioning, FR 5 lever pressing, optogenetic stimulation in a zone,
-  spontaneous-alternation counter). Double-click a procedure to rename it.
+  spontaneous-alternation counter). Double-click a procedure to rename it. *Sub-procedure* makes it a
+  sub-procedure (it only runs when called, see below); *ANY-maze maths* gives its expressions ANY-maze's
+  trigonometry in degrees and `log` in base 10 (for protocols taken over from ANY-maze).
 * **Statements** (middle) — the procedure as a tree of blocks. *Add* inserts a statement after the selected
   one, *Add inside* puts it in the selected When / If / Else / Repeat block. Drag & drop statements to move or
   nest them, or use ▲ ▼ (move), → (indent: into the block above) and ← (outdent). *On/off* disables a statement
@@ -637,17 +644,32 @@ range…) are reported in the live-test log without stopping the test.
 | Statement | What it does |
 |---|---|
 | **When** *event* | Runs its block every time the event happens (top level only). *If it recurs while running*: ignore it (default), restart the block, or run another copy in parallel. *Only the first time* runs it once. |
-| **Wait** | Pauses this block: for a time (`30`, `randint(20, 40)`), until a condition is true, or for an event; optionally with a timeout (afterwards `timed_out` is 1 if it timed out). Other procedures and blocks keep running. |
-| **If** / **Else** | Runs the block when the condition is true, otherwise the optional Else block. |
-| **Repeat** | A number of times, while a condition is true, or forever. An optional loop variable counts 0, 1, 2… |
+| **Wait** | Pauses this block: for a time (`30`, `randint(20, 40)`), until a condition is true, or for an event — or for the first of several events (*Or another event…*; afterwards `wait_event` is 1 for the first event, 2 for the next…, 0 after a timeout); optionally with a timeout (afterwards `timed_out` is 1 if it timed out). Other procedures and blocks keep running. |
+| **If** / **Else if** / **Else** | Runs the block when the condition is true; otherwise the block of the first *Else if* whose condition is true (*Add else-if*), otherwise the optional Else block. |
+| **Repeat** | A number of times, while a condition is true, until a condition is true (the block runs at least once, the condition is tested after it), or forever. An optional loop variable counts 0, 1, 2… |
 | **Set** | Gives a variable a value (an expression); with an index, sets one element of an array. |
 | **Do** *action* | Performs an action (see below). |
-| **Stop** | Exits this block, exits the loop, stops this procedure, stops all procedures, or ends the test. |
+| **Stop** | Exits this block, exits the loop, stops this procedure, stops all procedures, ends the test, or returns from a sub-procedure. |
+| **Call sub-procedure** | Runs a sub-procedure's statements here and continues when it has finished (its waits wait here). |
+| **Label** / **Go to** | *Go to* continues after the label of that name. The label must be in the same block or in a block around it: Go to can leave loops and Ifs, never jump into a block, out of a When block or out of a sub-procedure. |
+| **Set timer resolution** | Accepted so that ANY-maze protocols load: waits and timers are already kept on their exact due times and run on the first frame at or after them (see *Timing*); the value is only recorded. |
 | **Comment** | A note; does nothing. |
-| **Variable** | Declares a variable and its initial value (top level). *Keep the value between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list); *Save as a test result* stores its final value with the test, where it appears as a result measure. *Record the value* — *Every time it changes* / *Every time it is set* — also records each value with its time, for its mean, max, min, sum, count and list of values (see *I/O results*). |
+| **Variable** | Declares a variable and its initial value (top level). *Keep between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list): one value for the whole experiment, or one per animal or per apparatus (each animal / apparatus starts from the initial value and then keeps its own); *Save as a test result* stores its final value with the test, where it appears as a result measure. *Record the value* — *Every time it changes* / *Every time it is set* — also records each value with its time, for its mean, max, min, sum, count and list of values (see *I/O results*). |
 
 Statements written at the top level of a procedure (outside any When) run in order from the start of the test,
 so a timed protocol is simply: *Wait 120 → Do tone 30 s → Wait 28 → Do shock 2 s → …*.
+
+**Before the test starts.** A *When the test is waiting to start* block runs from the moment the test is armed
+(waiting to start), on every frame until it starts: with *Prevent test start* the test does not start — whatever
+the start mode, and even when the start button or key is pressed (the start then happens as soon as it is allowed)
+— until *Allow test start*. For example: *Prevent test start → Switch the house light on → Wait until
+input('door') → Allow test start*. Keys reach these blocks. When the test starts they stop (pulse trains stop,
+shocks and sounds go off); variables keep their values and outputs stay as they were.
+
+**Sub-procedures.** A procedure ticked *Sub-procedure* has no When blocks; its statements run when a *Call
+sub-procedure* statement calls it (in place: the caller continues when it has finished) or when the *Run
+sub-procedure* action starts it alongside the caller. Sub-procedures can call each other (up to 32 deep); *Stop ▸
+Return from the sub-procedure* ends one early. Use them for a sequence used in several places (a trial, a reward).
 
 **Timing.** Procedures are evaluated on every video frame. A wait ends on the first frame at or after its due
 time, and the next wait counts from the due time, so long sequences never drift. Pulses, pulse trains and pellet
@@ -655,7 +677,7 @@ pulses on the Arduino are timed by the board itself (microsecond resolution), in
 the I/O log records their exact times. Pulse sequences from a file are timed on the computer's clock by the I/O
 service thread (about 1 ms jitter; on the Arduino each pulse's width is timed by the board). Fast analogue inputs
 (up to 1 kHz) are sent by the board in batches with its own clock, and each sample is logged at its own time
-rather than at the frame's. "Repeat N times" and "Repeat while" loops run instantly; a
+rather than at the frame's. "Repeat N times", "Repeat while" and "Repeat until" loops run instantly; a
 "Repeat forever" loop whose block does not wait runs once per frame (a polling loop).
 
 **Several procedures at once.** Every When block that is running is independent: a procedure can wait for 30 s
@@ -671,6 +693,7 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 
 | Group | Event | Parameters |
 |---|---|---|
+| Test | Test is waiting to start (`test_waiting`) — runs before the test starts (from when it is armed); use Prevent / Allow test start to hold the start until something is ready | — |
 | Test | Test starts (`test_start`) | — |
 | Test | Test ends (`test_end`) | — |
 | Test | Time reached (`time_reached`) — once, when the test time reaches the given time | Time (s) |
@@ -733,6 +756,40 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 | Logic | Reinforcer earned (`reinforcer_earned`) | Schedule |
 | Touch screen | Touch in area (`touch`) | Area *(optional)* |
 | Touch screen | Touch outside all areas (`touch_outside`) | — |
+| Test | Test continued (`test_continuation`) — the test was ended by “End the test” with “allow continuation” and the experimenter continued it | — |
+| Test | Time until the test ends (`time_before_end`) — once, this long before the end of the test duration | Time before the end (s) |
+| Test | At random intervals (`random_interval`) — each interval is drawn uniformly between the shortest and the longest | Shortest interval (s), Longest interval (s) |
+| Test | Time of day reached (`time_of_day`) — once, when the computer's clock passes this time during the test | Time of day (HH:MM[:SS]) |
+| Zones | Investigation of a zone starts (`investigation_start`) — the head is in the zone, or within its investigation distance while facing it | Zone *(optional)* |
+| Zones | Investigation of a zone stops (`investigation_end`) | Zone *(optional)* |
+| Zones | Animal turns towards a zone or point (`oriented_towards`) — the body's orientation comes within this angle of the direction to the zone centre / point | Zone or point, Within (°) |
+| Zones | Animal turns away from a zone or point (`oriented_away`) — the animal stops facing the zone / point (the angle grows beyond the given one) | Zone or point, Within (°) |
+| Zones | Partial exit from a hidden zone (`hidden_partial_exit`) — the animal was seen near a hidden zone between two times it was hidden in it (e.g. peeking out of a nest); event_value = how long it was out | Zone *(optional)* |
+| Zones | Animal fails to enter a zone for a time (`zone_not_entered`) — since the start of the test or since it last left the zone; once per absence | Zone, Time (s) |
+| Animal | Position changes (`position_changed`) | Body part *(optional)*, By at least (px) *(optional)* |
+| Animal | Rearing starts (`rearing_start`) — detected from the animal's shape, as the rearing measures | — |
+| Animal | Rearing stops (`rearing_end`) | — |
+| Inputs | Encoder starts turning clockwise (`encoder_cw`) — clockwise = counts going up | Device *(optional)*, Encoder |
+| Inputs | Encoder starts turning anticlockwise (`encoder_ccw`) | Device *(optional)*, Encoder |
+| Inputs | Encoder changes direction (`encoder_reversed`) | Device *(optional)*, Encoder |
+| Inputs | Encoder speed rises above (`encoder_rpm_above`) — revolutions per minute over the last second (the channel's counts_per_rev option, default 1024) | Device *(optional)*, Encoder, RPM |
+| Inputs | Encoder speed falls below (`encoder_rpm_below`) | Device *(optional)*, Encoder, RPM |
+| Audio | Speaker starts (`speaker_start`) | Audio device *(optional)* |
+| Audio | Speaker stops (`speaker_stop`) | Audio device *(optional)* |
+| Audio | Sound file finished (`sound_file_end`) — a sound file played to its end (not stopped) | Audio device *(optional)* |
+| Outputs | Analogue output changes (`analog_output_changed`) — the level of a PWM / analogue output changes; event_value = the new level | Device *(optional)*, Output *(optional)* |
+| Logic | Condition true for a time (`condition_held`) — once each time the condition stays true this long | Condition, For (s) |
+| Logic | Value changes within a time (`value_changes_by`) — the value rises or falls by at least this much within the time | Value, By at least, Within (s) |
+| System | Disk space low (`disk_space_low`) — the recording disk has less free space than the warning level (1 GB by default) | — |
+| System | Disk full (`disk_full`) — the recording stopped: no space left on the disk | — |
+| System | Recording error (`recording_error`) — the video recording failed and stopped | — |
+
+**Event-wizard options.** Every *When* also has *Only after it happens (times)* and *… within (s)* — e.g. 3 and
+10: the block runs when the event has happened 3 times within 10 s (the count then starts again; without a time,
+on every 3rd occurrence) — and *Only in trials* (`1, 3-5`, `odd`, `even`): the block runs only in those trials
+of the animal. Together with the timed events above (time until the end, random intervals, time of day, a
+condition held for a time, a value changing within a time, a zone not entered for a time) they cover ANY-maze's
+event wizard.
 
 ### Actions
 
@@ -747,6 +804,7 @@ sounds and virtual switches are switched off when the test ends.
 | Outputs | Toggle output (`output_toggle`) | Device *(optional)*, Output |
 | Outputs | Pulse output (`output_pulse`) | Device *(optional)*, Output, Duration (s) |
 | Outputs | Set output level (`output_set`) | Device *(optional)*, Output, Level (0–1) |
+| Outputs | Set analogue output (V) (`output_volts`) — as in ANY-maze; the channel's max_v option is the voltage of level 1 (default 5 V) | Device *(optional)*, Output, Level (V) |
 | Outputs | Switch all outputs off (`all_outputs_off`) | Device *(optional)* |
 | Outputs | Pulse train (optogenetics) (`pulse_train`) | Device *(optional)*, Output, Frequency (Hz), Pulse width (ms), Duration (s) |
 | Outputs | Stop pulse train (`pulse_train_stop`) | Device *(optional)*, Output |
@@ -806,14 +864,73 @@ sounds and virtual switches are switched off when the test ends.
 | Test | Start state event (`mark_start`) | Event |
 | Test | End state event (`mark_end`) | Event |
 | Test | Write to log (`log`) | Message |
-| Test | End the test (`end_test`) | — |
+| Test | End the test (`end_test`) — with “allow continuation” the test pauses: continuing it fires “Test continued”, stopping it ends it | Reason *(optional)*, Allow the test to be continued *(optional)* |
 | Test | Pause the test (`pause_test`) | — |
 | Test | Resume the test (`resume_test`) | — |
+| Test | Prevent test start (`prevent_test_start`) — in a “test is waiting to start” block: the test does not start (not even when asked to) until Allow test start | — |
+| Test | Allow test start (`allow_test_start`) | — |
+| Test | Run sub-procedure (`run_subprocedure`) — starts it alongside this block (the Call statement runs it in place and waits for it) | Sub-procedure |
 | Test | Enable procedure (`enable_procedure`) | Procedure |
 | Test | Disable procedure (`disable_procedure`) | Procedure |
 | Touch screen | Show stimulus (`show_stimulus`) | Area, Image *(optional)*, Shape *(optional)*, Colour *(optional)* |
 | Touch screen | Hide stimulus (`hide_stimulus`) | Area |
 | Touch screen | Clear screen (`clear_screen`) | — |
+| Test | Schedule another test for this animal (`schedule_test`) — the test is added to the experiment when this test is saved | Stage *(optional)*, Apparatus *(optional)*, After (minutes) *(optional)* |
+| Test | Generate a warning (`warning`) — shown in the test's warnings and log | Message |
+| Test | Generate an error (`error`) — reported as a procedure error | Message, End the test *(optional)* |
+| Zones | Set zone label (`set_zone_label`) — e.g. which object is novel; saved with the test (zone_labels) | Zone, Label |
+| Zones | Remove zone label (`remove_zone_label`) | Zone |
+| Zones | Set moveable zone location (`move_zone`) — moves the zone (or point) for the rest of the test; saved as the test's zone position | Zone or point, Centre x (px), Centre y (px) |
+| Video | Start video recording (`video_start`) — starts again after a stop (a new file) | — |
+| Video | Stop video recording (`video_stop`) | — |
+| Video | Pause video recording (`video_pause`) | — |
+| Video | Resume video recording (`video_unpause`) | — |
+| Video | Label the video recording (`video_label`) — burned into the recorded frames | Label *(optional)*, For (s) *(optional)* |
+| Communication | Show a pop-up message (`popup`) | Message, Title *(optional)* |
+| Communication | Output text on the display (`display_text`) | Text name, Text, x (px) *(optional)*, y (px) *(optional)*, Colour *(optional)* |
+| Communication | Remove text from the display (`display_remove`) | Text name |
+| Communication | Clear the text on the display (`display_clear`) | — |
+| Communication | Send an e-mail (`send_email`) — through the alert (e-mail / SMS) devices | Message, Subject *(optional)*, To *(optional)* |
+| Communication | Send an SMS (`send_sms`) — through the alert (e-mail / SMS) devices | Message, To *(optional)* |
+| Communication | Run a program (`run_program`) — started in the background (no shell); the test does not wait for it | Program, Arguments *(optional)* |
+| Communication | Trigger a plug-in (`plugin`) — plug-ins: see manymaze.core.procedures.plugins | Plug-in, Argument *(optional)*, Store the result in *(optional)* |
+| Outputs | Set output frequency (`set_output_frequency`) — used when the output is switched on; a running output changes at once | Device *(optional)*, Output, Frequency (Hz) *(optional)* |
+| Outputs | Set output duty cycle (`set_output_duty`) — of the pulses when a frequency is set | Device *(optional)*, Output, Duty cycle (%) |
+| Outputs | Set output on-duration (`set_output_duration`) — switching the output on then switches it off after this time | Device *(optional)*, Output, Duration (s) *(optional)* |
+| Audio | Set speaker volume (`set_volume`) — scales the volume of the sounds played afterwards | Audio device *(optional)*, Volume (0–1) |
+
+**Ending and continuing a test.** *End the test* stores its *Reason* as the test's *Reason for test end*. With
+*Allow the test to be continued* the test pauses instead: press *Resume* to continue it (procedures see *Test
+continued*) or *Stop* to end it with that reason.
+
+**Video recording.** The recorder actions work when the test is set to record. *Pause* leaves the paused time
+out of the video; *Stop* closes the file and a later *Start* records into a new file (`…_part2`); *Label* burns a
+text into the recorded frames. The test notes list what the procedures did to the recording, and the recording
+stops with a warning (and the *Disk full* / *Recording error* events) if the disk fills up; *Disk space low* fires
+once when less than 1 GB is free.
+
+**Messages and the display.** Pop-up messages appear without stopping the test and are copied to the log; texts
+put on the display stay on the live image until removed. *Send an e-mail* / *Send an SMS* go through the alert
+devices (see *Alerts*), to the given address / number or the device's own. *Generate a warning* adds to the test's
+warnings; *Generate an error* reports a procedure error and can end the test.
+
+**Programs and plug-ins.** *Run a program* starts a program with its arguments, without a shell, and does not
+wait for it. *Trigger a plug-in* calls a Python function registered with
+`manymaze.core.procedures.plugins.register(name, fn)` (or installed through the `manymaze.procedure_plugins`
+entry point): `fn(argument, info)` receives the test time, the variables and the test, and its result can be
+stored in a variable.
+
+**Zones.** *Set zone label* records which zone is which in this test (saved in the test's variables as
+`zone_labels`; `zone_label("Zone")` reads it); *Set moveable zone location* moves a zone (or point) to a new
+centre for the rest of the test and saves the position with the test, as moving it by hand would.
+
+**Output and speaker settings.** *Set output frequency / duty cycle / on-duration* change how *Switch output on*
+drives that output (a pulse train at the frequency, and off after the on-duration); an output that is already
+on changes at once. *Set speaker volume* scales the volume of every sound played afterwards on that device.
+
+New expression functions: `rearing()`, `rears()`, `rearing_time()`, `investigating("Zone")`,
+`orientation("Zone or point")` (angle in degrees between the body's orientation and the direction to it) and
+`zone_label("Zone")`.
 
 Safety: *Shock on* always has a cut-off (default 2 s, at most 60 s), enforced by mANY-MAZE and, on the Arduino,
 by the board itself; *Shock for a duration* is limited to 60 s.
@@ -833,21 +950,35 @@ Expressions use numbers, `'text'`, arrays `[1, 2, 3]`, variables, `+ - * / // % 
 Functions:
 
 * maths — `abs min max round floor ceil sqrt exp log log10 sin cos tan asin acos atan atan2 hypot degrees
-  radians sign clamp int float bool str`
+  radians sign clamp int float bool str`; in degrees: `sind cosd tand asind acosd atand atan2d`. `sin` … `atan2`
+  work in radians and `log` is the natural log (`log(x, base)`), unless the procedure has *ANY-maze maths*: then,
+  as in ANY-maze, they work in degrees and `log` is in base 10
+* undefined values — `NA` (also written `#N/A`, as in ANY-maze) and `is_undefined(x)` (1 for `NA`, `none` and
+  not-a-number)
 * arrays — `len sum mean sorted reversed index count array(n, fill) range`
-* random — `random() uniform(a, b) randint(a, b) gauss(mean, sd) choice(array) shuffle(array)`
-* the test — `time()`, `zone('A')`, `head_zone('A')`, `zone_time('A')`, `zone_entries('A')`, `detected()`,
-  `freezing()`, `immobile()`, `speed()`, `distance()`, `x()`, `y()`, `key('s')`
+* random — `random() uniform(a, b) randint(a, b) gauss(mean, sd) choice(array) shuffle(array)`;
+  `shuffle(array, n)` shuffles with at most n equal values in a row (e.g. `shuffle(['L'] * 10 + ['R'] * 10, 2)`)
+* the test — `time()`, `test_running()`, `test_paused()`, `stage()`, `trial()`, `apparatus()`, `treatment()`
+  (its code when testing blind), `animal()` (the animal's number), `animal_field('Sex')`, `date()`
+  (`'YYYY-MM-DD'`), `time_of_day()` (seconds since midnight)
+* the animal — `zone('A')`, `head_zone('A')`, `zone_time('A')`, `zone_entries('A')`, `detected()`,
+  `freezing()`, `immobile()`, `freezing_time()`, `immobile_time()`, `speed()`, `distance()`, `x()`, `y()`,
+  `head_x()`, `head_y()`, `tail_x()`, `tail_y()`, `x_percent()` / `y_percent()` (position in % of the arena's
+  width / height), `zone_distance('A')` (0 inside the zone), `point_distance('P')`,
+  `sequence_duration('S')` (the duration of the last completed run of the apparatus's zone sequence S),
+  `key('s')`
 * I/O — `input([device,] channel)`, `analog(...)`, `encoder(...)`, `activations(...)`, `output(...)`,
-  `pellets([[device,] channel])`, `switch('name')`, `timer('name')`, `responses('schedule')`,
-  `reinforcers('schedule')`, `requirement('schedule')`
+  `output_volts(...)`, `speaker([device])` (1 while a sound plays), `pellets([[device,] channel])`,
+  `switch('name')`, `timer('name')`, `responses('schedule')`, `reinforcers('schedule')`,
+  `requirement('schedule')`
 
 Expressions are evaluated by a restricted interpreter: they cannot call anything else, read files or access
 Python objects, and huge numbers or arrays are refused.
 
 Variables are shared by all procedures. Numeric variables declared with *Save as a test result* are saved with
 the test (`Test.result_variables`) and analysed like any other measure ("Result variable" measures).
-Variables declared with *Keep the value between tests* are stored in the experiment (`Project.variables`).
+Variables declared with *Keep between tests* are stored in the experiment (`Project.variables`; the values kept
+per animal / apparatus under `@animal` / `@apparatus`), only when the test is saved.
 
 ### I/O devices
 
@@ -873,8 +1004,9 @@ sending heartbeats, e.g. after a crash.
 Channels have a name (used by procedures), a kind (digital input, movement detector, digital output, PWM output,
 analogue input, sensor, rotary encoder, temperature controller, olfactometer, syringe pump), a pin, *Invert* for
 active-low hardware, and options such as `pullup=0`, `debounce_ms=20`, `counts_per_rev=1024`, `cm_per_rev=50`,
-`scale=0.0049`, `period_ms=50`, `deadband=2`, and `role=shocker` / `role=speaker` / `role=light` to group an
-output's results with that device type.
+`scale=0.0049`, `period_ms=50`, `deadband=2`, `max_v=10` (the voltage of an analogue output at full level, for
+*Set analogue output (V)*; default 5), and `role=shocker` / `role=speaker` / `role=light` to group an output's
+results with that device type.
 
 **Fast and filtered analogue inputs.** `period_ms=1` samples at 1 kHz (the Arduino firmware sends batches of
 samples with its own time stamps). `filter=lowpass` with `cutoff_hz` (and `order`, default 2), `filter=highpass`
@@ -970,11 +1102,14 @@ latencies of things that never happen follow *When an event never occurs, its la
   more than 10°, so a count of jitter is not one); with *counts_per_rev*: **degrees clockwise / anticlockwise**
   (positive counts are clockwise; swap the encoder's A / B pins to change it), **clockwise / anticlockwise
   rotations** (completed 360° turns within each run in one direction), **half and quarter rotations** (completed
-  180° / 90° turns per run, both directions), **minimum RPM** (the slowest whole second of turning) and **mean RPM
-  while turning** (revolutions turned in either direction / time turning);
+  180° / 90° turns per run, both directions), **total rotations** (revolutions turned in either direction; the
+  *revolutions* are net, clockwise positive), **maximum RPM** (the fastest whole second of the period), **minimum
+  RPM** (the slowest whole second of turning) and **mean RPM while turning** (revolutions turned in either
+  direction / time turning);
 * **outputs, virtual switches, sounds and touch-screen stimuli** — times on, time on, latency to first on,
-  longest / shortest time on, latency to first off, plus pellets dispensed for pellet dispensers and pulse trains /
-  pulses for optogenetic outputs;
+  longest / shortest / mean time on (the average activation duration), latency to first off, activations per
+  minute, plus pellets dispensed for pellet dispensers and pulse trains / pulses for optogenetic outputs (lasers);
+  shockers, speakers, lights, dippers and drippers also give their activations per minute;
 * **shockers, speakers and lights** have their own measure groups, named after the device type: *Shocker
   shock: shocks, time on, latency to first shock, longest / shortest / mean shock, latency to first off*;
   *Speaker tone: sounds, time on, latency to first sound, longest / shortest / mean sound, …*; *Light house: times
@@ -996,6 +1131,12 @@ latencies of things that never happen follow *When an event never occurs, its la
 * **animal weight** — the weight taken with *Weigh the animal* during the test (also stored on the animal);
 * **virtual switches** — distance travelled before the first activation (in the period; the whole distance if
   never, or blank) and distance travelled while the switch is on;
+* **per zone** (and zone group) for inputs, outputs (shockers, speakers, lights, lasers, pellet dispensers…),
+  virtual switches and rotary encoders: the activations that start while the animal is in the zone (count,
+  latency to the first, activations per minute; *pellets dispensed* for pellet dispensers), the time the channel is
+  on while the animal is in the zone, and for encoders the counts (and total rotations, with *counts_per_rev*)
+  turned while the animal is in the zone — `lever in Centre: activations`, `Shocker shock in Dark: shocks`, `wheel
+  in Nest: total rotations`, …;
 * **touches** — activations per area (channel `touch <area>`);
 * **result variables** — the final value of each *Save as a test result* variable (`Variable: name`). A variable
   whose *Record the value* is *Every time it changes* or *Every time it is set* also logs each numeric value with
@@ -1050,11 +1191,15 @@ maps, group heat maps, results and statistics.
 
 ### Measures
 
-* **Whole apparatus** (~40): duration, detection %, time not detected, time hidden, distance, mean / max / mobile
-  speed, mobile & immobile time / episodes / mean & longest episode, latency to immobility, freezing (time, %,
-  episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity, meander,
-  body and path rotations, thigmotaxis, distance from wall and centre, time outside the arena, arena quadrants,
-  zone transitions, grid crossings.
+* **Whole apparatus** (~45): duration, detection %, time not detected, time hidden / not hidden, distance, mean /
+  max / mobile speed, mobile & immobile time / episodes / mean & longest episode, latency to immobility, freezing
+  (time, %, episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity,
+  meander, body and path rotations (clockwise, anticlockwise and total), average position (time-weighted mean X /
+  Y of the tracked positions, in units from the top-left of the image), thigmotaxis, distance from wall and centre,
+  time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the body
+  orientation, as in ANY-maze: the tracked body angle, else the tail → head axis when the head and tail are
+  tracked; only when neither is tracked do they follow the direction of travel (and there are then no separate
+  *path rotations*).
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
   (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
   twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
@@ -1062,7 +1207,8 @@ maps, group heat maps, results and statistics.
   speed): average freezing score (the mean motion, % of body, that freezing is detected from), time active /
   inactive, active and inactive episodes, longest / shortest active and inactive episode. The animal is active when
   its motion reaches *The animal is active when movement reaches*; inactive episodes shorter than *Shortest
-  inactive episode* count as active (Protocol ▸ Analysis ▸ Activity).
+  inactive episode* count as active (Protocol ▸ Analysis ▸ Activity). Per zone: time active / inactive in the zone
+  and inactive episodes (an episode belongs to the zone it starts in).
 * **Head** (when the head is tracked): head distance (smoothed like the centre), head turn angle — absolute,
   clockwise and anticlockwise — the cumulative change of the head direction (tail → head). A jump of more than 90°
   between two frames is a head / tail swap of the tracker and is not counted.
@@ -1077,7 +1223,8 @@ maps, group heat maps, results and statistics.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
   time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean
-  distance from the zone (0 while inside), and:
+  distance from the zone (as ANY-maze: over the frames the animal is outside it; blank if it never is), time
+  active / inactive and inactive episodes, and:
   * **visit durations** – the duration of each visit, as a comma-separated list (text, so statistics skip it);
   * **investigation** (investigation zones): bouts, time, latency to the first investigation and to its end, *was
     first zone investigated*, longest / shortest / mean bout, list of bout durations, distance and mean speed while
@@ -1090,9 +1237,10 @@ maps, group heat maps, results and statistics.
   * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
     increasing, outside it), time moving towards / away (mobile, outside, direction of travel within the
     *exploration facing angle* of the direction to the zone centre, or of the opposite direction);
-  * **heading error**: initial heading error, signed (positive = clockwise of the zone direction on screen) and
-    absolute — the direction from the first position to the position 1 s later against the direction to the zone
-    centre (blank if the animal starts in the zone) — and the mean absolute heading error while moving outside;
+  * **heading error**: *initial heading error* (absolute, 0–180°, as ANY-maze) and *signed initial heading error*
+    (positive = clockwise of the zone direction on screen) — the direction from the first position to the position
+    1 s later against the direction to the zone centre (blank if the animal starts in the zone) — and the mean
+    absolute heading error while moving outside;
   * **time oriented towards the zone centre when inside** (body orientation within the facing angle);
   * **absolute turn angle** and **absolute head turn angle** (body orientation) while in the zone;
   * **corrected integrated path length** (CIPL, Gallagher): the distance from the zone sampled every second from
@@ -1100,7 +1248,15 @@ maps, group heat maps, results and statistics.
     straight to the zone at the animal's mean speed;
   * **line crossings** while in the zone (all lines), and for **hidden zones** the number of *partial exits* (the
     animal seen between two times it is hidden in the zone, never further from it than the hidden-zone distance,
-    e.g. peeking out of the nest) and the time partially exited.
+    e.g. peeking out of the nest) and the time partially exited;
+  * **Whishaw's corridor** (zones): time (s and %), path % and distance inside a corridor from the release point
+    (a *Release point* / *Start* point, else the first position) to the zone centre, *Whishaw corridor width* wide
+    (20 cm by default), up to the first entry — as the water maze's corridor to the platform.
+
+  Grid cells get all of these except Whishaw's corridor and the distance-from-zone measures (they are not listed
+  among the visited zones). Zone groups get them all except the investigation, hidden-zone, Whishaw and
+  distance-from-zone measures: their border is the outline of their zones (an edge shared by two zones of the
+  group is not a border) and their centre is the centre of their area.
 * **Whole test** lists: **Visited zones** (in the order of their first entry) and **Investigated zones** (order of
   the first investigation), as comma-separated text.
 * **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
@@ -1118,7 +1274,10 @@ maps, group heat maps, results and statistics.
   time and episodes following, approaches / approached by.
 * **Keys** (scored behaviours): point – count, latency, rate; state and hold – count, duration, %, latency, mean &
   longest bout, rate, list of press durations (`1.5, 0.25, …`); both – distance travelled before the first press
-  (the whole distance if never pressed, or blank, as latencies); optionally per zone.
+  (the whole distance if never pressed, or blank, as latencies); optionally per zone (*Split the scored
+  behaviours by zone*): count, latency, rate, distance before the first press and, for state / hold keys,
+  duration, mean / longest / shortest bout, latency to the first release and the list of press durations (a press
+  belongs to the zone the animal was in when it started).
 * **I/O** measures (inputs, outputs, shockers, speakers, lights, encoders, analogue signals, virtual switches, OPAD)
   and **result variables** (`Variable: name`, and their recorded values) from procedures — see *I/O results*; they
   have their own *I/O* category in the measure chooser.
@@ -1145,8 +1304,8 @@ The novel object and the social side can be set per test (test variables) or as 
 
 #### More test-specific measures
 
-* **Water maze**: Whishaw corridor time, path % and distance (release point → platform, 20 cm wide) and *Left
-  Whishaw corridor*.
+* **Water maze**: Whishaw corridor time (s and %), path % and distance (release point → platform, 20 cm wide) and
+  *Left Whishaw corridor* (the same corridor is available towards any zone, see the zone measures).
 * **Novel tank diving test**: latency to top, top entries, top/bottom time %, top/bottom ratio, mean depth, erratic
   movements.
 * **Multi-well plate** (6/12/24/48/96): one apparatus per well (Well, Centre, Edge) — larval zebrafish.
@@ -1330,10 +1489,22 @@ the data from ANY-maze instead (ANY-maze ▸ **File ▸ Export**) and import it 
 | *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand) |
 
 Import the zone maps first: an apparatus that does not exist yet is otherwise created from the zones' bounding
-boxes (rectangles), which is all the XML export contains about zone shapes. Positions exported relative to the
-apparatus centre (ANY-maze's option) are recognised by their negative coordinates. ANY-maze's documentation names
-only the result tags of the XML file, so the other fields are recognised by name (case and separators do not
-matter); if a field of your file is not picked up, the import keeps the rest and you can complete it by hand.
+boxes and the apparatus' box (its arena), which is all the XML export contains about zone shapes. When the export
+holds ANY-maze's zone entries and exits (`<zone_entry>` / `<zone_exit>` in the results), they refine the boxes: a
+zone becomes the ellipse inside its box if that matches where ANY-maze had the animal better than the rectangle,
+and a zone inside another one is cut out of it if ANY-maze counted the animal as leaving the outer zone on
+entering the inner one (ANY-maze zones are made of areas that do not overlap, e.g. a quadrant without the
+platform). Positions exported relative to the apparatus centre (ANY-maze's option) are recognised by their negative
+coordinates. Fields are recognised by name (case and separators do not matter), including ANY-maze's nested
+`<date><day>…` / `<time><hours>…` form; if a field of your file is not picked up, the import keeps the rest and you
+can complete it by hand.
+
+**Checked against ANY-maze.** `scripts/verify_anymaze.py export.xml` imports an export and compares mANY-MAZE's zone
+entries, time in zone and latency to first entry with ANY-maze's own entries and exits. On a real water-maze export
+(600 tests, 5 zones; ANY-maze 2023) entries agree in 99–100 % of test × zone pairs, time in zone to the sample
+(median difference 0 s) and latencies in 94–100 %; the remaining differences are single samples on the edge of the
+round platform, whose exact pixels the XML does not contain. Set `MANYMAZE_ANYMAZE_XML` to an export to run this
+check in the test suite.
 
 #### XML format (`format-version="1"`)
 

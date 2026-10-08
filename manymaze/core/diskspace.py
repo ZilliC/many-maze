@@ -1,9 +1,10 @@
 """Free disk space: how much room is left where an experiment and its recordings are stored, and whether that is
-enough (opening an experiment, before and while recording live tests).  Procedures can react to the same levels
-("disk space low" / "disk full")."""
+enough (opening an experiment, arming and running recorded live tests, the procedures' "disk space low" / "disk
+full" events, see live.LiveSession._check_disk).  The one free-space helper of the application."""
 
 from __future__ import annotations
 
+import errno
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,21 @@ def free_bytes(path) -> int | None:
         return int(shutil.disk_usage(p).free)
     except OSError:
         return None
+
+
+def free_mb(path) -> float | None:
+    """Free space in MB (10⁶ bytes) on the disk of `path`; None when unknown (the live procedures' "disk space
+    low" / "disk full" thresholds are in MB)."""
+    b = free_bytes(path)
+    return None if b is None else b / 1e6
+
+
+def is_disk_full(e: BaseException) -> bool:
+    """Is this error a full disk (ENOSPC / EDQUOT, or an encoder message saying so)?"""
+    if isinstance(e, OSError) and e.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+        return True
+    text = str(e).lower()
+    return "no space left" in text or "disk full" in text or "disk quota" in text
 
 
 def recording_bytes(width: int, height: int, fps: float, duration_s: float) -> int:

@@ -9,25 +9,33 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QT
 
 from ..core import procedures as pr
 
-PATH_ROLE = Qt.UserRole  # the statement's path (an If's path + ("else",) for its Else branch)
-TYPE_ROLE = Qt.UserRole + 1  # statement type of a tree item (ELSE for an Else branch)
+PATH_ROLE = Qt.UserRole  # the statement's path (an If's path + ("else",) / ("elif", k) for its Else / else-if)
+TYPE_ROLE = Qt.UserRole + 1  # statement type of a tree item (ELSE / ELIF for an Else branch / else-if clause)
 ENABLED_ROLE = Qt.UserRole + 2  # False for a disabled statement
 ELSE = "__else__"
+ELIF = "__elif__"
+BRANCHES = (ELSE, ELIF)
 
-COLORS = {"when": "#7c3aed", "wait": "#b45309", "if": "#2563eb", ELSE: "#2563eb", "repeat": "#0d9488",
-          "set": "#15803d", "do": None, "stop": "#dc2626", "comment": "#6b7280", "var": "#166534"}
+COLORS = {"when": "#7c3aed", "wait": "#b45309", "if": "#2563eb", ELSE: "#2563eb", ELIF: "#2563eb", "repeat": "#0d9488",
+          "set": "#15803d", "do": None, "stop": "#dc2626", "comment": "#6b7280", "var": "#166534", "call": None,
+          "label": "#475569", "goto": "#475569", "resolution": "#b45309"}
 # ANY-maze style statement blocks: (fill, border); parameters sit in a lighter "pill"
 BLOCK_COLORS = {"wait": ("#ffc2c2", "#f28b8b"), "stop": ("#ffc2c2", "#e46a6a"),
                 "do": ("#cdf3c6", "#97d68d"),
-                "if": ("#ffe1a6", "#ecb453"), ELSE: ("#ffe1a6", "#ecb453"), "repeat": ("#ffeaa0", "#e2be4a"),
+                "if": ("#ffe1a6", "#ecb453"), ELSE: ("#ffe1a6", "#ecb453"), ELIF: ("#ffe1a6", "#ecb453"),
+                "repeat": ("#ffeaa0", "#e2be4a"), "call": ("#cdf3c6", "#97d68d"), "resolution": ("#ffc2c2", "#f28b8b"),
+                "label": ("#dde3ec", "#aab4c3"), "goto": ("#dde3ec", "#aab4c3"),
                 "when": ("#cfe0fb", "#8eaee6"),
                 "set": ("#e5d4f7", "#b897df"), "var": ("#e5d4f7", "#b897df"),
                 "comment": ("#f2f2f2", "#e0e0e0")}
-PILL_COLORS = {"wait": "#dcb8f0", "when": "#dcb8f0", "if": "#fff6dc", "repeat": "#fff6dc", "do": "#f3fcf0",
-               "set": "#f7f0fd", "var": "#f7f0fd", "stop": "#ffe9e9"}
+PILL_COLORS = {"wait": "#dcb8f0", "when": "#dcb8f0", "if": "#fff6dc", ELIF: "#fff6dc", "repeat": "#fff6dc",
+               "do": "#f3fcf0", "call": "#f3fcf0", "set": "#f7f0fd", "var": "#f7f0fd", "stop": "#ffe9e9",
+               "label": "#f1f4f8", "goto": "#f1f4f8", "resolution": "#ffe9e9"}
 BLOCK_LABELS = [("Wait until ", "Wait until:"), ("Wait for ", "Wait for:"), ("Wait ", "Wait:"), ("When ", "When:"),
-                ("If ", "If:"), ("Repeat ", "Repeat:"), ("Set ", "Set:"), ("Do: ", "Action:"), ("# ", "Note:"),
-                ("Variable ", "Variable:")]
+                ("If ", "If:"), ("Else if ", "Else if:"), ("Repeat ", "Repeat:"),
+                ("Set timer resolution ", "Timer resolution:"), ("Set ", "Set:"), ("Do: ", "Action:"),
+                ("# ", "Note:"), ("Variable ", "Variable:"), ("Call sub-procedure ", "Call:"), ("Label ", "Label:"),
+                ("Go to ", "Go to:")]
 
 
 def block_parts(text: str, type_: str | None) -> tuple[str, str]:
@@ -172,6 +180,14 @@ class StatementTree(QTreeWidget):
             self.style_item(it, st)
             if st.get("type") in pr.CONTAINERS:
                 self._add_items(it, st.get("body") or [], p + ("body",))
+                clauses = st.get("elif") if st.get("type") == "if" and isinstance(st.get("elif"), list) else []
+                for k, clause in enumerate(clauses):
+                    if not isinstance(clause, dict):
+                        continue
+                    el = QTreeWidgetItem(it)
+                    el.setData(0, PATH_ROLE, p + ("elif", k))
+                    self.style_branch(el, clause)
+                    self._add_items(el, clause.get("body") or [], p + ("elif", k, "body"))
                 if st.get("type") == "if" and "else" in st:
                     el = QTreeWidgetItem(it)
                     el.setData(0, PATH_ROLE, p + ("else",))
@@ -183,6 +199,18 @@ class StatementTree(QTreeWidget):
                     el.setFont(0, f)
                     el.setForeground(0, QBrush(QColor(COLORS[ELSE])))
                     self._add_items(el, st.get("else") or [], p + ("else",))
+
+    @staticmethod
+    def style_branch(it: QTreeWidgetItem, clause: dict):
+        """Text, colours and flags of an else-if clause's item."""
+        it.setText(0, pr.describe_elif(clause))
+        it.setData(0, TYPE_ROLE, ELIF)
+        it.setData(0, ENABLED_ROLE, clause.get("enabled", True) is not False)
+        it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDropEnabled)
+        f = it.font(0)
+        f.setBold(True)
+        it.setFont(0, f)
+        it.setForeground(0, QBrush(QColor(COLORS[ELIF])))
 
     @staticmethod
     def style_item(it: QTreeWidgetItem, st: dict):
@@ -223,7 +251,7 @@ class StatementTree(QTreeWidget):
         parent = it.parent()
         siblings = parent or self.invisibleRootItem()
         items = [siblings.child(k) for k in range(siblings.childCount())
-                 if siblings.child(k).data(0, TYPE_ROLE) != ELSE]
+                 if siblings.child(k).data(0, TYPE_ROLE) not in BRANCHES]
         ppath = self.path(parent) if parent is not None else None
-        dest = () if ppath is None else ppath if ppath[-1] == "else" else ppath + ("body",)
+        dest = () if ppath is None else pr.branch_block(ppath) if pr.is_branch(ppath) else ppath + ("body",)
         return dest, items.index(it)

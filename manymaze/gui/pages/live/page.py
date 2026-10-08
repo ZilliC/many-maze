@@ -6,7 +6,6 @@ import copy
 import datetime as _dt
 import json
 import threading
-import time
 
 import numpy as np
 from PySide6.QtCore import QSize, QTime, QTimer, Qt
@@ -14,7 +13,7 @@ from PySide6.QtGui import QAction, QActionGroup, QShortcut
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QInputDialog, QMenu, QMessageBox, QScrollArea, QSizePolicy,
                                QStackedWidget, QTabWidget, QToolButton)
 
-from ....core import autosave, diskspace
+from ....core import autosave
 from ....core import camsources
 from ....core.camera import CameraView
 from ....core.camhw import CameraHardware
@@ -738,37 +737,17 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             with s.lock:
                 rows, zones = s.stats.rows(), (s.stats.current_zones() if s.stats.detected else [])
             self.single_panel.set_zone_rows(rows, zones)
-        self._check_disk_space()
         if self.group.entries:
+            for e in self.group.entries:  # the procedures' pop-up messages (multi-test mode)
+                take = getattr(e.session, "take_popups", None)
+                for pop in (take() if take is not None else ()):
+                    self._show_popup(pop, e)
             self.group.tick(now)
             self._save_finished_entries()
             if self.mode == "multi":
                 self._update_row_states()
                 self._update_buttons()
         self._refresh_monitor()
-
-    def _check_disk_space(self, every_s: float = 30.0):
-        """While tests record, check the free space of the recordings disk every `every_s` seconds: a low /
-        full disk is logged and shown as a warning of the recording tests (once per level)."""
-        mono = time.monotonic()
-        if mono - getattr(self, "_disk_checked", -1e9) < every_s:
-            return
-        self._disk_checked = mono
-        recording = [(s, None) for s in (self.session,) if s is not None and getattr(s, "recorder", None)]
-        recording += [(e.session, e) for e in self.group.entries
-                      if e.session is not None and getattr(e.session, "recorder", None)]
-        if not recording:
-            return
-        space = diskspace.check(recording[0][0].record_path)
-        if space.ok:
-            self._disk_level = "ok"
-            return
-        if space.level == getattr(self, "_disk_level", "ok"):
-            return
-        self._disk_level = space.level
-        self._log(f"Warning: {space.message}")
-        for s, _e in recording:
-            s.warn(space.message)
 
     def _refresh_mosaic(self):
         for key, r in list(self.group.runners.items()):

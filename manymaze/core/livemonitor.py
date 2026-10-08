@@ -22,6 +22,13 @@ _SAME_AS_FAST = {"Speed", "Distance travelled", "Motion", "Detected", "Freezing"
 CHART_PREFIX = "chart:"
 
 
+def beam_angle(session) -> float:
+    """Half angle (degrees) of a session's orientation beam: the angle within which the animal counts as facing an
+    object in the analysis (exploration_facing_deg), so the beam shows what it is oriented towards."""
+    a = getattr(getattr(session, "analysis", None), "exploration_facing_deg", 0.0) or 0.0
+    return float(min(max(a, 5.0), 90.0)) if a > 0 else 20.0
+
+
 # ====================================================================== points
 class LivePoints:
     """Per point of interest: distance from the animal now, time near it (within its radius), approaches (entries

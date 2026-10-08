@@ -179,6 +179,7 @@ def sequence_measures(seq: Sequence, attempts: list[Attempt], t0: float, T: floa
     out[f"{n}: errors"] = int(sum(a.errors for a in attempts))
     out[f"{n}: completion (%)"] = r(100 * len(done) / len(attempts) if attempts else math.nan, 2)
     out[f"{n}: latency to first (s)"] = r(done[0].end - t0 if done else never)
+    out[f"{n}: latency to start of first (s)"] = r(done[0].start - t0 if done else never)
     out[f"{n}: first duration (s)"] = r(durs[0] if len(durs) else math.nan)
     out[f"{n}: mean duration (s)"] = r(durs.mean() if len(durs) else math.nan)
     out[f"{n}: min duration (s)"] = r(durs.min() if len(durs) else math.nan)

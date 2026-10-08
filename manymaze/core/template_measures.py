@@ -220,10 +220,27 @@ def _water_maze(d: TemplateData):
 def _whishaw(d: TemplateData, pc):
     """Whishaw's corridor: a band from the release point (first position or a "Release point" point) to the
     platform; reports how much of the swim to the platform stayed inside it."""
-    res, app, s, k = d.res, d.app, d.s, d.k
+    res, app, k = d.res, d.app, d.k
+    inp = d.memb.get("Platform")
+    found = np.flatnonzero(inp) if inp is not None else np.zeros(0, int)
+    w = whishaw_corridor(k, app, d.s, pc.x, pc.y, found[0] if len(found) else len(k.t) - 1)
+    if w is None:
+        return
+    res["Whishaw corridor time (s)"] = w["time"]
+    res["Whishaw corridor time (%)"] = w["time_pct"]
+    res["Whishaw corridor path (%)"] = w["path_pct"]
+    res[f"Whishaw corridor distance ({app.unit})"] = w["distance"]
+    res["Left Whishaw corridor"] = w["left"]
+
+
+def whishaw_corridor(k, app, s, gx: float, gy: float, stop: int) -> dict | None:
+    """Whishaw's corridor from the release point (a "Release point" / "Start" point, else the first position) to the
+    goal (gx, gy) px, *s.whishaw_width* wide (0 = 20 cm, or 13 % of the arena when not calibrated), over frames
+    from the first position to frame ``stop`` (the arrival): time (s and % of that time), path (% of the distance)
+    and distance inside it, and whether the animal left it. None without two positions."""
     ok = np.flatnonzero(np.isfinite(k.x))
     if len(ok) < 2:
-        return
+        return None
     rp = app.point("Release point") or app.point("Start")
     sx, sy = (rp.x, rp.y) if rp is not None else (k.x[ok[0]], k.y[ok[0]])
     width = s.whishaw_width
@@ -234,17 +251,15 @@ def _whishaw(d: TemplateData, pc):
             x0, _, x1, _ = app.arena_or_bounds().bounds()
             width = 0.13 * (x1 - x0)
     wpx = width / k.scale
-    inp = d.memb.get("Platform")
-    found = np.flatnonzero(inp) if inp is not None else np.zeros(0, int)
-    stop = found[0] if len(found) else len(k.t) - 1
     seg = slice(ok[0], stop + 1)
-    dist = point_segment_distance(k.x, k.y, sx, sy, pc.x, pc.y)
+    dist = point_segment_distance(k.x, k.y, sx, sy, gx, gy)
     inside = (dist <= wpx / 2)[seg]
     dd, st = k.dur[seg], k.step[seg]
-    res["Whishaw corridor time (%)"] = _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2)
-    res["Whishaw corridor path (%)"] = _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2)
-    res[f"Whishaw corridor distance ({app.unit})"] = _r(st[inside].sum(), 2)
-    res["Left Whishaw corridor"] = "No" if inside.all() else "Yes"
+    return {"time": _r(dd[inside].sum()),
+            "time_pct": _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2),
+            "path_pct": _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2),
+            "distance": _r(st[inside].sum(), 2),
+            "left": "No" if inside.all() else "Yes"}
 
 
 def classify_water_maze_strategy(res: dict, u: str) -> str:

@@ -28,7 +28,7 @@ from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
 from .pauses import drop_pauses, shift_events
 from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs, seg_moving_average, segments
-from .template_measures import TemplateData, template_measures
+from .template_measures import TemplateData, template_measures, whishaw_corridor
 from .templates import apply_overrides
 from .track import Track
 
@@ -45,7 +45,7 @@ class AnalysisSettings:
     freeze_off_pct: float = 3.0  # motion above which freezing ends (hysteresis)
     min_freeze_s: float = 1.0
     freeze_threshold_mode: str = "manual"  # "manual" (the two thresholds above) | "auto" (see core/freezing.py)
-    freeze_sensitivity: float = 50.0  # automatic thresholds: 0–100, higher = more freezing
+    freeze_sensitivity: float = 50.0  # automatic thresholds: 0–100, higher = smaller movements end freezing
     activity_threshold_pct: float = 5.0  # motion (% of body area changing) at or above which the animal is active
     min_inactive_s: float = 0.5  # inactive episodes shorter than this count as active
     rearing: bool = False  # detect rears automatically from the animal's shape (see rearing_mask)
@@ -416,6 +416,7 @@ def _detection(res, p: _Period):
     res["Time not detected (s)"] = _r(dur[~det & ~p.hid_any].sum())
     if p.hidden:
         res["Time hidden (s)"] = _r(dur[p.hid_any].sum())
+        res["Time not hidden (s)"] = _r(dur[~p.hid_any].sum())
 
 
 def _locomotion(res, p: _Period):
@@ -492,17 +493,39 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
             cw, acw = cw + c1, acw + c2
         return cw, acw
 
-    angle = p.track.angle
-    res["Rotations clockwise"], res["Rotations anticlockwise"] = rotations(angle if np.isfinite(angle).sum() > 2
-                                                                           else h)
-    if np.isfinite(angle).sum() > 2 and np.isfinite(h).sum() > 2:
+    # body rotations follow the body orientation (as ANY-maze): the tracked body angle, else the tail → head axis
+    # when the head and tail are tracked; only without either do they follow the direction of travel
+    angle = _body_angle(p.track)
+    body = angle is not None
+    cw, acw = rotations(angle if body else h)
+    res["Rotations clockwise"], res["Rotations anticlockwise"] = cw, acw
+    res["Total rotations"] = cw + acw
+    if body and np.isfinite(h).sum() > 2:
         # rotations of the direction of travel (the rotations above follow the body / head orientation)
         res["Path rotations clockwise"], res["Path rotations anticlockwise"] = rotations(h)
 
 
+def _body_angle(tr: Track) -> np.ndarray | None:
+    """The body orientation (deg) used for body rotations: the tracked body angle, else the tail → head axis, or
+    None when neither is tracked (in more than 2 frames)."""
+    if np.isfinite(tr.angle).sum() > 2:
+        return tr.angle
+    with np.errstate(invalid="ignore"):
+        axis = np.degrees(np.arctan2(tr.hy - tr.ty, tr.hx - tr.tx))
+    return axis if np.isfinite(axis).sum() > 2 else None
+
+
 def _arena_position(res, p: _Period):
-    """Thigmotaxis and position in the arena."""
+    """Average position, thigmotaxis and position in the arena."""
     s, k, app, u = p.P.s, p.k, p.P.app, p.P.app.unit
+    # average position: time-weighted mean of the positions tracked (not while hidden), in units from the top-left
+    # of the image like a point's X / Y
+    ok = np.isfinite(p.track.x) & np.isfinite(p.track.y)
+    w = float(p.dur[ok].sum())
+    res[f"Average position X ({u})"] = _r(float((p.track.x[ok] * p.dur[ok]).sum()) / w * k.scale if w > 0
+                                          else math.nan, 2)
+    res[f"Average position Y ({u})"] = _r(float((p.track.y[ok] * p.dur[ok]).sum()) / w * k.scale if w > 0
+                                          else math.nan, 2)
     try:
         arena = app.arena_or_bounds()
     except ValueError:
@@ -579,6 +602,12 @@ def _zones(res, p: _Period):
         res[f"{zn}: immobile episodes"] = len(p.eps(fm & ~K.mobile))
         if has_motion:
             res[f"{zn}: freezing episodes"] = len(p.eps(fm & K.freezing))
+            # pixel-change activity in the zone (see _activity); an inactive episode belongs to the zone it starts in
+            act_full = P.cached("active", lambda: activity_mask(P.k, P.s))
+            t_act = float(dur[vm & act_full[p.sl]].sum())
+            res[f"{zn}: time active (s)"] = _r(t_act)
+            res[f"{zn}: time inactive (s)"] = _r(tz - t_act)
+            res[f"{zn}: inactive episodes"] = len(p.eps(fm & ~act_full))
         sp = p.sp
         res[f"{zn}: max speed ({u}/s)"] = _r(np.nanmax(sp[vm]) if vm.any() and np.isfinite(sp[vm]).any() else math.nan)
         # route to the zone: distance travelled and path efficiency (straight line / path) up to the first entry
@@ -598,8 +627,9 @@ def _zones(res, p: _Period):
         if zobj is not None and zn not in grid_cells:
             dz_full = P.cached(("dist", zn), lambda z=zobj, m=P.memb[zn]: np.where(m, 0.0, _edge(P, z)))
             dzs = dz_full[p.sl]
-            res[f"{zn}: mean distance from zone ({u})"] = _r(np.nanmean(dzs) if np.isfinite(dzs).any() else math.nan,
-                                                             2)
+            # as ANY-maze: the mean over the frames the animal is outside the zone (blank if it never is)
+            dzo = dzs[~P.memb[zn][p.sl] & np.isfinite(dzs)]
+            res[f"{zn}: mean distance from zone ({u})"] = _r(dzo.mean() if len(dzo) else math.nan, 2)
             out_d = dzs[~vm & np.isfinite(dzs)]
             fin = np.flatnonzero(np.isfinite(dzs))
             res[f"{zn}: initial distance from zone ({u})"] = _r(dzs[fin[0]] if len(fin) else math.nan, 2)
@@ -612,13 +642,28 @@ def _zones(res, p: _Period):
             diff = _angle_diff(np.arctan2(zy - hyf, zx - hxf), ang_body)
             head_in = p.head_memb[zn] if p.head_memb is not None and zn in p.head_memb else np.zeros(p.n, bool)
             res[f"{zn}: time facing (s)"] = _r(dur[(diff <= s.exploration_facing_deg) & ~head_in & ~p.hid_any].sum())
-        if zn not in grid_cells:
-            _zone_more(res, p, zn, fm, vm, visits, vdur)
+        if zobj is not None and zn not in grid_cells:
+            _zone_whishaw(res, p, zobj, visits)
+        _zone_more(res, p, zn, fm, vm, visits, vdur)
     for hz in p.hidden:
         res[f"{hz}: time hidden (s)"] = _r(dur[p.hidden[hz]].sum())
     if app.zones:
         tr_at = P.cached("transitions", lambda: _transitions(P))
         res["Zone transitions"] = int(np.count_nonzero((tr_at >= p.i0) & (tr_at < p.i1)))
+
+
+def _zone_whishaw(res, p: _Period, z, visits: list):
+    """Whishaw's corridor towards any zone: the band from the release point to the zone centre, up to the first
+    entry into the zone in the period (or the end of the period), as the water maze's corridor to the platform."""
+    zx, zy = z.shape.centroid()
+    w = whishaw_corridor(p.k, p.P.app, p.P.s, zx, zy, visits[0][0] if visits else p.n - 1)
+    if w is None:
+        return
+    zn, u = z.name, p.P.app.unit
+    res[f"{zn}: Whishaw corridor time (s)"] = w["time"]
+    res[f"{zn}: Whishaw corridor time (%)"] = w["time_pct"]
+    res[f"{zn}: Whishaw corridor path (%)"] = w["path_pct"]
+    res[f"{zn}: Whishaw corridor distance ({u})"] = w["distance"]
 
 
 def _transitions(P: _Prepared) -> np.ndarray:
@@ -657,6 +702,82 @@ def _edge(P: _Prepared, z) -> np.ndarray:
     """Whole test: distance of the centre from the edge of zone z (units), inside or outside."""
     K = P.k
     return P.cached(("edge", z.name), lambda: z.shape.distance_to_edge(K.x, K.y) * K.scale)
+
+
+class _GroupShape:
+    """The outline of a zone group (union of its zones minus the excluded zones), for the zone measures that need
+    a shape (distance to the border, heading towards the zone, CIPL). Its border is made of the parts of its zones'
+    edges with the group on one side only (the edge shared by two touching zones of the group is not a border);
+    its centre is the centre of its area."""
+
+    def __init__(self, app: Apparatus, g):
+        self.members = [z.shape for zn in g.zones if (z := app.zone(zn)) is not None]
+        self.excluded = [z.shape for zn in g.exclude if (z := app.zone(zn)) is not None]
+        edges, mid, side = [], [], []  # (p0, p1, pieces); piece midpoints and normals (1 px)
+        for sh in self.members + self.excluded:
+            poly = np.asarray(sh.polygon(180), float)
+            for p0, p1 in zip(poly, np.roll(poly, -1, axis=0)):
+                L = math.hypot(*(p1 - p0))
+                if L < 1e-9:
+                    continue
+                n = max(1, int(math.ceil(L / 2.0)))  # pieces of at most 2 px, tested on both sides
+                f = ((np.arange(n) + 0.5) / n)[:, None]
+                edges.append((p0, p1, n))
+                mid.append(p0 + f * (p1 - p0))
+                side.append(np.tile([-(p1[1] - p0[1]) / L, (p1[0] - p0[0]) / L], (n, 1)))
+        a, b = [], []
+        if edges:
+            mid, side = np.vstack(mid), np.vstack(side)
+            keep = self.contains(*(mid + side).T) != self.contains(*(mid - side).T)
+            i = 0
+            for p0, p1, n in edges:
+                for r0, r1 in runs(keep[i:i + n]):  # each run of border pieces is one straight segment
+                    a.append(p0 + r0 / n * (p1 - p0))
+                    b.append(p0 + r1 / n * (p1 - p0))
+                i += n
+        self.a, self.b = np.asarray(a, float).reshape(-1, 2), np.asarray(b, float).reshape(-1, 2)
+
+    def contains(self, x, y) -> np.ndarray:
+        x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))
+        inside = np.zeros(x.shape, bool)
+        for sh in self.members:
+            inside |= sh.contains(x, y)
+        for sh in self.excluded:
+            inside &= ~sh.contains(x, y)
+        return inside
+
+    def distance_to_edge(self, x, y) -> np.ndarray:
+        x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))
+        fx, fy = x.ravel(), y.ravel()
+        if not len(self.a):
+            return np.full(x.shape, np.nan)
+        out = np.empty(fx.size)
+        for i in range(0, fx.size, 2048):  # bound the (points × segments) temporaries
+            out[i:i + 2048] = point_segment_distance(fx[i:i + 2048, None], fy[i:i + 2048, None], self.a[:, 0],
+                                                     self.a[:, 1], self.b[:, 0], self.b[:, 1]).min(axis=1)
+        return out.reshape(x.shape)
+
+    def centroid(self) -> tuple[float, float]:
+        if not self.members:
+            return math.nan, math.nan
+        bx = np.array([sh.bounds() for sh in self.members])
+        gx, gy = np.meshgrid(np.linspace(bx[:, 0].min(), bx[:, 2].max(), 200),
+                             np.linspace(bx[:, 1].min(), bx[:, 3].max(), 200))
+        inside = self.contains(gx, gy)
+        return (float(gx[inside].mean()), float(gy[inside].mean())) if inside.any() else self.members[0].centroid()
+
+
+@dataclass
+class _GroupZone:
+    """A zone group as a zone (a name and a shape) for _zone_border, _zone_heading and _zone_cipl."""
+
+    name: str
+    shape: _GroupShape
+
+
+def _group_zone(P: _Prepared, name: str) -> _GroupZone | None:
+    g = P.app.group(name)
+    return P.cached(("group_zone", name), lambda: _GroupZone(name, _GroupShape(P.app, g))) if g is not None else None
 
 
 def _head(P: _Prepared):
@@ -738,12 +859,13 @@ def _zone_more(res, p: _Period, zn: str, fm: np.ndarray, vm: np.ndarray, visits:
     if z is not None and z.hidden:
         _zone_partial_exits(res, p, z)
     _zone_head(res, p, zn, z)
-    if z is not None:
-        _zone_border(res, p, z, vm)
-        _zone_heading(res, p, z, vm)
+    geo = z if z is not None else _group_zone(p.P, zn)  # a zone group: the outline of its zones
+    if geo is not None:
+        _zone_border(res, p, geo, vm)
+        _zone_heading(res, p, geo, vm)
     _zone_turning(res, p, zn, vm)
-    if z is not None:
-        _zone_cipl(res, p, z, visits)
+    if geo is not None:
+        _zone_cipl(res, p, geo, visits)
     _zone_lines(res, p, zn, fm)
 
 
@@ -897,8 +1019,9 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
         start_in = bool(z.shape.contains(np.array([k.ux[i0] / k.scale]), np.array([k.uy[i0] / k.scale]))[0])
         if not start_in and math.hypot(hdx, hdy) > 1e-9 and math.hypot(tdx, tdy) > 0:
             signed = (math.degrees(math.atan2(hdy, hdx) - math.atan2(tdy, tdx)) + 180.0) % 360.0 - 180.0
-    res[f"{zn}: initial heading error (deg)"] = _r(signed, 1)
-    res[f"{zn}: initial absolute heading error (deg)"] = _r(abs(signed), 1)
+    # as ANY-maze: the initial heading error is the absolute angle, the signed one is a separate measure
+    res[f"{zn}: initial heading error (deg)"] = _r(abs(signed), 1)
+    res[f"{zn}: signed initial heading error (deg)"] = _r(signed, 1)
     if p.facing is not None:
         def orient():
             K, (zx, zy) = P.k, z.shape.centroid()
@@ -1319,12 +1442,14 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
 
 
 def _io_track(p: _Period, io_devices) -> dict:
-    """I/O measures that need the track: virtual switches (distance) and analogue inputs per zone visit."""
+    """I/O measures that need the track: virtual switches (distance), analogue inputs per zone visit and the other
+    devices per zone."""
     P = p.P
     grid_cells = {c for g in P.app.grids for c in g.zones}
     visits = {zn: p.eps(P.visits_mask(zn, m), entries=True) for zn, m in P.memb.items() if zn not in grid_cells}
+    zones = {zn: P.visits_mask(zn, m)[p.sl] for zn, m in P.memb.items() if zn not in grid_cells}
     return io_track_measures(P.io_events, p.t, p.dur, p.k.step, (p.t0, p.t0 + p.T), P.app.unit, visits, io_devices,
-                             P.s.latency_if_never)
+                             P.s.latency_if_never, zones)
 
 
 def _point_arrays(P: _Prepared, p) -> dict:
@@ -1500,7 +1625,9 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
     use_step = step is not None and t is not None and len(t) == len(step) and len(t) > 0
     u = f" ({unit})" if unit else ""
 
-    def dist_before(first):
+    def dist_before(first, prefix=None):
+        """Distance travelled before the first press (at time first; None = never) as "<prefix>: distance before
+        first press"."""
         if not use_step:
             return
         if first is None:
@@ -1508,7 +1635,7 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
         else:
             j = int(np.searchsorted(t, first, "right")) - 1
             d = float(step[1:j + 1].sum()) if j > 0 else 0.0
-        out[f"{name}: distance before first press{u}"] = _r(d, 2)
+        out[f"{prefix or name}: distance before first press{u}"] = _r(d, 2)
 
     for b in behaviours:
         name = b.name
@@ -1525,6 +1652,7 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
                     out[f"{name} in {zn}: count"] = len(zt)
                     out[f"{name} in {zn}: latency (s)"] = _r(zt[0] - t0 if zt else never)
                     out[f"{name} in {zn}: rate (/min)"] = _r(len(zt) / (T / 60) if T > 0 else math.nan)
+                    dist_before(zt[0] if zt else None, f"{name} in {zn}")
         else:
             spans = []
             for e in evs:
@@ -1552,14 +1680,23 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
                     active |= (t >= a) & (t < bb)
                 for zn, m in zones.items():
                     on = active & m
-                    starts = [a for a, _ in spans
-                              if m[min(max(np.searchsorted(t, a, "right") - 1, 0), len(t) - 1)]]
+                    # a press belongs to the zone the animal was in when it started (its whole duration)
+                    zs = [(a, bb) for a, bb in spans
+                          if m[min(max(np.searchsorted(t, a, "right") - 1, 0), len(t) - 1)]]
+                    starts = [a for a, _ in zs]
+                    lens = [bb - a for a, bb in zs]
                     tz = float(d[on].sum())
-                    out[f"{name} in {zn}: count"] = len(starts)
-                    out[f"{name} in {zn}: duration (s)"] = _r(tz)
-                    out[f"{name} in {zn}: latency (s)"] = _r(starts[0] - t0 if starts else never)
-                    out[f"{name} in {zn}: mean bout (s)"] = _r(tz / len(starts) if starts else 0.0)
-                    out[f"{name} in {zn}: rate (/min)"] = _r(len(starts) / (T / 60) if T > 0 else math.nan)
+                    g = f"{name} in {zn}"
+                    out[f"{g}: count"] = len(starts)
+                    out[f"{g}: duration (s)"] = _r(tz)
+                    out[f"{g}: latency (s)"] = _r(starts[0] - t0 if starts else never)
+                    out[f"{g}: mean bout (s)"] = _r(tz / len(starts) if starts else 0.0)
+                    out[f"{g}: rate (/min)"] = _r(len(starts) / (T / 60) if T > 0 else math.nan)
+                    out[f"{g}: longest bout (s)"] = _r(max(lens, default=0.0))
+                    out[f"{g}: shortest bout (s)"] = _r(min(lens, default=0.0))
+                    out[f"{g}: latency to first release (s)"] = _r(zs[0][1] - t0 if zs else never)
+                    out[f"{g}: press durations (s)"] = ", ".join(f"{_r(x):g}" for x in lens)
+                    dist_before(starts[0] if starts else None, g)
     return out
 
 

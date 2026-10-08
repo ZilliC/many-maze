@@ -122,8 +122,8 @@ ANALYSIS_SPEC = [
      "(the still and moving frames are separated on a log scale), adjusted by the sensitivity. Manual: the two "
      "thresholds below."),
     ("freeze_sensitivity", "Automatic threshold sensitivity (0–100)", "float", (0.0, 100.0, 5.0, 0),
-     "50 = the threshold separating still from moving frames; higher values count more frames as freezing "
-     "(+25 doubles the threshold), lower values fewer."),
+     "50 = the threshold separating still from moving frames. Higher: smaller movements count as movement, so "
+     "the animal must be stiller to be freezing (+25 halves the threshold); lower: it may move a little more."),
     ("freeze_on_pct", "Freezing starts when movement falls below (% of body)", "float", (0.0, 100.0, 0.1, 2),
      "Pixel change, as a % of the animal's area, under which freezing begins."),
     ("freeze_off_pct", "Freezing ends when movement rises above (% of body)", "float", (0.0, 100.0, 0.1, 2), ""),

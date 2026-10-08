@@ -19,7 +19,14 @@ GENERAL_PREFIXES = ("Test duration", "Detection", "Total distance", "Mean speed"
                     "Head positions recorded", "Head tracked", "Tracking quality", "Average freezing score",
                     "Time active", "Time inactive", "Active episodes", "Inactive episodes", "Longest active",
                     "Shortest active", "Longest inactive", "Shortest inactive", "Head distance", "Head turn angle",
-                    "Rears", "Time rearing", "Latency to first rear", "Mean rear", "Max rear", "Min rear")
+                    "Rears", "Time rearing", "Latency to first rear", "Mean rear", "Max rear", "Min rear",
+                    "Time hidden", "Time not hidden", "Mobile episodes", "Mean mobile episode",
+                    "Mean immobile episode", "Longest immobile", "Shortest immobile", "Longest mobile",
+                    "Shortest mobile", "Latency to first mobile", "Latency to last mobile", "Latency to last immobile",
+                    "Longest freezing", "Shortest freezing", "Path tortuosity", "Mean turn angle", "Angular velocity",
+                    "Total rotations", "Path rotations", "Average position", "Mean distance from centre",
+                    "Max distance from centre", "Arena quadrant", "First zone entered", "Visited zones",
+                    "Investigated zones", "Zone transitions", "Total line crossings")
 CATEGORY_ORDER = ["Information", "General", "Zones", "Points of interest", "Lines", "Test-specific", "Behaviours",
                   "Social", "I/O", "Other"]
 COLUMN_LABELS = {"Group": "Treatment"}
@@ -60,6 +67,8 @@ def measure_category(col: str, names: dict) -> tuple[str, str]:
             return "I/O", "Result variables"
         if prefix in names.get("io", ()) or prefix.split(" in ")[0] in names.get("io", ()):
             return "I/O", prefix
+        if col.startswith(GENERAL_PREFIXES):  # e.g. "Arena quadrant NE: time (%)"
+            return "General", ""
         return "Other", prefix
     if col.startswith(GENERAL_PREFIXES):
         return "General", ""
