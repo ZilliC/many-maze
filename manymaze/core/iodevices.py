@@ -779,8 +779,12 @@ DRIVERS = {"virtual": VirtualDevice, "arduino": ArduinoDevice, "serial": SerialD
 
 def drivers() -> dict:
     """Every device driver: the core ones and those of :mod:`.iodrivers`, :mod:`.pumps` and :mod:`.scales`."""
-    if "firmata" not in DRIVERS:
+    if "scale" not in DRIVERS:
         from . import iodrivers  # noqa: F401  (registers its drivers)
+        from .pumps import SyringePumpDevice
+        from .scales import ScaleDevice
+
+        DRIVERS.update({"syringe_pump": SyringePumpDevice, "scale": ScaleDevice})
     return DRIVERS
 
 

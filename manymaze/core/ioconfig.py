@@ -13,6 +13,8 @@ DEVICE_TYPES = {
     "nidaq": "National Instruments DAQ (NI-DAQmx)",
     "labjack": "LabJack T4 / T7 / T8 (LJM)",
     "notify": "Alerts (e-mail / SMS)",
+    "syringe_pump": "Syringe pump(s)",
+    "scale": "Balance (animal / food weights)",
 }
 CHANNEL_KINDS = {
     "input": "Digital input",
@@ -24,6 +26,7 @@ CHANNEL_KINDS = {
     "sensor": "Sensor (weight, light, temperature, humidity)",
     "thermostat": "Temperature controller",
     "odour": "Odour delivery (olfactometer)",
+    "pump": "Syringe pump",
     "status": "Device status",
 }
 INPUT_KINDS = ("input", "analog", "encoder", "pir", "sensor", "status")
@@ -53,12 +56,15 @@ DEVICE_FIELDS = {
     "labjack": {"identifier": "ANY"},
     "notify": {"smtp_host": "", "smtp_port": 587, "smtp_user": "", "smtp_password": "", "from_addr": "",
                "email_to": "", "sms_to": "", "twilio_sid": "", "twilio_token": "", "twilio_from": ""},
+    "syringe_pump": {"port": "", "baud": 9600, "protocol": "new_era"},
+    "scale": {"port": "", "baud": 9600, "protocol": "mt_sics"},
 }
 CHANNEL_FIELDS = {"virtual": (), "arduino": ("pin", "pin_b", "invert"), "serial": ("on", "off"), "audio": (),
                   "serial_lines": ("pin", "invert"), "firmata": ("pin", "invert"), "nidaq": ("pin", "invert"),
-                  "labjack": ("pin", "invert"), "notify": ()}
+                  "labjack": ("pin", "invert"), "notify": (), "syringe_pump": (), "scale": ()}
 _NAME_BASES = {"virtual": "sim", "arduino": "box", "serial": "serial", "audio": "speakers", "serial_lines": "ttl",
-               "firmata": "firmata", "nidaq": "daq", "labjack": "labjack", "notify": "alerts"}
+               "firmata": "firmata", "nidaq": "daq", "labjack": "labjack", "notify": "alerts",
+               "syringe_pump": "pumps", "scale": "balance"}
 # what "pin" means for each device type (help text of the channel table)
 PIN_HELP = {
     "arduino": "Arduino pin number (analogue inputs: 0 = A0)",

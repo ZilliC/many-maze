@@ -344,8 +344,11 @@ def _pump(res, log, key, lab, ev, t0, t1, T, never):
     g = f"Pump {lab}"
     for direction, word in (("infuse", "infused"), ("withdraw", "withdrawn")):
         rep = log.derived(key, f"{word}_ml")
-        if rep:
-            vol = _value_at(rep, t1) - (_value_at(rep, t0) if any(t <= t0 for t, _ in rep) else 0.0)
+        if rep:  # counters reported by the pump, with their values when each command was given as baselines
+            base = [(t, 0, float(e[f"{word}_ml"])) for t, e in cmds if e.get(f"{word}_ml") is not None]
+            pts = [(t, v) for t, _o, v in sorted(base + [(t, 1, v) for t, v in rep])]  # baselines first
+            before = [v for t, v in pts if t < t0]
+            vol = _value_at(pts, t1) - (before[-1] if before else pts[0][1])
         else:
             vol = 0.0
             for a, b, d, rate, target in runs:

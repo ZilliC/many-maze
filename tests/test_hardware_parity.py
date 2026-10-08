@@ -567,3 +567,25 @@ def test_missing_optional_packages_are_reported():
 
 def test_thermostat_class_is_exported():
     assert Thermostat is io.Thermostat
+
+
+def test_pump_and_balance_drivers_are_registered_and_driven_by_procedures():
+    from manymaze.core import pumps
+
+    assert io.drivers()["syringe_pump"] is pumps.SyringePumpDevice and "scale" in io.drivers()
+    assert ioconfig.new_device("syringe_pump")["protocol"] == "new_era"
+    dm = DeviceManager([{"name": "pumps", "type": "syringe_pump", "protocol": "simulated", "channels": [
+        {"name": "p1", "kind": "pump", "syringe": "BD Plastipak 10 ml"}]}])
+    procs = [{"name": "x", "statements": [
+        DO("pump_infuse", channel="p1", rate=60, volume=0.5),
+        WHEN("pump_target_reached", [DO("mark", name="done")], channel="p1")]}]
+    eng = ProcedureEngine(procs, dm)
+    eng.start(0)
+    for i in range(16):
+        time.sleep(0.1)  # the simulated pump runs on the computer's clock
+        eng.update_state(i / 10, {})
+    eng.stop(1.6)
+    assert eng.marks and not [e for e in eng.errors if "simulated" in e]
+    m = io_measures(eng.io_events, 1.6, devices=dm.configs)
+    assert m["Pump p1: volume infused (ml)"] == pytest.approx(0.5, abs=0.05) and m["Pump p1: infusions"] == 1
+    dm.close()

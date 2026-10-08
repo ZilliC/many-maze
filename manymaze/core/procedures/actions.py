@@ -595,7 +595,7 @@ class Actions:
             raise ExprError("the rate must be positive")
         dev = self._pump(th, p, device, channel, op, rate_ml_min=float(rate), volume_ml=float(volume or 0))
         self._log_io(self.t, dev, channel, "output", 1, "pump", direction=op, rate=float(rate),
-                     volume=float(volume or 0))
+                     volume=float(volume or 0), **self._pump_counters(dev, channel))
         self._pumps_on[(dev, channel)] = op
 
     def _a_pump_withdraw(self, th, p, device, channel, rate, volume):
@@ -604,7 +604,18 @@ class Actions:
     def _a_pump_stop(self, th, p, device, channel):
         dev = self._pump(th, p, device, channel, "stop")
         if self._pumps_on.pop((dev, channel), None) is not None:
-            self._log_io(self.t, dev, channel, "output", 0, "pump")
+            self._log_io(self.t, dev, channel, "output", 0, "pump", **self._pump_counters(dev, channel))
+
+    def _pump_counters(self, dev, channel) -> dict:
+        """The pump's volume counters when a command is given (they count from when the device opened): the
+        baseline of the volume measures."""
+        d = self.devices.device(dev, create=False)
+        out = {}
+        for word in ("infused", "withdrawn"):
+            v = d.inputs.get(f"{channel}.{word}_ml") if d is not None else None
+            if v is not None and f"{channel}.{word}_ml" in d.channels:
+                out[f"{word}_ml"] = float(v)
+        return out
 
     def _a_pump_syringe(self, th, p, device, channel, syringe):
         try:
