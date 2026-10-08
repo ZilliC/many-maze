@@ -673,6 +673,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         try:
             self.start_keys.setText(", ".join(d.get("start_keys", DEFAULT_START_KEYS)))
             self.stop_keys.setText(", ".join(d.get("stop_keys", DEFAULT_STOP_KEYS)))
+            self.control_input.setText(str(d.get("control_input", "")))
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
             self.split_min.setValue(float(d.get("split_minutes", 0.0)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
@@ -689,7 +690,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         new = {"start_keys": parse_keys(self.start_keys.text()), "stop_keys": parse_keys(self.stop_keys.text()),
                "record_overlay": self.record_overlay.isChecked(), "lost_warning_s": self.lost_warn.value(),
                "split_minutes": self.split_min.value(), "schedule_at": self.sched_time.time().toString("HH:mm"),
-               "schedule_daily": self.sched_daily.isChecked()}
+               "schedule_daily": self.sched_daily.isChecked(), "control_input": self.control_input.text().strip()}
         d = self._live_settings()
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
             new["pause_outputs_off"] = self.pause_off.isChecked()
@@ -806,11 +807,14 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         mode = self.mode
         st = s.state if armed else None
         # the single test panel's toolbar
-        self.arm_btn.setEnabled(has and (not armed or st == "waiting"))
-        self.arm_btn.setText("Start now" if st == "waiting" else "Arm / Start test")
-        self.arm_btn.setToolTip("Start the test now" if st == "waiting" else
+        waiting_end = armed and s.waiting_end  # a procedure ended the test allowing continuation
+        self.arm_btn.setEnabled(has and (not armed or st == "waiting" or waiting_end))
+        self.arm_btn.setText("Continue test" if waiting_end else "Start now" if st == "waiting" else
+                             "Arm / Start test")
+        self.arm_btn.setToolTip("Waiting for test end: continue the test (within 10 s)" if waiting_end else
+                                "Start the test now" if st == "waiting" else
                                 "Arm the test: it starts when its start condition is met (▾ to start it now)")
-        self.pause_btn.setEnabled(st in ("running", "paused"))
+        self.pause_btn.setEnabled(st in ("running", "paused") and not waiting_end)
         self.pause_btn.setText("Resume" if st == "paused" else "Pause")
         self.pause_btn.setIcon(icon("resume" if st == "paused" else "pause"))
         self.pause_btn.setToolTip(self.pause_btn.text())

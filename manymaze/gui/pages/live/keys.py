@@ -66,7 +66,8 @@ class KeysMixin:
         if self.mode == "observe" and self.obs is not None:
             return self.obs_start()
         if self.mode == "multi":
-            if any(e.state in ("waiting", "paused") for e in self.group.entries):
+            if any(e.state in ("waiting", "paused") or getattr(e.session, "waiting_end", False)
+                   for e in self.group.entries):
                 self.group.start_all()
                 self._log("Start key: tests started.")
                 return True
@@ -74,6 +75,10 @@ class KeysMixin:
         s = self.session
         if s is None:
             return False
+        if s.waiting_end and s.continue_test():  # "waiting for test end": the start key continues the test
+            self._log(f"Start key: test continued at {fmt_time(s.elapsed)}.")
+            self._update_buttons()
+            return True
         if s.state == "waiting":
             s.request_start()
             self._log("Start key: test started.")

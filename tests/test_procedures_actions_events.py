@@ -25,7 +25,7 @@ from manymaze.core.measures import AnalysisSettings
 from manymaze.core.procedures import (ACTION_SPECS, EVENT_SPECS, ProcedureEngine, describe_statement, plugins,
                                       spec_defaults, statement_fields, validate)
 from manymaze.core.project import Project
-from manymaze.core.session import END_PROCEDURE, END_USER, save_live_test
+from manymaze.core.session import END_USER, save_live_test
 from manymaze.core.tracking import Detection, DetectionSettings
 
 FPS = 25
@@ -145,18 +145,32 @@ def test_end_test_reason_and_continuation():
     eng = run([proc(W(0.5), DO("end_test", reason="criterion reached"))], 2, on_end=lambda: ended.append(1))
     assert ended == [1] and eng.end_reason == "criterion reached"
 
-    paused = []
-    eng = ProcedureEngine([proc(W(0.5), DO("end_test", reason="check", allow_continuation=True), MARK("after")),
-                           proc(WHEN("test_continuation", [MARK("continued")]), name="C")],
-                          on_pause=lambda t: paused.append(t))
+    # allowing continuation: "waiting for test end" — nothing pauses, the procedures keep running
+    pending = []
+    procs = [proc(W(0.5), DO("end_test", reason="check", allow_continuation=True), MARK("after")),
+             proc(WHEN("test_continuation", [MARK("continued")]), WHEN("every", [MARK("tick")], interval=0.25),
+                  name="C")]
+    eng = ProcedureEngine(procs, on_end=lambda: ended.append(2))
+    eng.on_end_pending = pending.append
     eng.start(0)
-    for i in range(20):
+    for i in range(21):
         eng.update_state(i / FPS, {})
-    assert eng.paused and paused == [0.52] and eng.awaiting_continuation and eng.end_reason == "check"
-    assert marks(eng) == []  # the handler stopped; the test is not over
-    eng.resume(0.8)
+    assert pending == [0.52] and eng.awaiting_continuation and not eng.paused and not eng.ended
+    assert eng.end_reason == "check" and eng.end_at == 0.52
+    assert marks(eng, "after") == [] and marks(eng, "tick") == [0.28, 0.52, 0.76]
+    assert eng.continue_test(0.8)
     assert marks(eng, "continued") == [0.8] and not eng.awaiting_continuation and eng.end_reason == ""
-    eng.stop(1)
+    assert eng.end_at is None and not eng.continue_test(0.9)
+    for i in range(21, 400):  # continued: it does not end 10 s later
+        eng.update_state(i / FPS, {})
+    assert not eng.ended
+    eng.stop(16)
+
+    # not continued: the test ends 10 s after the action
+    eng = run([proc(W(0.5), DO("end_test", reason="done", allow_continuation=True))], 12,
+              on_end=lambda: ended.append(3))
+    assert ended == [1, 3] and eng.end_reason == "done" and eng.end_at == 0.52
+    assert any("not continued" in m for _t, m in eng.log_lines) and eng.t == pytest.approx(10.52)
 
 
 def _frame(x=60, y=100, angle=0, length=36):
@@ -178,23 +192,72 @@ def test_live_end_reason_and_continuation():
         s.process(_frame(60 + i), i / FPS)
     assert s.state == "finished" and s.end_reason == "Criterion reached"
 
-    s = _session([proc(W(0.4), DO("end_test", allow_continuation=True))], duration_s=5)
-    for i in range(20):
-        s.process(_frame(60 + i), i / FPS)
-    assert s.state == "paused"
-    s.finish()  # the experimenter does not continue: the procedure ended the test
-    assert s.end_reason == END_PROCEDURE
 
-    s = _session([proc(W(0.4), DO("end_test", reason="pause", allow_continuation=True)),
-                  proc(WHEN("test_continuation", [DO("mark", name="Continued")]), name="C")], duration_s=5)
+def _continuation_session(**kw):
+    dm = DeviceManager([{"name": "box", "type": "virtual", "channels": [
+        {"name": "led", "kind": "output"}, {"name": "light", "kind": "output"}, {"name": "door", "kind": "input"}]}])
+    procs = [proc(DO("output_on", channel="light"), W(0.4), DO("end_test", reason="Island", allow_continuation=True)),
+             proc(WHEN("test_continuation", [DO("mark", name="Continued")]),
+                  WHEN("time_reached", [DO("output_on", channel="led"), DO("mark", name="Late")], time=0.6),
+                  name="C")]
+    return _session(procs, devices=dm, experimenter_area_px=3000, **kw)
+
+
+def _hand_frame():
+    img = _frame(60)
+    img[20:180, 100:190] = 30  # the experimenter's arm
+    return img
+
+
+def test_live_waiting_for_test_end_times_out_and_cuts_the_data():
+    s = _continuation_session(duration_s=0)
+    i = 0
+    while s.state != "finished" and i < 400:
+        s.process(_frame(60 + i % 50), i / FPS)
+        if i == 15:
+            assert s.waiting_end and s.state == "running" and not s.pause()  # tracking goes on; no pausing
+        i += 1
+    assert i - 1 == pytest.approx(10.4 * FPS, abs=2)  # ended 10 s after the action
+    assert s.end_reason == "Island" and s.cols["t"][-1] == pytest.approx(0.4)
+    assert [e["behaviour"] for e in s.events] == []  # "Late" (0.6 s) was after the end: discarded
+    led = [e for e in s.io_events if e["channel"] == "led"]
+    light = [(e["t"], e["value"]) for e in s.io_events if e["channel"] == "light"]
+    assert led == [] and light == [(0.0, 1), (0.4, 0)]  # on at the end: logged off at the cut
+    assert any("Waiting for test end" in m for _t, m in s.warnings)
+
+
+def test_live_continue_test_by_button_and_by_control_input():
+    s = _continuation_session(duration_s=0)
     for i in range(20):
         s.process(_frame(60 + i), i / FPS)
-    assert s.state == "paused" and s.resume()
-    for i in range(20, 30):
-        s.process(_frame(60 + i), i / FPS)
-    assert [e["behaviour"] for e in s.events] == ["Continued"]
+    assert s.waiting_end and s.continue_test() and not s.waiting_end
+    for i in range(20, 400):
+        s.process(_frame(60 + i % 50), i / FPS)
+    assert s.state == "running" and [e["behaviour"] for e in s.events] == ["Late", "Continued"]  # nothing lost while waiting
     s.finish()
-    assert s.end_reason == END_USER
+    assert s.end_reason == END_USER and s.cols["t"][-1] == pytest.approx(399 / FPS)  # no data lost
+
+    s = _continuation_session(duration_s=0, control_input="box/door")
+    for i in range(20):
+        s.process(_frame(60 + i), i / FPS)
+    s.engine.set_input("box", "door", 1)  # the test control switch closes
+    s.process(_frame(80), 20 / FPS)
+    assert not s.waiting_end and [e["behaviour"] for e in s.events] == ["Late", "Continued"]
+    s.finish()
+
+
+def test_live_waiting_for_test_end_stop_or_experimenter_in_view():
+    s = _continuation_session(duration_s=0)
+    for i in range(30):
+        s.process(_frame(60 + i), i / FPS)
+    s.finish()  # Stop: the procedure ended the test
+    assert s.end_reason == "Island" and s.cols["t"][-1] == pytest.approx(0.4)
+
+    s = _continuation_session(duration_s=0)
+    for i in range(30):
+        s.process(_frame(60 + i), i / FPS)
+    s.process(_hand_frame(), 30 / FPS)  # the experimenter walks into view to take the animal out
+    assert s.state == "finished" and s.end_reason == "Island" and s.cols["t"][-1] == pytest.approx(0.4)
 
 
 def test_live_zone_actions_scheduled_tests_and_saving(tmp_path):
@@ -497,7 +560,10 @@ def test_video_recorder_actions(tmp_path):
     assert s.record_parts == [str(path), str(tmp_path / "rec_part2.mp4")]
     assert _count_frames(path) == pytest.approx(20, abs=2)  # 0–0.4 s and 0.8–1.2 s (paused 0.4–0.8 s)
     assert _count_frames(tmp_path / "rec_part2.mp4") == pytest.approx(15, abs=2)  # 1.4–2.0 s
-    assert [m for _t, m in s.recording_log] == ["recording paused", "recording resumed", "recording label “Tone”",
+    # the label is a marker at its time in the video file (0.4 s recorded before it: paused 0.4–0.8 s)
+    assert s.video_labels == [{"t": 0.8, "video_t": pytest.approx(0.4, abs=0.05), "text": "Tone",
+                               "file": "rec.mp4"}]
+    assert [m for _t, m in s.recording_log] == ["recording paused", "recording resumed", "label “Tone”",
                                                 "recording stopped", "recording started"]
 
     s = _session([proc(DO("video_start"))], duration_s=0.2, fps=FPS)  # not set to record

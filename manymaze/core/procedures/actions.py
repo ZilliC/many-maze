@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .. import ioconfig
 from ..operant import Schedule
-from .catalog import ACTION_SPECS, EPS, SHOCK_MAX_S, STALL_S
+from .catalog import ACTION_SPECS, CONTINUATION_S, EPS, SHOCK_MAX_S, STALL_S
 from .expr import MAX_SEQ, ExprError
 from .model import _params_text
 
@@ -882,15 +882,25 @@ class Actions:
             self.on_end()
 
     def _a_end_test(self, th, p, reason="", allow_continuation=False):
-        """End the test (with a reason, stored as the test's end reason). With allow_continuation the test pauses
-        instead: continuing it fires "test continued"; stopping it ends it with the reason."""
+        """End the test (with a reason, stored as the test's end reason). With allow_continuation the test is
+        "waiting for test end" (as ANY-maze): tracking and the procedures go on and, for CONTINUATION_S seconds,
+        the experimenter may continue the test (:meth:`continue_test`, which fires "test continued"); otherwise it
+        ends then, with the data cut back to ``end_at``."""
+        if self.awaiting_continuation:
+            raise _Stop()
         self.end_reason = str(reason or "")
-        if allow_continuation and not self.paused:
+        self.end_at = self.t
+        if allow_continuation:
             self.awaiting_continuation = True
+            self._continue_until = self.t + CONTINUATION_S
             self._log_line(self.t, "Test ended by procedure" + (f" ({self.end_reason})" if self.end_reason else "")
-                           + " — it can be continued")
-            self._pause(self.t)
-        elif not allow_continuation:
+                           + f" — waiting for test end: it can be continued for {CONTINUATION_S:g} s")
+            if self.on_end_pending is not None:
+                try:
+                    self.on_end_pending(self.t)
+                except Exception as e:  # pragma: no cover
+                    self._error(th, p, f"End the test: {e}")
+        else:
             self._end_test(th)
         raise _Stop()
 
@@ -961,10 +971,6 @@ class Actions:
         if self.pauses and self.pauses[-1][1] is None:
             self.pauses[-1][1] = t
         self._emit("test_resumed", {}, t)
-        if self.awaiting_continuation:
-            self.awaiting_continuation = False
-            self.end_reason = ""
-            self._emit("test_continuation", {}, t)
         if self.on_resume:
             self.on_resume(t)
         self._dispatch_now(t)

@@ -250,11 +250,13 @@ class LiveGroup:
 
     # ------------------------------------------------------------------ control
     def start(self, entry: LiveEntry):
-        """Start now (waiting) or resume (paused)."""
+        """Start now (waiting), resume (paused) or continue a test waiting for its end."""
         s = entry.session
         if s is None:
             return
-        if s.state == "waiting":
+        if getattr(s, "waiting_end", False):
+            s.continue_test()
+        elif s.state == "waiting":
             s.request_start()
         elif s.state == "paused":
             s.resume()
@@ -294,7 +296,8 @@ class LiveGroup:
     def key(self, key: str) -> str | None:
         """Handle a key press (keyboard or USB presenter / remote). Returns "start", "stop" or None."""
         k = key.strip().lower()
-        if k in (x.lower() for x in self.start_keys) and any(e.state in ("waiting", "paused") for e in self.entries):
+        if k in (x.lower() for x in self.start_keys) and any(
+                e.state in ("waiting", "paused") or getattr(e.session, "waiting_end", False) for e in self.entries):
             self.start_all()
             return "start"
         if k in (x.lower() for x in self.stop_keys) and any(e.state in ("running", "paused") for e in self.entries):
