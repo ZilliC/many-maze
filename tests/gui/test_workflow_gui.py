@@ -287,8 +287,8 @@ def test_blind_display(win, monkeypatch):
     v = open_view(win)
     assert "Control" not in v.info_lbl.text() and codes["Control"] in v.info_lbl.text()
     assert "Control" not in v.title_lbl.text()
-    # results keep the real groups
-    assert {r["Group"] for r in p.results()} == {"Control", "Anxious"}
+    # results show the codes too while blind (audit 2026-10-08), the names once unblinded
+    assert {r["Group"] for r in p.results()} == {codes["Control"], codes["Anxious"]}
     # unblinding asks for confirmation
     exp = win.goto("ExperimentPage")
     assert exp.blind.isChecked()
@@ -298,6 +298,7 @@ def test_blind_display(win, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     exp.blind.setChecked(False)
     assert not p.blind
+    assert {r["Group"] for r in p.results()} == {"Control", "Anxious"}
     assert tests.model.index(0, C_GROUP).data() in ("Control", "Anxious")
     assert tests.model.headerData(C_GROUP, Qt.Horizontal) == "Treatment"
     # the Experiment ribbon's "Reveal treatment coding" switches blind testing too (asking before revealing)

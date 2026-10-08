@@ -3,13 +3,13 @@ wherever they are stored — in one zip file, to move it to another computer or 
 
 from __future__ import annotations
 
-import json
 import os
 import zipfile
 from pathlib import Path
 from typing import Callable
 
-from .project import BACKUP_DIR, PROJECT_FILE, Project
+from .explock import LOCK_FILE
+from .project import BACKUP_DIR, PROJECT_FILE, SECRETS_FILE, Project, dumps_json
 from .video import is_playlist, playlist_parts
 
 ARCHIVE_SUFFIX = ".zip"
@@ -26,7 +26,8 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
                     should_stop: Callable[[], bool] | None = None) -> Path | None:
     """Write the experiment to a zip file. Videos stored outside the experiment folder are copied into
     ``videos/external/`` and the tests point to the copies (the experiment itself is not changed). Automatic
-    backups are left out. Returns the zip path, or None if stopped."""
+    backups, the lock file and the I/O device passwords and tokens (io-secrets.json; project.json has none) are
+    left out. Returns the zip path, or None if stopped."""
     if project.path is None:
         raise ValueError("Save the experiment first")
     root = Path(project.path).resolve()
@@ -35,7 +36,8 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
     files: list[tuple[Path, str]] = []  # (source file, name in the archive)
     for f in sorted(root.rglob("*")):
         rel = f.relative_to(root)
-        if not f.is_file() or rel.parts[0] == BACKUP_DIR or rel.name == PROJECT_FILE or f.suffix == ".tmp":
+        if not f.is_file() or rel.parts[0] == BACKUP_DIR or f.suffix == ".tmp" or \
+                (len(rel.parts) == 1 and rel.name in (PROJECT_FILE, SECRETS_FILE, LOCK_FILE)):
             continue
         files.append((f, rel.as_posix()))
     inside = {src.resolve() for src, _ in files}
@@ -82,8 +84,10 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
                 base = Path(pl).parent
                 playlists[pl] = "#EXTM3U\n" + "\n".join(os.path.relpath(n, base) for n in names) + "\n"
                 td["video"] = pl
+                td.pop("video_abs", None)
             else:
                 td["video"] = names[0]
+                td.pop("video_abs", None)
     if missing:
         d.setdefault("settings_extra", {})["archive_missing_videos"] = missing
     total = sum(src.stat().st_size for src, _ in files) or 1
@@ -92,7 +96,7 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
     tmp = zip_path.with_name(zip_path.name + ".part")
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
-            z.writestr(f"{top}/{PROJECT_FILE}", json.dumps(d, indent=1))
+            z.writestr(f"{top}/{PROJECT_FILE}", dumps_json(d))
             for name, text in playlists.items():
                 z.writestr(f"{top}/{name}", text)
             for src, name in files:

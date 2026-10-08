@@ -123,7 +123,12 @@ manymaze track video.mp4 --template open_field --bbox 18,48,594,412 --size-cm 40
 manymaze project ~/Experiments/EPM.mmaze track
 manymaze project ~/Experiments/EPM.mmaze results -o results.xlsx --bins   # or .csv .tsv .slk .dbf .xml
 manymaze project ~/Experiments/EPM.mmaze report -o report.html
+manymaze project ~/Experiments/EPM.mmaze relink --folder /Volumes/Lab/videos   # find moved videos by name
 ```
+
+An experiment open in the app holds a `.manymaze.lock` file in its folder; `project … track` and `relink` refuse
+to change an experiment open elsewhere. I/O device passwords (alert e-mail / SMS) live in `io-secrets.json`, not in
+`project.json`, and are left out of archives. `MANYMAZE_WORKERS=N` sets the number of parallel tracking processes.
 
 ## Accuracy
 

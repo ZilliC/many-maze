@@ -57,18 +57,21 @@ if sys.platform == "darwin":
             "NSRequiresAquaSystemAppearance": True,  # light UI, matching the plots
             "NSCameraUsageDescription": "mANY-MAZE uses the camera to track animals during live tests.",
             "LSApplicationCategoryType": "public.app-category.education",
-            # a .mmaze experiment is a folder: declared as a package so Finder opens it with the app
+            # a .mmaze experiment is a folder, deliberately NOT a package (com.apple.package / LSTypeIsPackage): a
+            # package shows in Finder as a single file, which hides the exports/ and recordings/ users need to
+            # reach (Finder, Prism, R, video players) and makes it unselectable in "Open experiment folder"
+            # dialogs. The cost: double-clicking a .mmaze folder opens it in Finder; open it with File > Open or
+            # drop it on the app (the document type below keeps "Open With mANY-MAZE").
             "UTExportedTypeDeclarations": [{
                 "UTTypeIdentifier": "org.manymaze.mmaze",
                 "UTTypeDescription": "mANY-MAZE experiment",
-                "UTTypeConformsTo": ["com.apple.package"],
+                "UTTypeConformsTo": ["public.folder"],
                 "UTTypeTagSpecification": {"public.filename-extension": ["mmaze"]},
             }],
             "CFBundleDocumentTypes": [{
                 "CFBundleTypeName": "mANY-MAZE experiment",
                 "LSItemContentTypes": ["org.manymaze.mmaze"],
                 "CFBundleTypeRole": "Editor",
-                "LSTypeIsPackage": True,
             }],
         },
     )

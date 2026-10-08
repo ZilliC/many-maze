@@ -59,7 +59,20 @@ DEVICE_FIELDS = {
     "syringe_pump": {"port": "", "baud": 9600, "protocol": "new_era"},
     "scale": {"port": "", "baud": 9600, "protocol": "mt_sics"},
 }
-CHANNEL_FIELDS = {"virtual": (), "arduino": ("pin", "pin_b", "invert"), "serial": ("on", "off"), "audio": (),
+# device fields holding passwords / tokens: kept out of project.json (io-secrets.json), reports, archives and
+# protocol copies (see is_secret)
+SECRET_FIELDS = ("smtp_password", "twilio_token")
+_SECRET_SUFFIXES = ("password", "_token", "_secret", "api_key")
+
+
+def is_secret(key: str) -> bool:
+    """A device configuration field that holds a password or token (also those of device types added later:
+    names ending in password, _token, _secret or api_key)."""
+    k = str(key).lower()
+    return k in SECRET_FIELDS or k.endswith(_SECRET_SUFFIXES)
+
+
+CHANNEL_FIELDS = {"virtual": (),"arduino": ("pin", "pin_b", "invert"), "serial": ("on", "off"), "audio": (),
                   "serial_lines": ("pin", "invert"), "firmata": ("pin", "invert"), "nidaq": ("pin", "invert"),
                   "labjack": ("pin", "invert"), "notify": (), "syringe_pump": (), "scale": ()}
 _NAME_BASES = {"virtual": "sim", "arduino": "box", "serial": "serial", "audio": "speakers", "serial_lines": "ttl",

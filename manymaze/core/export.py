@@ -10,14 +10,15 @@ import html
 import logging
 import math
 from pathlib import Path
-from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
+from xml.sax.saxutils import escape as _sax_escape, quoteattr as _sax_quoteattr
 
 import numpy as np
 
 from .. import __version__
 from .atomicfile import atomic_write, write_text_atomic
 from .apparatus import CALIBRATION_KEY, ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
-from .project import INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
+from .ioconfig import is_secret
+from .project import ERROR_COLUMN, INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
 
 XML_FORMAT_VERSION = 1
@@ -178,20 +179,30 @@ def _dbf_field(values: list) -> tuple[str, int, int, list[bytes]]:
         return "L", 1, 0, [b"?" if v is None or value_text(v) == "" else (b"T" if v else b"F") for v in values]
     nums = [_cell_number(v) for v in values]
     if present and all(n is not None for v, n in zip(values, nums) if v is not None and value_text(v) != ""):
-        texts = [value_text(n) for n in nums if n is not None]
-        if not any("e" in t for t in texts):
-            ints = max(len(t.split(".")[0]) for t in texts)
-            dec = max((len(t.split(".")[1]) for t in texts if "." in t), default=0)
-            dec = min(dec, max(0, _DBF_NUM_MAX - ints - 1), 15)
-            width = ints + (dec + 1 if dec else 0)
+        # the widths come from the numbers' magnitudes, not from their shortest text (1e-05 is 0.00001: 7 places)
+        finite = [n for n in nums if n is not None]
+        dec = min(max(_decimals(n) for n in finite), 15)
+        ints = max(len(f"{n:.0f}") for n in finite)  # digits before the point, with the sign
+        dec = min(dec, max(0, _DBF_NUM_MAX - ints - 1))
+        width = ints + (dec + 1 if dec else 0)
+        if ints <= _DBF_NUM_MAX:  # tiny values rounded to the places that fit; text only when the digits do not fit
+            txt = [(f"{n:.{dec}f}" if dec else str(int(round(n)))) if n is not None else "" for n in nums]
+            width = max([width] + [len(t) for t in txt])
             if width <= _DBF_NUM_MAX:
-                enc = [(f"{n:.{dec}f}" if dec else str(int(round(n)))).rjust(width).encode("ascii")
-                       if n is not None else b" " * width for n in nums]
-                return "N", width, dec, enc
+                return "N", width, dec, [t.rjust(width).encode("ascii") for t in txt]
     enc = [("" if v is None else re.sub(r"[\r\n\t]", " ", value_text(v))).encode("cp1252", errors="replace")
            [:DBF_TEXT_MAX] for v in values]
     width = max([1] + [len(b) for b in enc])
     return "C", width, 0, [b.ljust(width) for b in enc]
+
+
+def _decimals(n) -> int:
+    """The decimal places needed to write a number exactly in fixed-point notation (its shortest exact text)."""
+    if isinstance(n, int) or float(n).is_integer():
+        return 0
+    from decimal import Decimal
+
+    return max(0, -Decimal(repr(float(n))).as_tuple().exponent)
 
 
 def write_dbf(rows: list[dict], path, columns: list[str] | None = None, date: _dt.date | None = None):
@@ -292,10 +303,11 @@ def write_xlsx(sheets: dict[str, list[dict]], path, columns: dict[str, list[str]
     for name, rows in sheets.items():
         ws = wb.create_sheet(title=name[:31])
         cols = (columns or {}).get(name) or result_columns(rows)
-        ws.append(cols)
+        ws.append([_ILLEGAL_XLSX.sub("", str(c)) for c in cols])
         for c in ws[1]:
             c.font = Font(bold=True, color="FFFFFF")
             c.fill = PatternFill("solid", fgColor="E11D48")
+            _as_text(c)
         for r in rows:
             vals = []
             for c in cols:
@@ -312,13 +324,19 @@ def write_xlsx(sheets: dict[str, list[dict]], path, columns: dict[str, list[str]
                     v = _ILLEGAL_XLSX.sub("", v)
                 vals.append(v)
             ws.append(vals)
-            for cell in ws[ws.max_row]:  # text that looks like a formula stays text (no formula injection)
-                if isinstance(cell.value, str) and cell.value[:1] in "=+-@" and cell.value not in ("", "-"):
-                    cell.data_type = "s"
+            for cell in ws[ws.max_row]:
+                _as_text(cell)
         ws.freeze_panes = "B2"
         for i, c in enumerate(cols, 1):
             ws.column_dimensions[get_column_letter(i)].width = min(40, max(10, len(str(c)) + 2))
-    wb.save(path)
+    with atomic_write(path, "wb") as fh:  # never a half-written workbook over a good one
+        wb.save(fh)
+
+
+def _as_text(cell):
+    """Text that looks like a formula stays text (no formula injection), headings included."""
+    if isinstance(cell.value, str) and cell.value[:1] in "=+-@" and cell.value not in ("", "-"):
+        cell.data_type = "s"
 
 
 def write_table(rows: list[dict], path, columns: list[str] | None = None, sheet: str = "Results") -> Path:
@@ -326,6 +344,9 @@ def write_table(rows: list[dict], path, columns: list[str] | None = None, sheet:
     or .dbf (dBase III)."""
     path = Path(path)
     ext = path.suffix.lower()
+    if ext == ".xml":
+        raise ValueError("XML holds whole experiments (results export), not a table: save the table as .csv, .tsv, "
+                         ".txt, .xlsx, .slk or .dbf")
     if ext == ".xlsx":
         write_xlsx({sheet: rows}, path, {sheet: columns} if columns else None)
     elif ext == ".slk":
@@ -368,8 +389,8 @@ def results_workbook(project: Project, rows: list[dict], columns: list[str] | No
     visits = zone_visit_rows(project, [t for t in project.tests if t.id in ids])
     if visits:
         sheets["Zone visits"] = visits
-    sheets["Animals"] = [{"Animal": a.id, "Group": a.group, "Sex": a.sex, **a.fields, "Notes": a.notes}
-                         for a in project.animals]
+    sheets["Animals"] = [{"Animal": a.id, "Group": group_label(project, a.group), "Sex": a.sex, **a.fields,
+                          "Notes": a.notes} for a in project.animals]
     sheets["Tests"] = [{"Test": t.id, "Animal": t.animal_id, "Stage": t.stage, "Trial": t.trial, "Video": t.video,
                         "Apparatus": t.apparatus, "Start (s)": t.start_s, "Status": t.status, "User": t.experimenter,
                         "Reason for test end": t.end_reason, "Notes": t.notes}
@@ -380,6 +401,14 @@ def results_workbook(project: Project, rows: list[dict], columns: list[str] | No
                            "test_duration_s": project.test_duration_s,
                            "software": f"mANY-MAZE {__version__}"}.items()]
     return sheets, cols
+
+
+def group_label(project: Project, group: str) -> str:
+    """A treatment as exports show it: its name, or its code only while testing blind (as the results' Group
+    column)."""
+    if not group or not project.blind:
+        return group or ""
+    return project.treatment_code(group) or "??"
 
 
 def export_results(project: Project, path, segmented: bool = False, columns: list[str] | None = None) -> Path:
@@ -423,9 +452,10 @@ def export_animals(project: Project, path):
     """The animal list as CSV: ID, treatment, sex, the custom fields and the notes."""
     with atomic_write(path, newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields) + ["Notes"])
-        for a in project.animals:
-            w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in project.animal_fields] + [a.notes])
+        w.writerow([_csv_text(c) for c in ["ID", "Treatment", "Sex"] + list(project.animal_fields) + ["Notes"]])
+        for a in project.animals:  # text that looks like a formula stays text, as in the results exports
+            w.writerow([_csv_text(v) for v in [a.id, a.group, a.sex] + [a.fields.get(f, "") for f in
+                                                                        project.animal_fields] + [a.notes]])
 
 
 def event_log_rows(project: Project, test) -> list[dict]:
@@ -636,8 +666,9 @@ def protocol_report(project: Project, path) -> Path:
                        f"<pre>{html.escape(chr(10).join(lines(pr.get('statements'))))}</pre></div>")
     if p.io_devices:
         out.append("<h2>I/O devices</h2>" + table(("Device", "Type", "Settings"), [
-            (d.get("name", ""), d.get("type", ""), ", ".join(f"{k}={v}" for k, v in d.items()
-                                                             if k not in ("name", "type") and not isinstance(v, (list, dict))))
+            (d.get("name", ""), d.get("type", ""), ", ".join(
+                f"{k}={v}" for k, v in d.items()  # passwords and tokens are never printed
+                if k not in ("name", "type") and not is_secret(k) and not isinstance(v, (list, dict))))
             for d in p.io_devices]))
     if p.training_criteria:
         out.append("<h2>Training criteria</h2><ul>" + "".join(
@@ -664,6 +695,7 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
     out_dir.mkdir(parents=True, exist_ok=True)
     tests = [t for t in (tests if tests is not None else project.tests) if project.has_track(t)]
     written = []
+    used_names: set[str] = set()
     beh = project.behaviours
     for k, t in enumerate(tests):
         if should_stop and should_stop():
@@ -687,10 +719,15 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
                 arrays += [arr[:, j] for j in range(1, arr.shape[1])]
             aid = ids[i] if i < len(ids) else f"{t.animal_id}#{i + 1}"
             safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(aid))
-            p = out_dir / f"test_{t.id:04d}_{safe}.{'tsv' if delimiter == chr(9) else 'csv'}"
+            ext = "tsv" if delimiter == chr(9) else "csv"
+            stem, n = f"test_{t.id:04d}_{safe}", 2
+            while f"{stem}.{ext}".lower() in used_names:  # IDs differing only in punctuation ("A/1", "A_1") or case
+                stem, n = f"test_{t.id:04d}_{safe}_{n}", n + 1
+            used_names.add(f"{stem}.{ext}".lower())
+            p = out_dir / f"{stem}.{ext}"
             with atomic_write(p, newline="") as f:
-                f.write(f"# Test {t.id}, animal {aid}, stage {t.stage}, trial {t.trial}, "
-                        f"unit {app.unit if app else 'px'} (raw columns in pixels)\n")
+                f.write(_one_line(f"# Test {t.id}, animal {aid}, stage {t.stage}, trial {t.trial}, "
+                                  f"unit {app.unit if app else 'px'} (raw columns in pixels)") + "\n")
                 w = csv.writer(f, delimiter=delimiter)
                 w.writerow(cols)
                 M = np.column_stack(arrays) if arrays and len(tr) else np.zeros((0, len(cols)))
@@ -704,7 +741,23 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
     return written
 
 
+def _one_line(s: str) -> str:
+    return re.sub(r"[\r\n]+", " ", s)
+
+
 # ---------------------------------------------------------------- XML export
+# characters XML 1.0 does not allow (control characters, lone surrogates, U+FFFE / U+FFFF): dropped
+_ILLEGAL_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _xesc(s) -> str:
+    return _sax_escape(_ILLEGAL_XML.sub("", str(s)))
+
+
+def _qa(s) -> str:
+    return _sax_quoteattr(_ILLEGAL_XML.sub("", str(s)))
+
+
 def _attrs(**kw) -> str:
     parts = []
     for k, v in kw.items():
@@ -956,16 +1009,25 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     """Self-contained HTML report: summary, per-test track plots/heat maps (+ optional charts of per-frame
     parameters), group heat maps on a common scale, results and statistics (compared between treatments as the
     Statistics page does). rows: the results to tabulate and compare (default: the whole-test results of `tests`)."""
-    from . import analyses, charts, plots
+    from . import analyses, plots
 
     tests = tests if tests is not None else [t for t in project.tests
                                              if t.status not in INACTIVE_STATUSES and project.has_results(t)]
+    errors: list[str] = []  # tests that could not be analysed or drawn (the report is made without them)
     if rows is None:
-        rows = [r for t in tests for r in project.analyse_test(t)]
+        rows = []
+        for t in tests:
+            try:
+                rows.extend(project.analyse_test(t))
+            except Exception as e:
+                log.warning("analysis of test %s failed in the HTML report: %s", t.id, e)
+                errors.append(f"Test {t.id}: {type(e).__name__}: {e}")
+                rows.append(project.error_row(t, e))
     cols = result_columns(rows)
     if measures:
         info = ["Test", "Animal", "Group", "Stage", "Trial"]
-        cols = [c for c in info if c in cols] + [c for c in measures if c in cols]
+        cols = [c for c in info if c in cols] + [c for c in measures if c in cols] + \
+            ([ERROR_COLUMN] if ERROR_COLUMN in cols else [])
     css = """
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;margin:24px;color:#0f172a}
     h1{color:#e11d48} table{border-collapse:collapse;font-size:12px} td,th{border:1px solid #e2e8f0;padding:3px 6px}
@@ -985,46 +1047,44 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         if heatmap_norm == "fixed":
             hm_vmax = 0.0
             for t in tests:
-                trs = project.load_tracks(t)
-                if trs:
-                    H, _ = plots.occupancy(trs[:1], project.apparatus_of(t))
-                    hm_vmax = max(hm_vmax, float(H.max()) if H.size else 0.0)
+                try:
+                    trs = project.load_tracks(t)
+                    if trs:
+                        H, _ = plots.occupancy(trs[:1], project.apparatus_of(t))
+                        hm_vmax = max(hm_vmax, float(H.max()) if H.size else 0.0)
+                except Exception:  # reported with the test's card
+                    continue
             hm_vmax = hm_vmax or None
         for t in tests:
-            tracks = project.load_tracks(t)
-            if not tracks:
-                continue
-            app = project.apparatus_of(t)
-            frame = project.start_frame(t)
-            an = project.get_animal(t.animal_id)
-            title = f"Test {t.id} · {t.animal_id} · {an.group if an else ''}"
-            markers = plots.behaviour_markers(tracks[0], app, project.analysis_for(t), t.events, beh)
-            tp = plots.fig_to_png(plots.track_plot(tracks[0], app, frame=frame, size=(3.2, 3.2), color_by=color_by,
-                                                   markers=markers, settings=project.analysis_for(t)))
-            hm = plots.fig_to_png(plots.heatmap(tracks[:1], app, size=(3.6, 3.2), vmax=hm_vmax,
-                                                norm="auto" if heatmap_norm == "fixed" else heatmap_norm))
-            card = f"<div class='card'><b>{html.escape(title)}</b><br>{_img(tp, 260)}{_img(hm, 290)}"
-            if chart_parameters:
-                names = [p.name for p in charts.parameters(app, tracks[0], beh) if p.name in chart_parameters]
-                if names:
-                    fig = plots.chart_figure(tracks[0], app, names, project.analysis_for(t), t.events, beh,
-                                              size=(6.5, 1.0 + 1.1 * len(names)))
-                    card += "<br>" + _img(plots.fig_to_png(fig), 560)
-            out.append(card + "</div>")
+            try:
+                card = _test_card(project, t, beh, color_by, hm_vmax, heatmap_norm, chart_parameters)
+            except Exception as e:  # one unreadable track: a note instead of the whole report failing
+                log.warning("plots of test %s failed in the HTML report: %s", t.id, e)
+                errors.append(f"Test {t.id} (plots): {type(e).__name__}: {e}")
+                card = (f"<div class='card'><b>Test {t.id}</b><p><em>Could not be drawn: "
+                        f"{html.escape(f'{type(e).__name__}: {e}')}</em></p></div>")
+            if card:
+                out.append(card)
         out.append("</div>")
         # group heatmaps
         groups = {}
         for t in tests:
             a = project.get_animal(t.animal_id)
-            groups.setdefault(a.group if a and a.group else "No group", []).append(t)
+            groups.setdefault(group_label(project, a.group) if a and a.group else "No group", []).append(t)
         if len(groups) > 1:
-            fig = plots.group_heatmap(project, groups, norm="auto" if heatmap_norm == "fixed" else heatmap_norm)
-            out.append("<h2>Group occupancy</h2><div class='grid'><div class='card'>"
-                       f"{_img(plots.fig_to_png(fig), 300 * min(3, len(groups)) + 60)}</div></div>")
+            try:
+                fig = plots.group_heatmap(project, groups, norm="auto" if heatmap_norm == "fixed" else heatmap_norm)
+                out.append("<h2>Group occupancy</h2><div class='grid'><div class='card'>"
+                           f"{_img(plots.fig_to_png(fig), 300 * min(3, len(groups)) + 60)}</div></div>")
+            except Exception as e:
+                log.warning("group heat maps failed in the HTML report: %s", e)
+                errors.append(f"Group occupancy: {type(e).__name__}: {e}")
+    if errors:
+        out.append("<h2>Problems</h2><ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in errors) + "</ul>")
     if stats_measures and rows:
         out.append("<h2>Statistics</h2>")
         for m in stats_measures:
-            a = analyses.compare(project, rows, m, "Group")
+            a = analyses.compare(project, [r for r in rows if not r.get(ERROR_COLUMN)], m, "Group")
             if len(a.result["groups"]) < 2:
                 continue
             out.append(f"<div class='card'>{_img(plots.fig_to_png(a.figure), 360)}"
@@ -1036,3 +1096,29 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     path = Path(path)
     write_text_atomic(path, "\n".join(out))
     return path
+
+
+def _test_card(project: Project, t, beh, color_by, hm_vmax, heatmap_norm, chart_parameters) -> str:
+    """The HTML report's card of one test: track plot, heat map and charts ("" without a track)."""
+    from . import charts, plots
+
+    tracks = project.load_tracks(t)
+    if not tracks:
+        return ""
+    app = project.apparatus_of(t)
+    frame = project.start_frame(t)
+    an = project.get_animal(t.animal_id)
+    title = f"Test {t.id} · {t.animal_id} · {group_label(project, an.group) if an else ''}"
+    markers = plots.behaviour_markers(tracks[0], app, project.analysis_for(t), t.events, beh)
+    tp = plots.fig_to_png(plots.track_plot(tracks[0], app, frame=frame, size=(3.2, 3.2), color_by=color_by,
+                                           markers=markers, settings=project.analysis_for(t)))
+    hm = plots.fig_to_png(plots.heatmap(tracks[:1], app, size=(3.6, 3.2), vmax=hm_vmax,
+                                        norm="auto" if heatmap_norm == "fixed" else heatmap_norm))
+    card = f"<div class='card'><b>{html.escape(title)}</b><br>{_img(tp, 260)}{_img(hm, 290)}"
+    if chart_parameters:
+        names = [p.name for p in charts.parameters(app, tracks[0], beh) if p.name in chart_parameters]
+        if names:
+            fig = plots.chart_figure(tracks[0], app, names, project.analysis_for(t), t.events, beh,
+                                      size=(6.5, 1.0 + 1.1 * len(names)))
+            card += "<br>" + _img(plots.fig_to_png(fig), 560)
+    return card + "</div>"

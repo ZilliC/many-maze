@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 
 from .. import APP_NAME, __version__
 from ..core.export import protocol_report
-from ..core.project import PROJECT_FILE, Project
+from ..core import explock
+from ..core.project import PROJECT_FILE, Project, same_folder
 from ..core.templates import TEMPLATES
 from ..core.workflow import add_experimenter, copy_protocol, remove_experimenter
 from . import theme
@@ -592,6 +593,7 @@ class MainWindow(QMainWindow):
             self._current_page = None
         self.project = project
         self.dirty = False
+        self._hold_lock()  # before the pages see it: crash recovery checks the lock
         has = project is not None
         if has:
             project.current_user = self.current_user()
@@ -735,7 +737,8 @@ class MainWindow(QMainWindow):
         if self.project is None:
             self.setWindowTitle(APP_NAME)
         else:
-            self.setWindowTitle(f"{self.project.name}{' •' if self.dirty else ''} — {APP_NAME}")
+            ro = " (read-only)" if self.project.read_only else ""
+            self.setWindowTitle(f"{self.project.name}{ro}{' •' if self.dirty else ''} — {APP_NAME}")
 
     def status(self, msg: str, ms: int = 6000):
         self.statusBar().showMessage(msg, ms)
@@ -836,10 +839,42 @@ class MainWindow(QMainWindow):
         except Exception as e:
             error_box(self, "Open experiment", e)
             return
+        other = explock.held_by_other(p.path)
+        if other is not None:
+            choice = self._ask_locked(p, other)
+            if choice == "cancel":
+                return
+            p.read_only = choice == "read_only"
         self._add_recent(p.path)
         self.set_project(p)
         self.status(f"Opened {p.path}")
         self.check_disk_space()
+
+    def _ask_locked(self, p: Project, other: dict) -> str:
+        """The experiment is open in another program: "read_only", "anyway" or "cancel"."""
+        box = QMessageBox(QMessageBox.Warning, "Open experiment",
+                          f"“{p.name}” is open in {explock.describe(other)}.\n\nOpen it read-only (you can look "
+                          "and export, and save a copy with Save as), or open it anyway — only if it is not really "
+                          "open there any more: both would save over each other's changes.", QMessageBox.NoButton,
+                          self)
+        ro = box.addButton("Open read-only", QMessageBox.AcceptRole)
+        anyway = box.addButton("Open anyway", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(ro)
+        box.exec()
+        return "read_only" if box.clickedButton() is ro else "anyway" if box.clickedButton() is anyway else "cancel"
+
+    def _hold_lock(self):
+        """Lock the open experiment's folder for this window (read-only experiments are not locked) and release
+        the folder locked before."""
+        p = self.project
+        new = p.path if p is not None and p.path is not None and not p.read_only else None
+        old = getattr(self, "_locked", None)
+        if old is not None and (new is None or not same_folder(old, new)):
+            explock.release(old)
+        if new is not None:
+            explock.acquire(new, force=True)
+        self._locked = new
 
     def check_disk_space(self):
         """Warn (without blocking) when the disk of the experiment is low on space or full."""
@@ -890,37 +925,27 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Choose a folder for the copy", self._last_dir())
         if not d:
             return
-        import shutil
-
         self._flush_edits()
         self._for_pages("commit")
         safe = "".join(c for c in self.project.name.strip() if c not in '/\\:*?"<>|') or "experiment"
         dest = Path(d) / f"{safe}.mmaze"
         old = self.project.path
-        if dest == old:
+        if old is not None and same_folder(dest, old):  # also another spelling of the same folder
             return self.save()
         if dest.exists() and QMessageBox.question(
                 self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
             return False
-        videos = [t.video for t in self.project.tests]
+        other = explock.held_by_other(dest) if dest.exists() else None
+        if other is not None:
+            QMessageBox.warning(self, "Save as", f"{dest} is open in {explock.describe(other)}: close it there "
+                                "or choose another folder.")
+            return False
         try:
-            # keep video paths valid from the new location: make them absolute, then relative to the copy
-            for t in self.project.tests:
-                t.video = self.project.abs_path(t.video)
-            if dest.exists() and (dest / "tracks").exists():
-                shutil.rmtree(dest / "tracks")  # replacing: no stale tracks of the old experiment mixed in
-            if old and (old / "tracks").exists():
-                shutil.copytree(old / "tracks", dest / "tracks")
-            self.project.save(dest)
-            for t in self.project.tests:
-                t.video = self.project.rel_path(t.video)
-            self.project.save()
+            self.project.save_as(dest)  # copies the tracks before replacing anything
         except Exception as e:
-            self.project.path = old
-            for t, v in zip(self.project.tests, videos):
-                t.video = v
             error_box(self, "Save as", e)
             return False
+        self._hold_lock()
         self._remember_dir(dest)
         self._add_recent(dest)
         self.dirty = False
@@ -1184,6 +1209,8 @@ class MainWindow(QMainWindow):
         if self.maybe_save():
             self._for_pages("shutdown")
             Worker.stop_all()
+            explock.release(getattr(self, "_locked", None))
+            self._locked = None
             e.accept()
         else:
             e.ignore()

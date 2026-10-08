@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -12,6 +13,29 @@ from .atomicfile import atomic_write
 from .series import moving_average
 
 COLUMNS = ["t", "x", "y", "hx", "hy", "tx", "ty", "area", "motion", "angle", "detected"]
+_JSON_KEY = ":json"  # "# key:json=<JSON string>": a meta value with line breaks or edge spaces
+
+
+def read_text(path, limit: int | None = None) -> str:
+    """A text file (track CSV, DeepLabCut CSV) as UTF-8, or in the Windows code page if it is not UTF-8 (files
+    written by older versions on Windows). ``limit``: read only the first bytes."""
+    with open(path, "rb") as f:
+        raw = f.read() if limit is None else f.read(limit)
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        if limit is not None and e.start >= len(raw) - 3:  # a character cut at the limit
+            return raw[:e.start].decode("utf-8-sig")
+        return raw.decode("cp1252", errors="replace")
+
+
+def _meta_line(k, v) -> str:
+    """A '# key=value' header line; values that would not read back as written (line breaks, spaces at the ends)
+    are stored as JSON text under 'key:json'."""
+    text = str(v)
+    if "\n" in text or "\r" in text or text != text.strip():
+        return f"# {k}{_JSON_KEY}={json.dumps(text)}\n"
+    return f"# {k}={text}\n"
 
 
 @dataclass
@@ -143,11 +167,12 @@ class Track:
 
     # ------------------------------------------------------------------
     def to_csv(self, path_or_buf):
-        """Write the track as CSV to a file object, or atomically to a path (never left half-written)."""
+        """Write the track as CSV to a file object, or atomically to a path (never left half-written; UTF-8 so a
+        video path with accents or Chinese characters reads back on any computer)."""
         if isinstance(path_or_buf, bytes):
             path_or_buf = path_or_buf.decode()
         if isinstance(path_or_buf, str) or hasattr(path_or_buf, "__fspath__"):
-            with atomic_write(path_or_buf, encoding=None, newline="") as f:
+            with atomic_write(path_or_buf, encoding="utf-8", newline="") as f:
                 self._write_csv(f)
         else:
             self._write_csv(path_or_buf)
@@ -155,7 +180,7 @@ class Track:
     def _write_csv(self, f):
         f.write(f"# fps={self.fps}\n")
         for k, v in self.meta.items():
-            f.write(f"# {k}={v}\n")
+            f.write(_meta_line(k, v))
         w = csv.writer(f)
         outline = self.outline if self.has_outline() else None
         w.writerow(COLUMNS + (["outline"] if outline is not None else []))
@@ -170,8 +195,7 @@ class Track:
     @classmethod
     def from_csv(cls, path_or_buf) -> "Track":
         if isinstance(path_or_buf, (str, bytes)) or hasattr(path_or_buf, "__fspath__"):
-            with open(path_or_buf, newline="") as f:
-                text = f.read()
+            text = read_text(path_or_buf)
         else:
             text = path_or_buf.read()
         fps = 25.0
@@ -182,6 +206,11 @@ class Track:
                 k, _, v = line[1:].strip().partition("=")
                 if k == "fps":
                     fps = float(v)
+                elif k.endswith(_JSON_KEY):
+                    try:
+                        meta[k[:-len(_JSON_KEY)]] = json.loads(v)
+                    except ValueError:
+                        meta[k] = v
                 else:
                     meta[k] = v
             elif line.strip():
@@ -279,8 +308,7 @@ def import_deeplabcut_csv(path, fps: float, centre_parts=None, head_part=None, t
 
     centre_parts: list of bodypart names averaged for the centre point (default: all parts).
     """
-    with open(path, newline="") as f:
-        rows = list(csv.reader(f))
+    rows = list(csv.reader(io.StringIO(read_text(path), newline="")))
     # DLC: scorer row, bodyparts row, coords row, then data
     hdr_idx = next(i for i, r in enumerate(rows) if r and r[0].lower() in ("bodyparts",))
     bodyparts = rows[hdr_idx]

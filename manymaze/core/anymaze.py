@@ -112,8 +112,24 @@ def _date_part(e, *names) -> str:
     return ""
 
 
-def _when(date: str, time_: str) -> str:
-    """ISO date-time of a test from ANY-maze's date and time texts ('' if they cannot be read)."""
+_NUMERIC_DATE = re.compile(r"^\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\b")
+
+
+def day_first(dates) -> bool:
+    """Whether the numeric dates of a file are written day first (27/02/2023, the default) or month first
+    (02/27/2023, US): month first only when some date's second number is over 12 and none's first is."""
+    first = second = False
+    for d in dates:
+        m = _NUMERIC_DATE.match(str(d or ""))
+        if m:
+            first |= int(m.group(1)) > 12
+            second |= int(m.group(2)) > 12
+    return not (second and not first)
+
+
+def _when(date: str, time_: str, dayfirst: bool = True) -> str:
+    """ISO date-time of a test from ANY-maze's date and time texts ('' if they cannot be read). ``dayfirst``:
+    the order of numeric dates in this file (see :func:`day_first`); the other order is tried when it fails."""
     text = f"{date} {time_}".strip()
     if not text:
         return ""
@@ -121,9 +137,11 @@ def _when(date: str, time_: str) -> str:
         return _dt.datetime.fromisoformat(text.replace("T", " ")).isoformat(timespec="seconds")
     except ValueError:
         pass
-    for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%d.%m.%Y %H:%M:%S",
-                "%d-%m-%Y %H:%M:%S", "%d %B %Y %H:%M:%S", "%d %b %Y %H:%M:%S", "%B %d, %Y %H:%M:%S",
-                "%d/%m/%Y", "%Y-%m-%d", "%d %B %Y", "%d %b %Y"):
+    dm = ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y")
+    md = ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y")
+    for fmt in (dm + md if dayfirst else md + dm) + (
+            "%d.%m.%Y %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d %B %Y %H:%M:%S", "%d %b %Y %H:%M:%S",
+            "%B %d, %Y %H:%M:%S", "%Y-%m-%d", "%d %B %Y", "%d %b %Y"):
         try:
             return _dt.datetime.strptime(text, fmt).isoformat(timespec="seconds")
         except ValueError:
@@ -239,7 +257,7 @@ def read_anymaze_xml(path) -> dict:
                          "calibration")
             animal["tests"].append({
                 "number": _get(t, "number", "testnumber", "num", "no"),
-                "recorded_at": _when(_date_part(t, "date", "testdate"), _date_part(t, "time", "testtime")),
+                "_date": (_date_part(t, "date", "testdate"), _date_part(t, "time", "testtime")),
                 "stage": _get(t, "stage", "stagename"),
                 "trial": _get(t, "trial", "trialnumber"),
                 "apparatus": _get(t, "apparatus", "apparatusname"),
@@ -252,6 +270,12 @@ def read_anymaze_xml(path) -> dict:
                 "track": _results(t),
                 "zone_events": _zone_events(t)})
         out["animals"].append(animal)
+    # the day / month order is decided from all the file's dates (one date such as 13/02 tells for every test)
+    dates = [t["_date"] for a in out["animals"] for t in a["tests"]]
+    dayfirst = day_first(d for d, _ in dates)
+    for a in out["animals"]:
+        for t in a["tests"]:
+            t["recorded_at"] = _when(*t.pop("_date"), dayfirst=dayfirst)
     return out
 
 
@@ -395,8 +419,14 @@ def import_anymaze_xml(project, path, origin: str = "auto", progress=None) -> di
     out = {"animals": [], "tests": [], "apparatus": [], "warnings": []}
     total = sum(len(a["tests"]) for a in data["animals"]) or 1
     done = 0
+    existing = {x.id for x in project.animals}
     for a in data["animals"]:
-        aid = a["id"] or (f"Animal {a['number']}" if a["number"] else f"Animal {len(out['animals']) + 1}")
+        aid = a["id"]
+        if not aid:  # no ID: a name of its own, never merged with an animal already in the experiment
+            base = f"Animal {a['number']}" if a["number"] else f"Animal {len(out['animals']) + 1}"
+            taken, aid, k = existing | set(out["animals"]), base, 2
+            while aid in taken:
+                aid, k = f"{base} ({k})", k + 1
         animal = project.ensure_animal(aid, a["treatment"])
         if a["treatment"] and not animal.group:
             animal.group = a["treatment"]
