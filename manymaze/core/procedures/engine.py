@@ -17,7 +17,7 @@ from .catalog import CONSTANTS, EPS, SAFETY_TASKS, STEP_BUDGET
 from .detect import _CONDITION_EVENTS, EventWait, FrameWait, TimeWait, UntilWait, _Detector
 from .expr import Evaluator, ExprError, interpolate
 from .legacy import Outputs
-from .model import _short, normalize_procedures, path_text, repeat_mode, wait_mode
+from .model import _short, normalize_procedures, path_text, record_mode, repeat_mode, wait_mode
 from .validate import _bad_var_name
 
 
@@ -495,7 +495,8 @@ class ProcedureEngine(Actions):
             return
         if name in self.var_flags:
             return
-        self.var_flags[name] = {"keep": bool(st.get("keep")), "result": bool(st.get("result"))}
+        self.var_flags[name] = {"keep": bool(st.get("keep")), "result": bool(st.get("result")),
+                                "record": record_mode(st)}
         if st.get("keep") and name in self.variables:
             self.vars[name] = copy.deepcopy(self.variables[name])
             return
@@ -520,7 +521,13 @@ class ProcedureEngine(Actions):
             return
         old = self.vars.get(name, None)
         self.vars[name] = value
-        if old != value or type(old) is not type(value):
+        changed = old != value or type(old) is not type(value)
+        rec = self.var_flags.get(name, {}).get("record")
+        if (rec == "set" or (rec == "changes" and changed)) and isinstance(value, (int, float)):
+            # a time-stamped history of the variable, analysed into mean / max / min / sum / count / list measures
+            self._log_io(self.t, "procedure", name, "variable", float(value) if isinstance(value, float)
+                         else int(value), "variable")
+        if changed:
             self._emit("variable_changed", {"var": name, "value": value}, self.t)
 
     # ------------------------------------------------------------------ observation

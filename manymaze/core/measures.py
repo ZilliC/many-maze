@@ -23,7 +23,7 @@ import numpy as np
 
 from .apparatus import Apparatus
 from .geometry import point_segment_distance, segments_intersect
-from .iomeasures import io_measures
+from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
 from .pauses import drop_pauses, shift_events
 from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs, seg_moving_average, segments
@@ -64,6 +64,13 @@ class AnalysisSettings:
     arena_quadrants: bool = False  # time in each quadrant of the arena (NE, SE, SW, NW)
     behaviour_by_zone: bool = False  # manually scored behaviours split by zone
     paired_chamber: str = "Chamber A"  # conditioned place preference: drug-paired chamber
+    io_baseline_s: float = 10.0  # analogue inputs: baseline = the first io_baseline_s seconds of each period
+    io_deviation_sd: float = 2.0  # analogue inputs: a deviation is more than this many baseline SDs from it
+    opad_contact: str = ""  # operant plantar assay: digital input of the paw contact with the thermal plate
+    opad_lick: str = ""  # OPAD: digital input of the lickometer
+    opad_temperature: str = ""  # OPAD: analogue input of the plate temperature
+    opad_temperatures: str = ""  # OPAD: temperatures of interest, e.g. "10, 45"
+    opad_tolerance: float = 1.0  # OPAD: the plate is at a temperature of interest within ± this
     nose_contact_distance: float = 0.0  # social: nose-to-nose / nose-to-body distance (units); 0 = auto
     follow_distance: float = 0.0  # social: max distance for following (units); 0 = 2 body lengths
     end_zone: str = ""  # the test ends when the animal has stayed in this zone (or group) for end_zone_s seconds
@@ -650,6 +657,48 @@ def _points(res, p: _Period):
             res[f"{pt.name}: time head oriented away (s)"] = _r(dur[diff >= 180 - s.exploration_facing_deg].sum())
             res[f"{pt.name}: mean head angle (deg)"] = _r(np.nanmean(diff), 1)
             res[f"{pt.name}: head turns towards"] = len(p.eps(A["head_towards"]))
+        t_tw = float(dur[towards].sum())
+        res[f"{pt.name}: mean speed moving towards ({u}/s)"] = _r(k.step[towards].sum() / t_tw if t_tw > 0
+                                                                  else math.nan)
+        if "hdist" in A:
+            hd = A["hdist"][p.sl]
+            fin = np.isfinite(hd).any()
+            res[f"{pt.name}: mean head distance ({u})"] = _r(np.nanmean(hd) if fin else math.nan, 2)
+            res[f"{pt.name}: max head distance ({u})"] = _r(np.nanmax(hd) if fin else math.nan, 2)
+            res[f"{pt.name}: min head distance ({u})"] = _r(np.nanmin(hd) if fin else math.nan, 2)
+            hdd, hmov = A["hdd"][p.sl], A["head_moving"][p.sl]
+            res[f"{pt.name}: time head moving towards (s)"] = _r(dur[hmov & (hdd < 0)].sum())
+            res[f"{pt.name}: time head moving away (s)"] = _r(dur[hmov & (hdd > 0)].sum())
+        _point_heading(res, p, pt)
+        res[f"{pt.name}: X ({u})"] = _r(pt.x * k.scale, 2)
+        res[f"{pt.name}: Y ({u})"] = _r(pt.y * k.scale, 2)
+        fin = np.flatnonzero(np.isfinite(dist))
+        res[f"{pt.name}: approximate time at point (s)"] = _r(
+            float(p.t[fin[np.argmin(dist[fin])]] - p.t0) if len(fin) else math.nan)
+
+
+def _point_heading(res, p: _Period, pt):
+    """Heading error to a point: the initial one (direction from the first position to the position ~1 s later vs
+    the direction to the point, as the water maze's) and the mean absolute one over the frames the animal moves."""
+    k, name = p.k, pt.name
+    ok = np.flatnonzero(np.isfinite(k.ux))
+    err = math.nan
+    if len(ok) > 2:
+        i0 = ok[0]
+        j = min(max(int(np.searchsorted(k.t, k.t[i0] + 1.0)), i0 + 1), len(k.t) - 1)
+        hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]
+        tdx, tdy = pt.x - k.x[i0], pt.y - k.y[i0]
+        if math.hypot(hdx, hdy) > 0 and math.hypot(tdx, tdy) > 0:
+            a = math.degrees(math.atan2(hdy, hdx) - math.atan2(tdy, tdx))
+            err = abs((a + 180) % 360 - 180)
+    res[f"{name}: initial heading error (deg)"] = _r(err, 1)
+    mv = k.mobile & np.isfinite(k.heading)
+    if mv.any():
+        bearing = np.arctan2(pt.y - k.y[mv], pt.x - k.x[mv])
+        res[f"{name}: mean absolute heading error (deg)"] = _r(float(np.mean(_angle_diff(np.radians(k.heading[mv]),
+                                                                                         bearing))), 1)
+    else:
+        res[f"{name}: mean absolute heading error (deg)"] = math.nan
 
 
 def _lines(res, p: _Period):
@@ -683,10 +732,17 @@ def _grids_and_sequences(res, p: _Period):
     if app.sequences:
         from .sequences import find_sequences, other_zones, sequence_measures
 
+        cum = np.cumsum(p.k.step)
+
+        def travelled(ta, tb):
+            """Distance travelled between times ta and tb (into the frames after ta, up to tb)."""
+            i, j = np.searchsorted(p.t, [ta, tb], "right") - 1
+            return float(cum[max(j, 0)] - cum[max(i, 0)]) if j > i else 0.0
+
         for q in app.sequences:
             names = list(dict.fromkeys(list(q.steps) + ([] if q.allow_other else other_zones(app, q))))
             att = find_sequences(q, p.seq([zn for zn in names if zn in p.memb]), names)
-            res.update(sequence_measures(q, att, p.t0, p.T, s.latency_if_never))
+            res.update(sequence_measures(q, att, p.t0, p.T, s.latency_if_never, distance=travelled, unit=app.unit))
 
 
 def _template(res, p: _Period):
@@ -715,11 +771,17 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
         section(res, p)
     if behaviours:
         res.update(behaviour_measures(P.events or [], behaviours, t0, t0 + T, zones=p.memb if s.behaviour_by_zone
-                                      else None, t=p.t, dur=p.dur, latency_if_never=s.latency_if_never))
+                                      else None, t=p.t, dur=p.dur, latency_if_never=s.latency_if_never,
+                                      step=p.k.step, unit=P.app.unit))
     if P.io_events:
         try:
-            res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices))
+            res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices, settings=s,
+                                   test_end=P.k.t0 + P.k.duration))
         except Exception:  # a malformed I/O log must not prevent the other measures
+            pass
+        try:
+            res.update(_io_track(p, io_devices))
+        except Exception:
             pass
     for name, v in (result_variables or {}).items():
         try:
@@ -733,6 +795,15 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
         keep = set(s.measure_filter) | {"Test duration (s)", "Warnings"}
         res = OrderedDict((key, v) for key, v in res.items() if key in keep)
     return res
+
+
+def _io_track(p: _Period, io_devices) -> dict:
+    """I/O measures that need the track: virtual switches (distance) and analogue inputs per zone visit."""
+    P = p.P
+    grid_cells = {c for g in P.app.grids for c in g.zones}
+    visits = {zn: p.eps(P.visits_mask(zn, m), entries=True) for zn, m in P.memb.items() if zn not in grid_cells}
+    return io_track_measures(P.io_events, p.t, p.dur, p.k.step, (p.t0, p.t0 + p.T), P.app.unit, visits, io_devices,
+                             P.s.latency_if_never)
 
 
 def _point_arrays(P: _Prepared, p) -> dict:
@@ -764,6 +835,25 @@ def _point_arrays(P: _Prepared, p) -> dict:
         hxf, hyf = ffill(tr.hx), ffill(tr.hy)
         diff = _angle_diff(np.arctan2(p.y - hyf, p.x - hxf), np.radians(ffill(tr.angle)))
         out["head_towards"] = diff <= s.exploration_facing_deg
+    if tr.has_head() and np.isfinite(tr.hx).any():
+        # the head: its distance from the point, and when it moves (smoothed like the centre) towards / away from it
+        hxf, hyf = ffill(tr.hx), ffill(tr.hy)
+        out["hdist"] = np.hypot((hxf - p.x) * K.scale, (hyf - p.y) * K.scale)
+        win = max(1, int(round(s.speed_smoothing_s / max(tr.dt, 1e-6))))
+        hux = seg_moving_average(hxf, win, P.breaks) * K.scale
+        huy = seg_moving_average(hyf, win, P.breaks) * K.scale
+        hdd = np.zeros(len(K.t))
+        hstep = np.zeros(len(K.t))
+        if len(hdd) > 1:
+            hdd[1:] = np.nan_to_num(np.diff(np.hypot(hux - p.x * K.scale, huy - p.y * K.scale)))
+            hstep[1:] = np.nan_to_num(np.hypot(np.diff(hux), np.diff(huy)))
+            hdd[P.breaks] = 0.0
+            hstep[P.breaks] = 0.0
+        dts = np.diff(K.t, prepend=K.t[0] - tr.dt)
+        hspeed = hstep / np.where(dts <= 0, tr.dt, dts)
+        hsp = seg_moving_average(hspeed, max(1, int(round(0.5 / max(tr.dt, 1e-6)))), P.breaks)
+        out["hdd"] = hdd
+        out["head_moving"] = np.nan_to_num(hsp) >= s.mobility_threshold
     return out
 
 
@@ -874,15 +964,31 @@ def social_measures(track: Track, k: Kinematics, o: Track, app: Apparatus, s: An
 
 def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1: float, zones: dict | None = None,
                        t: np.ndarray | None = None, dur: np.ndarray | None = None,
-                       latency_if_never: str = "duration") -> "OrderedDict[str, object]":
+                       latency_if_never: str = "duration", step: np.ndarray | None = None,
+                       unit: str = "") -> "OrderedDict[str, object]":
     """Measures from manually scored events.
 
     events: [{"behaviour", "t", "t_end" (state only)}]
     zones: optional {zone: per-frame bool} with frame times t / durations dur → the same measures per zone.
+    step: optional distance travelled into each frame t → distance travelled before the first press (unit: its
+    unit, for the measure name).
     """
     out: OrderedDict[str, object] = OrderedDict()
     T = t1 - t0
     never = T if latency_if_never == "duration" else math.nan
+    use_step = step is not None and t is not None and len(t) == len(step) and len(t) > 0
+    u = f" ({unit})" if unit else ""
+
+    def dist_before(first):
+        if not use_step:
+            return
+        if first is None:
+            d = float(step[1:].sum()) if latency_if_never == "duration" else math.nan
+        else:
+            j = int(np.searchsorted(t, first, "right")) - 1
+            d = float(step[1:j + 1].sum()) if j > 0 else 0.0
+        out[f"{name}: distance before first press{u}"] = _r(d, 2)
+
     for b in behaviours:
         name = b.name
         evs = [e for e in events if e.get("behaviour") == name]
@@ -891,6 +997,7 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
             out[f"{name}: count"] = len(ts)
             out[f"{name}: latency (s)"] = _r(ts[0] - t0 if ts else never)
             out[f"{name}: rate (/min)"] = _r(len(ts) / (T / 60) if T > 0 else math.nan)
+            dist_before(ts[0] if ts else None)
             if zones and t is not None and len(t):
                 for zn, m in zones.items():
                     zt = [x for x in ts if m[min(max(np.searchsorted(t, x, "right") - 1, 0), len(t) - 1)]]
@@ -915,6 +1022,8 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
             out[f"{name}: shortest bout (s)"] = _r(min((bb - a for a, bb in spans), default=0.0))
             out[f"{name}: latency to first release (s)"] = _r(spans[0][1] - t0 if spans else never)
             out[f"{name}: rate (/min)"] = _r(len(spans) / (T / 60) if T > 0 else math.nan)
+            out[f"{name}: press durations (s)"] = ", ".join(f"{_r(bb - a):g}" for a, bb in spans)
+            dist_before(spans[0][0] if spans else None)
             if zones and t is not None and len(t):
                 d = dur if dur is not None else np.full(len(t), (t1 - t0) / max(len(t), 1))
                 active = np.zeros(len(t), bool)

@@ -457,7 +457,7 @@ def test_result_variables_and_io_measures(monkeypatch):
 
     calls = []
 
-    def fake(io_events, duration, t_range, devices=None):
+    def fake(io_events, duration, t_range, devices=None, **kw):
         calls.append((len(io_events), duration, t_range))
         return {"lever: presses": 2}
 

@@ -139,6 +139,8 @@ def describe_statement(st: dict) -> str:
         return f"# {st.get('text', '')}"
     if t == "var":
         flags = [f for f, k in (("kept between tests", "keep"), ("saved as result", "result")) if st.get(k)]
+        if record_mode(st) != "end":
+            flags.append(f"recorded {RECORD_MODES[record_mode(st)].lower()}")
         return f"Variable {st.get('name', '?')} = {_short(st.get('value', 0))}" + (f"  ({', '.join(flags)})"
                                                                                    if flags else "")
     return f"Unknown statement '{t}'"
@@ -163,6 +165,17 @@ def wait_mode(st):
     if st.get("until") not in (None, ""):
         return "until"
     return "seconds"
+
+
+# how a variable's values are recorded for the results ("record" in a var statement; old projects: "end")
+RECORD_MODES = {"end": "Final value only", "changes": "Every time it changes", "set": "Every time it is set"}
+
+
+def record_mode(st) -> str:
+    """How a variable is recorded: "end" (only its final value, with "result"), "changes" (time-stamped every time
+    its value changes) or "set" (every time a statement sets it, even to the same value)."""
+    m = st.get("record")
+    return m if m in RECORD_MODES else "end"
 
 
 def repeat_mode(st):

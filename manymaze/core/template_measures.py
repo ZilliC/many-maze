@@ -131,6 +131,45 @@ def _radial_arm_maze(d: TemplateData):
     res["Entries to visit all arms"] = (all_idx + 1) if all_idx is not None else math.nan
 
 
+def _rapc(d: TemplateData):
+    """Radial arm place conditioning. Arm entries in order; baited arms are the "Baited arms" group (all arms when
+    there is no such group). Type 1 error (working memory): re-entry into a baited arm already entered in the
+    period. Type 2 error (reference memory): any entry into an arm that is not baited. The door sequence lists the
+    doors (arm numbers) the animal went through, in order."""
+    arms = [z.name for z in d.app.zones if z.name.startswith("Arm")]
+    g = d.app.group("Baited arms")
+    baited = [a for a in (g.zones if g is not None else arms) if a in arms]
+    seq = [e[0] for e in d.seq(arms)]
+    seen: set = set()
+    t1 = t2 = 0
+    first_err = None
+    for i, a in enumerate(seq):
+        err = a not in baited or a in seen
+        if a not in baited:
+            t2 += 1
+        elif a in seen:
+            t1 += 1
+        if err and first_err is None:
+            first_err = i
+        seen.add(a)
+    res = d.res
+    res["Type 1 errors"] = t1
+    res["Type 2 errors"] = t2
+    res["Total errors"] = t1 + t2
+    res["Door sequence"] = " ".join(a.split()[-1] for a in seq)
+    res["Total arm entries"] = len(seq)
+    res["Baited arms visited"] = len(seen & set(baited))
+    res["Correct entries before first error"] = first_err if first_err is not None else len(seq)
+    got, all_idx = set(), None
+    for i, a in enumerate(seq):
+        if a in baited:
+            got.add(a)
+        if baited and len(got) == len(baited):
+            all_idx = i
+            break
+    res["Entries to visit all baited arms"] = (all_idx + 1) if all_idx is not None else math.nan
+
+
 def _t_maze(d: TemplateData):
     seq = d.seq(["Left arm", "Right arm"])
     d.res["First choice"] = seq[0][0].split()[0] if seq else "None"
@@ -413,7 +452,7 @@ def _forced_swim(d: TemplateData):
 TEMPLATE_MEASURES: dict[str, tuple[Callable[[TemplateData], None], ...]] = {
     "open_field": (_grid,), "custom": (_grid,), "novel_object": (_grid, _novel_object),
     "epm": (_plus_maze,), "ezm": (_plus_maze,),
-    "y_maze": (_y_maze,), "radial_arm_maze": (_radial_arm_maze,), "t_maze": (_t_maze,),
+    "y_maze": (_y_maze,), "radial_arm_maze": (_radial_arm_maze,), "rapc": (_rapc,), "t_maze": (_t_maze,),
     "water_maze": (_water_maze,), "barnes_maze": (_barnes_maze,),
     "light_dark": (_light_dark,), "three_chamber": (_three_chamber,), "novel_tank": (_novel_tank,), "cpp": (_cpp,),
     "hole_board": (_hole_board,), "thermal_gradient": (_thermal_gradient,), "activity_wheel": (_activity_wheel,),
