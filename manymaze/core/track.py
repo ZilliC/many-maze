@@ -148,13 +148,22 @@ class Track:
         return out
 
     def smooth(self, window: int = 5) -> "Track":
-        """Centred moving-average smoothing of positions (window in frames, odd)."""
+        """Centred moving-average smoothing of positions (window in frames, odd).  The orientation follows: it is
+        recomputed from the smoothed head and tail, or (frames without them) averaged as a direction."""
         if window is None or window < 2:
             return self.copy()
         window = int(window) | 1
         out = self.copy()
         for name in ("x", "y", "hx", "hy", "tx", "ty"):
             setattr(out, name, moving_average(getattr(out, name), window))
+        a = out.angle
+        if np.isfinite(a).any():
+            r = np.radians(a)
+            sa = np.degrees(np.arctan2(moving_average(np.sin(r), window), moving_average(np.cos(r), window)))
+            dx, dy = out.hx - out.tx, out.hy - out.ty
+            ht = np.isfinite(dx) & np.isfinite(dy) & ((dx != 0) | (dy != 0)) & np.isfinite(a)
+            sa[ht] = np.degrees(np.arctan2(dy[ht], dx[ht]))
+            out.angle = sa
         return out
 
     def to_units(self, scale: float) -> "Track":

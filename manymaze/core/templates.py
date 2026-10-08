@@ -134,12 +134,16 @@ def _arms_maze(name, template, cx, cy, arm_len, arm_w, angles, arm_names, centre
 
 def y_maze(x, y, w, h, arm_length_cm=35.0, arm_width_cm=8.0) -> Apparatus:
     """Y maze with arms A (up), B (lower right), C (lower left)."""
-    # Fit: the Y spans arm_len above centre and arm_len*sin(30) below.
+    # Fit: arm A ends r_c + arm_len above the centre (r_c: where the arms start, as in _arms_maze — the centre
+    # triangle's inradius width / (2·tan 60°), but at least half the arm width); arms B and C, 30° below the
+    # horizontal, reach (r_c + arm_len)·sin 30° plus their half width·cos 30° below it.  The Y is therefore
+    # 1.5·(arm_len + r_c) + 0.433·width tall (= 1.5·arm_len + 1.183·width).
     cx = x + w / 2
-    total_h_units = arm_length_cm * (1 + 0.5) + arm_width_cm
+    r_c_cm = max(arm_width_cm / (2 * math.tan(math.pi / 3)), arm_width_cm / 2)
+    total_h_units = 1.5 * (arm_length_cm + r_c_cm) + arm_width_cm / 2 * math.cos(math.radians(30))
     s = h / total_h_units
     arm_len, arm_w = arm_length_cm * s, arm_width_cm * s
-    cy = y + (arm_length_cm + arm_width_cm / 2) * s
+    cy = y + (arm_length_cm + r_c_cm) * s
     app = _arms_maze("Y maze", "y_maze", cx, cy, arm_len, arm_w, [-90, 30, 150], ["Arm A", "Arm B", "Arm C"])
     app.px_per_cm = s
     return app
@@ -408,21 +412,37 @@ def novel_tank(x, y, w, h, width_cm=20.0, n_layers=3) -> Apparatus:
 
 WELL_LAYOUTS = {6: (2, 3, 0.89), 12: (3, 4, 0.85), 24: (4, 6, 0.81), 48: (6, 8, 0.83), 96: (8, 12, 0.71)}
 # rows, columns, well diameter / pitch for standard SBS plates
+SBS_PLATE_CM = (12.776, 8.548)  # ANSI/SLAS 1-2004 footprint (width × depth)
+WELL_PITCH_CM = {6: 3.912, 12: 2.601, 24: 1.930, 48: 1.308, 96: 0.900}  # centre-to-centre well spacing
+# offset of well A1's centre from the plate's left / top edge (ANSI/SLAS 4-2004 for 96 wells; the grids of the
+# common 6–48-well plates are centred on the footprint in the same way)
+WELL_A1_OFFSET_CM = {n: ((SBS_PLATE_CM[0] - (WELL_LAYOUTS[n][1] - 1) * p) / 2,
+                         (SBS_PLATE_CM[1] - (WELL_LAYOUTS[n][0] - 1) * p) / 2) for n, p in WELL_PITCH_CM.items()}
 
 
 def multi_well_plate(x, y, w, h, n_wells=24, plate_width_cm=12.78, centre_fraction=0.5) -> Apparatus:
-    """Multi-well plate (e.g. larval zebrafish): every well is a zone "Well A1" …; see split_wells()."""
-    rows, cols, frac = WELL_LAYOUTS.get(int(n_wells), WELL_LAYOUTS[24])
-    app = Apparatus(name=f"{int(n_wells)}-well plate", template="multi_well")
+    """Multi-well plate (e.g. larval zebrafish): every well is a zone "Well A1" …; see split_wells().
+
+    The box is the plate's outline; it calibrates the image (its width is plate_width_cm) and the wells are placed
+    at the plate's real well pitch and A1 offset in that calibration, so that distances measured in a well agree
+    with its zones.  A box whose height does not match the plate's depth keeps the grid centred vertically."""
+    n_wells = int(n_wells) if int(n_wells) in WELL_LAYOUTS else 24
+    rows, cols, frac = WELL_LAYOUTS[n_wells]
+    app = Apparatus(name=f"{n_wells}-well plate", template="multi_well")
     app.arena = rect(x, y, w, h)
-    pitch = min(w / cols, h / rows)
-    ox, oy = x + (w - cols * pitch) / 2, y + (h - rows * pitch) / 2
+    plate_w = plate_width_cm if plate_width_cm and plate_width_cm > 0 else SBS_PLATE_CM[0]
+    ppc = w / plate_w
+    pitch = WELL_PITCH_CM[n_wells] * ppc
+    a1x, a1y = WELL_A1_OFFSET_CM[n_wells]
+    # a plate wider or narrower than the SBS footprint (plate_width_cm) keeps the grid centred on it
+    ox = x + (a1x + (plate_w - SBS_PLATE_CM[0]) / 2) * ppc
+    oy = y + (h - SBS_PLATE_CM[1] * ppc) / 2 + a1y * ppc
     r = pitch * frac / 2
     names = []
     for i in range(rows):
         for j in range(cols):
             n = f"Well {'ABCDEFGH'[i]}{j + 1}"
-            app.zones.append(Zone(n, circle(ox + (j + 0.5) * pitch, oy + (i + 0.5) * pitch, r), "#38bdf8"))
+            app.zones.append(Zone(n, circle(ox + j * pitch, oy + i * pitch, r), "#38bdf8"))
             names.append(n)
     app.groups.append(ZoneGroup("All wells", names))
     _calibrate_width(app, w, plate_width_cm)
