@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -121,6 +122,8 @@ class ScheduleDialog(QDialog):
         self.seed.setRange(0, 999999)
         self.seed.setSpecialValueText("new random order")
         self.seed.setToolTip("Random seed: the same number gives the same order again")
+        # "new random order": one order drawn when the dialog opens, so the preview shows the tests that are created
+        self.random_seed = random.SystemRandom().randrange(1, 2 ** 31)
         self.cb = QComboBox()
         self.cb.addItem("No counterbalancing", "")
         self.cb.addItem("Apparatus (Latin square across each animal's tests)", "apparatus")
@@ -194,8 +197,8 @@ class ScheduleDialog(QDialog):
         return wf.generate_schedule(
             self.project, animals=self._checked(self.animals), stages=self._checked(self.stages),
             trials=self.trials.value(), order=self.order.currentData(), apparatus=self.app.currentText(),
-            seed=self.seed.value() or None, counterbalance=self.cb.currentData() if levels else "", levels=levels,
-            variable=self.var_name.currentText().strip(), skip_existing=self.skip.isChecked(),
+            seed=self.seed.value() or self.random_seed, counterbalance=self.cb.currentData() if levels else "",
+            levels=levels, variable=self.var_name.currentText().strip(), skip_existing=self.skip.isChecked(),
             skip_retired=self.skip_done.isChecked(), skip_completed=self.skip_done.isChecked())
 
     def _update_preview(self, *_):

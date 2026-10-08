@@ -514,6 +514,50 @@ class Project:
             self.stages.append(name)
         return name
 
+    def rename_stage(self, old: str, new: str) -> int:
+        """A stage was renamed: its tests, training criteria and the animals' completed stages follow (stages are
+        linked by name). Returns the number of tests moved."""
+        if not old or not new or old == new:
+            return 0
+        self.stages = [new if s == old else s for s in self.stages]
+        n = 0
+        for t in self.tests:
+            if t.stage == old:
+                t.stage, n = new, n + 1
+        for c in self.training_criteria:
+            if isinstance(c, dict) and c.get("stage") == old:
+                c["stage"] = new
+        for aid, done in (self.settings_extra.get("completed_stages") or {}).items():
+            if old in done:
+                done[:] = [new if s == old else s for s in done]
+        return n
+
+    def key_events(self, name: str) -> tuple[int, int]:
+        """(scored events, tests) of a key (behaviour), e.g. to warn before deleting it."""
+        counts = [sum(1 for e in t.events if e.get("behaviour") == name) for t in self.tests]
+        return sum(counts), sum(1 for c in counts if c)
+
+    def rename_key(self, old: str, new: str) -> int:
+        """A key (behaviour) was renamed: its scored events, the time periods marked by it and the training
+        criteria on its measures ("Rearing: count") follow (keys are linked by name). Returns the events renamed."""
+        if not old or not new or old == new:
+            return 0
+        n = 0
+        for t in self.tests:
+            for e in t.events:
+                if e.get("behaviour") == old:
+                    e["behaviour"], n = new, n + 1
+        for d in self.analysis.event_periods:
+            if isinstance(d, dict) and d.get("anchor") == "mark":
+                for k in ("behaviour", "mark"):
+                    if d.get(k) == old:
+                        d[k] = new
+        for c in self.training_criteria:
+            m = c.get("measure", "") if isinstance(c, dict) else ""
+            if m.startswith(old + ":") or m.startswith(old + " in "):
+                c["measure"] = new + m[len(old):]
+        return n
+
     def ensure_animal(self, aid: str, group: str = "") -> Animal:
         a = self.get_animal(aid)
         if a is None:

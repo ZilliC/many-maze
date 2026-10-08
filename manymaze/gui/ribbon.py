@@ -48,13 +48,29 @@ def action(parent, text: str, icon_name: str, fn=None, tip: str = "", checkable:
     return a
 
 
+class _RibbonButton(QToolButton):
+    """A ribbon button: calls ``on_press`` before the press is handled (before its action runs or its menu opens),
+    so the window can first store the field being typed in — ribbon buttons take no focus, so that field never
+    sees editingFinished."""
+
+    def __init__(self, on_press=None):
+        super().__init__()
+        self.on_press = on_press
+
+    def mousePressEvent(self, e):
+        if self.on_press is not None and e.button() == Qt.LeftButton and self.isEnabled():
+            self.on_press()
+        super().mousePressEvent(e)
+
+
 class RibbonGroup(QFrame):
     """A captioned group: large buttons (icon above text) and columns of up to three small buttons."""
 
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, parent=None, on_press=None):
         super().__init__(parent)
         self.setObjectName("RibbonGroup")
         self.title = title
+        self.on_press = on_press
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 2, 6, 1)
         outer.setSpacing(0)
@@ -72,7 +88,7 @@ class RibbonGroup(QFrame):
         self.widgets: list[QWidget] = []  # page-owned widgets: detached (not deleted) when the group goes
 
     def _button(self, action: QAction, large: bool) -> QToolButton:
-        b = QToolButton()
+        b = _RibbonButton(self.on_press)
         b.setObjectName("RibbonLarge" if large else "RibbonSmall")
         b.setDefaultAction(action)
         b.setAutoRaise(True)
@@ -114,11 +130,15 @@ class RibbonGroup(QFrame):
     def add_widget(self, w: QWidget):
         self._small_col = None
         self.row.addWidget(w)
+        if not w.property("ribbon_was_hidden"):
+            w.show()  # hidden when its previous group went (RibbonPanel.set_context)
         self.widgets.append(w)
 
 
 class RibbonPanel(QWidget):
     """The row of groups shown under a ribbon tab: fixed groups followed by the active page's groups."""
+
+    command_pressed = Signal()  # a button is being pressed, before its command runs
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -132,7 +152,7 @@ class RibbonPanel(QWidget):
         self.context: list[RibbonGroup] = []
 
     def add_group(self, title: str, fixed: bool = True) -> RibbonGroup:
-        g = RibbonGroup(title)
+        g = RibbonGroup(title, on_press=self.command_pressed.emit)
         self.lay.insertWidget(self.lay.count() - 1, g)
         (self.fixed if fixed else self.context).append(g)
         return g
@@ -140,7 +160,12 @@ class RibbonPanel(QWidget):
     def set_context(self, groups) -> list[RibbonGroup]:
         """Replace the contextual groups: [(title, [QAction | (QAction, "large"|"small") | QWidget, ...]), ...]."""
         for g in self.context:  # the page owns the actions and widgets; only the buttons go
+            # hidden first: a group added moments ago (set_context twice in one event-loop pass) still has the
+            # layout's pending show, which would otherwise open it as a top-level window once unparented
+            g.hide()
             for w in g.widgets:
+                w.setProperty("ribbon_was_hidden", w.isHidden())
+                w.hide()
                 w.setParent(None)
             g.setParent(None)
             g.deleteLater()
@@ -165,6 +190,7 @@ class Ribbon(QWidget):
     """Tab row ("File", "Protocol", …) above a stack of panels. Tab 0 is the File (backstage) tab."""
 
     tab_changed = Signal(int)
+    command_pressed = Signal()  # a ribbon button is being pressed, before its command runs
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -192,6 +218,7 @@ class Ribbon(QWidget):
 
     def add_tab(self, title: str) -> RibbonPanel:
         p = RibbonPanel()
+        p.command_pressed.connect(self.command_pressed)
         self.tabs.addTab(title)
         self.panels.addWidget(p)
         return p

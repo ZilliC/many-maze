@@ -117,8 +117,10 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
     return zip_path
 
 
-def extract_archive(zip_path, dest_dir) -> Path:
-    """Unpack an experiment archive into dest_dir and return the experiment folder (``Name.mmaze``)."""
+def extract_archive(zip_path, dest_dir, progress: Callable[[float], None] | None = None,
+                    should_stop: Callable[[], bool] | None = None) -> Path:
+    """Unpack an experiment archive into dest_dir and return the experiment folder (``Name.mmaze``). When
+    should_stop() turns true the partly unpacked folder is removed and InterruptedError raised."""
     dest = Path(dest_dir).resolve()
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
@@ -134,5 +136,16 @@ def extract_archive(zip_path, dest_dir) -> Path:
             out = (dest / n).resolve()
             if not str(out).startswith(str(dest) + os.sep):  # no paths outside the destination
                 raise ValueError(f"Unsafe path in archive: {n}")
-        z.extractall(dest)
+        if should_stop is None and progress is None:
+            z.extractall(dest)
+            return target
+        for i, n in enumerate(names):
+            if should_stop and should_stop():
+                import shutil
+
+                shutil.rmtree(target, ignore_errors=True)
+                raise InterruptedError("unpacking stopped")
+            z.extract(n, dest)
+            if progress:
+                progress((i + 1) / len(names))
     return target
