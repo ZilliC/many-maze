@@ -43,6 +43,12 @@ class AnalysisSettings:
     freeze_on_pct: float = 2.0  # motion (% of body area changing) below which freezing starts
     freeze_off_pct: float = 3.0  # motion above which freezing ends (hysteresis)
     min_freeze_s: float = 1.0
+    activity_threshold_pct: float = 5.0  # motion (% of body area changing) at or above which the animal is active
+    min_inactive_s: float = 0.5  # inactive episodes shorter than this count as active
+    rearing: bool = False  # detect rears automatically from the animal's shape (see rearing_mask)
+    rear_area_pct: float = 75.0  # rearing: body area below this % of the animal's usual area …
+    rear_length_pct: float = 80.0  # … and (head and tail tracked) body length below this % of its usual length
+    min_rear_s: float = 0.3  # rears shorter than this are ignored
     entry_min_duration_s: float = 0.0  # zone visits shorter than this are ignored
     count_initial_entry: bool = True  # an animal starting in a zone has entered it
     latency_if_never: str = "duration"  # "duration" (cap at test length) or "blank"
@@ -700,9 +706,185 @@ def _social(res, p: _Period):
         res.update(social_measures(p.track, p.k, o, p.P.app, p.P.s, f"Animal {ot.meta.get('animal_index', j + 1)}"))
 
 
+def _tracking_quality(res, p: _Period):
+    """How well the animal was tracked: positions recorded and frames where the tracking looks sound."""
+    tr = p.track
+    centre = tr.detected & np.isfinite(tr.x) & np.isfinite(tr.y)
+    head = centre & np.isfinite(tr.hx) & np.isfinite(tr.hy)
+    n_c, n_h = int(centre.sum()), int(head.sum())
+    res["Centre positions recorded"] = n_c
+    res["Head positions recorded"] = n_h
+    if p.P.clean.has_head():
+        res["Head tracked (% of tracked frames)"] = _r(100 * n_h / n_c if n_c else math.nan, 1)
+    q = p.P.cached("quality", lambda: _quality_mask(p.P))[p.sl]
+    res["Tracking quality (%)"] = _r(100 * q.mean() if p.n else math.nan, 1)
+
+
+def _quality_mask(P: _Prepared) -> np.ndarray:
+    """Frames tracked soundly: the animal detected (not interpolated or lost), its head found when the head is
+    tracked at all, and its body area within half to twice its usual area (a larger or smaller blob is usually a
+    shadow, a reflection, part of the animal or a merge with another object). Frames where the animal is hidden
+    in a hidden zone count as sound."""
+    tr = P.track
+    ok = tr.detected & np.isfinite(tr.x) & np.isfinite(tr.y)
+    if P.clean.has_head():
+        ok &= np.isfinite(tr.hx) & np.isfinite(tr.hy)
+    a = tr.area
+    if np.isfinite(a[ok]).any():
+        med = float(np.nanmedian(a[ok]))
+        if med > 0:
+            with np.errstate(invalid="ignore"):
+                ok &= (a >= 0.5 * med) & (a <= 2.0 * med)
+    return ok | P.hid_any
+
+
+def _activity(res, p: _Period):
+    """Pixel-change activity (separate from mobility, which comes from the centre's speed) and the average freezing
+    score (the motion value that freezing is detected from)."""
+    k, dur, T = p.k, p.dur, p.T
+    has = np.isfinite(k.motion_pct)
+    if not has.any():
+        return
+    act_full = p.P.cached("active", lambda: activity_mask(p.P.k, p.P.s))
+    t_has = float(dur[has].sum())
+    res["Average freezing score (% body)"] = _r(float((k.motion_pct[has] * dur[has]).sum()) / t_has
+                                                if t_has > 0 else math.nan, 2)
+    t_act = float(dur[act_full[p.sl]].sum())
+    res["Time active (s)"] = _r(t_act)
+    res["Time inactive (s)"] = _r(T - t_act)
+    for label, ep in (("active", p.eps(act_full)), ("inactive", p.eps(~act_full))):
+        d = [float(dur[a:b].sum()) for a, b in ep]
+        res[f"{label.capitalize()} episodes"] = len(ep)
+        res[f"Longest {label} episode (s)"] = _r(max(d, default=0.0))
+        res[f"Shortest {label} episode (s)"] = _r(min(d, default=0.0))
+
+
+def activity_mask(k: Kinematics, s: AnalysisSettings) -> np.ndarray:
+    """Per frame: is the animal active, its pixel change (as a % of its body area) at or above
+    s.activity_threshold_pct? Frames without a motion value keep the previous state; inactive episodes shorter
+    than s.min_inactive_s count as active."""
+    with np.errstate(invalid="ignore"):
+        act = np.nan_to_num(ffill(k.motion_pct), nan=0.0) >= s.activity_threshold_pct
+    return drop_short_runs(act, k.t, k.dur, s.min_inactive_s, value=False)
+
+
+def _head(res, p: _Period):
+    """Distance travelled by the head and how much the head turned (none across a pause)."""
+    if not p.P.clean.has_head():
+        return
+    H = p.P.cached("head", lambda: _head_arrays(p.P))
+    turn = H["turn"][p.sl]
+    res[f"Head distance ({p.P.app.unit})"] = _r(H["step"][p.sl].sum(), 2)
+    res["Head turn angle (deg)"] = _r(np.abs(turn).sum(), 1)
+    res["Head turn angle clockwise (deg)"] = _r(turn[turn > 0].sum(), 1)
+    res["Head turn angle anticlockwise (deg)"] = _r(-turn[turn < 0].sum(), 1)
+
+
+def _head_arrays(P: _Prepared) -> dict:
+    """Whole-test head path: distance travelled into each frame (units; positions smoothed as the centre's) and the
+    signed change of head direction into each frame (deg, clockwise positive since y points down)."""
+    tr, K, s = P.track, P.k, P.s
+    n = len(K.t)
+    win = max(1, int(round(s.speed_smoothing_s / max(tr.dt, 1e-6))))
+    hx = seg_moving_average(ffill(tr.hx), win, K.breaks) * K.scale
+    hy = seg_moving_average(ffill(tr.hy), win, K.breaks) * K.scale
+    step = np.zeros(n)
+    turn = np.zeros(n)
+    if n > 1:
+        step[1:] = np.nan_to_num(np.hypot(np.diff(hx), np.diff(hy)))
+        # head direction: the body axis (tail → head). Frames where it is unknown (or the animal is hidden) do not
+        # turn, and a jump of more than 90° from one tracked frame to the next is a head / tail swap of the
+        # tracker, not a turn. The cumulative direction is smoothed like the positions.
+        ang = np.where(P.hid_any, np.nan, tr.angle)
+        idx = np.flatnonzero(np.isfinite(ang))
+        if len(idx) > 1:
+            d = np.zeros(n)
+            d[idx[1:]] = (np.diff(ang[idx]) + 180) % 360 - 180
+            d[np.abs(d) > 90] = 0.0
+            if K.breaks is not None:
+                d[K.breaks] = 0.0
+            turn[1:] = np.diff(seg_moving_average(np.cumsum(d), win, K.breaks))
+    if K.breaks is not None:
+        step[K.breaks] = 0.0
+        turn[K.breaks] = 0.0
+    return {"step": step, "turn": turn}
+
+
+def rearing_mask(track: Track, s: AnalysisSettings, t: np.ndarray, dur: np.ndarray,
+                 exclude: np.ndarray | None = None) -> np.ndarray:
+    """Per frame: is the animal rearing?
+
+    Seen from above, a rodent standing on its hind legs covers a smaller area and looks shorter than on all fours.
+    The animal's usual size is the median over the frames where it was detected (it spends most of a test on all
+    fours). A frame is a rear when the body area is below s.rear_area_pct % of the usual area and, when the head
+    and tail are tracked (from the blob shape or the pose model's nose and tail base), the head–tail length is also
+    below s.rear_length_pct % of the usual length. Frames where the animal was not detected (or excluded, e.g.
+    hidden) are not rears, except gaps of up to 0.2 s inside a rear, which are bridged; rears shorter than
+    s.min_rear_s are dropped."""
+    n = len(t)
+    det = track.detected & np.isfinite(track.area)
+    if exclude is not None:
+        det &= ~exclude
+    if det.sum() < 3:
+        return np.zeros(n, bool)
+    area = track.area
+    base_a = float(np.median(area[det]))
+    if not base_a > 0:
+        return np.zeros(n, bool)
+    with np.errstate(invalid="ignore"):
+        rear = det & (area < base_a * s.rear_area_pct / 100.0)
+        L = np.hypot(track.hx - track.tx, track.hy - track.ty)
+        ok_l = det & np.isfinite(L)
+        if ok_l.sum() >= 3:
+            base_l = float(np.median(L[ok_l]))
+            if base_l > 0:
+                rear &= ~ok_l | (L < base_l * s.rear_length_pct / 100.0)
+    rear = drop_short_runs(rear, t, dur, 0.2, value=False)
+    return drop_short_runs(rear, t, dur, s.min_rear_s, value=True)
+
+
+def _rears(P: _Prepared) -> np.ndarray:
+    """The whole test's rearing frames (hidden frames are not rears)."""
+    return P.cached("rearing", lambda: rearing_mask(P.track, P.s, P.k.t, P.k.dur, P.hid_any))
+
+
+_REAR_NAMES = ("rears", "time rearing (s)", "latency to first rear (s)", "mean rear duration (s)",
+               "max rear duration (s)", "min rear duration (s)")
+
+
+def _rear_results(res, p: _Period, eps, in_mask: np.ndarray, prefix: str = ""):
+    """Rear count, time, latency and mean / max / min duration ("Rears", … or "{zone}: rears", …)."""
+    d = [float(p.dur[a:b].sum()) for a, b in eps]
+    values = (len(eps), _r(p.dur[in_mask].sum()), _r(p.lat(eps)), _r(sum(d) / len(d) if d else 0.0),
+              _r(max(d, default=0.0)), _r(min(d, default=0.0)))
+    for name, v in zip(_REAR_NAMES, values):
+        res[prefix + name if prefix else name[0].upper() + name[1:]] = v
+
+
+def _rearing(res, p: _Period):
+    """Automatically detected rears (s.rearing): count, time, latency, mean / max / min duration."""
+    if not p.P.s.rearing:
+        return
+    full = _rears(p.P)
+    _rear_results(res, p, p.eps(full), full[p.sl])
+
+
+def _zone_rearing(res, p: _Period):
+    """Rears per zone: a rear belongs to the zone the animal was in when it started; time rearing counts the
+    frames spent rearing in the zone."""
+    P = p.P
+    if not P.s.rearing:
+        return
+    full = _rears(P)
+    eps = p.eps(full)
+    for zn in p.memb:
+        vm = P.visits_mask(zn, P.memb[zn])[p.sl]
+        _rear_results(res, p, [e for e in eps if vm[e[0]]], vm & full[p.sl], f"{zn}: ")
+
+
 # the measures of a period, in column order
-_SECTIONS = (_detection, _locomotion, _arena_position, _zones, _points, _lines, _grids_and_sequences, _template,
-             _social)
+_SECTIONS = (_detection, _tracking_quality, _locomotion, _activity, _head, _rearing, _arena_position, _zones,
+             _zone_rearing, _points, _lines, _grids_and_sequences, _template, _social)
 
 
 def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range, behaviours, result_variables,
