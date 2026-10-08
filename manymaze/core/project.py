@@ -63,11 +63,15 @@ class Animal:
     retired: bool = False  # withdrawn from the experiment (e.g. failed a training criterion)
     retired_reason: str = ""
     notes: str = ""  # free-form notes about the animal
+    weights: list = field(default_factory=list)  # weight history: [{"date": ISO date/time, "grams": float}]
 
     @classmethod
     def from_dict(cls, d):
+        weights = [{"date": str(w.get("date", "")), "grams": float(w["grams"])}
+                   for w in d.get("weights", []) or [] if isinstance(w, dict) and w.get("grams") is not None]
         return cls(str(d["id"]), d.get("group", ""), d.get("sex", ""), dict(d.get("fields", {})),
-                   bool(d.get("retired", False)), d.get("retired_reason", ""), str(d.get("notes", "") or ""))
+                   bool(d.get("retired", False)), d.get("retired_reason", ""), str(d.get("notes", "") or ""),
+                   weights)
 
 
 @dataclass

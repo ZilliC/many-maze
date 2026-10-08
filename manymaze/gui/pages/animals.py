@@ -11,14 +11,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QC
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QStackedWidget,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
-from ...core import export
+from ...core import export, scales
 from ...core import workflow as wf
 from ...core.project import Animal
 from ...core.workflow import treatment_code, treatment_text
 from .. import ribbon, theme
 from ..icons import icon
 from ..widgets import color_icon, error_box
-from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog, RandomiseDialog
+from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog, RandomiseDialog, WeighDialog
 from .base import Page
 
 SEXES = ["", "Male", "Female"]
@@ -170,6 +170,11 @@ class AnimalsPage(Page):
                               "and new schedules leave them out), or reinstate retired animals")
         self.a_dose = act("Dose calculator", "calculator", self.dose_dialog,
                           "Injection volume from body weight, dose and concentration")
+        self.a_weigh = act("Weigh", "speed", lambda: self.weigh_dialog(),
+                           "Weigh the selected animal on the scale (an I/O device of type “scale”) or type "
+                           "its weight: it goes to the “Weight (g)” column and the animal's weight history; "
+                           "“Record & next” moves on to the next animal")
+        self.scale_reader = scales.read_weight  # (cfg, timeout=, stable=) -> (grams, stable); replaced in tests
         self.a_random = act("Randomise treatments", "shuffle", lambda: self.randomise_dialog(),
                             "Allocate the animals to the treatments at random, balanced (optionally within sex or "
                             "another column)")
@@ -278,7 +283,7 @@ class AnimalsPage(Page):
             return [exp, ("Treatments", [self.a_treat_add, (self.a_treat_rename, "small"),
                                          (self.a_treat_color, "small"), (self.a_treat_delete, "small")])]
         return [exp,
-                ("Animals", [self.retire_btn, self.a_random, self.a_dose, self.a_criteria, self.a_export,
+                ("Animals", [self.retire_btn, self.a_weigh, self.a_random, self.a_dose, self.a_criteria, self.a_export,
                              (self.a_add_one, "small"), (self.a_dup, "small")]),
                 ("Fields", [(self.a_field_add, "small"), (self.a_field_rename, "small"),
                             (self.a_field_remove, "small")])]
@@ -412,6 +417,10 @@ class AnimalsPage(Page):
         items["tests"] = n
         for c, (k, f) in enumerate(self._cols):
             it = self._item(str(a.fields.get(f, ""))) if k == "field" else items[k]
+            if k == "field" and f == scales.WEIGHT_FIELD and a.weights:
+                it.setToolTip("Weight history:\n" + "\n".join(
+                    f"{str(w.get('date', '')).replace('T', ' ')}   {scales.format_grams(w.get('grams', 0))} g"
+                    for w in a.weights[-12:]))
             if a.retired:
                 it.setForeground(QColor(MUTED_ROW))
             self.table.setItem(r, c, it)
@@ -463,7 +472,7 @@ class AnimalsPage(Page):
         animals = self.view == "animals"
         sel = self.selected_animals() if has and animals else []
         for a in (self.a_add_animals, self.a_add_one, self.a_import_animals, self.a_import_tests, self.a_reveal,
-                  self.a_field_add, self.a_export, self.a_criteria, self.a_dose):
+                  self.a_field_add, self.a_export, self.a_criteria, self.a_dose, self.a_weigh):
             a.setEnabled(has)
         for a in (self.a_del_animals, self.a_dup):
             a.setEnabled(bool(sel))
@@ -776,6 +785,44 @@ class AnimalsPage(Page):
         self.main.status(f"Allocated {len(res)} animals at random to {len(set(res.values()))} treatments"
                          + (f", balanced within {stratify_by}" if stratify_by else "") + ".")
         return res
+
+    # ------------------------------------------------------------------ weighing
+    def _sheet_animals(self) -> list[Animal]:
+        """Animals in the sheet's current (sorted) order."""
+        out = []
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is not None and it.data(Qt.UserRole) is not None:
+                out.append(it.data(Qt.UserRole))
+        return out
+
+    def weigh_dialog(self, exec_: bool = True):
+        """Weigh the selected animal (or the first one), then optionally the next ones of the sheet. Returns the
+        dialog (not shown when exec_ is False: tests)."""
+        p = self.project
+        if p is None or not p.animals:
+            return None
+        order = [a for a in self._sheet_animals() if not a.retired] or [a for a in p.animals if not a.retired]
+        if not order:
+            return None
+        sel = self.selected_animals()
+        start = order.index(sel[0]) if sel and sel[0] in order else 0
+        dlg = WeighDialog(p, order, start, self.scale_reader, self.record_weight, self)
+        if exec_:
+            dlg.exec()
+            if dlg.recorded:
+                self.main.status(f"Recorded the weight of {len(dlg.recorded)} animal(s).")
+        return dlg
+
+    def record_weight(self, animal: Animal, grams: float) -> dict:
+        """Store a weight (with today's date) on an animal: "Weight (g)" column and weight history."""
+        entry = scales.record_weight(self.project, animal, grams)
+        self._changed()
+        self.refresh()
+        r = self._row_of(animal)
+        if r >= 0:
+            self.table.selectRow(r)
+        return entry
 
     def calculate_doses(self, settings: dict | None = None, animals: list[Animal] | None = None) -> dict:
         p = self.project
