@@ -1,21 +1,26 @@
 // mANY-MAZE I/O firmware — turns an Arduino into a live-test I/O box for mANY-MAZE.
 // Debounced digital inputs with change reports, digital/PWM outputs (with an optional maximum on-time),
-// hardware-timed pulses and pulse trains (optogenetics, pellet dispensers, sync pulses), analogue inputs,
-// quadrature rotary encoders and a heartbeat watchdog. Line protocol at 115200 baud: see README.md.
+// hardware-timed pulses and pulse trains (optogenetics, pellet dispensers, sync pulses), analogue inputs (up to
+// 1 kHz, sent in batches), quadrature rotary encoders, HX711 load cells (weight), DHT22 temperature / humidity
+// sensors and a heartbeat watchdog. Line protocol at 115200 baud: see README.md.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#define FW_VERSION "1.0"
+#define FW_VERSION "1.1"
 #ifndef BOARD_NAME
 #define BOARD_NAME "arduino"
 #endif
 
-const uint8_t MAX_IN = 24, MAX_OUT = 24, MAX_AN = 8, MAX_ENC = 4, MAX_TRAIN = 8;
+const uint8_t MAX_IN = 24, MAX_OUT = 24, MAX_AN = 8, MAX_ENC = 4, MAX_TRAIN = 8, MAX_HX = 4, MAX_DHT = 4;
+const uint8_t MAX_BATCH = 16;
 const uint16_t ENC_REPORT_MS = 20;
 
 struct DIn { int8_t pin; uint8_t pullup; uint16_t debounce; uint8_t stable, last; unsigned long changed; };
 struct DOut { int8_t pin; uint8_t invert, pwm; uint8_t on; uint8_t timed; unsigned long offAt; };
-struct AIn { int8_t pin; uint16_t period, deadband; int last; unsigned long next; };
+struct AIn { int8_t pin; uint16_t period, deadband; int last; unsigned long next;
+             uint8_t batch, n; unsigned long first; int vals[MAX_BATCH]; };
+struct HX { int8_t dout, sck; uint16_t period; unsigned long next; };
+struct DHT { int8_t pin; uint16_t period; unsigned long next; };
 struct Enc { int8_t pa, pb; volatile long count; volatile uint8_t state; long reported; unsigned long next; uint8_t irq; };
 struct Train { int8_t pin; uint8_t active, level; unsigned long period, width, count, done, start; };
 
@@ -24,7 +29,9 @@ DOut outs[MAX_OUT];
 AIn ans[MAX_AN];
 Enc encs[MAX_ENC];
 Train trains[MAX_TRAIN];
-uint8_t nIn = 0, nOut = 0, nAn = 0, nEnc = 0;
+HX hxs[MAX_HX];
+DHT dhts[MAX_DHT];
+uint8_t nIn = 0, nOut = 0, nAn = 0, nEnc = 0, nHx = 0, nDht = 0;
 
 char buf[72];
 uint8_t blen = 0;
@@ -100,6 +107,76 @@ void reportAn(AIn &a) {
   Serial.println(millis());
 }
 
+// a batch of analogue samples: S n first_ms period_us v1 v2 ...
+void reportBatch(AIn &a) {
+  Serial.print(F("S "));
+  Serial.print(a.pin);
+  Serial.print(' ');
+  Serial.print(a.first);
+  Serial.print(' ');
+  Serial.print((unsigned long)a.period * 1000UL);
+  for (uint8_t i = 0; i < a.n; i++) {
+    Serial.print(' ');
+    Serial.print(a.vals[i]);
+  }
+  Serial.println();
+  a.n = 0;
+}
+
+// HX711 load-cell amplifier (channel A, gain 128): 24-bit signed reading, or false if not ready
+bool readHX(HX &h, long &value) {
+  if (digitalRead(h.dout)) return false;
+  unsigned long v = 0;
+  noInterrupts();
+  for (uint8_t i = 0; i < 24; i++) {
+    digitalWrite(h.sck, HIGH);
+    delayMicroseconds(1);
+    v = (v << 1) | digitalRead(h.dout);
+    digitalWrite(h.sck, LOW);
+    delayMicroseconds(1);
+  }
+  digitalWrite(h.sck, HIGH);  // 25th pulse: channel A, gain 128 next time
+  delayMicroseconds(1);
+  digitalWrite(h.sck, LOW);
+  interrupts();
+  if (v & 0x800000UL) v |= 0xFF000000UL;
+  value = (long)v;
+  return true;
+}
+
+// length in microseconds of the current level of a pin, or -1 after timeout_us
+long levelLength(int8_t pin, uint8_t level, unsigned long timeout_us) {
+  unsigned long start = micros();
+  while (digitalRead(pin) == level)
+    if (micros() - start > timeout_us) return -1;
+  return (long)(micros() - start);
+}
+
+// DHT22 / AM2302: temperature and humidity in tenths, or false on a timeout / checksum error
+bool readDHT(DHT &d, int &t10, int &h10) {
+  uint8_t data[5] = {0, 0, 0, 0, 0};
+  pinMode(d.pin, OUTPUT);  // start signal: at least 1 ms low
+  digitalWrite(d.pin, LOW);
+  delay(2);
+  pinMode(d.pin, INPUT_PULLUP);
+  noInterrupts();
+  // the line floats high 20-40 us, then the sensor answers ~80 us low and ~80 us high
+  bool ok = levelLength(d.pin, HIGH, 200) >= 0 && levelLength(d.pin, LOW, 200) >= 0 &&
+            levelLength(d.pin, HIGH, 200) >= 0;
+  // 40 bits: ~50 us low, then high for ~26 us (0) or ~70 us (1)
+  for (uint8_t i = 0; ok && i < 40; i++) {
+    long high = levelLength(d.pin, LOW, 200) >= 0 ? levelLength(d.pin, HIGH, 200) : -1;
+    if (high < 0) ok = false;
+    else data[i / 8] = (data[i / 8] << 1) | (high > 40 ? 1 : 0);
+  }
+  interrupts();
+  if (!ok || ((data[0] + data[1] + data[2] + data[3]) & 0xFF) != data[4]) return false;
+  h10 = ((int)data[0] << 8) | data[1];
+  t10 = (((int)(data[2] & 0x7F)) << 8) | data[3];
+  if (data[2] & 0x80) t10 = -t10;
+  return true;
+}
+
 void reportEnc(Enc &e, long c) {
   e.reported = c;
   Serial.print(F("E "));
@@ -124,7 +201,7 @@ void clearConfig() {
       detachInterrupt(digitalPinToInterrupt(encs[i].pa));
       detachInterrupt(digitalPinToInterrupt(encs[i].pb));
     }
-  nIn = nOut = nAn = nEnc = 0;
+  nIn = nOut = nAn = nEnc = nHx = nDht = 0;
   wdMs = 0;
 }
 
@@ -223,15 +300,38 @@ void command(char *line) {
       if (o) writeOut(o, 0);
       break;
     }
-    case 'A': {  // A channel period_ms deadband
+    case 'A': {  // A channel period_ms deadband [batch]
       if (argc < 2 || nAn >= MAX_AN) { err("A: bad arguments or too many analogue inputs"); break; }
       AIn &a = ans[nAn++];
       a.pin = a1;
       a.period = argc > 2 && a2 > 0 ? a2 : 50;
       a.deadband = argc > 3 ? a3 : 2;
+      a.batch = argc > 4 ? constrain(atol(argv[4]), 1, MAX_BATCH) : 1;
+      a.n = 0;
       a.last = analogRead(a.pin);
       a.next = millis() + a.period;
       reportAn(a);
+      break;
+    }
+    case 'L': {  // L dout sck period_ms   HX711 load cell
+      if (argc < 3 || nHx >= MAX_HX) { err("L: bad arguments or too many load cells"); break; }
+      HX &h = hxs[nHx++];
+      h.dout = a1;
+      h.sck = a2;
+      h.period = argc > 3 && a3 >= 100 ? a3 : 100;
+      pinMode(h.dout, INPUT);
+      pinMode(h.sck, OUTPUT);
+      digitalWrite(h.sck, LOW);
+      h.next = millis();
+      break;
+    }
+    case 'U': {  // U pin period_ms   DHT22 temperature / humidity
+      if (argc < 2 || nDht >= MAX_DHT) { err("U: bad arguments or too many DHT sensors"); break; }
+      DHT &d = dhts[nDht++];
+      d.pin = a1;
+      d.period = argc > 2 && a2 >= 2000 ? a2 : 2000;
+      pinMode(d.pin, INPUT_PULLUP);
+      d.next = millis() + 1000;  // the sensor needs ~1 s after power-up
       break;
     }
     case 'E': {  // E pinA pinB
@@ -317,13 +417,56 @@ void loop() {
     if (raw != d.last) { d.last = raw; d.changed = now; }
     if (raw != d.stable && now - d.changed >= d.debounce) { d.stable = raw; reportIn(d); }
   }
-  // analogue inputs
+  // analogue inputs (fast ones in batches: one line per ~10 ms instead of one per sample)
   for (uint8_t i = 0; i < nAn; i++) {
     AIn &a = ans[i];
     if ((long)(now - a.next) < 0) continue;
-    a.next = now + a.period;
+    a.next += a.period;
+    if ((long)(now - a.next) > (long)(4 * a.period)) a.next = now + a.period;  // fell behind: resynchronise
     int v = analogRead(a.pin);
-    if (abs(v - a.last) > (int)a.deadband) { a.last = v; reportAn(a); }
+    if (a.batch > 1) {
+      if (!a.n) a.first = now;
+      a.vals[a.n++] = v;
+      a.last = v;
+      if (a.n >= a.batch) reportBatch(a);
+    } else if (abs(v - a.last) > (int)a.deadband) {
+      a.last = v;
+      reportAn(a);
+    }
+  }
+  // load cells
+  for (uint8_t i = 0; i < nHx; i++) {
+    HX &h = hxs[i];
+    if ((long)(now - h.next) < 0) continue;
+    long v;
+    if (readHX(h, v)) {
+      h.next = now + h.period;
+      Serial.print(F("L "));
+      Serial.print(h.dout);
+      Serial.print(' ');
+      Serial.print(v);
+      Serial.print(' ');
+      Serial.println(now);
+    }
+  }
+  // temperature / humidity sensors
+  for (uint8_t i = 0; i < nDht; i++) {
+    DHT &d = dhts[i];
+    if ((long)(now - d.next) < 0) continue;
+    d.next = now + d.period;
+    int t10, h10;
+    if (readDHT(d, t10, h10)) {
+      Serial.print(F("U "));
+      Serial.print(d.pin);
+      Serial.print(' ');
+      Serial.print(t10);
+      Serial.print(' ');
+      Serial.print(h10);
+      Serial.print(' ');
+      Serial.println(now);
+    } else {
+      err("U: no reply from the DHT22");
+    }
   }
   // encoders (polled when the pins have no interrupt)
   for (uint8_t i = 0; i < nEnc; i++) {

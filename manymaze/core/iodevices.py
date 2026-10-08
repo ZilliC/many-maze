@@ -21,14 +21,21 @@ Device types:
   default, 2000 ms, when the board has outputs; ``"watchdog_ms": 0`` turns it off).
 * ``serial`` — any device driven by text lines; output channels have ``"on"``/``"off"`` command strings,
   input channels have ``"on"``/``"off"`` strings that are matched against received lines.
-* ``audio`` — the computer's sound output: tones, white noise and sound files (WAV generated with NumPy and
-  played with ``afplay``/``paplay``/``aplay``, or by a player installed by the GUI in ``AudioDevice.player``).
+* ``audio`` — the computer's sound output: tones, white noise and sound files, once or repeated (WAV generated
+  with NumPy and played with ``afplay``/``paplay``/``aplay``, or by a player installed by the GUI in
+  ``AudioDevice.player``).
+* ``serial_lines``, ``firmata``, ``nidaq``, ``labjack`` and ``notify`` (e-mail / SMS alerts): see :mod:`.iodrivers`;
+  syringe pumps and balances: :mod:`.pumps` and :mod:`.scales`.
 
-Channel kinds: ``input`` (digital in: lever, nose poke, beam, switch, TTL), ``output`` (digital out: TTL, relay,
-light, pellet dispenser, door, shocker trigger, laser), ``pwm`` (analogue / PWM out, level 0..1), ``analog``
-(analogue in) and ``encoder`` (quadrature rotary encoder, e.g. running wheel).
+Channel kinds: ``input`` (digital in: lever, nose poke, beam, switch, TTL), ``pir`` (movement detector, a digital
+input), ``output`` (digital out: TTL, relay, light, pellet dispenser, door, shocker trigger, laser), ``pwm``
+(analogue / PWM out, level 0..1), ``analog`` (analogue in, optionally filtered, see :mod:`.iocontrol`),
+``sensor`` (a calibrated analogue, HX711 load-cell or DHT22 reading: weight, light, temperature, humidity),
+``encoder`` (quadrature rotary encoder, e.g. running wheel), ``thermostat`` (closed-loop temperature control),
+``odour`` (olfactometer valves) and ``status`` (derived channels reported by drivers and controllers, e.g.
+``plate.at_target`` or ``pump1.stalled``).
 
-pyserial is optional (only needed for ``arduino`` and ``serial`` devices).
+pyserial is optional (only needed for serial devices).
 
 Device types, channel kinds and the configuration rules (new_device, watchdog_ms...) are in :mod:`.ioconfig`.
 :func:`.iomeasures.io_measures` turns a test's I/O log (``Test.io_events``) into ANY-maze-style result measures.
@@ -49,6 +56,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .iocontrol import AnalogFilter, Thermostat, sensor_value
 from .ioconfig import INPUT_KINDS, watchdog_ms
 
 FIRMWARE_ID = "MANYMAZE_IO"
@@ -88,11 +96,23 @@ class Device:
         self.transport = transport
         self._pending: list[tuple[str, float, float | None]] = []  # (channel, value, board ms or None)
         self.watchdog_fired = 0  # times the board's watchdog switched every output off
-        for n, c in self.channels.items():
+        self.input_times: dict[str, float] = {}  # monotonic time of each input's last report
+        self.filters: dict[str, AnalogFilter] = {}
+        for n, c in list(self.channels.items()):
             if c.get("kind", "input") in INPUT_KINDS:
                 self.inputs[n] = 0
             else:
                 self.outputs[n] = 0
+            if c.get("kind") in ("analog", "sensor") and c.get("filter"):
+                try:
+                    f = AnalogFilter.from_channel(c)
+                except (ValueError, TypeError) as e:
+                    self._error(f"{self.name}: channel '{n}': {e}")
+                    f = None
+                if f is not None:
+                    self.filters[n] = f
+        self.thermostats: dict[str, Thermostat] = {n: Thermostat(self, n, c) for n, c in list(self.channels.items())
+                                                   if c.get("kind") == "thermostat"}
 
     # -- lifecycle
     def open(self):
@@ -110,10 +130,27 @@ class Device:
         if msg not in self.errors:
             self.errors.append(msg)
 
-    def _changed(self, channel: str, value: float, ms: float | None = None):
-        if self.inputs.get(channel) != value:
+    def _changed(self, channel: str, value: float, ms: float | None = None, force: bool = False):
+        """An input value; unchanged values are dropped unless `force` (every sample of a sampled signal)."""
+        self.input_times[channel] = time.monotonic()
+        if self.inputs.get(channel) != value or force or (ms is not None and channel in self.filters):
             self.inputs[channel] = value
             self._pending.append((channel, value, ms))
+
+    def add_status(self, name: str, kind: str = "status"):
+        """A derived input channel reported by the driver itself (pump running / stalled, thermostat set-point)."""
+        self.channels.setdefault(name, {"name": name, "kind": kind, "derived": True})
+        self.inputs.setdefault(name, 0)
+
+    def _analog_in(self, channel: str, value: float, ms: float | None = None, force: bool = False):
+        """An analogue / sensor sample (already scaled): calibrated, filtered and reported."""
+        c = self.channels.get(channel, {})
+        if c.get("kind") == "sensor":
+            value = sensor_value({k: v for k, v in c.items() if k != "scale"}, value)
+        f = self.filters.get(channel)
+        if f is not None:
+            value = round(f(value), 6)
+        self._changed(channel, value, ms, force)
 
     def _read(self):
         """Read the hardware (subclasses): input changes go to ``_pending`` through :meth:`_changed`."""
@@ -152,12 +189,39 @@ class Device:
     def audio(self, cmd: str, **kw) -> bool:
         return False
 
+    def pump(self, channel: str, op: str, **kw) -> bool:
+        """Syringe pump command (see :mod:`.pumps`); False when the device has no pumps."""
+        return False
+
+    def control(self, channel: str, op: str, **kw) -> bool:
+        """Controller command: ``target`` (target, ramp) / ``off`` of a thermostat channel."""
+        th = self.thermostats.get(channel)
+        if th is None:
+            self._error(f"{self.name}: '{channel}' is not a temperature controller")
+            return False
+        if op == "off":
+            th.off()
+        else:
+            th.set_target(kw.get("target"), kw.get("ramp", 0.0))
+        return True
+
+    def notify(self, subject: str, text: str) -> bool:
+        return False
+
+    def service(self, now: float):
+        """Periodic work (controllers), from the manager's service thread."""
+        for th in self.thermostats.values():
+            th.step(now)
+
     def set_input(self, channel: str, value: float):
         """Simulate an input (virtual devices; ignored by hardware devices)."""
 
     def all_off(self):
+        for th in self.thermostats.values():
+            if th.target is not None:
+                th.off()
         for ch in list(self.outputs):
-            if self.outputs[ch]:
+            if self.outputs[ch] and self.kind(ch) not in ("thermostat", "odour"):
                 self.set_output(ch, 0)
 
 
@@ -167,7 +231,11 @@ class VirtualDevice(Device):
     def set_input(self, channel: str, value: float):
         if channel not in self.channels:
             self.channels[channel] = {"name": channel, "kind": "input"}
-        self._changed(channel, value)
+        if self.kind(channel) in ("analog", "sensor") and (channel in self.filters or
+                                                          self.kind(channel) == "sensor"):
+            self._analog_in(channel, value)
+        else:
+            self._changed(channel, value)
 
     def add_counts(self, channel: str, n: int):
         """Advance a simulated encoder by n counts."""
@@ -288,10 +356,18 @@ class ArduinoDevice(_LineDevice):
         super().__init__(cfg, transport)
         self.version = ""
         self.by_pin: dict[tuple[str, int], str] = {}
+        self.dht: dict[int, dict[str, str]] = {}  # DHT22 pin -> {"temperature": channel, "humidity": channel}
         for n, c in self.channels.items():
             k = c.get("kind", "input")
             tag = {"analog": "A", "encoder": "E"}.get(k, "D")
-            if c.get("pin") is not None:
+            if k == "sensor":
+                tag = {"hx711": "L", "dht22": "U"}.get(c.get("interface", "analog"), "A")
+            if c.get("pin") is None or c.get("derived"):
+                continue
+            if tag == "U":
+                self.dht.setdefault(int(c["pin"]), {})["humidity" if c.get("sensor") == "humidity"
+                                                       else "temperature"] = n
+            else:
                 self.by_pin[(tag, int(c["pin"]))] = n
 
     def open(self, handshake_s: float = 3.0):
@@ -314,18 +390,36 @@ class ArduinoDevice(_LineDevice):
 
     def configure(self):
         self.write_line("Z")
+        dht_done = set()
         for n, c in self.channels.items():
             k, pin = c.get("kind", "input"), c.get("pin")
+            if k in ("thermostat", "odour") or c.get("derived"):
+                continue  # built from other channels
             if pin is None:
                 self._error(f"{self.name}: channel '{n}' has no pin")
                 continue
             pin = int(pin)
-            if k == "input":
-                self.write_line(f"I {pin} {1 if c.get('pullup', True) else 0} {int(c.get('debounce_ms', 20))}")
+            iface = c.get("interface", "analog") if k == "sensor" else None
+            if k in ("input", "pir"):
+                self.write_line(f"I {pin} {1 if c.get('pullup', k == 'input') else 0} "
+                                f"{int(c.get('debounce_ms', 20))}")
             elif k in ("output", "pwm"):
                 self.write_line(f"O {pin} {1 if c.get('invert') else 0}")
-            elif k == "analog":
-                self.write_line(f"A {pin} {int(c.get('period_ms', 50))} {int(c.get('deadband', 2))}")
+            elif k == "analog" or iface == "analog":
+                period = max(1, int(c.get("period_ms", 50)))
+                # filtered channels need every sample; fast channels are sent in batches of ~10 ms
+                deadband = 0 if n in self.filters else int(c.get("deadband", 2))
+                batch = max(1, min(16, 10 // period)) if period < 10 else 1
+                self.write_line(f"A {pin} {period} {deadband}" + (f" {batch}" if batch > 1 else ""))
+            elif iface == "hx711":
+                if c.get("pin_b") is None:
+                    self._error(f"{self.name}: HX711 sensor '{n}' needs pin B (SCK)")
+                    continue
+                self.write_line(f"L {pin} {int(c['pin_b'])} {max(100, int(c.get('period_ms', 100)))}")
+            elif iface == "dht22":
+                if pin not in dht_done:
+                    dht_done.add(pin)
+                    self.write_line(f"U {pin} {max(2000, int(c.get('period_ms', 2000)))}")
             elif k == "encoder":
                 if c.get("pin_b") is None:
                     self._error(f"{self.name}: encoder '{n}' needs pin B")
@@ -361,6 +455,39 @@ class ArduinoDevice(_LineDevice):
         if not parts:
             return
         tag = parts[0]
+        if tag == "S" and len(parts) >= 5:  # batch of analogue samples: S n first_ms period_us v1 v2 ...
+            try:
+                pin, ms0, per_us = int(parts[1]), float(parts[2]), float(parts[3])
+                vals = [float(x) for x in parts[4:]]
+            except ValueError:
+                return
+            n = self.by_pin.get(("A", pin))
+            if n is not None:
+                sc = float(self.channels[n].get("scale", 1.0))
+                for i, raw in enumerate(vals):
+                    self._analog_in(n, raw * sc, ms0 + i * per_us / 1000.0, force=True)
+            return
+        if tag == "U" and len(parts) >= 4:  # DHT22: U pin temperature_x10 humidity_x10 ms
+            try:
+                pin, tx10, hx10 = int(parts[1]), float(parts[2]), float(parts[3])
+                ms = int(parts[4]) if len(parts) >= 5 else None
+            except ValueError:
+                return
+            for what, v in (("temperature", tx10 / 10.0), ("humidity", hx10 / 10.0)):
+                n = self.dht.get(pin, {}).get(what)
+                if n is not None:
+                    self._analog_in(n, v, ms)
+            return
+        if tag == "L" and len(parts) >= 3:  # HX711: L dout raw ms
+            try:
+                pin, raw = int(parts[1]), float(parts[2])
+                ms = int(parts[3]) if len(parts) >= 4 else None
+            except ValueError:
+                return
+            n = self.by_pin.get(("L", pin))
+            if n is not None:
+                self._analog_in(n, raw * float(self.channels[n].get("scale", 1.0)), ms)
+            return
         if tag in ("D", "A", "E") and len(parts) >= 3:
             try:
                 pin, raw = int(parts[1]), float(parts[2])
@@ -371,7 +498,7 @@ class ArduinoDevice(_LineDevice):
                 return
             c = self.channels[n]
             if tag == "D":  # raw pin level; with the pull-up a closed switch reads LOW, i.e. "on"
-                v = 1 - int(raw) if c.get("pullup", True) else int(raw)
+                v = 1 - int(raw) if c.get("pullup", c.get("kind", "input") == "input") else int(raw)
                 if c.get("invert"):
                     v = 1 - v
             elif tag == "A":
@@ -384,7 +511,10 @@ class ArduinoDevice(_LineDevice):
                     ms = int(parts[3])
                 except ValueError:
                     ms = None
-            self._changed(n, v, ms)
+            if tag == "A":
+                self._analog_in(n, v, ms)
+            else:
+                self._changed(n, v, ms)
         elif tag == "ERR":
             self._error(f"{self.name}: firmware error: {' '.join(parts[1:])}")
         elif tag == "WATCHDOG":
@@ -432,6 +562,8 @@ class ArduinoDevice(_LineDevice):
         return True
 
     def all_off(self):
+        for th in self.thermostats.values():
+            th.target = th.setpoint = None
         self.write_line("R")
         for ch in self.outputs:
             self.outputs[ch] = 0
@@ -537,12 +669,21 @@ class AudioDevice(Device):
                 return False
         else:
             return False
+        repeat = int(kw.get("repeat", 1) or 0) if cmd == "file" else 1
+        if repeat != 1:
+            loop = _Loop(self, str(path), vol, repeat)
+            self._procs.append(loop)
+            loop.start()
+            return True
         return self._play(str(path), vol if cmd == "file" else 1.0)
 
-    def _play(self, path: str, volume: float) -> bool:
+    def _play(self, path: str, volume: float, track: bool = True):
         if AudioDevice.player is not None:
             try:
-                self._procs.append(AudioDevice.player(path, volume))
+                h = AudioDevice.player(path, volume)
+                if not track:
+                    return h
+                self._procs.append(h)
                 return True
             except Exception as e:  # pragma: no cover - GUI dependent
                 self._error(f"{self.name}: audio player failed: {e}")
@@ -553,7 +694,10 @@ class AudioDevice(Device):
         if self.backend == "afplay":  # pragma: no cover - macOS
             args = ["afplay", "-v", f"{volume:g}", path]
         try:  # pragma: no cover - depends on the sound system
-            self._procs.append(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            h = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not track:
+                return h
+            self._procs.append(h)
             return True
         except Exception as e:  # pragma: no cover
             self._error(f"{self.name}: could not play sound: {e}")
@@ -575,15 +719,78 @@ class AudioDevice(Device):
         super().close()
 
 
+def _wav_seconds(path: str) -> float | None:
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        return None
+
+
+class _Loop:
+    """A sound file played `repeat` times (0 = until stopped) from a background thread; ``stop()`` ends it."""
+
+    def __init__(self, dev: AudioDevice, path: str, volume: float, repeat: int):
+        self.dev, self.path, self.volume, self.repeat = dev, path, volume, max(0, int(repeat))
+        self.plays = 0
+        self._stop = threading.Event()
+        self._cur = None
+        self._thread = threading.Thread(target=self._run, name="audio-loop", daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        length = _wav_seconds(self.path)
+        while not self._stop.is_set() and (not self.repeat or self.plays < self.repeat):
+            self._cur = self.dev._play(self.path, self.volume, track=False)
+            self.plays += 1
+            if self._cur is None or self._cur is False:
+                if self.dev.backend is None and AudioDevice.player is None:
+                    # no sound system (e.g. tests): keep counting plays at the file's pace
+                    if self._stop.wait(length or 0.05):
+                        return
+                    continue
+                return
+            if hasattr(self._cur, "wait"):
+                while not self._stop.is_set():
+                    try:
+                        self._cur.wait(timeout=0.05)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            elif self._stop.wait(length or 1.0):  # a GUI player: wait for the length of the file
+                return
+
+    def stop(self):
+        self._stop.set()
+        cur = self._cur
+        if cur is not None and cur is not False:
+            try:
+                cur.terminate() if hasattr(cur, "terminate") else cur.stop()
+            except Exception:  # pragma: no cover
+                pass
+
+    terminate = stop
+
+
 DRIVERS = {"virtual": VirtualDevice, "arduino": ArduinoDevice, "serial": SerialDevice, "audio": AudioDevice}
+
+
+def drivers() -> dict:
+    """Every device driver: the core ones and those of :mod:`.iodrivers`, :mod:`.pumps` and :mod:`.scales`."""
+    if "firmata" not in DRIVERS:
+        from . import iodrivers  # noqa: F401  (registers its drivers)
+    return DRIVERS
 
 
 # ======================================================================================== manager
 class DeviceManager:
     """All the I/O devices of a project. Unknown device names used by procedures become virtual devices.
 
-    Thread-safe: tests run in their own threads, the GUI polls the status and a keep-alive thread sends the
-    watchdog heartbeats of boards that have one (so a paused test or a stalled camera does not trip it).
+    Thread-safe: tests run in their own threads, the GUI polls the status and a service thread sends the
+    watchdog heartbeats of boards that have one (so a paused test or a stalled camera does not trip it), runs the
+    temperature controllers and times pulse sequences (:meth:`pulse_sequence`) on the computer's clock.
 
     Several tests at once each see their own box through a :class:`DeviceView`; input changes are fanned out to
     every subscriber (:meth:`subscribe`) so that one test never consumes another test's lever presses.
@@ -603,8 +810,11 @@ class DeviceManager:
         self._wd_seen: dict[str, int] = {}
         self._ka_stop = threading.Event()
         self._ka_thread: threading.Thread | None = None
+        self._sched: list = []  # timed outputs: (due monotonic, seq, device, channel, value, max_s)
+        self._sched_seq = 0
+        self._sched_wake = threading.Event()
         for c in self.configs:
-            cls = DRIVERS.get(c.get("type", "virtual"), VirtualDevice)
+            cls = drivers().get(c.get("type", "virtual"), VirtualDevice)
             dev = cls(c, (transports or {}).get(c.get("name")))
             self.devices[dev.name] = dev
         self._kinds_cache: dict = {}
@@ -625,18 +835,26 @@ class DeviceManager:
                         d._error(f"{d.name}: {e}")
             self._start_keepalive()
 
+    SERVICE_S = 0.1  # controller period
+
+    def _needs_service(self) -> bool:
+        return bool(self._sched) or any(d.keepalive_period() or d.thermostats for d in self.devices.values())
+
     def _start_keepalive(self):
         if self._ka_thread is not None and self._ka_thread.is_alive():
             return
-        if not any(d.keepalive_period() for d in self.devices.values()):
+        if not self._needs_service():
             return
         self._ka_stop.clear()
-        self._ka_thread = threading.Thread(target=self._keepalive_loop, name="io-keepalive", daemon=True)
+        self._ka_thread = threading.Thread(target=self._keepalive_loop, name="io-service", daemon=True)
         self._ka_thread.start()
 
     def _keepalive_loop(self):
+        next_service = 0.0
         while not self._ka_stop.is_set():
             periods = []
+            now = time.monotonic()
+            self._run_schedule(now)
             for d in list(self.devices.values()):
                 per = d.keepalive_period()
                 if per:
@@ -645,12 +863,77 @@ class DeviceManager:
                         d.keepalive()
                     except Exception as e:  # pragma: no cover - hardware dependent
                         d._error(f"{d.name}: keep-alive failed: {e}")
-            if not periods:
+                if d.thermostats:
+                    periods.append(self.SERVICE_S)
+                    if now >= next_service:
+                        with self._lock:
+                            try:
+                                d.service(now)
+                            except Exception as e:  # pragma: no cover - hardware dependent
+                                d._error(f"{d.name}: {e}")
+            if now >= next_service:
+                next_service = now + self.SERVICE_S
+            if not periods and not self._sched:
                 return
-            self._ka_stop.wait(max(0.02, min(periods) / 4))
+            wait = max(0.02, min(periods) / 4) if periods else 0.5
+            if self._sched:
+                wait = min(wait, max(0.0, self._sched[0][0] - time.monotonic()))
+            self._sched_wake.clear()
+            if wait > 0:
+                self._sched_wake.wait(wait)
+
+    # -- timed outputs (pulse sequences)
+    def _run_schedule(self, now):
+        import heapq
+
+        while self._sched and self._sched[0][0] <= now + 0.0005:
+            _due, _seq, dev, ch, value, max_s = heapq.heappop(self._sched)
+            with self._lock:
+                d = self.devices.get(dev)
+                if d is not None:
+                    try:
+                        d.set_output(ch, value, max_s=max_s)
+                    except Exception as e:  # pragma: no cover - hardware dependent
+                        d._error(f"{d.name}: {e}")
+
+    def pulse_sequence(self, device: str, channel: str, pulses, level: float = 1) -> bool:
+        """Switch an output on for each (delay from now in s, width in s) on the computer's clock (about 1 ms
+        jitter), independently of the video frames. Boards that time pulses switch each one off themselves."""
+        import heapq
+
+        with self._lock:
+            d = self.device(device)
+            self._cancel_schedule(device, channel)
+            t0 = time.monotonic()
+            hw_off = getattr(d, "hardware_pulses", False) and d.kind(channel) != "pwm"
+            for delay, width in pulses:
+                for dt, v, mx in ((delay, level, width if hw_off else None), (delay + width, 0, None)):
+                    if v == 0 and hw_off:
+                        v = None  # the board switches it off; still update the shown state
+                    self._sched_seq += 1
+                    heapq.heappush(self._sched, (t0 + max(0.0, dt), self._sched_seq, device, channel,
+                                                 0 if v is None else v, mx if v else None))
+            if self._ka_thread is None or not self._ka_thread.is_alive():
+                self._ka_stop.clear()
+                self._ka_thread = threading.Thread(target=self._keepalive_loop, name="io-service", daemon=True)
+                self._ka_thread.start()
+            self._sched_wake.set()
+            return True
+
+    def _cancel_schedule(self, device, channel):
+        import heapq
+
+        with self._lock:
+            n = len(self._sched)
+            self._sched = [e for e in self._sched if not (e[2] == device and e[3] == channel)]
+            if len(self._sched) != n:
+                heapq.heapify(self._sched)
 
     def close(self):
         self._ka_stop.set()
+        self._sched_wake.set()
+        with self._lock:
+            self._sched = []
         th = self._ka_thread
         if th is not None and th.is_alive() and th is not threading.current_thread():
             th.join(2.0)
@@ -725,6 +1008,7 @@ class DeviceManager:
 
     def stop_train(self, device, channel) -> bool:
         with self._lock:
+            self._cancel_schedule(device, channel)
             return self.device(device).stop_train(channel)
 
     def send(self, device: str, text: str) -> bool:
@@ -736,6 +1020,24 @@ class DeviceManager:
         with self._lock:
             d = self.devices.get(device)
             return d.audio(cmd, **kw) if d else False
+
+    def pump(self, device: str, channel: str, op: str, **kw) -> bool:
+        with self._lock:
+            d = self.devices.get(device)
+            return d.pump(channel, op, **kw) if d else False
+
+    def control(self, device: str, channel: str, op: str, **kw) -> bool:
+        with self._lock:
+            d = self.devices.get(device)
+            ok = d.control(channel, op, **kw) if d else False
+        self._start_keepalive()
+        return ok
+
+    def notify(self, subject: str, text: str) -> bool:
+        """Send an alert through every alert device (e-mail / SMS, in the background)."""
+        with self._lock:
+            sent = [d.notify(subject, text) for d in self.devices.values() if d.type == "notify"]
+        return any(sent)
 
     def set_input(self, device: str, channel: str, value: float):
         with self._lock:
@@ -793,6 +1095,7 @@ class DeviceManager:
 
     def all_off(self):
         with self._lock:
+            self._sched = []
             for d in self.devices.values():
                 d.all_off()
 
@@ -804,7 +1107,7 @@ class DeviceView:
     private to the test. ``device`` None: no hardware at all (simulated outputs). Audio devices (the computer's
     speakers) stay shared."""
 
-    SHARED_TYPES = ("audio",)
+    SHARED_TYPES = ("audio", "notify")
 
     def __init__(self, manager: DeviceManager, device: str | None):
         self.manager = manager
@@ -897,6 +1200,9 @@ class DeviceView:
         return self._call(device, lambda d: d.pulse_train(channel, period_s, width_s, count))
 
     def stop_train(self, device, channel) -> bool:
+        name = self._map(device)
+        if self.alias is not None and name == self.alias:
+            self.manager._cancel_schedule(name, channel)
         return self._call(device, lambda d: d.stop_train(channel))
 
     def send(self, device: str, text: str) -> bool:
@@ -904,6 +1210,23 @@ class DeviceView:
 
     def audio(self, device: str, cmd: str, **kw) -> bool:
         return self._call(device, lambda d: d.audio(cmd, **kw)) if self.has(device) else False
+
+    def pump(self, device: str, channel: str, op: str, **kw) -> bool:
+        return self._call(device, lambda d: d.pump(channel, op, **kw)) if self.has(device) else False
+
+    def control(self, device: str, channel: str, op: str, **kw) -> bool:
+        ok = self._call(device, lambda d: d.control(channel, op, **kw)) if self.has(device) else False
+        self.manager._start_keepalive()
+        return ok
+
+    def notify(self, subject: str, text: str) -> bool:
+        return self.manager.notify(subject, text)
+
+    def pulse_sequence(self, device: str, channel: str, pulses, level: float = 1) -> bool:
+        name = self._map(device)
+        if self.alias is not None and name == self.alias:
+            return self.manager.pulse_sequence(name, channel, pulses, level)
+        return False  # private simulated devices: timed by the engine
 
     def set_input(self, device: str, channel: str, value: float):
         name = self._map(device)

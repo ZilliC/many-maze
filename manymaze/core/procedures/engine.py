@@ -10,6 +10,7 @@ import threading
 from collections import deque
 from functools import wraps
 
+from .. import ioconfig
 from ..iodevices import DeviceManager
 from ..operant import Schedule
 from .actions import Actions, _Break, _Stop, _Timer, _Train
@@ -196,6 +197,18 @@ class ProcedureEngine(Actions):
         self._audio_on: dict[tuple, float] = {}
         self._shock_keys: set[tuple] = set()
         self._pause_t: float | None = None
+        self._ramps: dict = {}
+        self._pellet_checks: dict = {}
+        self._odours: dict[tuple, str] = {}
+        self.intensities: dict[tuple, float] = {}
+        self._pumps_on: dict[tuple, str] = {}
+        self._thermostats_on: set[tuple] = set()
+        self.animal_weights: list[tuple[float, float]] = []
+        self.alerts: list[tuple[float, str]] = []
+        self._alert_times: dict = {}
+        self._sensor_alarm: dict[tuple, bool] = {}
+        self._chan_cfg: dict[tuple, dict] = {}
+        self._last_sample_t: dict[tuple, float] = {}
 
     def _start_procs(self, pis, t, defer=False):
         """Start procedures: declare their variables (all of them first), create their handlers, then start their
@@ -362,7 +375,9 @@ class ProcedureEngine(Actions):
             for key in list(self._trains):
                 self._stop_train(key, t)
             self._tasks, self._task_keys, self._cancelled = [], {}, set()
+            self._ramps.clear()
             if self.outputs_off_at_end:
+                self._devices_off(t)
                 for (dev, ch), v in list(self.outputs_state.items()):
                     if v:
                         self._set_out(dev, ch, 0, t, "digital")
@@ -389,6 +404,16 @@ class ProcedureEngine(Actions):
         finally:
             self._busy = False
             self.stopped = True
+
+    def _devices_off(self, t):
+        """Pumps stopped, temperature control off and odours off (end of the test)."""
+        for dev, ch in list(self._pumps_on):
+            self._a_pump_stop(None, (), dev, ch)
+        for dev, ch in list(self._thermostats_on):
+            self._a_temperature_off(None, (), dev, ch)
+        for (dev, ch), name in list(self._odours.items()):
+            if name:
+                self._a_odour_off(None, (), dev, ch)
 
     # ------------------------------------------------------------------ internals: errors & helpers
     def _proc_name(self, pi):
@@ -604,13 +629,23 @@ class ProcedureEngine(Actions):
         except Exception as e:  # pragma: no cover - hardware dependent
             self._error(None, (), f"I/O: {e}")
             return
+        # samples timed by the board (fast analogue inputs): placed before the frame by their board time, the
+        # newest sample of the poll at the frame time
+        newest: dict = {}
+        for dev, ch, kind, _v, ms in changes:
+            if ms is not None and kind in ioconfig.VALUE_KINDS:
+                newest[(dev, ch)] = max(ms, newest.get((dev, ch), ms))
         for dev, ch, kind, value, ms in changes:
             if kind == "watchdog":
                 self._watchdog_fired(t, dev)
             elif quiet:  # paused: keep the input states, no events
-                self.inputs[(dev, ch)] = value if kind in ("analog", "encoder") else (1 if value else 0)
+                self.inputs[(dev, ch)] = value if kind in ioconfig.VALUE_KINDS else (1 if value else 0)
             else:
-                self._input_changed(t, dev, ch, kind, value, ms)
+                ts = t
+                if ms is not None and (dev, ch) in newest:
+                    ts = max(self._last_sample_t.get((dev, ch), -math.inf), t - (newest[(dev, ch)] - ms) / 1000.0)
+                    self._last_sample_t[(dev, ch)] = ts
+                self._input_changed(ts, dev, ch, kind, value, ms)
         for e in self.devices.errors:
             self._error(None, (), e)
 
@@ -630,11 +665,13 @@ class ProcedureEngine(Actions):
         key = (dev, ch)
         old = self.inputs.get(key)
         extra = {"board_ms": ms} if ms is not None else {}
-        if kind in ("analog", "encoder"):
+        if kind in ioconfig.VALUE_KINDS:
             self.inputs[key] = value
             self._log_io(t, dev, ch, "input", value, kind, **extra)
             if old is None or value != old:
                 self._emit("input_changed", {"device": dev, "channel": ch, "value": value}, t)
+            if kind == "sensor":
+                self._sensor_range(t, dev, ch, value)
             return
         v = 1 if value else 0
         if old is not None and v == (1 if old else 0):
@@ -643,12 +680,54 @@ class ProcedureEngine(Actions):
             self.inputs[key] = 0
             return
         self.inputs[key] = v
-        self._log_io(t, dev, ch, "input", v, "digital", **extra)
+        typ = {"pir": "pir", "status": "status"}.get(kind, "digital")
+        self._log_io(t, dev, ch, "input", v, typ, **extra)
         args = {"device": dev, "channel": ch, "value": v}
         self._emit("input_changed", args, t)
         self._emit("input_on" if v else "input_off", args, t)
         if v:
             self.input_counts[key] = self.input_counts.get(key, 0) + 1
+            if self._pellet_checks:
+                self._pellet_seen(key, t)
+        if kind == "pir":
+            self._emit("movement_start" if v else "movement_end", args, t)
+        elif kind == "status" and v and "." in ch:
+            base, suffix = ch.rsplit(".", 1)
+            ev = ioconfig.STATUS_EVENTS.get(suffix)
+            if ev:
+                self._emit(ev, {"device": dev, "channel": base, "value": v}, t)
+
+    def _cfg(self, dev, ch) -> dict:
+        key = (dev, ch)
+        if key not in self._chan_cfg:
+            try:
+                self._chan_cfg[key] = self.devices.channel_config(dev, ch)
+            except Exception:  # pragma: no cover - devices without configurations
+                self._chan_cfg[key] = {}
+        return self._chan_cfg[key]
+
+    def _sensor_range(self, t, dev, ch, value):
+        """A sensor leaving / returning to its alert range (alert_min / alert_max options)."""
+        c = self._cfg(dev, ch)
+        lo, hi = c.get("alert_min"), c.get("alert_max")
+        if lo in (None, "") and hi in (None, ""):
+            return
+        try:
+            out = (lo not in (None, "") and value < float(lo)) or (hi not in (None, "") and value > float(hi))
+        except (TypeError, ValueError):
+            return
+        key = (dev, ch)
+        if out == self._sensor_alarm.get(key, False):
+            return
+        self._sensor_alarm[key] = out
+        args = {"device": dev, "channel": ch, "value": value}
+        self._log_io(t, dev, f"{ch}.out_of_range", "input", 1 if out else 0, "status")
+        self._emit("sensor_out_of_range" if out else "sensor_in_range", args, t)
+        if out and c.get("alert", True) not in (False, 0, "false", "no"):
+            units = c.get("units") or ioconfig.SENSOR_TYPES.get(c.get("sensor", "generic"), "")
+            rng = f"{lo if lo not in (None, '') else '-∞'} – {hi if hi not in (None, '') else '∞'}"
+            self._alert(t, f"{dev}/{ch} = {value:g} {units} is outside its range {rng} {units}".replace("  ", " "),
+                        key=("sensor",) + key, repeat_s=float(c.get("alert_repeat_s", 600)))
 
     def _log_io(self, t, dev, ch, kind, value, typ=None, **extra):
         e = {"t": round(float(t), 4), "device": str(dev), "channel": str(ch), "kind": kind,
@@ -688,6 +767,8 @@ class ProcedureEngine(Actions):
     def _tick(self, t):
         for key in list(self._trains):
             self._train_tick(key, t)
+        for key in list(self._ramps):
+            self._ramp_tick(key, t)
         while self._tasks and self._tasks[0][0] <= t + EPS:
             due, seq, fn, key = heapq.heappop(self._tasks)
             if seq in self._cancelled:

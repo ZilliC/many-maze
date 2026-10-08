@@ -1,10 +1,14 @@
 """The actions of the procedure engine ("do" statements): outputs, pulse trains, shocks, audio, communication,
-variables, timers, schedules, test control and the touch screen."""
+variables, timers, schedules, test control and the touch screen; lights, optogenetics, odours, liquid delivery,
+syringe pumps, temperature controllers, sensors, balances and alerts."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
+from .. import ioconfig
 from ..operant import Schedule
 from .catalog import ACTION_SPECS, EPS, SHOCK_MAX_S, STALL_S
 from .expr import MAX_SEQ, ExprError
@@ -33,6 +37,41 @@ class _Train:
     on: bool = False
     first: bool = True
     delayed: float = 0.0  # total delay after stalled frames
+    pulses: list | None = None  # explicit (onset from t0, width) of each pulse (pulse sequences)
+    levels: list | None = None  # intensity of each pulse of a sequence (or None)
+
+    def on_time(self, k):
+        return self.t0 + (self.pulses[k][0] if self.pulses is not None else k * self.period)
+
+    def width_of(self, k):
+        return self.pulses[k][1] if self.pulses is not None else self.width
+
+
+@dataclass
+class _Ramp:
+    """An output level changing linearly from v0 at t0 to v1 at t0 + duration."""
+
+    t0: float
+    v0: float
+    v1: float
+    duration: float
+    typ: str
+
+
+@dataclass
+class _PelletCheck:
+    """Pellets dispensed with a sensor: the pellets the sensor has not seen yet are dispensed again."""
+
+    dev: str
+    ch: str
+    sensor: tuple
+    want: int
+    timeout: float
+    retries: int
+    pulse_width: float
+    gap: float
+    seen: int = 0
+    tries: list = field(default_factory=list)
 
 
 @dataclass
@@ -60,7 +99,9 @@ class Actions:
         for prm in spec["params"]:
             v = st.get(prm["name"], prm["default"])
             typ = prm["type"]
-            if typ in ("number", "int"):
+            if typ in ("number", "int") and prm["default"] is None and (v is None or str(v).strip() == ""):
+                v = None  # optional, not given
+            elif typ in ("number", "int"):
                 d = prm["default"] if isinstance(prm["default"], (int, float)) else 0
                 v = self._num(th, v, p, prm["label"], default=d)
                 if typ == "int":
@@ -124,6 +165,48 @@ class Actions:
     def _a_light_off(self, th, p, device, channel):
         self._a_output_off(th, p, device, channel, "light")
 
+    def _a_light_level(self, th, p, device, channel, level):
+        dev, ch = self._resolve(th, p, device, channel)
+        self._stop_train((dev, ch), self.t)
+        self._set_out(dev, ch, self._level(dev, ch, level), self.t, "light")
+
+    def _level(self, dev, ch, percent):
+        """A level 0..1 for an output from a percentage; digital outputs are on for any level above 0."""
+        v = max(0.0, min(1.0, float(percent) / 100.0))
+        if self.devices.channel_kind(dev, ch) == "output":
+            return 1 if v > 0 else 0
+        return 1 if v == 1 else 0 if v == 0 else round(v, 4)
+
+    def _a_light_ramp(self, th, p, device, channel, level, duration, start):
+        dev, ch = self._resolve(th, p, device, channel)
+        key = (dev, ch)
+        self._stop_train(key, self.t)
+        v0 = self._level(dev, ch, start) if start not in (None, "") else float(self.outputs_state.get(key, 0))
+        v1 = max(0.0, min(1.0, float(level) / 100.0))
+        if duration <= 0:
+            self._set_out(dev, ch, self._level(dev, ch, level), self.t, "light")
+            self._emit("light_ramp_done", {"device": dev, "channel": ch}, self.t)
+            return
+        self._ramps[key] = _Ramp(self.t, v0, v1, float(duration), "light")
+        self._ramp_tick(key, self.t)
+
+    def _ramp_tick(self, key, t):
+        r = self._ramps.get(key)
+        if r is None:
+            return
+        f = min(1.0, max(0.0, (t - r.t0) / r.duration))
+        v = r.v0 + (r.v1 - r.v0) * f
+        dev, ch = key
+        if self.devices.channel_kind(dev, ch) == "output":
+            v = 1 if v > 0 else 0
+        else:
+            v = 1 if v >= 1 else 0 if v <= 0 else round(v, 3)
+        if abs(float(self.outputs_state.get(key, -1)) - v) >= 1 / 255 or f >= 1:
+            self._set_out(dev, ch, v, min(t, r.t0 + r.duration), r.typ)
+        if f >= 1:
+            del self._ramps[key]
+            self._emit("light_ramp_done", {"device": dev, "channel": ch}, r.t0 + r.duration)
+
     def _a_output_toggle(self, th, p, device, channel):
         dev, ch = self._resolve(th, p, device, channel)
         self._set_out(dev, ch, 0 if self.outputs_state.get((dev, ch)) else 1, self.t)
@@ -141,20 +224,30 @@ class Actions:
             if v and (not device or dev == device):
                 self._set_out(dev, ch, 0, self.t)
 
-    def _start_train(self, th, p, device, channel, period, width, count, typ, t0=None):
+    def _start_train(self, th, p, device, channel, period, width, count, typ, t0=None, pulses=None, levels=None):
         dev, ch = self._resolve(th, p, device, channel)
         key = (dev, ch)
         self._stop_train(key, self.t)
         width = max(0.0005, float(width))
         period = max(width, float(period))
         hw = False
-        if getattr(self.devices.device(dev, create=True), "hardware_pulses", False):
+        if pulses is not None:
+            pulses = [(max(0.0, float(a)), max(0.0005, float(b))) for a, b in pulses]
+            count = len(pulses)
+            seq = getattr(self.devices, "pulse_sequence", None)
+            if seq is not None and levels is None and self.devices.has(dev):
+                try:  # timed on the computer's clock by the device manager, not by the frames
+                    hw = bool(seq(dev, ch, pulses))
+                except Exception as e:  # pragma: no cover - hardware dependent
+                    self._error(th, p, f"pulse sequence: {e}")
+        elif getattr(self.devices.device(dev, create=True), "hardware_pulses", False):
             try:
                 hw = bool(self.devices.pulse_train(dev, ch, period, width, count))
             except Exception as e:  # pragma: no cover - hardware dependent
                 self._error(th, p, f"pulse train: {e}")
         t0 = self.t if t0 is None else t0
-        self._trains[key] = _Train(t0, period, width, count, hw, typ)
+        self._ramps.pop(key, None)
+        self._trains[key] = _Train(t0, period, width, count, hw, typ, pulses=pulses, levels=levels)
         self._train_tick(key, self.t)
 
     def _train_tick(self, key, t):
@@ -165,11 +258,16 @@ class Actions:
         guard = 0
         while guard < 100000:
             guard += 1
-            on_t = tr.t0 + tr.k * tr.period
+            if tr.n and tr.k >= tr.n and not tr.on:
+                del self._trains[key]
+                if tr.pulses is not None:
+                    self._emit("pulse_sequence_done", {"device": dev, "channel": ch},
+                               tr.on_time(tr.n - 1) + tr.width_of(tr.n - 1) if tr.n else t)
+                elif tr.typ == "pellet":
+                    self._pellet_train_done(key, t)
+                return
+            on_t = tr.on_time(tr.k)
             if not tr.on:
-                if tr.n and tr.k >= tr.n:
-                    del self._trains[key]
-                    return
                 if on_t > t + EPS:
                     return
                 if not tr.hw and t - on_t > STALL_S:
@@ -183,20 +281,23 @@ class Actions:
                     tr.delayed += lag
                 extra = {"train_start": True} if tr.first and tr.typ == "train" else {}
                 tr.first = False
+                if tr.levels is not None and tr.levels[tr.k] is not None:
+                    self._intensity(dev, ch, tr.levels[tr.k], on_t)
                 self._set_out(dev, ch, 1, on_t, tr.typ, hw=tr.hw, **extra)
                 tr.on = True
             else:
-                off_t = on_t + tr.width
+                off_t = on_t + tr.width_of(tr.k)
                 if off_t > t + EPS:
                     return
                 if not tr.hw and t - off_t > STALL_S:
                     off_t = t  # the output really stayed on until now
-                    tr.t0 = t - tr.width - tr.k * tr.period
+                    tr.t0 = t - tr.width_of(tr.k) - (tr.on_time(tr.k) - tr.t0)
                 self._set_out(dev, ch, 0, off_t, tr.typ, hw=tr.hw)
                 tr.on = False
                 tr.k += 1
 
     def _stop_train(self, key, t):
+        self._ramps.pop(key, None)
         tr = self._trains.pop(key, None)
         if tr is None:
             return
@@ -232,15 +333,162 @@ class Actions:
     def _a_sync_pulse(self, th, p, device, channel, width):
         self._start_train(th, p, device, channel, width / 1000.0, width / 1000.0, 1, "sync")
 
-    def _a_pellet(self, th, p, device, channel, count, pulse_width, gap):
+    def _a_pellet(self, th, p, device, channel, count, pulse_width, gap, sensor="", timeout=1.0, retries=0):
         n = max(1, int(count))
         width = max(0.001, pulse_width / 1000.0)
         dev, ch = self._resolve(th, p, device, channel)
         self.pellet_counts[(dev, ch)] = self.pellet_counts.get((dev, ch), 0) + n
         self._start_train(th, p, dev, ch, max(width * 2, gap), width, n, "pellet")
+        if sensor:
+            sdev = self.devices.find_channel(sensor, ioconfig.INPUT_KINDS) or dev
+            self._pellet_checks[(dev, ch)] = _PelletCheck(dev, ch, (sdev, sensor), n, max(0.05, float(timeout)),
+                                                          max(0, int(retries)), width, max(width * 2, gap))
+            if (dev, ch) not in self._trains:
+                self._pellet_train_done((dev, ch), self.t)
 
-    def _a_shock_on(self, th, p, device, channel, max_duration):
+    def _pellet_train_done(self, key, t):
+        """The pellets of a dispense went out: wait for the sensor to see the missing ones."""
+        chk = self._pellet_checks.get(key)
+        if chk is not None:
+            self._add_task(t + chk.timeout, lambda tt, key=key: self._pellet_timeout(key, tt), ("pellet",) + key)
+
+    def _pellet_seen(self, sensor_key, t):
+        for key, chk in list(self._pellet_checks.items()):
+            if chk.sensor == sensor_key and chk.seen < chk.want:
+                chk.seen += 1
+                self._emit("pellet_dropped", {"device": chk.dev, "channel": chk.ch}, t)
+                if chk.seen >= chk.want:
+                    self._cancel_task(("pellet",) + key)
+                    del self._pellet_checks[key]
+                return
+
+    def _pellet_timeout(self, key, t):
+        chk = self._pellet_checks.get(key)
+        if chk is None:
+            return
+        missing = chk.want - chk.seen
+        if missing <= 0:
+            del self._pellet_checks[key]
+            return
+        if chk.retries > 0:
+            chk.retries -= 1
+            chk.tries.append(t)
+            self._log_line(t, f"Pellet dispenser {key[0]}/{key[1]}: {missing} pellet(s) not detected — retrying")
+            self._log_io(t, key[0], f"{key[1]}.retries", "output", missing, "pellet_retry")
+            self._start_train(None, (), key[0], key[1], chk.gap, chk.pulse_width, missing, "pellet")
+            return
+        del self._pellet_checks[key]
+        self._log_line(t, f"Pellet dispenser {key[0]}/{key[1]}: {missing} pellet(s) not dispensed (jammed or empty)")
+        self._log_io(t, key[0], f"{key[1]}.errors", "output", missing, "pellet_error")
+        self._emit("pellet_error", {"device": key[0], "channel": key[1], "value": missing}, t)
+
+    def _a_dipper(self, th, p, device, channel, duration):
+        self._start_train(th, p, device, channel, duration, max(0.001, duration), 1, "dipper")
+
+    def _a_liquid_drop(self, th, p, device, channel, count, pulse_width, gap):
+        width = max(0.001, pulse_width / 1000.0)
+        self._start_train(th, p, device, channel, max(width * 2, gap), width, max(1, int(count)), "drop")
+
+    # -- odours
+    def _a_odour(self, th, p, device, channel, odour, flow):
+        dev = self._devname(device) or self.devices.find_channel(channel, ("odour",)) or "virtual"
+        cfg = self.devices.channel_config(dev, channel)
+        if not cfg:
+            self._error(th, p, f"odour: '{channel}' is not an olfactometer channel — simulated")
+        valves = dict(ioconfig.parse_pairs(cfg.get("odours", "")))
+        name = "" if str(odour).strip().lower() in ("", "none") else str(odour).strip()
+        if name and valves and name not in valves:
+            raise ExprError(f"unknown odour '{name}' (the olfactometer has {', '.join(valves)})")
+        blank = cfg.get("blank")
+        for n, v in valves.items():
+            if n != name and self.outputs_state.get((dev, v)):
+                self._set_out(dev, v, 0, self.t, "valve")
+        if name and name in valves:
+            if blank:
+                self._set_out(dev, blank, 0, self.t, "valve")
+            self._set_out(dev, valves[name], 1, self.t, "valve")
+        elif blank:
+            self._set_out(dev, blank, 1, self.t, "valve")
+        if flow and flow > 0 and cfg.get("flow"):
+            level = min(1.0, float(flow) / float(cfg.get("max_flow", 1.0) or 1.0))
+            self._set_out(dev, cfg["flow"], round(level, 4), self.t, "pwm", flow=float(flow))
+        old = self._odours.get((dev, channel), "")
+        if name != old:
+            if old:
+                self._log_io(self.t, dev, channel, "output", 0, "odour", odour=old)
+            if name:
+                self._log_io(self.t, dev, channel, "output", 1, "odour", odour=name)
+            self._odours[(dev, channel)] = name
+
+    def _a_odour_off(self, th, p, device, channel):
+        self._a_odour(th, p, device, channel, "", 0)
+
+    # -- shock intensity and optogenetics
+    def _intensity(self, dev, ch, value, t, unit="%"):
+        """Set the intensity output of an output channel (its ``intensity`` option): a level in % or, for a
+        shocker, a current in mA through the ``calibration`` table (level:mA|...) or ``max_ma``."""
+        cfg = self.devices.channel_config(dev, ch)
+        ich = cfg.get("intensity")
+        if not ich:
+            raise ExprError(f"'{ch}' has no intensity option (the output that sets its intensity)")
+        if unit == "mA":
+            pts = ioconfig.calibration_points(cfg.get("calibration"))
+            if len(pts) >= 2:
+                level = ioconfig.level_for(float(value), pts)
+            elif cfg.get("max_ma"):
+                level = max(0.0, min(1.0, float(value) / float(cfg["max_ma"])))
+            else:
+                raise ExprError(f"shocker '{ch}' is not calibrated (calibration or max_ma option)")
+            extra = {"ma": round(float(value), 4)}
+        else:
+            level = max(0.0, min(1.0, float(value) / 100.0))
+            extra = {}
+        self._set_out(dev, ich, round(level, 4), t, "pwm", **extra)
+        self.intensities[(dev, ch)] = float(value)
+        return level
+
+    def _a_shock_intensity(self, th, p, device, channel, intensity):
         dev, ch = self._resolve(th, p, device, channel)
+        self._intensity(dev, ch, intensity, self.t, "mA")
+
+    def _a_opto_intensity(self, th, p, device, channel, intensity):
+        dev, ch = self._resolve(th, p, device, channel)
+        self._intensity(dev, ch, intensity, self.t)
+
+    def _a_opto_train(self, th, p, device, channel, frequency, duty_cycle, duration, intensity):
+        if frequency <= 0:
+            raise ExprError("the frequency must be positive")
+        if not 0 < duty_cycle <= 100:
+            raise ExprError("the duty cycle must be between 0 and 100 %")
+        dev, ch = self._resolve(th, p, device, channel)
+        if intensity not in (None, ""):
+            self._intensity(dev, ch, intensity, self.t)
+        period = 1.0 / frequency
+        count = max(1, int(round(duration * frequency))) if duration > 0 else 0
+        self._start_train(th, p, dev, ch, period, period * duty_cycle / 100.0, count, "train")
+
+    def _a_opto_sequence(self, th, p, device, channel, file, repeat, intensity):
+        rows = read_pulse_file(file)
+        if not rows:
+            raise ExprError(f"no pulses in '{file}'")
+        dev, ch = self._resolve(th, p, device, channel)
+        if intensity not in (None, ""):
+            self._intensity(dev, ch, intensity, self.t)
+        reps = int(repeat) if repeat is not None else 1
+        span = max(a + b for a, b, _ in rows)
+        if reps <= 0:
+            reps = max(1, int(3600 // max(span, 0.001)))  # "until stopped": an hour of repetitions
+        reps = min(reps, max(1, 100000 // len(rows)))
+        pulses = [(r * span + a, b) for r in range(reps) for a, b, _ in rows]
+        levels = [lv for _r in range(reps) for _a, _b, lv in rows]
+        if all(lv is None for lv in levels) or not self.devices.channel_config(dev, ch).get("intensity"):
+            levels = None
+        self._start_train(th, p, dev, ch, 1, 0.001, len(pulses), "train", pulses=pulses, levels=levels)
+
+    def _a_shock_on(self, th, p, device, channel, max_duration, intensity=0):
+        dev, ch = self._resolve(th, p, device, channel)
+        if intensity and intensity > 0:
+            self._intensity(dev, ch, intensity, self.t, "mA")
         m = max_duration if 0 < max_duration <= SHOCK_MAX_S else (2.0 if max_duration <= 0 else SHOCK_MAX_S)
         if max_duration > SHOCK_MAX_S:
             self._error(th, p, f"Shock: safety cut-off limited to {SHOCK_MAX_S:g} s")
@@ -260,11 +508,13 @@ class Actions:
         self._cancel_task(("shock", dev, ch))
         self._set_out(dev, ch, 0, self.t, "shock")
 
-    def _a_shock_pulse(self, th, p, device, channel, duration):
+    def _a_shock_pulse(self, th, p, device, channel, duration, intensity=0):
         d = min(max(0.0, duration), SHOCK_MAX_S)
         if duration > SHOCK_MAX_S:
             self._error(th, p, f"Shock: duration limited to {SHOCK_MAX_S:g} s")
         dev, ch = self._resolve(th, p, device, channel)
+        if intensity and intensity > 0:
+            self._intensity(dev, ch, intensity, self.t, "mA")
         self._shock_keys.add((dev, ch))
         self._start_train(th, p, dev, ch, d, d, 1, "shock")
 
@@ -299,8 +549,11 @@ class Actions:
     def _a_white_noise(self, th, p, device, duration, volume):
         self._audio(th, p, device, "noise", "noise", 1, duration, volume=volume)
 
-    def _a_play_sound(self, th, p, device, file, duration, volume):
-        self._audio(th, p, device, "file", "sound", 1, duration, file=file, volume=volume)
+    def _a_play_sound(self, th, p, device, file, duration, volume, repeat=1):
+        self._audio(th, p, device, "file", "sound", 1, duration, file=file, volume=volume, repeat=repeat)
+
+    def _a_loop_sound(self, th, p, device, file, volume):
+        self._audio(th, p, device, "file", "sound", 1, 0, file=file, volume=volume, repeat=0)
 
     def _a_stop_sound(self, th, p, device):
         dev = self._audio_dev(device)
@@ -316,6 +569,116 @@ class Actions:
             self._a_tone(th, p, dev, 1000, 0.2, 0.5)
         else:
             self.outputs.beep()
+
+    # -- syringe pumps, temperature controllers, sensors, balances, alerts
+    def _channel_dev(self, th, p, device, channel, kinds, what):
+        dev = self._devname(device) or self.devices.find_channel(channel, kinds) or ""
+        if not dev or not self.devices.has(dev):
+            self._error(th, p, f"{what} '{channel}': no such device — simulated")
+            return dev or "virtual", False
+        return dev, True
+
+    def _pump(self, th, p, device, channel, op, **kw):
+        dev, ok = self._channel_dev(th, p, device, channel, ("pump",), "pump")
+        if ok:
+            try:
+                ok = bool(self.devices.pump(dev, channel, op, **kw))
+            except Exception as e:  # pragma: no cover - hardware dependent
+                self._error(th, p, f"pump: {e}")
+                ok = False
+            for err in self.devices.device(dev).errors:
+                self._error(th, p, err)
+        return dev
+
+    def _a_pump_infuse(self, th, p, device, channel, rate, volume, op="infuse"):
+        if rate <= 0:
+            raise ExprError("the rate must be positive")
+        dev = self._pump(th, p, device, channel, op, rate_ml_min=float(rate), volume_ml=float(volume or 0))
+        self._log_io(self.t, dev, channel, "output", 1, "pump", direction=op, rate=float(rate),
+                     volume=float(volume or 0))
+        self._pumps_on[(dev, channel)] = op
+
+    def _a_pump_withdraw(self, th, p, device, channel, rate, volume):
+        self._a_pump_infuse(th, p, device, channel, rate, volume, op="withdraw")
+
+    def _a_pump_stop(self, th, p, device, channel):
+        dev = self._pump(th, p, device, channel, "stop")
+        if self._pumps_on.pop((dev, channel), None) is not None:
+            self._log_io(self.t, dev, channel, "output", 0, "pump")
+
+    def _a_pump_syringe(self, th, p, device, channel, syringe):
+        try:
+            kw = {"diameter_mm": float(syringe)}
+        except ValueError:
+            kw = {"syringe": syringe}
+        self._pump(th, p, device, channel, "set_syringe", **kw)
+        self._log_line(self.t, f"Pump {channel}: syringe {syringe}")
+
+    def _a_set_temperature(self, th, p, device, channel, target, ramp):
+        dev, ok = self._channel_dev(th, p, device, channel, ("thermostat",), "temperature controller")
+        if ok:
+            self.devices.control(dev, channel, "target", target=float(target), ramp=float(ramp or 0))
+        self._log_io(self.t, dev, channel, "output", float(target), "thermostat", ramp=float(ramp or 0))
+        self._thermostats_on.add((dev, channel))
+
+    def _a_temperature_off(self, th, p, device, channel):
+        dev, ok = self._channel_dev(th, p, device, channel, ("thermostat",), "temperature controller")
+        if ok:
+            self.devices.control(dev, channel, "off")
+        if (dev, channel) in self._thermostats_on:
+            self._thermostats_on.discard((dev, channel))
+            self._log_io(self.t, dev, channel, "output", 0, "thermostat")
+
+    def _a_tare_sensor(self, th, p, device, channel):
+        dev, ok = self._channel_dev(th, p, device, channel, ("sensor", "analog"), "sensor")
+        if not ok:
+            return
+        d = self.devices.device(dev, create=False)
+        c = d.channels.get(channel) if d is not None else None
+        if c is None:
+            raise ExprError(f"unknown sensor '{channel}'")
+        v = d.inputs.get(channel, 0)
+        c["tare"] = float(c.get("tare", 0.0)) + float(v or 0)  # readings are reported net of the tare
+        self._log_line(self.t, f"Sensor {channel} tared at {float(v or 0):g}")
+
+    def _a_read_sensor(self, th, p, device, channel, var):
+        v = self._input_value(device, channel)
+        self._setvar(th, var, float(v) if v is not None else float("nan"), p)
+
+    def _a_weigh_animal(self, th, p, device, var):
+        dev = self._devname(device) or self.devices.find_type("scale")
+        d = self.devices.device(dev, create=False) if dev else None
+        if d is None or not hasattr(d, "read"):
+            raise ExprError("no balance configured (an I/O device of type scale)")
+        res = d.read(timeout=3.0)
+        grams = float(res[0] if isinstance(res, tuple) else res)
+        self.animal_weights.append((self.t, grams))
+        self._log_io(self.t, dev, "weight", "input", grams, "weight")
+        self._log_line(self.t, f"Animal weighed: {grams:g} g")
+        if var:
+            self._setvar(th, var, grams, p)
+
+    def _a_send_alert(self, th, p, text):
+        self._alert(self.t, text)
+
+    def _alert(self, t, text, key=None, repeat_s=0.0):
+        """Log an alert and send it by e-mail / SMS (alert devices); with `key`, at most once every repeat_s."""
+        if key is not None and repeat_s > 0:
+            last = self._alert_times.get(key)
+            if last is not None and t - last < repeat_s:
+                return
+            self._alert_times[key] = t
+        subject = "mANY-MAZE alert"
+        ctx = self.context or {}
+        who = ", ".join(str(ctx[k]) for k in ("test", "animal", "apparatus") if ctx.get(k))
+        self._log_line(t, f"Alert: {text}")
+        self.alerts.append((t, text))
+        notify = getattr(self.devices, "notify", None)
+        if notify is not None:
+            try:
+                notify(subject + (f" — {who}" if who else ""), f"{text}\n\n(test time {t:.1f} s)")
+            except Exception as e:  # pragma: no cover - network dependent
+                self._error(None, (), f"alert: {e}")
 
     # -- communication
     def _a_serial_send(self, th, p, device, text):
@@ -350,7 +713,7 @@ class Actions:
         self._set_switch(switch, 0 if self.switches.get(switch) else 1, self.t)
 
     def _a_simulate_input(self, th, p, device, channel, value):
-        dev = self._devname(device) or self.devices.find_channel(channel, ("input", "analog", "encoder")) or "virtual"
+        dev = self._devname(device) or self.devices.find_channel(channel, ioconfig.INPUT_KINDS) or "virtual"
         self.devices.set_input(dev, channel, value)
         self._poll_inputs(self.t)
 
@@ -472,7 +835,9 @@ class Actions:
 
     def _pause_safety(self, t):
         """Pulse trains stop and shocks go off (they cannot be timed while the test clock is stopped); with
-        outputs_off_on_pause every output and sound goes off too."""
+        outputs_off_on_pause every output and sound goes off too, pumps stop and odours go off (temperature
+        controllers keep regulating)."""
+        self._ramps.clear()
         for key in list(self._trains):
             self._stop_train(key, t)
         for key in list(self._shock_keys):
@@ -481,7 +846,12 @@ class Actions:
                 self._set_out(key[0], key[1], 0, t, "shock")
         if not self.outputs_off_on_pause:
             return
-        n = 0
+        n = len(self._pumps_on) + sum(1 for v in self._odours.values() if v)
+        for dev, ch in list(self._pumps_on):
+            self._a_pump_stop(None, (), dev, ch)
+        for (dev, ch), name in list(self._odours.items()):
+            if name:
+                self._a_odour_off(None, (), dev, ch)
         for (dev, ch), v in list(self.outputs_state.items()):
             if v:
                 self._set_out(dev, ch, 0, t, "pwm" if isinstance(v, float) and v not in (0.0, 1.0) else "digital")
@@ -565,3 +935,25 @@ class Actions:
             self._log_io(self.t, "screen", area, "output", 0, "stimulus")
         self.stimuli.clear()
         self._stimulus("clear", {})
+
+
+_NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def read_pulse_file(path) -> list[tuple[float, float, float | None]]:
+    """Pulses from a text / CSV file: one per line, "onset (s), duration (s)[, intensity %]" separated by commas,
+    semicolons, tabs or spaces; lines without two numbers (headers, comments) are skipped. Sorted by onset."""
+    p = Path(str(path)).expanduser()
+    if not p.is_file():
+        raise ExprError(f"pulse file not found: {path}")
+    rows = []
+    for line in p.read_text(errors="replace").splitlines():
+        line = line.split("#", 1)[0]
+        nums = _NUM.findall(line)
+        if len(nums) < 2 or not re.match(r"\s*[-+.\d]", line):  # a header or a comment
+            continue
+        a, b = float(nums[0]), float(nums[1])
+        if a < 0 or b <= 0:
+            continue
+        rows.append((a, b, float(nums[2]) if len(nums) > 2 else None))
+    return sorted(rows)

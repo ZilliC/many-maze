@@ -48,7 +48,7 @@ class _Detector:
             self.prev = None
         elif e in ("speed_above", "speed_below"):
             self.prev = eng._speed
-        elif e in ("analog_above", "analog_below"):
+        elif e in ("analog_above", "analog_below", "sensor_above", "sensor_below"):
             self.prev = eng._input_value(a.get("device"), a.get("channel"))
         elif e in ("condition_true", "condition_false"):
             self.prev = eng._truth(th, self.cond, path, quiet=True)
@@ -129,13 +129,18 @@ class _Detector:
             if eng._input_count(a.get("device"), a.get("channel")) >= a["count"]:
                 out.append((t, {"channel": a.get("channel")}))
                 self.done = True
-        elif e in ("analog_above", "analog_below"):
+        elif e in ("analog_above", "analog_below", "sensor_above", "sensor_below"):
             v = eng._input_value(a.get("device"), a.get("channel"))
             if v is not None:
                 thr = a["threshold"]
-                if _rising(self.prev, v, (lambda x: x > thr) if e == "analog_above" else (lambda x: x < thr)):
+                if _rising(self.prev, v, (lambda x: x > thr) if e.endswith("_above") else (lambda x: x < thr)):
                     out.append((t, {"value": v}))
                 self.prev = v
+        elif e == "pump_volume_reaches":
+            v = eng._input_value(a.get("device"), f"{a.get('channel')}.infused_ml") or 0
+            if v + EPS >= (a.get("volume") or 0):
+                out.append((t, {"channel": a.get("channel"), "value": v}))
+                self.done = True
         elif e == "encoder_reaches":
             v = eng._input_value(a.get("device"), a.get("channel")) or 0
             if abs(v) >= a["count"]:
