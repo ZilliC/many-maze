@@ -203,8 +203,24 @@ class WelcomePage(QWidget):
             self.side_buttons[k].setEnabled(has)
 
 
-# project lists an ANY-maze XML import appends to (see MainWindow.import_anymaze_xml)
-_IMPORTED_LISTS = ("animals", "groups", "apparatus", "tests")
+def _merge_imported(p: Project, scratch: Project):
+    """Move what an import added to ``scratch`` (a copy of ``p``) into ``p``: animals matched by ID (existing ones
+    take their imported treatment, notes and fields), treatments and apparatus by name, tests by number."""
+    have = {a.id: a for a in p.animals}
+    for new in scratch.animals:
+        old = have.get(new.id)
+        if old is None:
+            p.animals.append(new)
+            have[new.id] = new
+        else:
+            vars(old).update(vars(new))
+    for f in ("groups", "apparatus"):
+        names = {x.name for x in getattr(p, f)}
+        getattr(p, f).extend(x for x in getattr(scratch, f) if x.name not in names)
+    ids = {t.id for t in p.tests}
+    p.tests.extend(t for t in scratch.tests if t.id not in ids)
+    p.animal_fields[:] = list(dict.fromkeys(list(p.animal_fields) + list(scratch.animal_fields)))
+    p.stages[:] = list(dict.fromkeys(list(p.stages) + list(scratch.stages)))
 
 
 def page_hook(page, hook: str, *args, on_error=None):
@@ -326,6 +342,9 @@ class SectionView(QWidget):
 
 class MainWindow(QMainWindow):
     project_loaded = Signal(object)
+    # the experiment's list of tests changed (tests added or removed outside the Test schedule, e.g. by Run tests):
+    # emitted by notify_tests_changed(), and by mark_dirty() / save() when they find the list changed
+    tests_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -417,6 +436,9 @@ class MainWindow(QMainWindow):
         self.ribbon.corner.insertWidget(0, self.user_btn)
         self._update_user_button()
         self.ribbon.tab_changed.connect(self._tab_changed)
+        # a ribbon command first stores the field being typed in (ribbon buttons take no focus, so the field would
+        # not see editingFinished before the command rebuilds the form)
+        self.ribbon.command_pressed.connect(self._flush_edits)
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -570,7 +592,7 @@ class MainWindow(QMainWindow):
                                         "their experimenter):", list(p.experimenters), 0, False)
         if ok and remove_experimenter(p, name):
             if self.current_user() == name:
-                self.settings.setValue("current_user", "")
+                self.set_current_user("")  # also the project's: new tests must not be stamped with the removed user
             self.mark_dirty()
             self._update_user_button()
 
@@ -609,6 +631,7 @@ class MainWindow(QMainWindow):
         else:
             self._show_backstage()
         self.dirty = False  # page set-up must not count as user edits
+        self._tests_sig = self._tests_signature()
         self.update_title()
         self.project_loaded.emit(project)
 
@@ -730,6 +753,21 @@ class MainWindow(QMainWindow):
             return
         self.dirty = True
         self.update_title()
+        self._check_tests_changed()
+
+    def _tests_signature(self) -> tuple:
+        return tuple(id(t) for t in self.project.tests) if self.project is not None else ()
+
+    def _check_tests_changed(self):
+        sig = self._tests_signature()
+        if sig != getattr(self, "_tests_sig", None):
+            self._tests_sig = sig
+            self.tests_changed.emit()
+
+    def notify_tests_changed(self):
+        """Pages that add or remove tests of the experiment call this (the Test schedule's rows follow)."""
+        self._tests_sig = self._tests_signature()
+        self.tests_changed.emit()
 
     def update_title(self):
         if self.project is None:
@@ -881,6 +919,7 @@ class MainWindow(QMainWindow):
             return False
         self.dirty = False
         self.update_title()
+        self._check_tests_changed()
         self.status(f"Saved {self.project.path}")
         return True
 
@@ -979,20 +1018,20 @@ class MainWindow(QMainWindow):
             return None
 
         # the import runs on a copy (the pages keep reading the experiment meanwhile); done() moves what it added
-        # into the experiment on the GUI thread
+        # into the experiment on the GUI thread, matching animals by ID, treatments and apparatus by name and tests
+        # by number (never by list position: nothing may assume the experiment is as it was when the import began)
         scratch = copy.deepcopy(p)
-        sizes = {f: len(getattr(p, f)) for f in _IMPORTED_LISTS}
 
         def work(progress, stop):
-            return import_anymaze_xml(scratch, path, origin, progress)
+            def step(f):
+                if stop():  # the window is closing (Worker.stop_all)
+                    raise InterruptedError("import stopped")
+                progress(f)
+
+            return import_anymaze_xml(scratch, path, origin, step)
 
         def done(res):
-            for old, new in zip(p.animals, scratch.animals):  # existing animals get their group, notes, fields
-                vars(old).update(vars(new))
-            for f in _IMPORTED_LISTS:
-                getattr(p, f).extend(getattr(scratch, f)[sizes[f]:])
-            p.animal_fields[:] = scratch.animal_fields
-            p.stages[:] = scratch.stages
+            _merge_imported(p, scratch)
             self.mark_dirty()
             self.save()
             msg = (f"Imported {len(res['tests'])} tests of {len(res['animals'])} animals from ANY-maze"
@@ -1151,7 +1190,7 @@ class MainWindow(QMainWindow):
             self.load_project(str(folder), confirmed=True)
 
         w = run_with_progress(self, "Unpacking the experiment archive",
-                              lambda progress, stop: extract_archive(path, dest), on_done=done,
+                              lambda progress, stop: extract_archive(path, dest, progress, stop), on_done=done,
                               on_fail=lambda msg: error_box(self, "Open archive", msg), cancellable=False)
         if wait:  # scripting / tests: block until opened
             w.wait()

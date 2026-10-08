@@ -167,8 +167,17 @@ def import_animals(project, header, rows, mapping: dict, extra_fields: list[int]
 
 
 def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | None = None) -> list:
-    """Create tests (test schedule) from a table: animal, stage, trial, apparatus, video, duration."""
+    """Create tests (test schedule) from a table: test number, animal, stage, trial, apparatus, video, duration.
+    A test keeps its number from the table (ANY-maze's test number) unless the experiment already has a test of
+    that number."""
     new = []
+    taken = {t.id for t in project.tests}
+
+    def number(r):
+        n = parse_number(_cell(r, mapping.get("test")))
+        return int(n) if math.isfinite(n) and n >= 1 and n == int(n) else None
+
+    wanted = {n for n in map(number, rows) if n is not None and n not in taken}  # kept free for their rows
     for r in rows:
         aid = _cell(r, mapping.get("animal"))
         if not aid:
@@ -187,6 +196,12 @@ def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | N
         app = _cell(r, mapping.get("apparatus"))
         app = app if app in [x.name for x in project.apparatus] else ""
         t = project.add_test(video, aid, app, stage=stage, trial=int(trial) if math.isfinite(trial) else 1)
+        num = number(r)
+        if num is not None and num not in taken:
+            t.id = num
+        elif t.id in wanted:  # a row without a (free) number: after every number the table gives
+            t.id = max(taken | wanted) + 1
+        taken.add(t.id)
         dur = parse_number(_cell(r, mapping.get("duration")))
         if math.isfinite(dur) and dur > 0:
             t.duration_s = dur

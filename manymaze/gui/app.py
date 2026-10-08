@@ -43,7 +43,12 @@ def main(project: str | None = None, argv_project: bool = True) -> int:
     from .updates import startup_check
 
     startup_check(w)  # only if turned on (Help ▸ Check for updates at startup), at most once a week
-    return app.exec()
+    rc = app.exec()
+    from .widgets import Worker
+
+    if Worker.running:  # still finishing after the window closed (asked to stop): Qt aborts if they are destroyed
+        Worker.stop_all(ms=None)
+    return rc
 
 
 class _FileOpenFilter(QObject):
