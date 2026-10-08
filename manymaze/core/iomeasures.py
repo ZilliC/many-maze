@@ -14,7 +14,7 @@ import math
 import numpy as np
 
 ENCODER_TURN_GAP_S = 1.0  # an encoder is turning between two samples that differ and are at most this far apart
-ENCODER_REVERSAL_DEG = 10.0  # the encoder must turn back by more than this for a reversal (filters jitter)
+ENCODER_REVERSAL_DEG = 0.0  # turning back by more than this is a reversal (ANY-maze: any pulse the other way)
 ENCODER_IRV_WINDOW_S = 0.2  # instantaneous RPM (as ANY-maze): counts turned over windows of at least this length…
 ENCODER_IRV_AVERAGE = 10  # … averaged over this many windows
 DEVICE_GROUPS = {"shocker": "Shocker", "speaker": "Speaker", "light": "Light", "dipper": "Dipper",
@@ -178,7 +178,7 @@ def _overlap(spans_a, spans_b) -> float:
 
 
 def io_measures(io_events: list, duration: float, t_range: tuple | None = None, devices: list | None = None,
-                settings=None, test_end: float | None = None) -> dict:
+                settings=None, test_end: float | None = None, whole: bool | None = None) -> dict:
     """ANY-maze-style measures from a test's I/O log (``Test.io_events``).
 
     io_events: [{"t", "device", "channel", "kind": "input"|"output"|"variable", "value", "type"?}] where the optional
@@ -188,7 +188,8 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
     devices: optional ``Project.io_devices`` (encoder counts_per_rev / cm_per_rev, channel kinds, ``role``).
     settings: optional AnalysisSettings (latency_if_never, io_baseline_s, io_deviation_sd, opad_*).
     test_end: the end of the test, so that values recorded at that very moment count in the last period (periods
-    are otherwise half-open [t0, t1) for recorded variables).
+    are otherwise half-open [t0, t1) for recorded variables). whole: the period is the whole test (default: no
+    t_range).
 
     Returns {name: value}; channel labels are the channel name, or "device/channel" when two devices use the
     same channel name. See the user guide (I/O results) for the measures and their definitions.
@@ -204,7 +205,7 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
         ev = log.series[key]
         lab = log.label(key)
         if kind == "variable":
-            _variable(res, key[2], ev, t0, t1, end)
+            _variable(res, key[2], ev, t0, t1, end, t_range is None if whole is None else whole)
         elif kind == "derived":
             continue
         elif kind in _SPECIAL:
@@ -221,7 +222,7 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
             res[f"{lab}: activations"] = n
             res[f"{lab}: time on (s)"] = _r(total_on)
             res[f"{lab}: latency to first activation (s)"] = _r(onsets[0] - t0 if onsets else never)
-            res[f"{lab}: mean activation (s)"] = _r(total_on / len(spans) if spans else 0.0)
+            res[f"{lab}: mean activation (s)"] = _r(total_on / n if n else 0.0)  # time active / activations
             res[f"{lab}: activations per minute"] = _r(n / (T / 60) if T > 0 else math.nan)
             res[f"{lab}: longest activation (s)"] = _r(max(lens, default=0.0))
             res[f"{lab}: shortest activation (s)"] = _r(min(lens, default=0.0))
@@ -230,8 +231,37 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
             res[f"{lab}: negative reversals"] = len(offsets)
         else:
             _output(res, log, key, lab, ev, t0, t1, T, never)
+    _index_reversals(res, log, t0, t1)
     _opad(res, log, t0, t1, settings)
     return res
+
+
+def _index_reversals(res, log, t0, t1):
+    """ANY-maze's on/off input reversals: with two or more inputs given an ``index`` option, the order in which
+    they are activated rises or falls; a positive reversal is a change from falling to rising, a negative one from
+    rising to falling (e.g. a rat running back and forth along a row of beams)."""
+    idx = {}
+    for key in log.series:
+        v = log.conf(key).get("index")
+        if key[0] == "input" and log.kind(key) == "input" and v not in (None, ""):
+            try:
+                idx[key] = float(v)
+            except (TypeError, ValueError):
+                pass
+    if len(idx) < 2:
+        return
+    acts = sorted((t, idx[key]) for key in idx for t in _digital(log.series[key], -math.inf, math.inf)[1])
+    pos = neg = 0
+    direction, last = 0, None
+    for t, i in acts:
+        if last is not None and i != last:
+            d = 1 if i > last else -1
+            if direction and d != direction and t0 <= t < t1:
+                pos, neg = pos + (d > 0), neg + (d < 0)
+            direction = d
+        last = i
+    res["On/off inputs: positive reversals"] = pos
+    res["On/off inputs: negative reversals"] = neg
 
 
 def _output(res, log, key, lab, ev, t0, t1, T, never):
@@ -249,12 +279,12 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: latency to first {what} (s)"] = _r(onsets[0] - t0 if onsets else never)
         res[f"{g}: longest {what} (s)"] = _r(max(lens, default=0.0))
         res[f"{g}: shortest {what} (s)"] = _r(min(lens, default=0.0))
-        res[f"{g}: mean {what} (s)"] = _r(total_on / len(spans) if spans else 0.0)
+        res[f"{g}: mean {what} (s)"] = _r(total_on / len(onsets) if onsets else 0.0)
     else:
         res[f"{g}: latency to first on (s)"] = _r(onsets[0] - t0 if onsets else never)
         res[f"{g}: longest on (s)"] = _r(max(lens, default=0.0))
         res[f"{g}: shortest on (s)"] = _r(min(lens, default=0.0))
-        res[f"{g}: mean on (s)"] = _r(total_on / len(spans) if spans else 0.0)
+        res[f"{g}: mean on (s)"] = _r(total_on / len(onsets) if onsets else 0.0)  # time on / times on
     res[f"{g}: latency to first off (s)"] = _r(offsets[0] - t0 if offsets else never)
     res[f"{g}: activations per minute"] = _r(len(onsets) / (T / 60) if T > 0 else math.nan)
     if group == "light" and any(0 < v < 1 for _t, v in ev):
@@ -263,6 +293,7 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: mean level"] = _r(sum((b - a) * v for a, b, v in seg) / tot if tot > 0 else math.nan)
     if "pellet" in ty:
         res[f"{g}: pellets dispensed"] = len(onsets)
+        res[f"{g}: latency to first pellet (s)"] = _r(onsets[0] - t0 if onsets else never)
         errs = [v for t, v in log.derived(key, "errors") if t0 <= t <= t1]
         if errs or log.derived(key, "retries"):
             res[f"{g}: pellets not dispensed (errors)"] = int(sum(errs))
@@ -322,7 +353,8 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
     g = f"Sensor {lab}"
     res[f"{g}: initial value"] = _r(first)
     res[f"{g}: final value"] = _r(last)
-    res[f"{g}: mean"] = _r(sum((b - a) * v for a, b, v in seg) / tot if tot > 0 else first)
+    smp = [v for t, v in ev if t0 <= t <= t1 and math.isfinite(v)]  # as ANY-maze: the average of the readings
+    res[f"{g}: mean"] = _r(sum(smp) / len(smp) if smp else first)
     res[f"{g}: max"] = _r(max(vals) if vals else math.nan)
     res[f"{g}: min"] = _r(min(vals) if vals else math.nan)
     res[f"{g}: change"] = _r(last - first)
@@ -429,14 +461,16 @@ _SPECIAL = {"pir": _pir, "sensor": _sensor, "pump": _pump, "thermostat": _thermo
             "weight": _weight}
 
 
-def _variable(res, name, ev, t0, t1, end):
-    """A procedure variable recorded during the test (every change / every time it is set)."""
+def _variable(res, name, ev, t0, t1, end, whole=False):
+    """A procedure variable recorded during the test (every change / every time it is set). As ANY-maze, a
+    variable never recorded in the whole test has a max / min of 0 (variables start at 0); in a period, blank."""
     vals = [v for t, v in ev if t0 <= t < t1 or (end is not None and t == t1 and t1 >= end - 1e-9)]
     p = f"Variable: {name}"
+    none = 0.0 if whole else math.nan
     res[f"{p} (count)"] = len(vals)
     res[f"{p} (mean)"] = _r(np.mean(vals) if vals else math.nan)
-    res[f"{p} (max)"] = _r(max(vals) if vals else math.nan)
-    res[f"{p} (min)"] = _r(min(vals) if vals else math.nan)
+    res[f"{p} (max)"] = _r(max(vals) if vals else none)
+    res[f"{p} (min)"] = _r(min(vals) if vals else none)
     res[f"{p} (sum)"] = _r(sum(vals) if vals else 0.0)
     res[f"{p} (values)"] = ", ".join(f"{v:g}" for v in vals)
 
@@ -473,19 +507,16 @@ def _encoder(res, lab, ev, c, t0, t1, T):
     res[f"{lab}: max rate (counts/s)"] = _r(bins.max() if len(bins) else 0)
     t_turn = sum(b - a for a, b in turning)
     res[f"{lab}: time turning (s)"] = _r(t_turn)
-    # reversals: the direction changes after turning back by more than ENCODER_REVERSAL_DEG (any change without a
-    # counts per revolution); each run in one direction contributes its completed rotations
+    # reversals (as ANY-maze): a count in one direction followed by one in the other; each unbroken run in one
+    # direction contributes its completed rotations
     runs_cw, runs_acw, reversals = _encoder_runs(deltas, cpr)
     res[f"{lab}: reversals"] = reversals
     if cpr > 0:
         revs = counts / cpr
-        res[f"{lab}: revolutions"] = _r(revs)
-        # unsigned: revolutions turned in either direction (revolutions above are net, clockwise positive)
-        res[f"{lab}: mean rate (rev/min)"] = _r(abs(revs) / (T / 60) if T > 0 else math.nan)
-        cm = float(c.get("cm_per_rev", 0) or 0)
-        if cm > 0:
-            res[f"{lab}: distance (cm)"] = _r(abs(revs) * cm, 2)
+        res[f"{lab}: revolutions"] = _r(revs)  # net, clockwise positive
         d = np.asarray(deltas, float)
+        # ANY-maze's average RPM: the rotational velocity in either direction (turning back does not cancel it)
+        res[f"{lab}: mean rate (rev/min)"] = _r(np.abs(d).sum() / cpr / (T / 60) if T > 0 else math.nan)
         res[f"{lab}: degrees clockwise"] = _r(d[d > 0].sum() * 360 / cpr, 1)
         res[f"{lab}: degrees anticlockwise"] = _r(-d[d < 0].sum() * 360 / cpr, 1)
         eps = 1e-9
@@ -494,8 +525,14 @@ def _encoder(res, lab, ev, c, t0, t1, T):
         res[f"{lab}: clockwise rotations"] = n_cw
         res[f"{lab}: anticlockwise rotations"] = n_acw
         res[f"{lab}: total rotations"] = n_cw + n_acw  # ANY-maze's number of rotations (either direction)
-        res[f"{lab}: half rotations"] = int(sum(math.floor(2 * x / cpr + eps) for x in runs_cw + runs_acw))
-        res[f"{lab}: quarter rotations"] = int(sum(math.floor(4 * x / cpr + eps) for x in runs_cw + runs_acw))
+        cm = float(c.get("cm_per_rev", 0) or 0)
+        if cm > 0:  # as ANY-maze: the number of rotations × the wheel's circumference
+            res[f"{lab}: distance (cm)"] = _r((n_cw + n_acw) * cm, 2)
+        # as ANY-maze, a half / quarter rotation is an unbroken run of counts per revolution / 2 (/ 4) counts,
+        # rounded down
+        half, quarter = max(1, int(cpr) // 2), max(1, int(cpr) // 4)
+        res[f"{lab}: half rotations"] = int(sum(math.floor(x / half + eps) for x in runs_cw + runs_acw))
+        res[f"{lab}: quarter rotations"] = int(sum(math.floor(x / quarter + eps) for x in runs_cw + runs_acw))
         # minimum RPM: the slowest 1-s window of the period during which the encoder turned throughout (a change
         # logged at t happened during the sample interval ending at t)
         nb = max(1, int(math.ceil(T - 1e-9)))
@@ -508,6 +545,9 @@ def _encoder(res, lab, ev, c, t0, t1, T):
         res[f"{lab}: min rate while turning (rev/min)"] = _r(moving.min() / cpr * 60 if len(moving) else math.nan)
         irv = _encoder_irv(ev, t0, t1, cpr)
         res[f"{lab}: max rate (rev/min)"] = _r(max(v for _, v in irv) if irv else 0.0)
+        # ANY-maze's minimum RPM: the lowest instantaneous velocity, 0 if the encoder stopped in the period
+        still = t_turn < T - 1e-6
+        res[f"{lab}: min rate (rev/min)"] = _r(0.0 if still or not irv else min(v for _, v in irv))
         res[f"{lab}: mean rate while turning (rev/min)"] = _r(np.abs(d).sum() / cpr / (t_turn / 60) if t_turn > 0
                                                              else math.nan)
 
@@ -573,29 +613,29 @@ def _encoder_irv(ev, t0, t1, cpr: float) -> list[tuple[float, float]]:
 
 
 def _analog(res, lab, ev, t0, t1, settings):
-    """Analogue signal: mean, min, max and their times, baseline and deviations from it."""
+    """Analogue signal: mean, min, max and their times, baseline and deviations from it. As ANY-maze, the mean,
+    min, max and baseline are over the samples (their simple average); a period without a sample has the value
+    held from before it."""
     seg = _steps(ev, t0, t1)
-    tot = sum(b - a for a, b, _ in seg)
-    vals = [v for _, _, v in seg]
-    res[f"{lab}: mean"] = _r(sum((b - a) * v for a, b, v in seg) / tot if tot > 0 else
-                             (vals[0] if vals else math.nan))
+    smp = [(t, v) for t, v in ev if t0 <= t <= t1 and math.isfinite(v)] or [(a, v) for a, _, v in seg[:1]]
+    vals = [v for _, v in smp]
+    res[f"{lab}: mean"] = _r(sum(vals) / len(vals) if vals else math.nan)
     res[f"{lab}: min"] = _r(min(vals) if vals else math.nan)
     res[f"{lab}: max"] = _r(max(vals) if vals else math.nan)
     if not seg:
         return
-    res[f"{lab}: time of max (s)"] = _r(next(a for a, _, v in seg if v == max(vals)) - t0)
-    res[f"{lab}: time of min (s)"] = _r(next(a for a, _, v in seg if v == min(vals)) - t0)
+    res[f"{lab}: time of max (s)"] = _r(next(t for t, v in smp if v == max(vals)) - t0)
+    res[f"{lab}: time of min (s)"] = _r(next(t for t, v in smp if v == min(vals)) - t0)
     base_s = float(_setting(settings, "io_baseline_s", 10.0))
     k_sd = float(_setting(settings, "io_deviation_sd", 2.0))
     if base_s <= 0:
         return
     tb = min(t1, t0 + base_s)
-    bseg = [(a, min(b, tb), v) for a, b, v in seg if a < tb]
-    bt = sum(b - a for a, b, _ in bseg)
-    if bt <= 0:
+    bvals = [v for t, v in smp if t < tb]  # the samples in the baseline period
+    if not bvals:
         return
-    base = sum((b - a) * v for a, b, v in bseg) / bt
-    sd = math.sqrt(sum((b - a) * (v - base) ** 2 for a, b, v in bseg) / bt)
+    base = sum(bvals) / len(bvals)
+    sd = math.sqrt(sum((v - base) ** 2 for v in bvals) / len(bvals))
     res[f"{lab}: baseline"] = _r(base)
     res[f"{lab}: baseline SD"] = _r(sd)
     res[f"{lab}: end of baseline (s)"] = _r(tb - t0)
@@ -722,17 +762,20 @@ def io_track_measures(io_events: list, t: np.ndarray, dur: np.ndarray, step: np.
                 res[f"{g}: mean time to min (s)"] = _r(np.mean(tmn))
                 res[f"{g}: mean at entry"] = _r(np.mean(ent))
                 res[f"{g}: mean at exit"] = _r(np.mean(ext))
-        if zones and kind in ("input", "output", "switch", "encoder"):
-            _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never)
+        if zones and kind in ("input", "output", "switch", "encoder", "analog", "sensor", "variable"):
+            _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never, step, unit)
     return res
 
 
-def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never):
-    """A device's activity per zone: the activations that start while the animal is in the zone (their count,
-    latency, and their rate per minute spent in the zone), the time the channel is on while the animal is in the
-    zone; pellets dispensed in the zone; for a rotary encoder the counts turned while the animal is in the zone
-    and, with counts per revolution, the rotations made entirely in it and the maximum RPM in it. Measures are named "<channel> in <zone>: …" (groups as in io_measures:
-    "Shocker <channel> in <zone>: shocks", …)."""
+def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never, step=None, unit="cm"):
+    """A device's activity per zone, as ANY-maze: the activations that start while the animal is in the zone
+    (their count, latency, and their rate per minute spent in the zone), the latency to the first deactivation
+    in the zone, the time the channel is on while the animal is in the zone and the longest / shortest stretch
+    of it; pellets dispensed in the zone and the latency to the first; the distance travelled in the zone while a
+    virtual switch is on; for a rotary encoder the counts turned while the animal is in the zone and, with counts
+    per revolution, the degrees each way, the rotations made entirely in it, the distance (wheels) and the maximum
+    RPM in it. Measures are named "<channel> in <zone>: …" (groups as in io_measures: "Shocker <channel> in
+    <zone>: shocks", …)."""
     t0, t1 = float(t_range[0]), float(t_range[1])
     T = max(0.0, t1 - t0)
     never = T if latency_if_never == "duration" else math.nan
@@ -743,6 +786,25 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
         j = int(np.searchsorted(t, x, "right")) - 1
         return j if 0 <= j < n and t0 <= x <= t1 else -1
 
+    if kind in ("analog", "sensor", "variable"):
+        # the values recorded while the animal was in the zone (ANY-maze 9.1-9.3, 10.2-10.4, 20.2-20.7)
+        for zn, m in zones.items():
+            vz = [v for x, v in ev if (f := frame(x)) >= 0 and m[f] and math.isfinite(v)
+                  and (kind != "variable" or x < t1)]
+            if kind == "variable":
+                g = f"Variable: {key[2]} in {zn}"
+                res[f"{g} (count)"] = len(vz)
+                res[f"{g} (mean)"] = _r(sum(vz) / len(vz) if vz else math.nan)
+                res[f"{g} (max)"] = _r(max(vz) if vz else math.nan)
+                res[f"{g} (min)"] = _r(min(vz) if vz else math.nan)
+                res[f"{g} (sum)"] = _r(sum(vz))
+                res[f"{g} (values)"] = ", ".join(f"{v:g}" for v in vz)
+                continue
+            g = f"Sensor {lab} in {zn}" if kind == "sensor" else f"{lab} in {zn}"
+            res[f"{g}: mean"] = _r(sum(vz) / len(vz) if vz else math.nan)
+            res[f"{g}: max"] = _r(max(vz) if vz else math.nan)
+            res[f"{g}: min"] = _r(min(vz) if vz else math.nan)
+        return
     if kind == "encoder":
         cpr = float(log.conf(key).get("counts_per_rev", 0) or 0)
         start = [v for x, v in ev if x <= t0]
@@ -757,6 +819,10 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
             inz = [j >= 0 and bool(m[j]) for j, _ in moved]
             res[f"{lab} in {zn}: encoder counts"] = _r(sum(abs(d) for (_, d), i in zip(moved, inz) if i), 0)
             if cpr > 0:
+                res[f"{lab} in {zn}: degrees clockwise"] = _r(sum(d for (_, d), i in zip(moved, inz) if i and d > 0)
+                                                             * 360 / cpr, 1)
+                res[f"{lab} in {zn}: degrees anticlockwise"] = _r(-sum(d for (_, d), i in zip(moved, inz)
+                                                                       if i and d < 0) * 360 / cpr, 1)
                 # a rotation counts in the zone when the animal was in it for the whole rotation: the runs are found
                 # in each stretch of changes made while it was in the zone
                 n_rot, seg = 0, []
@@ -768,6 +834,9 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
                         n_rot += int(sum(math.floor(x / cpr + 1e-9) for x in r_cw + r_acw))
                         seg = []
                 res[f"{lab} in {zn}: total rotations"] = n_rot
+                cm = float(log.conf(key).get("cm_per_rev", 0) or 0)
+                if cm > 0:
+                    res[f"{lab} in {zn}: distance (cm)"] = _r(n_rot * cm, 2)
                 vz = [v for j, v in irv if j >= 0 and m[j]]
                 res[f"{lab} in {zn}: max rate (rev/min)"] = _r(max(vz) if vz else 0.0)
         return
@@ -775,7 +844,7 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
         g, n_name, what = lab, "activations", "activation"
     else:
         g, n_name, what = _output_names(log, key, lab)
-    onsets = _digital(ev, t0, t1)[1]
+    _, onsets, offsets, _ = _digital(ev, t0, t1)
     ts = np.asarray([x for x, _ in ev])
     vs = np.asarray([v for _, v in ev])
     j = np.searchsorted(ts, t, "right") - 1
@@ -789,8 +858,24 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
         res[f"{p}: latency to first {what or 'on'} (s)"] = _r(zo[0] - t0 if zo else never)
         tz = float(dur[m].sum())  # as ANY-maze: the activations in the zone per minute spent in the zone
         res[f"{p}: activations per minute"] = _r(len(zo) / (tz / 60) if tz > 0 else math.nan)
+        zoff = [x for x in offsets if (f := frame(x)) >= 0 and m[f]]
+        res[f"{p}: latency to first {'deactivation' if kind == 'input' else 'off'} (s)"] = _r(zoff[0] - t0 if zoff
+                                                                                           else never)
+        bouts = [float(dur[a:b].sum()) for a, b in _runs(on & m)]  # on while in the zone, continuously
+        res[f"{p}: longest {what or 'on'} (s)"] = _r(max(bouts, default=0.0))
+        res[f"{p}: shortest {what or 'on'} (s)"] = _r(min(bouts, default=0.0))
         if pellets:
             res[f"{p}: pellets dispensed"] = len(zo)
+            res[f"{p}: latency to first pellet (s)"] = _r(zo[0] - t0 if zo else never)
+        if kind == "switch" and step is not None:
+            res[f"{p}: distance while active ({unit})"] = _r(step[on & m].sum(), 2)
+
+
+def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """[start, end) of each run of True."""
+    m = np.r_[False, np.asarray(mask, bool), False]
+    d = np.flatnonzero(np.diff(m.astype(np.int8)))
+    return list(zip(d[::2], d[1::2]))
 
 
 def _was_on(ev, t0) -> bool:

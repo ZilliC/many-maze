@@ -60,6 +60,7 @@ class AnalysisSettings:
     novel_object: str = "Object B"  # for the novel object test
     social_side: str = "Left"  # three chamber: side holding the stranger animal
     exploration_facing_deg: float = 45.0
+    orientation_deg: float = 30.0  # oriented towards a zone / point: the head direction within this angle of it
     grid_cells: int = 4  # open field: N×N grid for line-crossing counts (0 = off)
     contact_distance: float = 0.0  # inter-animal contact distance (units); 0 = auto (1 body length)
     measure_filter: list = field(default_factory=list)  # optional list of measure names to keep
@@ -121,9 +122,12 @@ class Kinematics:
 
 
 def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | None = None,
-               duration: float | None = None, breaks: np.ndarray | None = None) -> Kinematics:
+               duration: float | None = None, breaks: np.ndarray | None = None,
+               gaps: np.ndarray | None = None) -> Kinematics:
     """breaks: frames that follow a pause (no distance, speed or turn is counted into them, smoothing does not
-    cross them, and the frame before lasts one dt)."""
+    cross them, and the frame before lasts one dt). gaps: frames where the animal is seen again after being hidden
+    (as ANY-maze, the distance it may have travelled while hidden is not counted: no distance, speed or turn into
+    them and no smoothing across them; frame durations are unchanged)."""
     t = track.t
     dur = track.frame_durations()
     if breaks is not None and not breaks.any():
@@ -135,15 +139,18 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     unit = app.unit
     x = ffill(track.x)
     y = ffill(track.y)
+    cuts = breaks
+    if gaps is not None and gaps.any():
+        cuts = gaps if breaks is None else (breaks | gaps)
     win = max(1, int(round(s.speed_smoothing_s / max(track.dt, 1e-6))))
-    ux = seg_moving_average(x, win, breaks) * scale
-    uy = seg_moving_average(y, win, breaks) * scale
+    ux = seg_moving_average(x, win, cuts) * scale
+    uy = seg_moving_average(y, win, cuts) * scale
     step = np.zeros(len(t))
     if len(t) > 1:
         d = np.hypot(np.diff(ux), np.diff(uy))
         step[1:] = np.nan_to_num(d)
-        if breaks is not None:
-            step[breaks] = 0.0
+        if cuts is not None:
+            step[cuts] = 0.0
     dts = np.diff(t, prepend=t[0] - track.dt) if len(t) else np.zeros(0)
     dts = np.where(dts <= 0, track.dt, dts)
     speed = step / dts
@@ -175,14 +182,34 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     if len(t) > 1:
         heading[1:] = np.degrees(np.arctan2(np.diff(uy), np.diff(ux)))
         heading[step < 1e-6] = np.nan
-        if breaks is not None:
-            heading[breaks] = np.nan
+        if cuts is not None:
+            heading[cuts] = np.nan
     if t0 is None:
         t0 = float(t[0]) if len(t) else 0.0
     if duration is None:
         duration = float(dur.sum())
     return Kinematics(t, dur, x, y, ux, uy, step, speed, mobile, freezing, motion_pct, heading, t0, duration,
                       scale, unit, breaks)
+
+
+def _head_direction(tr: Track) -> np.ndarray:
+    """Per frame: the direction (deg) from the centre to the head (NaN where the head is not tracked or is on the
+    centre) - ANY-maze's orientation of the animal."""
+    with np.errstate(invalid="ignore"):
+        a = np.degrees(np.arctan2(tr.hy - tr.y, tr.hx - tr.x))
+        a[~(np.hypot(tr.hy - tr.y, tr.hx - tr.x) > 1e-9)] = np.nan
+    return a
+
+
+def _orientation(P) -> tuple | None:
+    """Whole test: (head x, head y, orientation in radians), forward filled, or None without a tracked head."""
+    def make():
+        tr = P.track
+        a = _head_direction(tr)
+        if not np.isfinite(a).any():
+            return None
+        return ffill(tr.hx), ffill(tr.hy), np.radians(ffill(a))
+    return P.cached("orientation", make)
 
 
 def _mask(visits, n) -> np.ndarray:
@@ -283,7 +310,9 @@ def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_
         track = track.copy()
         for c in ("x", "y", "hx", "hy", "tx", "ty"):
             getattr(track, c)[hid_any] = np.nan
-    k = kinematics(track, app, s, t0=float(track.t[0]), duration=duration, breaks=breaks)
+    gaps = np.zeros(n, bool)  # frames where the animal is seen again after being hidden
+    gaps[1:] = hid_any[:-1] & ~hid_any[1:]
+    k = kinematics(track, app, s, t0=float(track.t[0]), duration=duration, breaks=breaks, gaps=gaps)
     return _Prepared(track, clean, app, s, k, breaks, memb, head_memb, hidden, hid_any, events, io_events, others)
 
 
@@ -383,11 +412,12 @@ class _Period:
 
     @cached_property
     def facing(self) -> tuple | None:
-        """(head x, head y, body angle in radians), forward filled, if the head and orientation are tracked."""
-        tr = self.track
-        if not (tr.has_head() and np.isfinite(tr.angle).any()):
+        """(head x, head y, orientation in radians), forward filled, if the head is tracked. As ANY-maze, the
+        orientation is the direction from the centre to the head."""
+        o = _orientation(self.P)
+        if o is None:
             return None
-        return ffill(tr.hx), ffill(tr.hy), np.radians(ffill(tr.angle))
+        return o[0][self.sl], o[1][self.sl], o[2][self.sl]
 
     def seq(self, names, part=None) -> list[tuple[str, float, float]]:
         """Entries (zone, t_enter, t_exit) into the given zones in the period, in order, from the occupancy of the
@@ -441,8 +471,9 @@ def _locomotion(res, p: _Period):
     res["Longest mobile episode (s)"] = _r(max((dur[a:b].sum() for a, b in mob), default=0.0))
     res["Shortest mobile episode (s)"] = _r(min((dur[a:b].sum() for a, b in mob), default=0.0))
     res["Latency to first mobile episode (s)"] = _r(p.lat(mob))
-    res["Latency to last mobile episode (s)"] = _r(float(p.t[mob[-1][0]] - p.t0) if mob else p.never)
-    res["Latency to last immobile episode (s)"] = _r(float(p.t[imm[-1][0]] - p.t0) if imm else p.never)
+    # as ANY-maze: blank when there is no episode (not the test duration, unlike the first-episode latencies)
+    res["Latency to last mobile episode (s)"] = _r(float(p.t[mob[-1][0]] - p.t0) if mob else math.nan)
+    res["Latency to last immobile episode (s)"] = _r(float(p.t[imm[-1][0]] - p.t0) if imm else math.nan)
     if np.isfinite(k.motion_pct).any():
         fr = p.eps(K.freezing)
         t_fr = float(dur[k.freezing].sum())
@@ -464,8 +495,10 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
     if ok.sum() >= 2:
         j0, j1 = np.flatnonzero(ok)[[0, -1]]
         straight = math.hypot(k.ux[j1] - k.ux[j0], k.uy[j1] - k.uy[j0])
-        res["Path efficiency"] = _r(straight / total if total > 0 else math.nan)
-        res["Path tortuosity"] = _r(total / straight if straight > 0 else math.nan)
+        # as ANY-maze: undefined when the animal was hidden (the distance it travelled meanwhile is not known)
+        hid = bool(p.hid_any.any())
+        res["Path efficiency"] = _r(straight / total if total > 0 and not hid else math.nan)
+        res["Path tortuosity"] = _r(total / straight if straight > 0 and not hid else math.nan)
     h = k.heading.copy()
     seg_id = np.cumsum(k.breaks) if k.breaks is not None else np.zeros(n, int)
     moving = np.isfinite(h) & (k.speed > max(s.mobility_threshold, 1e-9))
@@ -505,9 +538,7 @@ def _body_angle(tr: Track) -> np.ndarray | None:
     """The body orientation (deg) used for body rotations: the direction from the centre to the head (ANY-maze's
     definition), in the frames where the head is tracked, else the tracked body angle, or None when neither is
     tracked (in more than 2 frames)."""
-    with np.errstate(invalid="ignore"):
-        axis = np.degrees(np.arctan2(tr.hy - tr.y, tr.hx - tr.x))
-    axis[np.hypot(tr.hy - tr.y, tr.hx - tr.x) < 1e-9] = np.nan  # head on the centre: no direction
+    axis = _head_direction(tr)
     if np.isfinite(axis).sum() > 2:
         return axis
     return tr.angle if np.isfinite(tr.angle).sum() > 2 else None
@@ -569,16 +600,20 @@ def _zones(res, p: _Period):
         res[f"{zn}: time (%)"] = _r(100 * tz / T if T > 0 else math.nan, 2)
         res[f"{zn}: entries"] = len(visits)
         res[f"{zn}: latency to first entry (s)"] = _r(p.lat(visits))
-        dz = float(k.step[vm].sum())
+        # as ANY-maze, the step between two positions counts in the zone the animal is leaving (it was in at the
+        # first of them): the step into the zone is not counted, the step out of it is
+        dz = float(k.step[np.r_[False, fm[:-1]][p.sl]].sum())
         res[f"{zn}: distance ({u})"] = _r(dz, 2)
         res[f"{zn}: mean speed ({u}/s)"] = _r(dz / tz if tz > 0 else math.nan)
-        res[f"{zn}: mean visit (s)"] = _r(p.ep_time(visits) / len(visits) if visits else 0.0)
+        res[f"{zn}: mean visit (s)"] = _r(tz / len(visits) if visits else 0.0)  # time in the zone / entries
         res[f"{zn}: time immobile (s)"] = _r(dur[vm & ~k.mobile].sum())
         if has_motion:
             res[f"{zn}: time freezing (s)"] = _r(dur[vm & k.freezing].sum())
         if P.head_memb is not None and zn in P.head_memb:
             hfm = P.visits_mask(("head", zn), P.head_memb[zn])
-            hv = p.eps(hfm, entries=True)
+            # as ANY-maze, a head entry is the head going from outside the zone to inside it: a head that starts
+            # the test in the zone has not entered it
+            hv = [e for e in p.eps(hfm, entries=True) if e[0] + p.i0 > 0]
             res[f"{zn}: head entries"] = len(hv)
             res[f"{zn}: head time (s)"] = _r(dur[hfm[p.sl]].sum())
             res[f"{zn}: latency to head entry (s)"] = _r(p.lat(hv))
@@ -592,14 +627,16 @@ def _zones(res, p: _Period):
         res[f"{zn}: latency to last entry (s)"] = _r(float(t[visits[-1][0]] - p.t0) if visits else p.never)
         if zn in zone_names:
             res[f"{zn}: was first zone entered"] = "Yes" if zn == first_zone else "No"
-        vdur = [float(dur[a:b].sum()) for a, b in visits]
+        # every visit in the period, clipped to it (one carried into the period and the initial one included)
+        vdur = [float(dur[a:b].sum()) for a, b in runs(vm)]
         res[f"{zn}: longest visit (s)"] = _r(max(vdur, default=0.0))
         res[f"{zn}: shortest visit (s)"] = _r(min(vdur, default=0.0))
         res[f"{zn}: entries (/min)"] = _r(len(visits) / (T / 60) if T > 0 else math.nan)
         res[f"{zn}: time mobile (s)"] = _r(dur[vm & k.mobile].sum())
         res[f"{zn}: immobile episodes"] = len(p.eps(fm & ~K.mobile))
         if has_motion:
-            res[f"{zn}: freezing episodes"] = len(p.eps(fm & K.freezing))
+            # as ANY-maze: the times the animal starts to freeze while in the zone
+            res[f"{zn}: freezing episodes"] = sum(1 for a, _ in p.eps(K.freezing) if vm[a])
             # pixel-change activity in the zone (see _activity); an inactive episode belongs to the zone it starts in
             act_full = P.cached("active", lambda: activity_mask(P.k, P.s))
             t_act = float(dur[vm & act_full[p.sl]].sum())
@@ -616,10 +653,11 @@ def _zones(res, p: _Period):
             straight = (math.hypot(k.ux[j] - k.ux[ok_xy[0]], k.uy[j] - k.uy[ok_xy[0]])
                         if len(ok_xy) and math.isfinite(k.ux[j]) else math.nan)
             res[f"{zn}: distance before first entry ({u})"] = _r(d_first, 2)
-            res[f"{zn}: path efficiency to first entry"] = _r(straight / d_first if d_first > 0 else math.nan)
-        else:
-            res[f"{zn}: distance before first entry ({u})"] = _r(total if s.latency_if_never == "duration"
-                                                                 else math.nan, 2)
+            # undefined when the route passed through a hidden zone (the distance travelled there is not known)
+            res[f"{zn}: path efficiency to first entry"] = _r(straight / d_first if d_first > 0
+                                                              and not p.hid_any[:j + 1].any() else math.nan)
+        else:  # as ANY-maze: undefined if the animal never entered the zone
+            res[f"{zn}: distance before first entry ({u})"] = math.nan
             res[f"{zn}: path efficiency to first entry"] = math.nan
         zobj = app.zone(zn)
         if zobj is not None and zn not in grid_cells:
@@ -633,15 +671,15 @@ def _zones(res, p: _Period):
             out_d = dzs[~vm & np.isfinite(dzs)]
             fin = np.flatnonzero(np.isfinite(dzs))
             res[f"{zn}: initial distance from zone ({u})"] = _r(dzs[fin[0]] if len(fin) else math.nan, 2)
-            res[f"{zn}: max distance from zone ({u})"] = _r(out_d.max() if len(out_d) else math.nan, 2)
-            res[f"{zn}: min distance from zone when outside ({u})"] = _r(out_d.min() if len(out_d) else math.nan, 2)
+            # as ANY-maze: 0 when the animal never left the zone (max) / when it was in the zone (min)
+            res[f"{zn}: max distance from zone ({u})"] = _r(out_d.max() if len(out_d) else 0.0, 2)
+            res[f"{zn}: min distance from zone ({u})"] = _r(0.0 if vm.any() or not len(out_d) else out_d.min(), 2)
             res[f"{zn}: cumulative distance from zone ({u}·s)"] = _r(np.nansum(dzs * dur), 1)
         if p.facing is not None and zobj is not None:
-            hxf, hyf, ang_body = p.facing
-            zx, zy = zobj.shape.centroid()
-            diff = _angle_diff(np.arctan2(zy - hyf, zx - hxf), ang_body)
-            head_in = p.head_memb[zn] if p.head_memb is not None and zn in p.head_memb else np.zeros(p.n, bool)
-            res[f"{zn}: time facing (s)"] = _r(dur[(diff <= s.exploration_facing_deg) & ~head_in & ~p.hid_any].sum())
+            # ANY-maze's time oriented towards the zone: outside it, the direction from the centre to the head
+            # within the orientation angle of the direction from the head to some point of the zone's border
+            towards = P.cached(("facing", zn), lambda z=zobj: _oriented_to_shape(P, z.shape))[p.sl]
+            res[f"{zn}: time facing (s)"] = _r(dur[towards & ~vm & ~p.hid_any].sum())
         if zobj is not None and zobj.whishaw_width_cm > 0:
             _zone_whishaw(res, p, zobj)
         _zone_more(res, p, zn, fm, vm, visits, vdur)
@@ -655,7 +693,7 @@ def _zones(res, p: _Period):
 def _zone_whishaw(res, p: _Period, z):
     """Whishaw's corridor of a zone (as ANY-maze): a band z.whishaw_width_cm wide centred on the line from the
     animal's first position in the test to the zone centre; the time spent in it in the period and the distance
-    travelled in it (the step into the corridor is not counted, as the distance in a zone)."""
+    travelled in it (as the distance in a zone: the step into the corridor is not counted, the step out of it is)."""
     P, zn, u = p.P, z.name, p.P.app.unit
 
     def make():
@@ -668,9 +706,31 @@ def _zone_whishaw(res, p: _Period, z):
         with np.errstate(invalid="ignore"):
             return d <= z.whishaw_width_cm / 2
     inside = P.cached(("whishaw", zn), make)
-    prev = np.r_[False, inside[:-1]][p.sl]
+    prev = np.r_[False, inside[:-1]][p.sl]  # as the distance in a zone: the step out of it counts, the step in not
     res[f"{zn}: time in Whishaw's corridor (s)"] = _r(p.dur[inside[p.sl]].sum())
-    res[f"{zn}: distance in Whishaw's corridor ({u})"] = _r(p.k.step[inside[p.sl] & prev].sum(), 2)
+    res[f"{zn}: distance in Whishaw's corridor ({u})"] = _r(p.k.step[prev].sum(), 2)
+
+
+def _oriented_to_shape(P: _Prepared, shape) -> np.ndarray:
+    """Whole test: is the animal oriented towards the shape - the direction from its centre to its head within
+    s.orientation_deg of the direction from the head to at least one point of the shape's border?"""
+    hx, hy, ang = _orientation(P)
+    poly = np.asarray(shape.polygon(72), float)
+    # points along the whole border (a polygon gives only its corners): ~64 points spread by edge length
+    nxt = np.roll(poly, -1, axis=0)
+    seg = np.hypot(*(nxt - poly).T)
+    per = np.maximum(1, np.round(64 * seg / max(seg.sum(), 1e-9)).astype(int))
+    poly = np.vstack([a + np.linspace(0, 1, k, endpoint=False)[:, None] * (b - a)
+                      for a, b, k in zip(poly, nxt, per)])
+    out = np.zeros(len(hx), bool)
+    tol = math.radians(P.s.orientation_deg)
+    for i in range(0, len(hx), 4096):  # bound the (frames × border points) temporaries
+        sl = slice(i, i + 4096)
+        with np.errstate(invalid="ignore"):
+            to = np.arctan2(poly[None, :, 1] - hy[sl, None], poly[None, :, 0] - hx[sl, None])
+            d = np.abs((to - ang[sl, None] + np.pi) % (2 * np.pi) - np.pi)
+            out[sl] = np.nanmin(np.where(np.isfinite(d), d, np.inf), axis=1) <= tol
+    return out
 
 
 def _transitions(P: _Prepared) -> np.ndarray:
@@ -807,23 +867,23 @@ def _head(P: _Prepared):
 
 
 def _investigation(P: _Prepared, z) -> np.ndarray:
-    """Whole test: frames in which the animal investigates zone z - its head is in the zone, or within the zone's
-    investigation distance and (when the body orientation is tracked) pointing at it (within the exploration
-    facing angle of the direction to the zone centre); never while hidden. Bouts shorter than the minimum entry
-    duration are ignored."""
+    """Whole test: frames in which the animal investigates zone z - as ANY-maze, its head is outside the zone but
+    within the zone's investigation distance of its border and (when the orientation is tracked) pointing at it
+    (the direction from the centre to the head within the exploration facing angle of the direction to the zone
+    centre); never while hidden. Bouts shorter than the minimum entry duration are ignored."""
     def make():
         K, s = P.k, P.s
         H = _head(P)
         hx, hy = (H[0], H[1]) if H is not None else (K.x, K.y)
         inside = z.shape.contains(hx, hy)
         with np.errstate(invalid="ignore"):
-            inv = inside | ((z.shape.distance_to_edge(hx, hy) <= z.investigation_distance_cm / P.app.scale)
-                            & np.isfinite(hx))
-            ang = ffill(P.track.angle)
-            if np.isfinite(ang).any():
+            inv = ~inside & ((z.shape.distance_to_edge(hx, hy) <= z.investigation_distance_cm / P.app.scale)
+                             & np.isfinite(hx))
+            o = _orientation(P)
+            if o is not None:
                 zx, zy = z.shape.centroid()
-                diff = _angle_diff(np.arctan2(zy - hy, zx - hx), np.radians(ang))
-                inv &= inside | ~np.isfinite(diff) | (diff <= s.exploration_facing_deg)
+                diff = _angle_diff(np.arctan2(zy - hy, zx - hx), o[2])
+                inv &= ~np.isfinite(diff) | (diff <= s.exploration_facing_deg)
         return drop_short_runs(inv & ~P.hid_any, K.t, K.dur, s.entry_min_duration_s, value=True)
     return P.cached(("inv", z.name), make)
 
@@ -891,17 +951,19 @@ def _zone_investigation(res, p: _Period, z):
         float(p.t[bouts[0][1] - 1] + dur[bouts[0][1] - 1] - p.t0) if bouts else p.never)
     firsts = _investigation_firsts(p)
     res[f"{zn}: was first zone investigated"] = "Yes" if firsts and firsts[0][1] == zn else "No"
-    res[f"{zn}: longest investigation bout (s)"] = _r(max(bd, default=0.0))
-    res[f"{zn}: shortest investigation bout (s)"] = _r(min(bd, default=0.0))
-    res[f"{zn}: mean investigation bout (s)"] = _r(sum(bd) / len(bd) if bd else 0.0)
+    # longest / shortest: every bout in the period, clipped to it (as ANY-maze)
+    bclip = [float(dur[a:b].sum()) for a, b in runs(inv)]
+    res[f"{zn}: longest investigation bout (s)"] = _r(max(bclip, default=0.0))
+    res[f"{zn}: shortest investigation bout (s)"] = _r(min(bclip, default=0.0))
+    res[f"{zn}: mean investigation bout (s)"] = _r(ti / len(bd) if bd else 0.0)  # time investigating / bouts
     res[f"{zn}: investigation durations (s)"] = _list_text(bd)
     di = float(k.step[inv].sum())
     res[f"{zn}: distance while investigating ({u})"] = _r(di, 2)
     if bouts:
         j = bouts[0][0]
         d_first = float(k.step[1:j + 1].sum()) if j > 0 else 0.0
-    else:
-        d_first = float(k.step.sum()) if P.s.latency_if_never == "duration" else math.nan
+    else:  # as ANY-maze: undefined if the animal never investigated the zone
+        d_first = math.nan
     res[f"{zn}: distance before first investigation ({u})"] = _r(d_first, 2)
     res[f"{zn}: mean speed while investigating ({u}/s)"] = _r(di / ti if ti > 0 else math.nan)
     res[f"{zn}: time mobile while investigating (s)"] = _r(dur[inv & k.mobile].sum())
@@ -909,7 +971,8 @@ def _zone_investigation(res, p: _Period, z):
     res[f"{zn}: immobile episodes while investigating"] = len(p.eps(inv_full & ~K.mobile))
     if np.isfinite(k.motion_pct).any():
         res[f"{zn}: time freezing while investigating (s)"] = _r(dur[inv & k.freezing].sum())
-        res[f"{zn}: freezing episodes while investigating"] = len(p.eps(inv_full & K.freezing))
+        # as ANY-maze: the times the animal starts to freeze while investigating the zone
+        res[f"{zn}: freezing episodes while investigating"] = sum(1 for a, _ in p.eps(K.freezing) if inv[a])
 
 
 def _zone_partial_exits(res, p: _Period, z):
@@ -950,20 +1013,26 @@ def _zone_head(res, p: _Period, zn: str, z):
                                                      if len(exits) else p.never)
     res[f"{zn}: head distance ({u})"] = _r(H[2][p.sl][hin].sum(), 2)
     cin = P.cached(("occ", "centre"), lambda: occupancy(P.track, P.app, P.s, part="centre")[0])
-    if zn in cin:
-        res[f"{zn}: time head in zone with centre outside (s)"] = _r(dur[hin & ~cin[zn][p.sl]].sum())
     if z is None:
+        if zn in cin:
+            res[f"{zn}: time head in zone with centre outside (s)"] = _r(dur[hin & ~cin[zn][p.sl]].sum())
         return
     hx, hy = H[0], H[1]
     h_in = P.cached(("hin", zn), lambda: z.shape.contains(hx, hy))[p.sl]
+    # as ANY-maze, without the entry criteria: the head position in the zone and the centre position outside it
+    c_in = P.cached(("cin", zn), lambda: z.shape.contains(P.k.x, P.k.y))[p.sl]
+    res[f"{zn}: time head in zone with centre outside (s)"] = _r(dur[h_in & ~c_in & ~p.hid_any].sum())
     h_edge = P.cached(("hedge", zn), lambda: z.shape.distance_to_edge(hx, hy) * K.scale)[p.sl]
-    seen = ~p.hid_any
-    mean = np.where(h_in, 0.0, h_edge)[seen]
-    res[f"{zn}: mean head distance from zone ({u})"] = _r(np.nanmean(mean) if np.isfinite(mean).any()
-                                                          else math.nan, 2)
+    seen = ~p.hid_any & np.isfinite(h_edge)
+    # as ANY-maze: the head's distance while outside (0 inside) weighted by time, over the period; the max is 0 if
+    # the head never left the zone and the min 0 if it entered it
+    t_seen = float(dur[seen].sum())
+    res[f"{zn}: mean head distance from zone ({u})"] = _r(float((np.where(h_in, 0.0, h_edge) * dur)[seen].sum())
+                                                          / t_seen if t_seen > 0 else math.nan, 2)
     _, mx, mn = _stats3(h_edge[~h_in & seen])
-    res[f"{zn}: max head distance from zone ({u})"] = _r(mx, 2)
-    res[f"{zn}: min head distance from zone when outside ({u})"] = _r(mn, 2)
+    res[f"{zn}: max head distance from zone ({u})"] = _r(mx if math.isfinite(mx) else (0.0 if seen.any()
+                                                                                        else math.nan), 2)
+    res[f"{zn}: min head distance from zone ({u})"] = _r(0.0 if (h_in & seen).any() else mn, 2)
     mean, mx, mn = _stats3(h_edge[h_in & seen])
     res[f"{zn}: mean head distance to border when inside ({u})"] = _r(mean, 2)
     res[f"{zn}: max head distance to border when inside ({u})"] = _r(mx, 2)
@@ -974,10 +1043,16 @@ def _zone_border(res, p: _Period, z, vm: np.ndarray):
     """Distance of the centre from the zone border while the animal is in the zone (and its centre inside it)."""
     P, zn, u = p.P, z.name, p.P.app.unit
     c_in = P.cached(("cin", zn), lambda: z.shape.contains(P.k.x, P.k.y))[p.sl]
-    mean, mx, mn = _stats3(_edge(P, z)[p.sl][vm & c_in & ~p.hid_any])
-    res[f"{zn}: mean distance to border when inside ({u})"] = _r(mean, 2)
+    sel = vm & c_in & ~p.hid_any
+    e = _edge(P, z)[p.sl]
+    _, mx, mn = _stats3(e[sel])
+    t_in = float(p.dur[sel & np.isfinite(e)].sum())
+    res[f"{zn}: mean distance to border when inside ({u})"] = _r(float((e * p.dur)[sel & np.isfinite(e)].sum())
+                                                                 / t_in if t_in > 0 else math.nan, 2)
     res[f"{zn}: max distance to border when inside ({u})"] = _r(mx, 2)
-    res[f"{zn}: min distance to border when inside ({u})"] = _r(mn, 2)
+    # as ANY-maze: 0 once the animal has left the zone (in the period)
+    left = bool((vm[:-1] & ~vm[1:]).any())
+    res[f"{zn}: min distance to border when inside ({u})"] = _r(0.0 if left and sel.any() else mn, 2)
 
 
 def _zone_heading_arrays(P: _Prepared, z) -> dict:
@@ -1009,8 +1084,9 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
     res[f"{zn}: time getting further away (s)"] = _r(dur[out & (dd > 1e-9)].sum())
     with np.errstate(invalid="ignore"):
         ae = np.abs(err)
-        res[f"{zn}: time moving towards (s)"] = _r(dur[out & k.mobile & (ae <= tol)].sum())
-        res[f"{zn}: time moving away (s)"] = _r(dur[out & k.mobile & (ae >= 180.0 - tol)].sum())
+        # as ANY-maze: within ("less than") the critical angle of the direction to the zone / of the opposite one
+        res[f"{zn}: time moving towards (s)"] = _r(dur[out & k.mobile & (ae < tol)].sum())
+        res[f"{zn}: time moving away (s)"] = _r(dur[out & k.mobile & (ae > 180.0 - tol)].sum())
     moving = ae[out & k.mobile]
     res[f"{zn}: mean absolute heading error (deg)"] = _r(np.nanmean(moving) if np.isfinite(moving).any()
                                                          else math.nan, 1)
@@ -1031,17 +1107,18 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
     res[f"{zn}: initial heading error (deg)"] = _r(abs(signed), 1)
     res[f"{zn}: signed initial heading error (deg)"] = _r(signed, 1)
     if p.facing is not None:
-        def orient():
-            K, (zx, zy) = P.k, z.shape.centroid()
+        def orient():  # as ANY-maze: the orientation (centre → head) vs the direction from the head to the centre
+            hx, hy, ang = _orientation(P)
+            zx, zy = z.shape.centroid()
             with np.errstate(invalid="ignore"):
-                return _angle_diff(np.arctan2(zy - K.y, zx - K.x), np.radians(ffill(P.track.angle))) <= tol
+                return _angle_diff(np.arctan2(zy - hy, zx - hx), ang) <= s.orientation_deg
         towards = P.cached(("oriented", zn), orient)[p.sl]
         res[f"{zn}: time oriented towards zone centre when inside (s)"] = _r(dur[vm & ~p.hid_any & towards].sum())
 
 
 def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray):
-    """Absolute turn angle (direction of travel, as the whole-test measure) and absolute head turn angle (body
-    orientation) while in the zone; nothing across a pause."""
+    """Absolute turn angle (direction of travel, as the whole-test measure) and absolute head turn angle (the
+    direction from the centre to the head) while in the zone; nothing across a pause."""
     s, k = p.P.s, p.k
     brk = np.asarray(k.breaks, bool) if k.breaks is not None else np.zeros(p.n, bool)
     seg_id = np.cumsum(brk)
@@ -1053,11 +1130,10 @@ def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray):
         keep = (seg_id[mi[1:]] == seg_id[mi[:-1]]) & vm[mi[1:]] & vm[mi[:-1]]
         turn = float(d[keep].sum())
     res[f"{zn}: absolute turn angle (deg)"] = _r(turn, 1)
-    ang = p.track.angle
-    if np.isfinite(ang).sum() > 2:
-        d = np.abs((np.diff(ang) + 180) % 360 - 180)
-        keep = np.isfinite(d) & ~brk[1:] & vm[1:] & vm[:-1]
-        res[f"{zn}: absolute head turn angle (deg)"] = _r(float(d[keep].sum()), 1)
+    if p.P.clean.has_head():
+        # as the whole-test head turn angle; a turn counts in the zone the animal is in after it (as ANY-maze)
+        turn_h = p.P.cached("head_motion", lambda: _head_arrays(p.P))["turn"][p.sl]
+        res[f"{zn}: absolute head turn angle (deg)"] = _r(float(np.abs(turn_h[vm]).sum()), 1)
 
 
 def _zone_cipl(res, p: _Period, z, visits: list):
@@ -1068,7 +1144,7 @@ def _zone_cipl(res, p: _Period, z, visits: list):
     cipl = math.nan
     ok = np.flatnonzero(np.isfinite(k.ux))
     stop = visits[0][0] if visits else p.n
-    if len(ok) and stop > ok[0]:
+    if visits and len(ok) and stop > ok[0]:  # as ANY-maze: undefined if the animal never entered the zone
         i0 = ok[0]
         dz = P.cached(("dist", zn), lambda: np.where(P.memb[zn], 0.0, _edge(P, z)))[p.sl]
         t_stop = float(p.t[stop]) if stop < p.n else p.t0 + p.T
@@ -1112,19 +1188,27 @@ def _points(res, p: _Period):
             res[f"{pt.name}: latency to approach (s)"] = _r(p.lat(ap))
         res[f"{pt.name}: max distance ({u})"] = _r(np.nanmax(dist), 2)
         dd = A["dd"][p.sl]
-        towards = k.mobile & (dd < 0)
-        away = k.mobile & (dd > 0)
+        # as ANY-maze: moving towards / away when the direction of travel is within the critical angle of the
+        # direction to the point / of the opposite direction (while mobile)
+        tol = s.exploration_facing_deg
+        with np.errstate(invalid="ignore"):
+            err = A["heading_err"][p.sl]
+            towards = k.mobile & (err < tol)  # "less than the critical angle"
+            away = k.mobile & (err > 180.0 - tol)
         res[f"{pt.name}: time moving towards (s)"] = _r(dur[towards].sum())
         res[f"{pt.name}: time moving away (s)"] = _r(dur[away].sum())
-        res[f"{pt.name}: distance moved towards ({u})"] = _r(-dd[towards].sum(), 2)
-        res[f"{pt.name}: distance moved away ({u})"] = _r(dd[away].sum(), 2)
-        if p.facing is not None:
-            hxf, hyf, ang_body = p.facing
-            diff = _angle_diff(np.arctan2(pt.y - hyf, pt.x - hxf), ang_body)
-            res[f"{pt.name}: time head oriented towards (s)"] = _r(dur[diff <= s.exploration_facing_deg].sum())
-            res[f"{pt.name}: time head oriented away (s)"] = _r(dur[diff >= 180 - s.exploration_facing_deg].sum())
+        # distances: how much the distance to the point shrank / grew while the animal was mobile
+        res[f"{pt.name}: distance moved towards ({u})"] = _r(-dd[k.mobile & (dd < 0)].sum(), 2)
+        res[f"{pt.name}: distance moved away ({u})"] = _r(dd[k.mobile & (dd > 0)].sum(), 2)
+        if "head_angle" in A:
+            diff = A["head_angle"][p.sl]
+            otol = s.orientation_deg
+            res[f"{pt.name}: time head oriented towards (s)"] = _r(dur[diff < otol].sum())
+            res[f"{pt.name}: time head oriented away (s)"] = _r(dur[diff > 180 - otol].sum())
             res[f"{pt.name}: mean head angle (deg)"] = _r(np.nanmean(diff), 1)
-            res[f"{pt.name}: head turns towards"] = len(p.eps(A["head_towards"]))
+            # the times it turns towards the point (not oriented before, oriented now; not at the start of the test)
+            full = P.cached(("head_towards", pt.name), lambda d=A["head_angle"]: d < s.orientation_deg)
+            res[f"{pt.name}: head turns towards"] = sum(1 for a, _ in p.eps(full) if a + p.i0 > 0)
         t_tw = float(dur[towards].sum())
         res[f"{pt.name}: mean speed moving towards ({u}/s)"] = _r(k.step[towards].sum() / t_tw if t_tw > 0
                                                                   else math.nan)
@@ -1134,9 +1218,10 @@ def _points(res, p: _Period):
             res[f"{pt.name}: mean head distance ({u})"] = _r(np.nanmean(hd) if fin else math.nan, 2)
             res[f"{pt.name}: max head distance ({u})"] = _r(np.nanmax(hd) if fin else math.nan, 2)
             res[f"{pt.name}: min head distance ({u})"] = _r(np.nanmin(hd) if fin else math.nan, 2)
-            hdd, hmov = A["hdd"][p.sl], A["head_moving"][p.sl]
-            res[f"{pt.name}: time head moving towards (s)"] = _r(dur[hmov & (hdd < 0)].sum())
-            res[f"{pt.name}: time head moving away (s)"] = _r(dur[hmov & (hdd > 0)].sum())
+            herr, hmov = A["head_err"][p.sl], A["head_moving"][p.sl]
+            with np.errstate(invalid="ignore"):
+                res[f"{pt.name}: time head moving towards (s)"] = _r(dur[hmov & (herr < tol)].sum())
+                res[f"{pt.name}: time head moving away (s)"] = _r(dur[hmov & (herr > 180.0 - tol)].sum())
         _point_heading(res, p, pt)
         res[f"{pt.name}: X ({u})"] = _r(pt.x * k.scale, 2)
         res[f"{pt.name}: Y ({u})"] = _r(pt.y * k.scale, 2)
@@ -1208,16 +1293,25 @@ def _grids_and_sequences(res, p: _Period):
     if app.sequences:
         from .sequences import find_sequences, other_zones, sequence_measures
 
-        cum = np.cumsum(p.k.step)
+        P, K = p.P, p.P.k
+        cum = P.cached("cum_step", lambda: np.cumsum(K.step))
 
         def travelled(ta, tb):
             """Distance travelled between times ta and tb (into the frames after ta, up to tb)."""
-            i, j = np.searchsorted(p.t, [ta, tb], "right") - 1
+            i, j = np.searchsorted(K.t, [ta, tb], "right") - 1
             return float(cum[max(j, 0)] - cum[max(i, 0)]) if j > i else 0.0
 
+        whole = p if p.whole else P.cached("whole_period", lambda: _Period(P, 0, len(K.t), float(K.t[0]),
+                                                                           K.duration, None))
+        t1 = p.t0 + p.T
         for q in app.sequences:
             names = list(dict.fromkeys(list(q.steps) + ([] if q.allow_other else other_zones(app, q))))
-            att = find_sequences(q, p.seq([zn for zn in names if zn in p.memb]), names)
+            # found on the whole test; as ANY-maze, a completed sequence belongs to the period in which it ends
+            # (an incomplete attempt to the one in which it starts)
+            att = P.cached(("sequence", q.name), lambda q=q, names=names: find_sequences(
+                q, whole.seq([zn for zn in names if zn in P.memb]), names))
+            att = [a for a in att if p.t0 - 1e-9 <= (a.end if a.completed else a.start) < t1 - 1e-9
+                   or (p.whole and a.completed)]
             res.update(sequence_measures(q, att, p.t0, p.T, s.latency_if_never, distance=travelled, unit=app.unit))
 
 
@@ -1318,10 +1412,10 @@ def _head_arrays(P: _Prepared) -> dict:
     turn = np.zeros(n)
     if n > 1:
         step[1:] = np.nan_to_num(np.hypot(np.diff(hx), np.diff(hy)))
-        # head direction: the body axis (tail → head). Frames where it is unknown (or the animal is hidden) do not
-        # turn, and a jump of more than 90° from one tracked frame to the next is a head / tail swap of the
-        # tracker, not a turn. The cumulative direction is smoothed like the positions.
-        ang = np.where(P.hid_any, np.nan, tr.angle)
+        # head direction: as ANY-maze, the direction from the centre to the head. Frames where it is unknown (or
+        # the animal is hidden) do not turn, and a jump of more than 90° from one tracked frame to the next is a
+        # head / tail swap of the tracker, not a turn. The cumulative direction is smoothed like the positions.
+        ang = np.where(P.hid_any, np.nan, _head_direction(tr))
         idx = np.flatnonzero(np.isfinite(ang))
         if len(idx) > 1:
             d = np.zeros(n)
@@ -1379,9 +1473,13 @@ _REAR_NAMES = ("rears", "time rearing (s)", "latency to first rear (s)", "mean r
 
 
 def _rear_results(res, p: _Period, eps, in_mask: np.ndarray, prefix: str = ""):
-    """Rear count, time, latency and mean / max / min duration ("Rears", … or "{zone}: rears", …)."""
-    d = [float(p.dur[a:b].sum()) for a, b in eps]
-    values = (len(eps), _r(p.dur[in_mask].sum()), _r(p.lat(eps)), _r(sum(d) / len(d) if d else 0.0),
+    """Rear count, time, latency and mean / max / min duration ("Rears", … or "{zone}: rears", …). As ANY-maze,
+    the mean is the time rearing / the number of rears, and the max / min are over the bouts of in_mask (rearing,
+    in the zone), clipped to the period - a bout in a zone also starts by entering it while rearing and ends by
+    leaving it."""
+    t_rear = float(p.dur[in_mask].sum())
+    d = [float(p.dur[a:b].sum()) for a, b in runs(in_mask)]
+    values = (len(eps), _r(t_rear), _r(p.lat(eps)), _r(t_rear / len(eps) if eps else 0.0),
               _r(max(d, default=0.0)), _r(min(d, default=0.0)))
     for name, v in zip(_REAR_NAMES, values):
         res[prefix + name if prefix else name[0].upper() + name[1:]] = v
@@ -1428,7 +1526,7 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
     if P.io_events:
         try:
             res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices, settings=s,
-                                   test_end=P.k.t0 + P.k.duration))
+                                   test_end=P.k.t0 + P.k.duration, whole=p.whole))
         except Exception:  # a malformed I/O log must not prevent the other measures
             pass
         try:
@@ -1472,7 +1570,9 @@ def _point_arrays(P: _Prepared, p) -> dict:
             hx, hy = ffill(tr.hx), ffill(tr.hy)
             hd = np.hypot((hx - p.x) * K.scale, (hy - p.y) * K.scale)
             near = hd <= radius
-            diff = _angle_diff(np.arctan2(p.y - hy, p.x - hx), np.radians(tr.angle))
+            o = _orientation(P)
+            diff = (_angle_diff(np.arctan2(p.y - hy, p.x - hx), o[2]) if o is not None
+                    else np.full(len(hx), np.inf))
             explore = near & ((diff <= s.exploration_facing_deg) | (hd <= radius * 0.5))
             out["explore"] = explore
             out["explore_bouts"] = drop_short_runs(explore, K.t, K.dur, 0.2, value=True)
@@ -1485,10 +1585,18 @@ def _point_arrays(P: _Prepared, p) -> dict:
         dd[1:] = np.nan_to_num(np.diff(ud))
         dd[P.breaks] = 0.0
     out["dd"] = dd
-    if tr.has_head() and np.isfinite(tr.angle).any():
-        hxf, hyf = ffill(tr.hx), ffill(tr.hy)
-        diff = _angle_diff(np.arctan2(p.y - hyf, p.x - hxf), np.radians(ffill(tr.angle)))
-        out["head_towards"] = diff <= s.exploration_facing_deg
+    # heading error (deg): the direction of travel into each frame vs the direction from the previous position to
+    # the point (ANY-maze: the vector to the next position vs the vector to the point)
+    hd_err = np.full(len(K.t), np.nan)
+    if len(K.t) > 1:
+        with np.errstate(invalid="ignore"):
+            brg = np.arctan2(p.y * K.scale - K.uy[:-1], p.x * K.scale - K.ux[:-1])
+            hd_err[1:] = _angle_diff(np.radians(K.heading[1:]), brg)
+    out["heading_err"] = hd_err
+    o = _orientation(P)
+    if o is not None:  # as ANY-maze: the orientation (centre → head) vs the direction from the head to the point
+        diff = _angle_diff(np.arctan2(p.y - o[1], p.x - o[0]), o[2])
+        out["head_angle"] = diff
     if tr.has_head() and np.isfinite(tr.hx).any():
         # the head: its distance from the point, and when it moves (smoothed like the centre) towards / away from it
         hxf, hyf = ffill(tr.hx), ffill(tr.hy)
@@ -1498,11 +1606,17 @@ def _point_arrays(P: _Prepared, p) -> dict:
         huy = seg_moving_average(hyf, win, P.breaks) * K.scale
         hdd = np.zeros(len(K.t))
         hstep = np.zeros(len(K.t))
+        h_err = np.full(len(K.t), np.nan)  # the head's direction of movement vs the direction to the point
         if len(hdd) > 1:
             hdd[1:] = np.nan_to_num(np.diff(np.hypot(hux - p.x * K.scale, huy - p.y * K.scale)))
             hstep[1:] = np.nan_to_num(np.hypot(np.diff(hux), np.diff(huy)))
             hdd[P.breaks] = 0.0
             hstep[P.breaks] = 0.0
+            with np.errstate(invalid="ignore"):
+                h_err[1:] = _angle_diff(np.arctan2(np.diff(huy), np.diff(hux)),
+                                        np.arctan2(p.y * K.scale - huy[:-1], p.x * K.scale - hux[:-1]))
+            h_err[(hstep < 1e-9) | P.breaks] = np.nan
+        out["head_err"] = h_err
         dts = np.diff(K.t, prepend=K.t[0] - tr.dt)
         hspeed = hstep / np.where(dts <= 0, tr.dt, dts)
         hsp = seg_moving_average(hspeed, max(1, int(round(0.5 / max(tr.dt, 1e-6)))), P.breaks)
@@ -1645,6 +1759,13 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
             d = float(step[1:j + 1].sum()) if j > 0 else 0.0
         out[f"{prefix or name}: distance before first press{u}"] = _r(d, 2)
 
+    def frame(x):
+        return min(max(int(np.searchsorted(t, x, "right")) - 1, 0), len(t) - 1)
+
+    def zone_time(m):
+        d = dur if dur is not None else np.full(len(t), (t1 - t0) / max(len(t), 1))
+        return float(d[m].sum())
+
     for b in behaviours:
         name = b.name
         evs = [e for e in events if e.get("behaviour") == name]
@@ -1656,10 +1777,11 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
             dist_before(ts[0] if ts else None)
             if zones and t is not None and len(t):
                 for zn, m in zones.items():
-                    zt = [x for x in ts if m[min(max(np.searchsorted(t, x, "right") - 1, 0), len(t) - 1)]]
+                    zt = [x for x in ts if m[frame(x)]]
+                    tz = zone_time(m)  # as ANY-maze: the rate in a zone is per minute spent in the zone
                     out[f"{name} in {zn}: count"] = len(zt)
                     out[f"{name} in {zn}: latency (s)"] = _r(zt[0] - t0 if zt else never)
-                    out[f"{name} in {zn}: rate (/min)"] = _r(len(zt) / (T / 60) if T > 0 else math.nan)
+                    out[f"{name} in {zn}: rate (/min)"] = _r(len(zt) / (tz / 60) if tz > 0 else math.nan)
                     dist_before(zt[0] if zt else None, f"{name} in {zn}")
         else:
             spans = []
@@ -1668,19 +1790,23 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
                 bb = min(e.get("t_end", e["t"]) if e.get("t_end") is not None else t1, t1)
                 if bb > a:
                     spans.append((a, bb))
-            spans.sort()
+            spans.sort()  # the bouts in the period, clipped to it (one under way at its start included)
+            # as ANY-maze, presses and releases are the moments the key goes down / up in the period: a bout under
+            # way at the start of the period is time pressed, not a press
+            presses = sorted(e["t"] for e in evs if t0 <= e["t"] < t1)
+            releases = sorted(e["t_end"] for e in evs if e.get("t_end") is not None and t0 <= e["t_end"] < t1)
             total = sum(bb - a for a, bb in spans)
-            out[f"{name}: count"] = len(spans)
+            out[f"{name}: count"] = len(presses)
             out[f"{name}: duration (s)"] = _r(total)
             out[f"{name}: duration (%)"] = _r(100 * total / T if T > 0 else math.nan, 2)
-            out[f"{name}: latency (s)"] = _r(spans[0][0] - t0 if spans else never)
-            out[f"{name}: mean bout (s)"] = _r(total / len(spans) if spans else 0.0)
+            out[f"{name}: latency (s)"] = _r(presses[0] - t0 if presses else never)
+            out[f"{name}: mean bout (s)"] = _r(total / len(presses) if presses else 0.0)  # time pressed / presses
             out[f"{name}: longest bout (s)"] = _r(max((bb - a for a, bb in spans), default=0.0))
             out[f"{name}: shortest bout (s)"] = _r(min((bb - a for a, bb in spans), default=0.0))
-            out[f"{name}: latency to first release (s)"] = _r(spans[0][1] - t0 if spans else never)
-            out[f"{name}: rate (/min)"] = _r(len(spans) / (T / 60) if T > 0 else math.nan)
+            out[f"{name}: latency to first release (s)"] = _r(releases[0] - t0 if releases else never)
+            out[f"{name}: rate (/min)"] = _r(len(presses) / (T / 60) if T > 0 else math.nan)
             out[f"{name}: press durations (s)"] = ", ".join(f"{_r(bb - a):g}" for a, bb in spans)
-            dist_before(spans[0][0] if spans else None)
+            dist_before(presses[0] if presses else None)
             if zones and t is not None and len(t):
                 d = dur if dur is not None else np.full(len(t), (t1 - t0) / max(len(t), 1))
                 active = np.zeros(len(t), bool)
@@ -1688,21 +1814,22 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
                     active |= (t >= a) & (t < bb)
                 for zn, m in zones.items():
                     on = active & m
-                    # a press belongs to the zone the animal was in when it started (its whole duration)
-                    zs = [(a, bb) for a, bb in spans
-                          if m[min(max(np.searchsorted(t, a, "right") - 1, 0), len(t) - 1)]]
-                    starts = [a for a, _ in zs]
-                    lens = [bb - a for a, bb in zs]
+                    # a press / release counts in the zone the animal is in at that moment (as ANY-maze)
+                    starts = [a for a in presses if m[frame(a)]]
+                    rel = [x for x in releases if m[frame(x)]]
+                    lens = [bb - a for a, bb in spans if m[frame(a)]]  # list: the presses that started in the zone
+                    bouts = [float(d[a:bb].sum()) for a, bb in runs(on)]  # pressed while in the zone, continuously
                     tz = float(d[on].sum())
+                    t_zone = float(d[m].sum())
                     g = f"{name} in {zn}"
                     out[f"{g}: count"] = len(starts)
                     out[f"{g}: duration (s)"] = _r(tz)
                     out[f"{g}: latency (s)"] = _r(starts[0] - t0 if starts else never)
                     out[f"{g}: mean bout (s)"] = _r(tz / len(starts) if starts else 0.0)
-                    out[f"{g}: rate (/min)"] = _r(len(starts) / (T / 60) if T > 0 else math.nan)
-                    out[f"{g}: longest bout (s)"] = _r(max(lens, default=0.0))
-                    out[f"{g}: shortest bout (s)"] = _r(min(lens, default=0.0))
-                    out[f"{g}: latency to first release (s)"] = _r(zs[0][1] - t0 if zs else never)
+                    out[f"{g}: rate (/min)"] = _r(len(starts) / (t_zone / 60) if t_zone > 0 else math.nan)
+                    out[f"{g}: longest bout (s)"] = _r(max(bouts, default=0.0))
+                    out[f"{g}: shortest bout (s)"] = _r(min(bouts, default=0.0))
+                    out[f"{g}: latency to first release (s)"] = _r(rel[0] - t0 if rel else never)
                     out[f"{g}: press durations (s)"] = ", ".join(f"{_r(x):g}" for x in lens)
                     dist_before(starts[0] if starts else None, g)
     return out

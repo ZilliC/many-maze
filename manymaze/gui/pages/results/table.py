@@ -58,9 +58,12 @@ def measure_category(col: str, names: dict) -> tuple[str, str]:
                 return cat, prefix
         if prefix.startswith("Animal "):
             return "Social", ""
-        for word, sub in (("Shocker ", "Shockers"), ("Speaker ", "Speakers"), ("Light ", "Lights")):
+        for word, sub in (("Shocker ", "Shockers"), ("Speaker ", "Speakers"), ("Light ", "Lights"),
+                          ("Sensor ", "Sensors")):
             if prefix.startswith(word):
                 return "I/O", sub
+        if prefix == "On/off inputs":
+            return "I/O", "Inputs"
         if prefix == "OPAD" or prefix.startswith("OPAD at "):
             return "I/O", "OPAD"
         if prefix == "Variable":

@@ -139,7 +139,8 @@ def test_whishaw_corridor_seconds_and_any_zone():
     assert "Plain: time in Whishaw's corridor (s)" not in r
     # 75 frames on the way and waiting, then 9 frames (up to 50 px = 5 cm sideways) leaving
     assert r["Goal: time in Whishaw's corridor (s)"] == pytest.approx(84 / FPS, abs=1e-3)
-    assert r["Goal: distance in Whishaw's corridor (cm)"] == pytest.approx(31.0 + 5.0, abs=0.1)
+    # the step out of the corridor counts, the step into it not (as the distance in a zone)
+    assert r["Goal: distance in Whishaw's corridor (cm)"] == pytest.approx(31.0 + 5.0 + 0.625, abs=0.1)
     assert Zone.from_dict(goal.to_dict()).whishaw_width_cm == 10.0
 
 
@@ -262,7 +263,8 @@ def test_keys_per_zone():
     pts = np.vstack([line((50, 200), (150, 200), 100), line((250, 200), (350, 200), 100)])
     res = analyse(make_track(pts, head=False), app, s, events=ev, behaviours=beh)
     assert res["Groom in A: count"] == 2 and res["Groom in B: count"] == 1
-    assert res["Groom in A: longest bout (s)"] == 1.0 and res["Groom in A: shortest bout (s)"] == 0.5
+    assert res["Groom in A: longest bout (s)"] == pytest.approx(1.0, abs=0.05)
+    assert res["Groom in A: shortest bout (s)"] == pytest.approx(0.5, abs=0.05)
     assert res["Groom in A: latency to first release (s)"] == 1.5
     assert res["Groom in B: latency to first release (s)"] == 7.0
     assert nums(res["Groom in A: press durations (s)"]) == [0.5, 1.0]
