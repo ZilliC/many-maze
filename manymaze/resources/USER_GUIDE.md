@@ -125,7 +125,14 @@ areas (*Periphery = Arena − Centre*); an area can be in several groups. Every 
 * **Entry rule** – *Default* (analysis setting), *Centre*, *Head*, *Tail base*, **Proportion of the body** (≥ N %
   of the body ellipse inside to enter; leave when < min(N, 100−N) %), or **Not in any other zone**.
 * **Investigate** – the animal counts as in the zone while its head is within this distance of the zone's edge
-  (object investigation).
+  (object investigation). Such a zone also gets separate *investigation* measures: the animal investigates it
+  while its head is in the zone, or within the distance and pointing at it (body orientation within the
+  *exploration facing angle* of the direction to the zone centre; without a tracked orientation, within the
+  distance is enough). Never while hidden; bouts shorter than the minimum entry duration are ignored.
+* **Entry only when facing the zone** – an entry counts only once the animal is oriented towards the zone (its body
+  orientation within this angle of the direction from its centre to the zone centre). The visit starts at the
+  first frame it faces the zone; a visit in which it never does is not counted (e.g. backing into a zone).
+  0 = off. Applied in the analysis and in live tests alike; needs a tracked orientation (head / tail).
 * **Hidden zone** – nests, tunnels, shelters: if the animal disappears in or near it (*Hidden zone distance*; 0 =
   half the zone size) the time until it reappears counts as time in that zone, not "not detected", and no movement
   is interpolated.
@@ -436,8 +443,8 @@ variables, pauses). The source / session layout is saved with the experiment.
 
 The **Monitor** tab shows the selected test (click a row or a camera image): distance, speed, whether the animal
 is moving / immobile / freezing, the current zone, a live table of **time, entries and latency per zone** (zone
-entry rules, investigation distances, hidden zones and the test's moveable-zone positions are applied as in the
-results), a **live chart** of speed, distance, motion, detection or freezing over the last 30 s – 5 min, the
+entry rules, entries that require facing the zone, investigation distances, hidden zones and the test's
+moveable-zone positions are applied as in the results), a **live chart** of speed, distance, motion, detection or freezing over the last 30 s – 5 min, the
 **status of I/O devices**, and **warnings**: animal lost for longer than *Warn if lost for*, dropped camera
 frames, recording errors and procedure errors.
 
@@ -778,7 +785,32 @@ maps, group heat maps, results and statistics.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
   time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean
-  distance from the zone (0 while inside).
+  distance from the zone (0 while inside), and:
+  * **visit durations** – the duration of each visit, as a comma-separated list (text, so statistics skip it);
+  * **investigation** (investigation zones): bouts, time, latency to the first investigation and to its end, *was
+    first zone investigated*, longest / shortest / mean bout, list of bout durations, distance and mean speed while
+    investigating, distance before the first investigation, time mobile / immobile, immobile episodes, time freezing
+    and freezing episodes while investigating;
+  * **head**: latency to the first head exit, distance travelled by the head in the zone, time the head is in the
+    zone while the centre is outside, mean / max head distance from the zone and min when outside, mean / max /
+    min head distance to the border when inside;
+  * **distance to the border when inside** (centre): mean / max / min;
+  * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
+    increasing, outside it), time moving towards / away (mobile, outside, direction of travel within the
+    *exploration facing angle* of the direction to the zone centre, or of the opposite direction);
+  * **heading error**: initial heading error, signed (positive = clockwise of the zone direction on screen) and
+    absolute — the direction from the first position to the position 1 s later against the direction to the zone
+    centre (blank if the animal starts in the zone) — and the mean absolute heading error while moving outside;
+  * **time oriented towards the zone centre when inside** (body orientation within the facing angle);
+  * **absolute turn angle** and **absolute head turn angle** (body orientation) while in the zone;
+  * **corrected integrated path length** (CIPL, Gallagher): the distance from the zone sampled every second from
+    the start of the period until the first entry (or the end), minus the same sum for an ideal path going
+    straight to the zone at the animal's mean speed;
+  * **line crossings** while in the zone (all lines), and for **hidden zones** the number of *partial exits* (the
+    animal seen between two times it is hidden in the zone, never further from it than the hidden-zone distance,
+    e.g. peeking out of the nest) and the time partially exited.
+* **Whole test** lists: **Visited zones** (in the order of their first entry) and **Investigated zones** (order of
+  the first investigation), as comma-separated text.
 * **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
   and distance moving towards / away, head oriented towards / away, mean head angle, head turns towards.
 * **Lines**: crossings in each direction, latency.
@@ -809,8 +841,8 @@ The novel object and the social side can be set per test (test variables) or as 
 
 #### More test-specific measures
 
-* **Water maze**: Whishaw corridor time and path % (release point → platform, 20 cm wide) and *Left Whishaw
-  corridor*.
+* **Water maze**: Whishaw corridor time, path % and distance (release point → platform, 20 cm wide) and *Left
+  Whishaw corridor*.
 * **Novel tank diving test**: latency to top, top entries, top/bottom time %, top/bottom ratio, mean depth, erratic
   movements.
 * **Multi-well plate** (6/12/24/48/96): one apparatus per well (Well, Centre, Edge) — larval zebrafish.

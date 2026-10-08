@@ -204,6 +204,7 @@ def _whishaw(d: TemplateData, pc):
     dd, st = k.dur[seg], k.step[seg]
     res["Whishaw corridor time (%)"] = _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2)
     res["Whishaw corridor path (%)"] = _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2)
+    res[f"Whishaw corridor distance ({app.unit})"] = _r(st[inside].sum(), 2)
     res["Left Whishaw corridor"] = "No" if inside.all() else "Yes"
 
 
