@@ -23,6 +23,8 @@ Statements (``"type"``)::
     when     {"event": name, <event parameters>, "mode": "ignore"|"restart"|"parallel", "once": bool, "body": [...]}
              top level only. mode: what happens when the event recurs while the handler is still running
              (ignore it — default, restart the handler, or run another copy in parallel).
+             Event-wizard options: "times": n, "within": s (runs once the event happened n times within s
+             seconds), "trials": "1, 3-5, odd" (only in these trials; context["trial"]).
     wait     {"mode": "seconds", "seconds": expr}
              {"mode": "until", "until": condition, "timeout": expr?}
              {"mode": "event", "event": name, <event parameters>, "timeout": expr?}
@@ -68,9 +70,14 @@ format), ``result_variables``, ``marks``, ``pauses``. Old projects stored rules
 ``{"trigger", "action", "payload", "zone", "time_s", "delay_s"}``; they are converted on load
 (:func:`normalize_procedures`) and the old ``ProcedureEngine(rules, outputs).update(t, zones, ...)`` API works.
 
+The live test implements the engine's callbacks ``on_display`` (pop-ups, text on the display), ``on_video`` (the
+video recorder actions) and ``on_zone`` (zone labels and positions), and reports ``system_event(t, name)`` (disk
+space low, disk full, recording error); see ``live_state``.
+
 Modules: ``catalog`` (statement types, events, actions), ``expr`` (expressions), ``model`` (procedure documents),
 ``validate`` (edit-time checks), ``detect`` (event detectors and waits), ``engine`` and ``actions`` (running them),
-``legacy`` (the old rules), ``examples``.
+``live_state`` (investigation, orientation, rearing, event-wizard options, callbacks), ``plugins`` (the "trigger a
+plug-in" action), ``legacy`` (the old rules), ``examples``.
 """
 
 from ..iomeasures import io_measures
@@ -81,6 +88,8 @@ from .examples import EXAMPLES
 from .expr import (FUNCTIONS, MAX_EXPR_LEN, MAX_SEQ, RANDOM_FUNCTIONS, Evaluator, ExprError, check_expr, compile_expr,
                    expr_names, interpolate)
 from .legacy import ACTIONS, TRIGGERS, Outputs, convert_rule, describe_rule, is_legacy_rule
+from .live_state import WHEN_OPTIONS, parse_clock, parse_trials
+from . import plugins
 from .model import (RECORD_MODES, describe, describe_event, describe_statement, iter_statements, new_procedure,
                     new_statement, normalize_procedures, path_text, record_mode, repeat_mode, spec_defaults,
                     statement_at, statement_fields, wait_mode)

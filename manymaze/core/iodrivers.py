@@ -508,9 +508,17 @@ class NotifyDevice(Device):
         self.sent: list[tuple[str, str, str]] = []  # (kind, to, subject)
         self._threads: list[threading.Thread] = []
 
-    def notify(self, subject: str, text: str) -> bool:
-        emails = [a.strip() for a in str(self.cfg.get("email_to", "")).split(",") if a.strip()]
-        sms = [a.strip() for a in str(self.cfg.get("sms_to", "")).split(",") if a.strip()]
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        """kinds: ("email",) / ("sms",) / None = both; to: comma-separated addresses / numbers instead of the
+        configured ones (an e-mail given to an SMS goes to an e-mail-to-SMS gateway)."""
+        def split(v):
+            return [a.strip() for a in str(v or "").split(",") if a.strip()]
+        kinds = tuple(kinds) if kinds else ("email", "sms")
+        emails = split(to if to and kinds == ("email",) else self.cfg.get("email_to", "")) \
+            if "email" in kinds else []
+        sms = split(to if to and kinds == ("sms",) else self.cfg.get("sms_to", "")) if "sms" in kinds else []
+        if to and kinds == ("email", "sms"):
+            emails, sms = [a for a in split(to) if "@" in a], [a for a in split(to) if "@" not in a]
         jobs = [("email", a) for a in emails + [s for s in sms if "@" in s]] + \
                [("sms", s) for s in sms if "@" not in s]
         if not jobs:

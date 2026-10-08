@@ -691,6 +691,40 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 | Logic | Reinforcer earned (`reinforcer_earned`) | Schedule |
 | Touch screen | Touch in area (`touch`) | Area *(optional)* |
 | Touch screen | Touch outside all areas (`touch_outside`) | — |
+| Test | Test continued (`test_continuation`) — the test was ended by “End the test” with “allow continuation” and the experimenter continued it | — |
+| Test | Time until the test ends (`time_before_end`) — once, this long before the end of the test duration | Time before the end (s) |
+| Test | At random intervals (`random_interval`) — each interval is drawn uniformly between the shortest and the longest | Shortest interval (s), Longest interval (s) |
+| Test | Time of day reached (`time_of_day`) — once, when the computer's clock passes this time during the test | Time of day (HH:MM[:SS]) |
+| Zones | Investigation of a zone starts (`investigation_start`) — the head is in the zone, or within its investigation distance while facing it | Zone *(optional)* |
+| Zones | Investigation of a zone stops (`investigation_end`) | Zone *(optional)* |
+| Zones | Animal turns towards a zone or point (`oriented_towards`) — the body's orientation comes within this angle of the direction to the zone centre / point | Zone or point, Within (°) |
+| Zones | Animal turns away from a zone or point (`oriented_away`) — the animal stops facing the zone / point (the angle grows beyond the given one) | Zone or point, Within (°) |
+| Zones | Partial exit from a hidden zone (`hidden_partial_exit`) — the animal was seen near a hidden zone between two times it was hidden in it (e.g. peeking out of a nest); event_value = how long it was out | Zone *(optional)* |
+| Zones | Animal fails to enter a zone for a time (`zone_not_entered`) — since the start of the test or since it last left the zone; once per absence | Zone, Time (s) |
+| Animal | Position changes (`position_changed`) | Body part *(optional)*, By at least (px) *(optional)* |
+| Animal | Rearing starts (`rearing_start`) — detected from the animal's shape, as the rearing measures | — |
+| Animal | Rearing stops (`rearing_end`) | — |
+| Inputs | Encoder starts turning clockwise (`encoder_cw`) — clockwise = counts going up | Device *(optional)*, Encoder |
+| Inputs | Encoder starts turning anticlockwise (`encoder_ccw`) | Device *(optional)*, Encoder |
+| Inputs | Encoder changes direction (`encoder_reversed`) | Device *(optional)*, Encoder |
+| Inputs | Encoder speed rises above (`encoder_rpm_above`) — revolutions per minute over the last second (the channel's counts_per_rev option, default 1024) | Device *(optional)*, Encoder, RPM |
+| Inputs | Encoder speed falls below (`encoder_rpm_below`) | Device *(optional)*, Encoder, RPM |
+| Audio | Speaker starts (`speaker_start`) | Audio device *(optional)* |
+| Audio | Speaker stops (`speaker_stop`) | Audio device *(optional)* |
+| Audio | Sound file finished (`sound_file_end`) — a sound file played to its end (not stopped) | Audio device *(optional)* |
+| Outputs | Analogue output changes (`analog_output_changed`) — the level of a PWM / analogue output changes; event_value = the new level | Device *(optional)*, Output *(optional)* |
+| Logic | Condition true for a time (`condition_held`) — once each time the condition stays true this long | Condition, For (s) |
+| Logic | Value changes within a time (`value_changes_by`) — the value rises or falls by at least this much within the time | Value, By at least, Within (s) |
+| System | Disk space low (`disk_space_low`) — the recording disk has less free space than the warning level (1 GB by default) | — |
+| System | Disk full (`disk_full`) — the recording stopped: no space left on the disk | — |
+| System | Recording error (`recording_error`) — the video recording failed and stopped | — |
+
+**Event-wizard options.** Every *When* also has *Only after it happens (times)* and *… within (s)* — e.g. 3 and
+10: the block runs when the event has happened 3 times within 10 s (the count then starts again; without a time,
+on every 3rd occurrence) — and *Only in trials* (`1, 3-5`, `odd`, `even`): the block runs only in those trials
+of the animal. Together with the timed events above (time until the end, random intervals, time of day, a
+condition held for a time, a value changing within a time, a zone not entered for a time) they cover ANY-maze's
+event wizard.
 
 ### Actions
 
@@ -764,7 +798,7 @@ sounds and virtual switches are switched off when the test ends.
 | Test | Start state event (`mark_start`) | Event |
 | Test | End state event (`mark_end`) | Event |
 | Test | Write to log (`log`) | Message |
-| Test | End the test (`end_test`) | — |
+| Test | End the test (`end_test`) — with “allow continuation” the test pauses: continuing it fires “Test continued”, stopping it ends it | Reason *(optional)*, Allow the test to be continued *(optional)* |
 | Test | Pause the test (`pause_test`) | — |
 | Test | Resume the test (`resume_test`) | — |
 | Test | Enable procedure (`enable_procedure`) | Procedure |
@@ -772,6 +806,62 @@ sounds and virtual switches are switched off when the test ends.
 | Touch screen | Show stimulus (`show_stimulus`) | Area, Image *(optional)*, Shape *(optional)*, Colour *(optional)* |
 | Touch screen | Hide stimulus (`hide_stimulus`) | Area |
 | Touch screen | Clear screen (`clear_screen`) | — |
+| Test | Schedule another test for this animal (`schedule_test`) — the test is added to the experiment when this test is saved | Stage *(optional)*, Apparatus *(optional)*, After (minutes) *(optional)* |
+| Test | Generate a warning (`warning`) — shown in the test's warnings and log | Message |
+| Test | Generate an error (`error`) — reported as a procedure error | Message, End the test *(optional)* |
+| Zones | Set zone label (`set_zone_label`) — e.g. which object is novel; saved with the test (zone_labels) | Zone, Label |
+| Zones | Remove zone label (`remove_zone_label`) | Zone |
+| Zones | Set moveable zone location (`move_zone`) — moves the zone (or point) for the rest of the test; saved as the test's zone position | Zone or point, Centre x (px), Centre y (px) |
+| Video | Start video recording (`video_start`) — starts again after a stop (a new file) | — |
+| Video | Stop video recording (`video_stop`) | — |
+| Video | Pause video recording (`video_pause`) | — |
+| Video | Resume video recording (`video_unpause`) | — |
+| Video | Label the video recording (`video_label`) — burned into the recorded frames | Label *(optional)*, For (s) *(optional)* |
+| Communication | Show a pop-up message (`popup`) | Message, Title *(optional)* |
+| Communication | Output text on the display (`display_text`) | Text name, Text, x (px) *(optional)*, y (px) *(optional)*, Colour *(optional)* |
+| Communication | Remove text from the display (`display_remove`) | Text name |
+| Communication | Clear the text on the display (`display_clear`) | — |
+| Communication | Send an e-mail (`send_email`) — through the alert (e-mail / SMS) devices | Message, Subject *(optional)*, To *(optional)* |
+| Communication | Send an SMS (`send_sms`) — through the alert (e-mail / SMS) devices | Message, To *(optional)* |
+| Communication | Run a program (`run_program`) — started in the background (no shell); the test does not wait for it | Program, Arguments *(optional)* |
+| Communication | Trigger a plug-in (`plugin`) — plug-ins: see manymaze.core.procedures.plugins | Plug-in, Argument *(optional)*, Store the result in *(optional)* |
+| Outputs | Set output frequency (`set_output_frequency`) — used when the output is switched on; a running output changes at once | Device *(optional)*, Output, Frequency (Hz) *(optional)* |
+| Outputs | Set output duty cycle (`set_output_duty`) — of the pulses when a frequency is set | Device *(optional)*, Output, Duty cycle (%) |
+| Outputs | Set output on-duration (`set_output_duration`) — switching the output on then switches it off after this time | Device *(optional)*, Output, Duration (s) *(optional)* |
+| Audio | Set speaker volume (`set_volume`) — scales the volume of the sounds played afterwards | Audio device *(optional)*, Volume (0–1) |
+
+**Ending and continuing a test.** *End the test* stores its *Reason* as the test's *Reason for test end*. With
+*Allow the test to be continued* the test pauses instead: press *Resume* to continue it (procedures see *Test
+continued*) or *Stop* to end it with that reason.
+
+**Video recording.** The recorder actions work when the test is set to record. *Pause* leaves the paused time
+out of the video; *Stop* closes the file and a later *Start* records into a new file (`…_part2`); *Label* burns a
+text into the recorded frames. The test notes list what the procedures did to the recording, and the recording
+stops with a warning (and the *Disk full* / *Recording error* events) if the disk fills up; *Disk space low* fires
+once when less than 1 GB is free.
+
+**Messages and the display.** Pop-up messages appear without stopping the test and are copied to the log; texts
+put on the display stay on the live image until removed. *Send an e-mail* / *Send an SMS* go through the alert
+devices (see *Alerts*), to the given address / number or the device's own. *Generate a warning* adds to the test's
+warnings; *Generate an error* reports a procedure error and can end the test.
+
+**Programs and plug-ins.** *Run a program* starts a program with its arguments, without a shell, and does not
+wait for it. *Trigger a plug-in* calls a Python function registered with
+`manymaze.core.procedures.plugins.register(name, fn)` (or installed through the `manymaze.procedure_plugins`
+entry point): `fn(argument, info)` receives the test time, the variables and the test, and its result can be
+stored in a variable.
+
+**Zones.** *Set zone label* records which zone is which in this test (saved in the test's variables as
+`zone_labels`; `zone_label("Zone")` reads it); *Set moveable zone location* moves a zone (or point) to a new
+centre for the rest of the test and saves the position with the test, as moving it by hand would.
+
+**Output and speaker settings.** *Set output frequency / duty cycle / on-duration* change how *Switch output on*
+drives that output (a pulse train at the frequency, and off after the on-duration); an output that is already
+on changes at once. *Set speaker volume* scales the volume of every sound played afterwards on that device.
+
+New expression functions: `rearing()`, `rears()`, `rearing_time()`, `investigating("Zone")`,
+`orientation("Zone or point")` (angle in degrees between the body's orientation and the direction to it) and
+`zone_label("Zone")`.
 
 Safety: *Shock on* always has a cut-off (default 2 s, at most 60 s), enforced by mANY-MAZE and, on the Arduino,
 by the board itself; *Shock for a duration* is limited to 60 s.

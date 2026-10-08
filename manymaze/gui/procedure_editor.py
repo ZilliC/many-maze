@@ -556,6 +556,13 @@ class ProcedureEditor(QWidget):
         if t == "when":
             self._combo_field(st, "mode", "If it recurs while running", pr.WHEN_MODES, st.get("mode", "ignore"))
             self._check_field(st, "once", "Only the first time")
+            # event wizard: only after N occurrences within S seconds, only in some trials
+            self._line_field(st, pr.P("times", "int", "", "Only after it happens (times)",
+                                      help="optional: e.g. 3 = runs on every 3rd occurrence"))
+            self._line_field(st, pr.P("within", "number", "", "… within (s)",
+                                      help="optional: the occurrences must fall within this time"))
+            self._line_field(st, pr.P("trials", "text", "", "Only in trials",
+                                      help="optional: e.g. 1, 3-5, odd, even"))
         elif t == "wait" and wait != "seconds":
             self._line_field(st, pr.P("timeout", "number", "", "Timeout (s)",
                                       help="optional; afterwards timed_out = 1"))
@@ -673,6 +680,12 @@ class ProcedureEditor(QWidget):
         ctx = self.context()
         if typ == "zone":
             return list(ctx.get("zones") or [])
+        if typ == "point":  # a zone or a point
+            return list(ctx.get("zones") or []) + list(ctx.get("points") or [])
+        if typ == "plugin":
+            from ..core.procedures import plugins
+
+            return plugins.names()
         if typ in ("device", "audio"):
             devs = self.project.io_devices if self.project is not None else []
             return [d.get("name") for d in devs if typ == "device" or d.get("type") == "audio"]
@@ -706,7 +719,7 @@ class ProcedureEditor(QWidget):
         elif typ.startswith("choice:"):
             opts = {o: o.capitalize() for o in typ[7:].split("|")}
             self._combo_field(st, prm["name"], prm["label"], opts, st.get(prm["name"], prm["default"]))
-        elif typ in ("number", "int", "expr", "text", "sequence"):
+        elif typ in ("number", "int", "expr", "text", "sequence", "clock"):
             self._line_field(st, prm)
         else:
             self._name_field(st, prm)

@@ -30,6 +30,7 @@ def _context(context) -> dict:
             channels[d.get("name", "")] = {ch.get("name"): ch.get("kind", "input") for ch in d.get("channels", []) or []
                                            if ch.get("name")}
     return {"zones": set(_names(c.get("zones"))) if c.get("zones") is not None else None,
+            "points": set(_names(c.get("points"))) if c.get("points") is not None else None,
             "devices": set(_names(devs)) if devs is not None else None,
             "channels": channels or None,
             "areas": set(_names(c.get("areas"))) if c.get("areas") else None}
@@ -41,7 +42,10 @@ def project_context(project) -> dict:
     zones = [n for a in project.apparatus for n in a.names()]
     areas = [a.get("name") for a in (project.settings_extra.get("touchscreen", {}) or {}).get("areas", [])
              if a.get("name")]
+    points = [p.name for a in project.apparatus for p in getattr(a, "points", [])]
     ctx = {"zones": sorted(set(zones)) if zones else None, "devices": list(project.io_devices) or None}
+    if points:
+        ctx["points"] = sorted(set(points))
     if areas:
         ctx["areas"] = areas
     return ctx
@@ -102,6 +106,19 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     elif typ == "zone":
         if ctx["zones"] is not None and str(v) not in ctx["zones"]:
             errs = [f"unknown zone '{v}'"]
+    elif typ == "point":  # a zone or a point
+        if ctx["zones"] is not None and str(v) not in ctx["zones"] | (ctx.get("points") or set()):
+            errs = [f"unknown zone or point '{v}'"]
+    elif typ == "clock":
+        from .live_state import parse_clock
+
+        if parse_clock(v) is None:
+            errs = [f"'{v}' is not a time of day (HH:MM or HH:MM:SS)"]
+    elif typ == "plugin":
+        from . import plugins
+
+        if plugins.names() and str(v) not in plugins.names():
+            errs = [f"unknown plug-in '{v}' (installed: {', '.join(plugins.names())})"]
     elif typ == "sequence":
         zs = [z.strip() for z in str(v).split(",") if z.strip()]
         if len(zs) < 2:
@@ -140,6 +157,31 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
         if str(v) not in typ[7:].split("|"):
             errs = [f"must be one of {typ[7:].replace('|', ', ')}"]
     return [f"{label}: {e}" for e in errs]
+
+
+def _check_when_options(st) -> list[str]:
+    """The event-wizard options of a "when": times (≥ 1) within seconds (> 0), trials ("1, 3-5, odd")."""
+    from .live_state import parse_trials
+
+    errs = []
+    times, within = st.get("times"), st.get("within")
+    if times not in (None, ""):
+        try:
+            if int(times) < 1 or float(times) != int(times):
+                raise ValueError
+        except (TypeError, ValueError):
+            errs.append("“times”: give a whole number of at least 1")
+    if within not in (None, ""):
+        try:
+            if float(within) <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            errs.append("“within”: give a time in seconds above 0")
+        if times in (None, ""):
+            errs.append("“within” needs a number of times")
+    if st.get("trials") not in (None, "") and parse_trials(st["trials"]) is None:
+        errs.append(f"trials: '{st['trials']}' is not a list of trials (e.g. 1, 3-5, odd)")
+    return errs
 
 
 def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
@@ -186,6 +228,8 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 check(statement_fields(st))
                 if st.get("mode", "ignore") not in WHEN_MODES:
                     err(f"unknown mode '{st.get('mode')}'")
+                for m in _check_when_options(st):
+                    err(m)
                 block(pi, st.get("body", []), p + ("body",), False, False)
             elif t == "var":
                 e = _bad_var_name(st.get("name"))

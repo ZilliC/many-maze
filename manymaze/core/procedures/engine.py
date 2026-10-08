@@ -18,6 +18,7 @@ from .catalog import CONSTANTS, EPS, SAFETY_TASKS, STEP_BUDGET
 from .detect import _CONDITION_EVENTS, EventWait, FrameWait, TimeWait, UntilWait, _Detector
 from .expr import Evaluator, ExprError, interpolate
 from .legacy import Outputs
+from .live_state import LIVE_FUNCTIONS, LiveState
 from .model import _short, normalize_procedures, path_text, record_mode, repeat_mode, wait_mode
 from .validate import _bad_var_name
 
@@ -77,6 +78,7 @@ _ENGINE_FUNCTIONS = {
     "reinforcers": _schedule_value("reinforcers"),
     "requirement": _schedule_value("requirement"),
 }
+_ENGINE_FUNCTIONS.update({name: v[0] for name, v in LIVE_FUNCTIONS.items()})
 
 
 # ---------------------------------------------------------------------- engine
@@ -109,7 +111,7 @@ def _locked(fn):
     return wrapper
 
 
-class ProcedureEngine(Actions):
+class ProcedureEngine(Actions, LiveState):
     """Runs procedures during a live test. Call start(t), update_state(t, state) every frame, stop(t).
 
     The public methods are thread-safe (e.g. frames processed in a worker thread, keys and touches from the GUI);
@@ -209,6 +211,7 @@ class ProcedureEngine(Actions):
         self._sensor_alarm: dict[tuple, bool] = {}
         self._chan_cfg: dict[tuple, dict] = {}
         self._last_sample_t: dict[tuple, float] = {}
+        self._reset_extra()
 
     def _start_procs(self, pis, t, defer=False):
         """Start procedures: declare their variables (all of them first), create their handlers, then start their
@@ -614,6 +617,7 @@ class ProcedureEngine(Actions):
             self._speed = float(st["speed"])
         elif dt > 0:
             self._speed = (self._distance - prev_d) / dt
+        self._observe_extra(t, dt, st)
 
     def _devname(self, name):
         """The device a name used by the procedures refers to (a per-test DeviceView maps box names to its box)."""
@@ -866,6 +870,8 @@ class ProcedureEngine(Actions):
             return
         h.threads = [x for x in h.threads if x.alive]
         if h.once and h.count:
+            return
+        if not self._when_ok(h, t_occ):
             return
         if h.threads:
             if h.mode == "ignore":
