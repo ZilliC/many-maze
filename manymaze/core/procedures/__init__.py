@@ -18,6 +18,15 @@ A procedure's top-level statements are ``when`` handlers, ``var`` declarations, 
 statements, which run in order from the start of the test (an implicit "when the test starts").
 Each running handler is an independent cooperative thread: waits never block the frame loop.
 
+Procedure options: ``"sub": true`` makes it a sub-procedure (no handlers: its statements run when a ``call``
+statement or the "Run sub-procedure" action runs it); ``"anymaze_maths": true`` gives its expressions ANY-maze's
+maths (sin, cos, tan, asin, acos, atan, atan2 in degrees, ``log`` in base 10; ``ANYMAZE_FUNCTIONS``) — for protocols
+taken over from ANY-maze. Without it they are Python's (radians, natural log); sind … atan2d and log10 always exist.
+
+Before the test: ``when`` handlers of the event "test_waiting" ("test is waiting to start") run while the test
+waits to start (``ProcedureEngine.waiting_update``) and may use the actions "Prevent test start" / "Allow test
+start"; they stop when the test starts (variables and output states carry over).
+
 Statements (``"type"``)::
 
     when     {"event": name, <event parameters>, "mode": "ignore"|"restart"|"parallel", "once": bool, "body": [...]}
@@ -25,21 +34,32 @@ Statements (``"type"``)::
              (ignore it — default, restart the handler, or run another copy in parallel).
     wait     {"mode": "seconds", "seconds": expr}
              {"mode": "until", "until": condition, "timeout": expr?}
-             {"mode": "event", "event": name, <event parameters>, "timeout": expr?}
-             after a timeout the local variable ``timed_out`` is 1 (else 0).
-    if       {"cond": condition, "body": [...], "else": [...]}           ("else" optional)
+             {"mode": "event", "event": name, <event parameters>, "or": [{"event": name, <parameters>}, ...]?,
+              "timeout": expr?}
+             after a timeout the local variable ``timed_out`` is 1 (else 0); ``wait_event`` tells which event
+             ended the wait: 1 for "event", 2 for the first "or" event, … (0 after a timeout).
+    if       {"cond": condition, "body": [...], "elif": [{"cond": condition, "body": [...]}, ...], "else": [...]}
+             ("elif" and "else" optional): the body of the first true condition runs, else the "else".
     repeat   {"mode": "count", "count": expr, "var": name?, "body": [...]}
              {"mode": "while", "while": condition, "var": name?, "body": [...]}
+             {"mode": "until", "until": condition, "var": name?, "body": [...]}   (the body runs at least once)
              {"mode": "forever", "body": [...]}
-             "var" receives the iteration number (0, 1, ...). "count" and "while" loops run instantly (a
+             "var" receives the iteration number (0, 1, ...). "count", "while" and "until" loops run instantly (a
              thread yields to the next frame after 5000 statements); a "forever" loop whose body did not
              wait advances one iteration per frame (it polls).
+    call     {"procedure": name}  run a sub-procedure here (its waits wait in this thread); nested up to 32 deep.
+    label    {"name": name}
+    goto     {"label": name}  continue after the label, which is in the same block or a block around it (a
+             jump out of loops and ifs, never into a block or out of a handler / sub-procedure).
+    resolution {"ms": expr}  ANY-maze's "set timer resolution": accepted and recorded; waits and timers are
+             already kept on exact due times and run on the first frame at or after them (see Timing).
     set      {"var": name, "value": expr, "index": expr?}                  (index: set one array element)
     do       {"action": name, <action parameters>}
-    stop     {"what": "handler"|"loop"|"procedure"|"all"|"test"}
+    stop     {"what": "handler"|"loop"|"procedure"|"all"|"test"|"return"}   ("return": from a sub-procedure)
     comment  {"text": "..."}
     var      {"name": name, "value": expr, "keep": bool, "result": bool, "record": "end"|"changes"|"set"}
-             top level only. keep: the value is kept between tests (``Project.variables``); result: a numeric
+             top level only. keep: the value is kept between tests (``Project.variables``): true (or "experiment")
+             one value, "animal" / "apparatus" one per animal / apparatus of the test; result: a numeric
              variable's final value saved as a test result (``Test.result_variables``); record: "changes" / "set"
              also log each numeric value, time-stamped, when it changes / every time it is set (I/O log entries of
              kind "variable", analysed into mean, max, min, sum, count and the list of values).
@@ -55,7 +75,9 @@ Expressions
 Evaluated by a safe interpreter built on ``ast`` (never ``eval``): numbers, strings, lists ``[1, 2, 3]``,
 ``+ - * / // % **``, comparisons, ``and or not``, ``a if c else b``, ``x[i]`` / slices and calls of the
 functions listed in ``FUNCTIONS`` (maths, random numbers, and live state such as ``zone("Centre")``,
-``input("box", "lever")``, ``timer("iti")``, ``time()``). Variables are global to all procedures; arrays are lists.
+``input("box", "lever")``, ``timer("iti")``, ``time()``, ``trial()``, ``zone_distance("Centre")``). Variables
+are global to all procedures; arrays are lists. ``NA`` (or ``#N/A``) is ANY-maze's undefined value
+(``is_undefined(x)``).
 
 Events (``EVENT_SPECS``) and actions (``ACTION_SPECS``) are catalogued with their parameters in ``catalog``.
 
@@ -74,17 +96,18 @@ Modules: ``catalog`` (statement types, events, actions), ``expr`` (expressions),
 """
 
 from ..iomeasures import io_measures
-from .catalog import (ACTION_SPECS, CONSTANTS, CONTAINERS, EPS, EVENT_SPECS, LOCAL_NAMES, SAFETY_TASKS, SHOCK_MAX_S,
-                      STALL_S, STATEMENT_TYPES, STEP_BUDGET, STOP_WHAT, WHEN_MODES, P)
-from .engine import ProcedureEngine
+from .catalog import (ACTION_SPECS, CONSTANTS, CONTAINERS, EPS, EVENT_SPECS, KEEP_SCOPES, LOCAL_NAMES, MAX_CALL_DEPTH,
+                      SAFETY_TASKS, SHOCK_MAX_S, STALL_S, STATEMENT_TYPES, STEP_BUDGET, STOP_WHAT, WHEN_MODES, P)
+from .engine import ProcedureEngine, merge_kept_variables
 from .examples import EXAMPLES
-from .expr import (FUNCTIONS, MAX_EXPR_LEN, MAX_SEQ, RANDOM_FUNCTIONS, Evaluator, ExprError, check_expr, compile_expr,
-                   expr_names, interpolate)
+from .expr import (ANYMAZE_FUNCTIONS, FUNCTIONS, MAX_EXPR_LEN, MAX_SEQ, RANDOM_FUNCTIONS, Evaluator, ExprError,
+                   check_expr, compile_expr, expr_names, interpolate)
 from .legacy import ACTIONS, TRIGGERS, Outputs, convert_rule, describe_rule, is_legacy_rule
-from .model import (RECORD_MODES, describe, describe_event, describe_statement, iter_statements, new_procedure,
-                    new_statement, normalize_procedures, path_text, record_mode, repeat_mode, spec_defaults,
-                    statement_at, statement_fields, wait_mode)
-from .validate import declared_names, project_context, validate
+from .model import (RECORD_MODES, branch_block, describe, describe_elif, describe_event, describe_statement, is_branch,
+                    iter_statements, keep_scope, new_elif, new_procedure, new_statement, normalize_procedures,
+                    path_text, record_mode, repeat_mode, spec_defaults, statement_at, statement_fields,
+                    wait_alternatives, wait_mode)
+from .validate import declared_names, project_context, test_context, validate
 
 # the procedure editor's names from before the split
 _wait_mode, _repeat_mode = wait_mode, repeat_mode

@@ -7,9 +7,10 @@ import re
 
 from .. import ioconfig
 from ..operant import parse_spec
-from .catalog import ACTION_SPECS, CONSTANTS, EVENT_SPECS, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT, WHEN_MODES
+from .catalog import (ACTION_SPECS, CONSTANTS, EVENT_SPECS, KEEP_SCOPES, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT,
+                      WHEN_MODES)
 from .expr import _INTERP, check_expr
-from .model import iter_statements, normalize_procedures, statement_fields, wait_mode
+from .model import iter_statements, normalize_procedures, statement_fields, wait_alternatives, wait_mode
 
 
 def _names(lst) -> list[str]:
@@ -45,6 +46,17 @@ def project_context(project) -> dict:
     if areas:
         ctx["areas"] = areas
     return ctx
+
+
+def test_context(project, test) -> dict:
+    """What the procedures know about the test they run in (``context["test"]`` of the engine: the stage(),
+    trial(), apparatus(), treatment(), animal() and animal_field() functions, and the per-animal / per-apparatus
+    kept variables)."""
+    a = project.get_animal(test.animal_id)
+    group = a.group if a else ""
+    return {"test": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
+            "trial": test.trial, "treatment": project.treatment_code(group) if project.blind else group,
+            "fields": dict(a.fields, Sex=a.sex) if a else {}}
 
 
 def declared_names(procedures) -> set[str]:
@@ -153,11 +165,16 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
     issues: list[tuple[int, tuple, str]] = []
     seen_vars: dict[str, int] = {}
     proc_names = [p.get("name") for p in procs]
+    subs = {p.get("name") for p in procs if p.get("sub")}
 
-    def block(pi, stmts, path, top, in_loop):
+    def block(pi, stmts, path, top, in_loop, visible=(), event=None):
+        """visible: the label names of the enclosing blocks of the same thread (a Go to may jump to a label of its
+        own block or of an enclosing one, not into a nested block); event: the When handler's event."""
         if not isinstance(stmts, list):
             issues.append((pi, path, "statements must be a list"))
             return
+        here = {str(s.get("name") or "") for s in stmts if isinstance(s, dict) and s.get("type") == "label"}
+        visible = visible + (here,)
         for i, st in enumerate(stmts):
             p = path + (i,)
             if not isinstance(st, dict):
@@ -174,6 +191,8 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 continue
             if t in ("when", "var") and not top:
                 err("only allowed at the top level of a procedure")
+            if t == "when" and procs[pi].get("sub"):
+                err("a sub-procedure has no When handlers (it runs when it is called)")
 
             def check(fields, report=err):
                 for prm in fields:
@@ -186,7 +205,7 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 check(statement_fields(st))
                 if st.get("mode", "ignore") not in WHEN_MODES:
                     err(f"unknown mode '{st.get('mode')}'")
-                block(pi, st.get("body", []), p + ("body",), False, False)
+                block(pi, st.get("body", []), p + ("body",), False, False, (), st.get("event"))
             elif t == "var":
                 e = _bad_var_name(st.get("name"))
                 if e:
@@ -198,29 +217,67 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                     seen_vars[n] = pi
                 for m in check_expr(st.get("value", 0), names):
                     err(f"initial value: {m}")
+                if st.get("keep") not in (None, False, True, 0, 1) and str(st.get("keep")) not in KEEP_SCOPES:
+                    err(f"unknown keep option '{st.get('keep')}'")
             elif t == "wait":
                 ev = st.get("event")
                 if wait_mode(st) == "event" and ev not in EVENT_SPECS:
                     err(f"unknown event '{ev}'")
-                elif wait_mode(st) == "event" and ev == "test_start":
+                elif wait_mode(st) == "event" and ev in ("test_start", "test_waiting"):
                     err("cannot wait for the test to start")
                 else:
                     check(statement_fields(st))
+                if wait_mode(st) == "event":
+                    for k, alt in enumerate(wait_alternatives(st)):
+                        a_ev = alt.get("event")
+
+                        def err3(msg, k=k):
+                            err(f"or event {k + 1}: {msg}")
+                        if a_ev not in EVENT_SPECS:
+                            err3(f"unknown event '{a_ev}'")
+                        elif a_ev in ("test_start", "test_waiting"):
+                            err3("cannot wait for the test to start")
+                        else:
+                            for prm in EVENT_SPECS[a_ev]["params"]:
+                                for m in _check_param(prm, alt.get(prm["name"], prm["default"]), names, ctx, alt):
+                                    err3(m)
                 if st.get("timeout") not in (None, "", 0):
                     for m in check_expr(st["timeout"], names):
                         err(f"timeout: {m}")
             elif t == "if":
                 check(statement_fields(st))
-                block(pi, st.get("body", []), p + ("body",), False, in_loop)
+                block(pi, st.get("body", []), p + ("body",), False, in_loop, visible, event)
+                clauses = st.get("elif", [])
+                if not isinstance(clauses, list):
+                    err("the else-if clauses must be a list")
+                    clauses = []
+                for k, clause in enumerate(clauses):
+                    cp = p + ("elif", k)
+                    if not isinstance(clause, dict):
+                        issues.append((pi, cp, "Else if: invalid clause"))
+                        continue
+                    for m in _check_param(statement_fields({"type": "if"})[0], clause.get("cond"), names, ctx, clause):
+                        issues.append((pi, cp, f"Else if: {m}"))
+                    block(pi, clause.get("body", []), cp + ("body",), False, in_loop, visible, event)
                 if "else" in st:
-                    block(pi, st.get("else") or [], p + ("else",), False, in_loop)
+                    block(pi, st.get("else") or [], p + ("else",), False, in_loop, visible, event)
             elif t == "repeat":
                 check(statement_fields(st))
                 if st.get("var"):
                     e = _bad_var_name(st["var"])
                     if e:
                         err(e)
-                block(pi, st.get("body", []), p + ("body",), False, True)
+                block(pi, st.get("body", []), p + ("body",), False, True, visible, event)
+            elif t in ("call", "label", "goto", "resolution"):
+                check(statement_fields(st))
+                if t == "call" and st.get("procedure") and st["procedure"] not in subs:
+                    err(f"'{st['procedure']}' is not a sub-procedure" if st["procedure"] in proc_names
+                        else f"unknown procedure '{st['procedure']}'")
+                elif t == "label" and st.get("name") and labels[pi].count(str(st["name"])) > 1:
+                    err(f"another label is also called '{st['name']}'")
+                elif t == "goto" and st.get("label") and not any(str(st["label"]) in v for v in visible):
+                    err(f"no label '{st['label']}' in this block or a block around it" if str(st["label"])
+                        in labels[pi] else f"unknown label '{st['label']}'")
             elif t == "set":
                 e = _bad_var_name(st.get("var"))
                 if e:
@@ -244,6 +301,12 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                     if a in ("enable_procedure", "disable_procedure") and st.get("procedure") \
                             and st["procedure"] not in proc_names:
                         err2(f"unknown procedure '{st['procedure']}'")
+                    if a == "run_subprocedure" and st.get("procedure") and st["procedure"] not in subs:
+                        err2(f"'{st['procedure']}' is not a sub-procedure" if st["procedure"] in proc_names
+                             else f"unknown procedure '{st['procedure']}'")
+                    if a in ("prevent_test_start", "allow_test_start") and event != "test_waiting" \
+                            and not procs[pi].get("sub"):
+                        err2("only in a “test is waiting to start” handler")
                     if a == "schedule_response" and not st.get("spec"):
                         started = any(s2.get("action") == "schedule_start" and s2.get("schedule") == st.get("schedule")
                                       for q in procs for _pp, s2 in iter_statements(q.get("statements")))
@@ -256,6 +319,8 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 elif w == "loop" and not in_loop:
                     err("“exit the loop” is not inside a repeat")
 
+    labels = [[str(s.get("name") or "") for _p, s in iter_statements(q.get("statements")) if s.get("type") == "label"]
+              for q in procs]
     for pi, proc in enumerate(procs):
         if not str(proc.get("name", "")).strip():
             issues.append((pi, (), "the procedure has no name"))

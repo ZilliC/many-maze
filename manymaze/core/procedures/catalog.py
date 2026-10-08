@@ -32,6 +32,8 @@ def _ev(name, group, label, params=(), generic=True, help=""):
     EVENT_SPECS[name] = {"group": group, "label": label, "params": list(params), "generic": generic, "help": help}
 
 
+_ev("test_waiting", "Test", "Test is waiting to start", help="runs before the test starts (from when it is armed); "
+    "use Prevent / Allow test start to hold the start until something is ready")
 _ev("test_start", "Test", "Test starts")
 _ev("test_end", "Test", "Test ends")
 _ev("time_reached", "Test", "Time reached", [P("time", "number", 60, "Time (s)", True)], False,
@@ -132,6 +134,8 @@ _ac("output_off", "Outputs", "Switch output off", _OUTS)
 _ac("output_toggle", "Outputs", "Toggle output", _OUTS)
 _ac("output_pulse", "Outputs", "Pulse output", _OUTS + [P("duration", "number", 0.5, "Duration (s)", True)])
 _ac("output_set", "Outputs", "Set output level", _OUTS + [P("value", "number", 0.5, "Level (0–1)", True)])
+_ac("output_volts", "Outputs", "Set analogue output (V)", _OUTS + [P("volts", "number", 2.5, "Level (V)", True)],
+    "as in ANY-maze; the channel's max_v option is the voltage of level 1 (default 5 V)")
 _ac("all_outputs_off", "Outputs", "Switch all outputs off", [P("device", "device", "", "Device", help="empty = all")])
 _ac("pulse_train", "Outputs", "Pulse train (optogenetics)",
     _OUTS + [P("frequency", "number", 20, "Frequency (Hz)", True),
@@ -241,6 +245,12 @@ _ac("log", "Test", "Write to log", [P("text", "text", "", "Message", True)])
 _ac("end_test", "Test", "End the test")
 _ac("pause_test", "Test", "Pause the test")
 _ac("resume_test", "Test", "Resume the test")
+_ac("prevent_test_start", "Test", "Prevent test start",
+    help="in a “test is waiting to start” handler: the test does not start (not even when asked to) until Allow test "
+         "start")
+_ac("allow_test_start", "Test", "Allow test start")
+_ac("run_subprocedure", "Test", "Run sub-procedure", [P("procedure", "procedure", "", "Sub-procedure", True)],
+    "starts it alongside this handler (the Call statement runs it in place and waits for it)")
 _ac("enable_procedure", "Test", "Enable procedure", [P("procedure", "procedure", "", "Procedure", True)])
 _ac("disable_procedure", "Test", "Disable procedure", [P("procedure", "procedure", "", "Procedure", True)])
 _ac("show_stimulus", "Touch screen", "Show stimulus",
@@ -252,17 +262,23 @@ _ac("clear_screen", "Touch screen", "Clear screen")
 
 STATEMENT_TYPES = {
     "when": "When", "wait": "Wait", "if": "If", "repeat": "Repeat", "set": "Set", "do": "Do", "stop": "Stop",
-    "comment": "Comment", "var": "Variable",
+    "comment": "Comment", "var": "Variable", "call": "Call sub-procedure", "label": "Label", "goto": "Go to",
+    "resolution": "Set timer resolution",
 }
 CONTAINERS = ("when", "if", "repeat")
 STOP_WHAT = {"handler": "Exit this handler", "loop": "Exit the loop", "procedure": "Stop this procedure",
-             "all": "Stop all procedures", "test": "End the test"}
+             "all": "Stop all procedures", "test": "End the test", "return": "Return from the sub-procedure"}
 WHEN_MODES = {"ignore": "Ignore while running", "restart": "Restart", "parallel": "Run in parallel"}
-LOCAL_NAMES = ("event_time", "event_value", "event_name", "timed_out")
+LOCAL_NAMES = ("event_time", "event_value", "event_name", "timed_out", "wait_event")
+# how a variable declared "keep" is kept between tests: one value for the experiment (old projects: true), one per
+# animal or one per apparatus
+KEEP_SCOPES = {"experiment": "For the whole experiment", "animal": "Per animal", "apparatus": "Per apparatus"}
 CONSTANTS = {"true": True, "false": False, "True": True, "False": False, "pi": math.pi, "e": math.e,
-             "inf": math.inf, "nan": math.nan, "none": None, "None": None}
+             "inf": math.inf, "nan": math.nan, "none": None, "None": None,
+             "NA": math.nan}  # NA: ANY-maze's #N/A (undefined), see is_undefined()
 SHOCK_MAX_S = 60.0  # hard cap on any continuous shock
 STALL_S = 0.25  # a software pulse train later than this (frames stalled) is delayed instead of bursting
 SAFETY_TASKS = ("shock", "audio")  # scheduled tasks that keep running in real time while the test is paused
 STEP_BUDGET = 5000  # statements a thread may run per frame before yielding
+MAX_CALL_DEPTH = 32  # sub-procedures calling sub-procedures
 EPS = 1e-6

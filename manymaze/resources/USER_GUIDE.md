@@ -577,7 +577,9 @@ The editor has three panes:
 
 * **Procedures** (left) — every ticked procedure runs during each live test. *Add* creates an empty procedure
   or one of the examples (fear conditioning, FR 5 lever pressing, optogenetic stimulation in a zone,
-  spontaneous-alternation counter). Double-click a procedure to rename it.
+  spontaneous-alternation counter). Double-click a procedure to rename it. *Sub-procedure* makes it a
+  sub-procedure (it only runs when called, see below); *ANY-maze maths* gives its expressions ANY-maze's
+  trigonometry in degrees and `log` in base 10 (for protocols taken over from ANY-maze).
 * **Statements** (middle) — the procedure as a tree of blocks. *Add* inserts a statement after the selected
   one, *Add inside* puts it in the selected When / If / Else / Repeat block. Drag & drop statements to move or
   nest them, or use ▲ ▼ (move), → (indent: into the block above) and ← (outdent). *On/off* disables a statement
@@ -595,17 +597,32 @@ range…) are reported in the live-test log without stopping the test.
 | Statement | What it does |
 |---|---|
 | **When** *event* | Runs its block every time the event happens (top level only). *If it recurs while running*: ignore it (default), restart the block, or run another copy in parallel. *Only the first time* runs it once. |
-| **Wait** | Pauses this block: for a time (`30`, `randint(20, 40)`), until a condition is true, or for an event; optionally with a timeout (afterwards `timed_out` is 1 if it timed out). Other procedures and blocks keep running. |
-| **If** / **Else** | Runs the block when the condition is true, otherwise the optional Else block. |
-| **Repeat** | A number of times, while a condition is true, or forever. An optional loop variable counts 0, 1, 2… |
+| **Wait** | Pauses this block: for a time (`30`, `randint(20, 40)`), until a condition is true, or for an event — or for the first of several events (*Or another event…*; afterwards `wait_event` is 1 for the first event, 2 for the next…, 0 after a timeout); optionally with a timeout (afterwards `timed_out` is 1 if it timed out). Other procedures and blocks keep running. |
+| **If** / **Else if** / **Else** | Runs the block when the condition is true; otherwise the block of the first *Else if* whose condition is true (*Add else-if*), otherwise the optional Else block. |
+| **Repeat** | A number of times, while a condition is true, until a condition is true (the block runs at least once, the condition is tested after it), or forever. An optional loop variable counts 0, 1, 2… |
 | **Set** | Gives a variable a value (an expression); with an index, sets one element of an array. |
 | **Do** *action* | Performs an action (see below). |
-| **Stop** | Exits this block, exits the loop, stops this procedure, stops all procedures, or ends the test. |
+| **Stop** | Exits this block, exits the loop, stops this procedure, stops all procedures, ends the test, or returns from a sub-procedure. |
+| **Call sub-procedure** | Runs a sub-procedure's statements here and continues when it has finished (its waits wait here). |
+| **Label** / **Go to** | *Go to* continues after the label of that name. The label must be in the same block or in a block around it: Go to can leave loops and Ifs, never jump into a block, out of a When block or out of a sub-procedure. |
+| **Set timer resolution** | Accepted so that ANY-maze protocols load: waits and timers are already kept on their exact due times and run on the first frame at or after them (see *Timing*); the value is only recorded. |
 | **Comment** | A note; does nothing. |
-| **Variable** | Declares a variable and its initial value (top level). *Keep the value between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list); *Save as a test result* stores its final value with the test, where it appears as a result measure. *Record the value* — *Every time it changes* / *Every time it is set* — also records each value with its time, for its mean, max, min, sum, count and list of values (see *I/O results*). |
+| **Variable** | Declares a variable and its initial value (top level). *Keep between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list): one value for the whole experiment, or one per animal or per apparatus (each animal / apparatus starts from the initial value and then keeps its own); *Save as a test result* stores its final value with the test, where it appears as a result measure. *Record the value* — *Every time it changes* / *Every time it is set* — also records each value with its time, for its mean, max, min, sum, count and list of values (see *I/O results*). |
 
 Statements written at the top level of a procedure (outside any When) run in order from the start of the test,
 so a timed protocol is simply: *Wait 120 → Do tone 30 s → Wait 28 → Do shock 2 s → …*.
+
+**Before the test starts.** A *When the test is waiting to start* block runs from the moment the test is armed
+(waiting to start), on every frame until it starts: with *Prevent test start* the test does not start — whatever
+the start mode, and even when the start button or key is pressed (the start then happens as soon as it is allowed)
+— until *Allow test start*. For example: *Prevent test start → Switch the house light on → Wait until
+input('door') → Allow test start*. Keys reach these blocks. When the test starts they stop (pulse trains stop,
+shocks and sounds go off); variables keep their values and outputs stay as they were.
+
+**Sub-procedures.** A procedure ticked *Sub-procedure* has no When blocks; its statements run when a *Call
+sub-procedure* statement calls it (in place: the caller continues when it has finished) or when the *Run
+sub-procedure* action starts it alongside the caller. Sub-procedures can call each other (up to 32 deep); *Stop ▸
+Return from the sub-procedure* ends one early. Use them for a sequence used in several places (a trial, a reward).
 
 **Timing.** Procedures are evaluated on every video frame. A wait ends on the first frame at or after its due
 time, and the next wait counts from the due time, so long sequences never drift. Pulses, pulse trains and pellet
@@ -613,7 +630,7 @@ pulses on the Arduino are timed by the board itself (microsecond resolution), in
 the I/O log records their exact times. Pulse sequences from a file are timed on the computer's clock by the I/O
 service thread (about 1 ms jitter; on the Arduino each pulse's width is timed by the board). Fast analogue inputs
 (up to 1 kHz) are sent by the board in batches with its own clock, and each sample is logged at its own time
-rather than at the frame's. "Repeat N times" and "Repeat while" loops run instantly; a
+rather than at the frame's. "Repeat N times", "Repeat while" and "Repeat until" loops run instantly; a
 "Repeat forever" loop whose block does not wait runs once per frame (a polling loop).
 
 **Several procedures at once.** Every When block that is running is independent: a procedure can wait for 30 s
@@ -629,6 +646,7 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 
 | Group | Event | Parameters |
 |---|---|---|
+| Test | Test is waiting to start (`test_waiting`) — runs before the test starts (from when it is armed); use Prevent / Allow test start to hold the start until something is ready | — |
 | Test | Test starts (`test_start`) | — |
 | Test | Test ends (`test_end`) | — |
 | Test | Time reached (`time_reached`) — once, when the test time reaches the given time | Time (s) |
@@ -705,6 +723,7 @@ sounds and virtual switches are switched off when the test ends.
 | Outputs | Toggle output (`output_toggle`) | Device *(optional)*, Output |
 | Outputs | Pulse output (`output_pulse`) | Device *(optional)*, Output, Duration (s) |
 | Outputs | Set output level (`output_set`) | Device *(optional)*, Output, Level (0–1) |
+| Outputs | Set analogue output (V) (`output_volts`) — as in ANY-maze; the channel's max_v option is the voltage of level 1 (default 5 V) | Device *(optional)*, Output, Level (V) |
 | Outputs | Switch all outputs off (`all_outputs_off`) | Device *(optional)* |
 | Outputs | Pulse train (optogenetics) (`pulse_train`) | Device *(optional)*, Output, Frequency (Hz), Pulse width (ms), Duration (s) |
 | Outputs | Stop pulse train (`pulse_train_stop`) | Device *(optional)*, Output |
@@ -767,6 +786,9 @@ sounds and virtual switches are switched off when the test ends.
 | Test | End the test (`end_test`) | — |
 | Test | Pause the test (`pause_test`) | — |
 | Test | Resume the test (`resume_test`) | — |
+| Test | Prevent test start (`prevent_test_start`) — in a “test is waiting to start” block: the test does not start (not even when asked to) until Allow test start | — |
+| Test | Allow test start (`allow_test_start`) | — |
+| Test | Run sub-procedure (`run_subprocedure`) — starts it alongside this block (the Call statement runs it in place and waits for it) | Sub-procedure |
 | Test | Enable procedure (`enable_procedure`) | Procedure |
 | Test | Disable procedure (`disable_procedure`) | Procedure |
 | Touch screen | Show stimulus (`show_stimulus`) | Area, Image *(optional)*, Shape *(optional)*, Colour *(optional)* |
@@ -791,21 +813,35 @@ Expressions use numbers, `'text'`, arrays `[1, 2, 3]`, variables, `+ - * / // % 
 Functions:
 
 * maths — `abs min max round floor ceil sqrt exp log log10 sin cos tan asin acos atan atan2 hypot degrees
-  radians sign clamp int float bool str`
+  radians sign clamp int float bool str`; in degrees: `sind cosd tand asind acosd atand atan2d`. `sin` … `atan2`
+  work in radians and `log` is the natural log (`log(x, base)`), unless the procedure has *ANY-maze maths*: then,
+  as in ANY-maze, they work in degrees and `log` is in base 10
+* undefined values — `NA` (also written `#N/A`, as in ANY-maze) and `is_undefined(x)` (1 for `NA`, `none` and
+  not-a-number)
 * arrays — `len sum mean sorted reversed index count array(n, fill) range`
-* random — `random() uniform(a, b) randint(a, b) gauss(mean, sd) choice(array) shuffle(array)`
-* the test — `time()`, `zone('A')`, `head_zone('A')`, `zone_time('A')`, `zone_entries('A')`, `detected()`,
-  `freezing()`, `immobile()`, `speed()`, `distance()`, `x()`, `y()`, `key('s')`
+* random — `random() uniform(a, b) randint(a, b) gauss(mean, sd) choice(array) shuffle(array)`;
+  `shuffle(array, n)` shuffles with at most n equal values in a row (e.g. `shuffle(['L'] * 10 + ['R'] * 10, 2)`)
+* the test — `time()`, `test_running()`, `test_paused()`, `stage()`, `trial()`, `apparatus()`, `treatment()`
+  (its code when testing blind), `animal()` (the animal's number), `animal_field('Sex')`, `date()`
+  (`'YYYY-MM-DD'`), `time_of_day()` (seconds since midnight)
+* the animal — `zone('A')`, `head_zone('A')`, `zone_time('A')`, `zone_entries('A')`, `detected()`,
+  `freezing()`, `immobile()`, `freezing_time()`, `immobile_time()`, `speed()`, `distance()`, `x()`, `y()`,
+  `head_x()`, `head_y()`, `tail_x()`, `tail_y()`, `x_percent()` / `y_percent()` (position in % of the arena's
+  width / height), `zone_distance('A')` (0 inside the zone), `point_distance('P')`,
+  `sequence_duration('S')` (the duration of the last completed run of the apparatus's zone sequence S),
+  `key('s')`
 * I/O — `input([device,] channel)`, `analog(...)`, `encoder(...)`, `activations(...)`, `output(...)`,
-  `pellets([[device,] channel])`, `switch('name')`, `timer('name')`, `responses('schedule')`,
-  `reinforcers('schedule')`, `requirement('schedule')`
+  `output_volts(...)`, `speaker([device])` (1 while a sound plays), `pellets([[device,] channel])`,
+  `switch('name')`, `timer('name')`, `responses('schedule')`, `reinforcers('schedule')`,
+  `requirement('schedule')`
 
 Expressions are evaluated by a restricted interpreter: they cannot call anything else, read files or access
 Python objects, and huge numbers or arrays are refused.
 
 Variables are shared by all procedures. Numeric variables declared with *Save as a test result* are saved with
 the test (`Test.result_variables`) and analysed like any other measure ("Result variable" measures).
-Variables declared with *Keep the value between tests* are stored in the experiment (`Project.variables`).
+Variables declared with *Keep between tests* are stored in the experiment (`Project.variables`; the values kept
+per animal / apparatus under `@animal` / `@apparatus`), only when the test is saved.
 
 ### I/O devices
 
@@ -831,8 +867,9 @@ sending heartbeats, e.g. after a crash.
 Channels have a name (used by procedures), a kind (digital input, movement detector, digital output, PWM output,
 analogue input, sensor, rotary encoder, temperature controller, olfactometer, syringe pump), a pin, *Invert* for
 active-low hardware, and options such as `pullup=0`, `debounce_ms=20`, `counts_per_rev=1024`, `cm_per_rev=50`,
-`scale=0.0049`, `period_ms=50`, `deadband=2`, and `role=shocker` / `role=speaker` / `role=light` to group an
-output's results with that device type.
+`scale=0.0049`, `period_ms=50`, `deadband=2`, `max_v=10` (the voltage of an analogue output at full level, for
+*Set analogue output (V)*; default 5), and `role=shocker` / `role=speaker` / `role=light` to group an output's
+results with that device type.
 
 **Fast and filtered analogue inputs.** `period_ms=1` samples at 1 kHz (the Arduino firmware sends batches of
 samples with its own time stamps). `filter=lowpass` with `cutoff_hz` (and `order`, default 2), `filter=highpass`

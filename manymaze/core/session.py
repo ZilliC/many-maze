@@ -4,7 +4,6 @@ session is stored in its test."""
 
 from __future__ import annotations
 
-import copy
 import datetime as _dt
 from pathlib import Path
 
@@ -111,7 +110,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
                 pass
     kept = session.kept_variables
     if kept:  # procedure variables kept between tests: only from tests that are saved
-        project.variables.update(copy.deepcopy(kept))
+        from .procedures import merge_kept_variables
+
+        merge_kept_variables(project.variables, kept)
     test.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
     test.end_reason = session.end_reason or END_USER
     if getattr(project, "current_user", ""):
