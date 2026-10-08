@@ -7,6 +7,7 @@ Frames are decoded, drawn and encoded one at a time, so memory use does not depe
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -237,11 +238,16 @@ class OverlayRenderer:
 
 def export_video(project, test, path, options: OverlayOptions | None = None, progress=None, should_stop=None
                  ) -> Path | None:
-    """Write the test's video with overlays to `path` (.mp4 recommended). Returns the path, or None if cancelled."""
+    """Write the test's video with overlays to `path` (.mp4 recommended). Returns the path, or None if cancelled.
+
+    The video is written to ``<name>.part.<ext>`` and renamed to `path` once complete, so a cancelled or failed
+    export never leaves a truncated file or removes an existing one; `path` may not be the test's own video."""
     o = options or OverlayOptions()
     video = project.abs_path(test.video)
     if not video or not Path(video).exists():
         raise FileNotFoundError(f"Video not found: {test.video}")
+    if _same_file(path, video):
+        raise ValueError("Choose another file name: the overlay video cannot replace the test's own video")
     tracks = project.load_tracks(test) if project.has_track(test) else []
     app = project.apparatus_of(test)
     with VideoSource(video) as src:
@@ -266,7 +272,8 @@ def export_video(project, test, path, options: OverlayOptions | None = None, pro
                            project.analysis_for(test), caption)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    rec = VideoRecorder(str(path), out_fps, (ow, oh))
+    part = path.with_name(f"{path.stem}.part{path.suffix}")  # same extension: the container follows it
+    rec = VideoRecorder(str(part), out_fps, (ow, oh))
     total = (f1 - f0) // step + 1
     written = 0
     cancelled = False
@@ -287,11 +294,25 @@ def export_video(project, test, path, options: OverlayOptions | None = None, pro
                 written += 1
                 if progress and written % 5 == 0:
                     progress(min(1.0, written / max(1, total)))
-    finally:
         rec.close()
+    except BaseException:
+        try:
+            rec.close()
+        except Exception:
+            pass
+        part.unlink(missing_ok=True)
+        raise
     if cancelled:
-        path.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
         return None
+    os.replace(part, path)
     if progress:
         progress(1.0)
     return path
+
+
+def _same_file(a, b) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
