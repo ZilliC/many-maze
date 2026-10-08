@@ -168,3 +168,101 @@ Today: Test, Animal, Group, Sex, Stage, Trial, Apparatus, Period.
       is available — without secrets the build stays ad-hoc signed)
 - [ ] (Not applicable to a GPL project) licence tiers such as TakeNote-only and network licences — the TakeNote
       functionality itself is the observation-only live mode
+
+---
+
+Sections 12–15 come from a second audit (2026-10-08) of the code against ANY-maze's full measure list, its feature pages,
+the 7.x release notes and the procedure help (<https://www.anymaze.co.uk/help/>). Hardware-only items are in §7.
+
+## 12. Measures still missing (audit 2026-10-08)
+
+- [ ] Zone: time active, time inactive, inactive episodes (activity is whole-test only, measures.py:1132)
+- [ ] Time not hidden (only "Time hidden" today)
+- [ ] Total body rotations (only clockwise / anticlockwise columns)
+- [ ] Whishaw's corridor time in seconds, and the corridor for any zone (today a water-maze template measure, % only)
+- [ ] Average position (mean X / Y of the animal; ANY-maze 7.50)
+- [ ] Sequence: latency to start of first sequence (only latency to completion, sequences.py:181)
+- [ ] Average activation duration for plain outputs, light controllers, optogenetic lasers and virtual switches
+      (generic branch of `_output`, iomeasures.py:226)
+- [ ] Frequency of activations (per minute) for outputs, speakers, shockers, lights, lasers and virtual switches
+- [ ] Rotary encoder: total number of rotations (today net signed revolutions) and maximum RPM (today counts/s)
+- [ ] Per-zone device measures for inputs, outputs, speakers, shockers, lights, lasers, pellets, encoders and virtual
+      switches (only analogue signals have them)
+- [ ] Per-zone key measures: longest / shortest press, latency to first release, distance before first press,
+      list of press durations (today only count, duration, latency, mean bout, rate)
+- [ ] Grid cells: the advanced zone measures (visit list, head, border, heading, turning, CIPL, line crossings);
+      zone groups: border, heading and CIPL measures (measures.py:616, 737)
+- [ ] Check definitions against ANY-maze:
+  - [ ] Average distance from zone: ANY-maze averages only while outside; we count inside frames as 0 (measures.py:596)
+  - [ ] Initial heading error: ANY-maze's "Initial heading error" is the absolute value and "Signed …" the signed
+        one; our names are the other way round (matters for the ANY-maze import / column mapping)
+  - [ ] Body rotations fall back to direction of travel when no body angle is tracked; ANY-maze uses body orientation
+- [ ] Results table: add the missing whole-test measures (mobile episodes, latency to last mobile episode, longest
+      mobile episode, mean speed when not hidden, path tortuosity, first zone entered, visited zones …) to
+      `GENERAL_PREFIXES` (gui/pages/results/table.py:13) so they are not grouped under "Other"
+
+## 13. Procedures (audit 2026-10-08; ANY-maze ~71 events / 75 actions, mANY-MAZE 48 / 51)
+
+Structure and statements:
+- [ ] Pre-test section ("Test is waiting to start") with Prevent / Allow test start
+- [ ] Sub-procedures: Run sub-procedure statement and action
+- [ ] Go to / Label statements
+- [ ] Repeat until (body runs at least once)
+- [ ] If … else-if chains (today only if / else, engine.py:858)
+- [ ] Wait until event A *or* event B, then test which one fired (today one event + timeout, engine.py:914)
+- [ ] Set timer resolution (engine runs once per frame; decide whether it applies)
+
+Actions:
+- [ ] End test with a reason, allow continuation, "Test continuation" event (reason is always END_PROCEDURE, live.py:420)
+- [ ] Schedule another test for this animal
+- [ ] Set / remove zone label; set moveable zone location (zone_overrides exist, live.py:405, but no action)
+- [ ] Video recorder: start / stop / pause / unpause / label
+- [ ] Pop-up message, text on the display (output / remove / clear), SMS, e-mail
+- [ ] Generate error / warning (today only `log`)
+- [ ] Run a program; trigger a plug-in
+- [ ] Separate setters for output frequency / duty / duration and speaker volume (today action parameters only)
+
+Events:
+- [ ] Investigation of a zone starts / stops
+- [ ] Animal oriented towards / away from a zone or point
+- [ ] Hidden-zone partial exit
+- [ ] Centre / head / tail position changed
+- [ ] Rearing starts / stops (and rearing variables)
+- [ ] Rotary encoder: turning clockwise / anticlockwise, direction reversed, RPM (today count only)
+- [ ] Speaker starts / stops / end of sound file
+- [ ] Analogue output changed
+- [ ] Disk full, disk space low, recording error
+- [ ] Event-wizard triggers: time until test end, random interval, time of day, X times in Y s, value held for a
+      duration, change within a time, apply only to some trials; "fails to enter zone for a time" as a real trigger
+
+Variables and functions:
+- [ ] Built-in variables: test running / paused, stage, trial, apparatus, treatment, animal number, date and time of
+      day, cumulative freezing / immobile time, distance from zone / point, head and tail x / y, position as % of
+      width, sequence duration, animal field values, speaker state (engine.py:55)
+- [ ] Retained variables per animal and per apparatus (today one project-wide store, project.py:159)
+- [ ] Randomise an array with a maximum number of consecutive repeats (only `shuffle`, expr.py:78)
+- [ ] #N/A constant and Is undefined function
+- [ ] ANY-maze compatible trigonometry (degrees) and Log (base 10), at least when importing ANY-maze protocols
+      (today Python semantics, expr.py:98)
+- [ ] Analogue output level in volts as in ANY-maze (today 0–1)
+
+## 14. Application features (audit 2026-10-08, ANY-maze feature pages and 7.x release notes)
+
+- [ ] Automatic freezing threshold with a sensitivity setting (ANY-maze 7.00; today manual on / off thresholds)
+- [ ] Live charts of more parameters (ANY-maze 40+, today 5: speed, distance, motion, detected, freezing — live.py:202)
+- [ ] Live point, sequence and input statistics in the monitor during a test
+- [ ] Show the animal's orientation live (7.00 "flashlight beam"; tracking.py:778 draws no heading)
+- [ ] Change apparatus geometry (not only calibration) during a running test
+- [ ] Auto-start when the operator's hand leaves the image (today: start when the animal is first detected)
+- [ ] Automatic recovery when video capture drops (camera.py:134 just stops)
+- [ ] Export the zone map as an image (PNG / SVG)
+- [ ] Low-disk-space check when opening / recording
+- [ ] Count the statistical tests against ANY-maze's "more than 30" (17 named in statistics.py:29 plus post-hoc)
+- [ ] (Obsolete, probably skip) DVD as a video source
+
+## 15. Not verified
+
+- [ ] Numerical agreement of our measures with ANY-maze on the same video (needs a reference ANY-maze export)
+- [ ] ANY-maze XML import against a real ANY-maze file (see §10)
+- [ ] Hardware-related procedure elements (sensors, pellet out / failed, syringe pumps, temperature, light ramps,
+      laser intensity / pulse files, selectors, shock mA) belong to §7
