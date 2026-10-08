@@ -1103,11 +1103,11 @@ def activity_mask(k: Kinematics, s: AnalysisSettings) -> np.ndarray:
     return drop_short_runs(act, k.t, k.dur, s.min_inactive_s, value=False)
 
 
-def _head(res, p: _Period):
+def _head_motion(res, p: _Period):
     """Distance travelled by the head and how much the head turned (none across a pause)."""
     if not p.P.clean.has_head():
         return
-    H = p.P.cached("head", lambda: _head_arrays(p.P))
+    H = p.P.cached("head_motion", lambda: _head_arrays(p.P))
     turn = H["turn"][p.sl]
     res[f"Head distance ({p.P.app.unit})"] = _r(H["step"][p.sl].sum(), 2)
     res["Head turn angle (deg)"] = _r(np.abs(turn).sum(), 1)
@@ -1218,7 +1218,7 @@ def _zone_rearing(res, p: _Period):
 
 
 # the measures of a period, in column order
-_SECTIONS = (_detection, _tracking_quality, _locomotion, _activity, _head, _rearing, _arena_position, _zones,
+_SECTIONS = (_detection, _tracking_quality, _locomotion, _activity, _head_motion, _rearing, _arena_position, _zones,
              _zone_rearing, _points, _lines, _grids_and_sequences, _template, _social)
 
 
