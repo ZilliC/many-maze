@@ -234,8 +234,9 @@ class Project:
 
     def restore_backup(self, backup: str | os.PathLike) -> "Project":
         """The experiment as stored in a backup (the current file is backed up first). Save it to restore."""
+        data = json.loads(Path(backup).read_text(encoding="utf-8"))  # read first: backup() prunes the oldest copy
         self.backup()
-        return Project.from_dict(json.loads(Path(backup).read_text()), self.path)
+        return Project.from_dict(data, self.path)
 
     def to_dict(self) -> dict:
         return {
@@ -269,7 +270,7 @@ class Project:
     @classmethod
     def load(cls, path: str | os.PathLike) -> "Project":
         pdir = cls.project_dir(path)
-        return cls.from_dict(json.loads((pdir / PROJECT_FILE).read_text()), pdir)
+        return cls.from_dict(json.loads((pdir / PROJECT_FILE).read_text(encoding="utf-8")), pdir)
 
     @classmethod
     def from_dict(cls, d: dict, path: str | os.PathLike | None = None) -> "Project":

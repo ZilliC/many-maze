@@ -414,8 +414,16 @@ class Worker(QThread):
         """Ask every running worker to stop and wait for it (Qt aborts if a running QThread is destroyed)."""
         for w in list(cls.running):
             w.stop()
+        import time
+
+        from PySide6.QtWidgets import QApplication
+
+        end = time.monotonic() + ms / 1000  # one overall bound, and the UI keeps painting while we wait
         for w in list(cls.running):
-            w.wait(ms)
+            while w.isRunning() and time.monotonic() < end:
+                w.wait(50)
+                if QApplication.instance() is not None:
+                    QApplication.processEvents()
 
     def run(self):
         try:

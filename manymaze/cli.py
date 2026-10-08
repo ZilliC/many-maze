@@ -46,7 +46,7 @@ def cmd_track(a):
 
         from .core.apparatus import Apparatus
 
-        d = json.loads(Path(a.apparatus).read_text())
+        d = json.loads(Path(a.apparatus).read_text(encoding="utf-8"))
         if isinstance(d, dict) and isinstance(d.get("apparatus"), list):  # apparatus file or experiment
             if not d["apparatus"]:
                 sys.exit(f"{a.apparatus} contains no apparatus")

@@ -7,6 +7,7 @@ import csv
 import re
 import datetime as _dt
 import html
+import logging
 import math
 from pathlib import Path
 from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
@@ -14,23 +15,25 @@ from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
 import numpy as np
 
 from .. import __version__
+from .atomicfile import atomic_write, write_text_atomic
 from .apparatus import CALIBRATION_KEY, ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
 from .project import INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
 
 XML_FORMAT_VERSION = 1
+log = logging.getLogger(__name__)
 
 
 def value_text(v) -> str:
-    """Full-precision text of a value (exports, clipboard): whole numbers as integers, other numbers with 10
-    significant digits, blank for missing and non-finite values."""
+    """Full-precision text of a value (exports, clipboard): whole numbers as integers, other numbers with the shortest
+    text that reads back exactly (repr), blank for missing and non-finite values."""
     if v is None:
         return ""
     if isinstance(v, (float, np.floating)):
         if not math.isfinite(v):
             return ""
         f = float(v)
-        return str(int(f)) if f.is_integer() and abs(f) < 1e15 else f"{f:.10g}"
+        return str(int(f)) if f.is_integer() and abs(f) < 1e15 else repr(f)
     if isinstance(v, np.integer):
         return str(int(v))
     return str(v)
@@ -49,14 +52,19 @@ def display_text(v) -> str:
 
 def _csv_text(v) -> str:
     """value_text, with text that looks like a formula prefixed by ' so a spreadsheet keeps it as text (no formula
-    injection; as the xlsx writer). Numbers, negative ones included, are left alone."""
+    injection; as the xlsx writer). Numbers, negative ones included, and plain labels such as "+/+" or "-ctrl" are
+    left alone: a leading + or - counts only when the text also has formula syntax (parentheses, ! : \\ |)."""
     s = value_text(v)
-    return "'" + s if isinstance(v, str) and s[:1] in ("=", "+", "-", "@") and s != "-" else s
+    if not isinstance(v, str) or not s:
+        return s
+    if s[0] in ("=", "@") or (s[0] in "+-" and re.search(r"[(!:\\|]", s)):
+        return "'" + s
+    return s
 
 
 def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimiter=","):
     cols = columns or result_columns(rows)
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    with atomic_write(path, newline="") as f:
         w = csv.writer(f, delimiter=delimiter)
         w.writerow([_csv_text(c) for c in cols])
         for r in rows:
@@ -106,8 +114,8 @@ def write_sylk(rows: list[dict], path, columns: list[str] | None = None):
             out.append(f"C;{f'Y{y};' if first else ''}X{x};K{val}")
             first = False
     out.append("E")
-    with open(path, "w", encoding="cp1252", errors="replace", newline="\r\n") as f:
-        f.write("\n".join(out) + "\n")
+    with atomic_write(path, "wb") as f:
+        f.write(("\r\n".join(out) + "\r\n").encode("cp1252", errors="replace"))
 
 
 def read_sylk(path) -> list[list]:
@@ -221,7 +229,8 @@ def write_dbf(rows: list[dict], path, columns: list[str] | None = None, date: _d
     for i in range(len(rows)):
         out += b" " + b"".join(f[3][i] for f in fields)  # ' ': record not deleted
     out += b"\x1a"
-    Path(path).write_bytes(bytes(out))
+    with atomic_write(path, "wb") as f:
+        f.write(bytes(out))
 
 
 def read_dbf(path) -> tuple[list[str], list[list]]:
@@ -412,7 +421,7 @@ def zone_visit_rows(project: Project, tests=None) -> list[dict]:
 
 def export_animals(project: Project, path):
     """The animal list as CSV: ID, treatment, sex, the custom fields and the notes."""
-    with open(path, "w", newline="", encoding="utf-8") as fh:
+    with atomic_write(path, newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields) + ["Notes"])
         for a in project.animals:
@@ -567,8 +576,9 @@ def protocol_report(project: Project, path) -> Path:
             ax.set_xticks([])
             ax.set_yticks([])
             out.append(_img(plots.fig_to_png(fig), 380))
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("apparatus figure for %s failed: %s", app.name, e)
+            out.append("<p><em>(figure unavailable)</em></p>")
         cal = (f"{app.px_per_cm:.3f} px/cm" + (f" (line of {app.calibration_length_cm:g} cm)"
                                                  if app.calibration_length_cm else "")) if app.px_per_cm else \
             "not calibrated (results in pixels)"
@@ -634,7 +644,7 @@ def protocol_report(project: Project, path) -> Path:
             f"<li>{html.escape(criterion_text(c))}</li>" for c in p.training_criteria) + "</ul>")
     out.append("</body></html>")
     path = Path(path)
-    path.write_text("\n".join(out), encoding="utf-8")
+    write_text_atomic(path, "\n".join(out))
     return path
 
 
@@ -678,7 +688,7 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
             aid = ids[i] if i < len(ids) else f"{t.animal_id}#{i + 1}"
             safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(aid))
             p = out_dir / f"test_{t.id:04d}_{safe}.{'tsv' if delimiter == chr(9) else 'csv'}"
-            with open(p, "w", newline="", encoding="utf-8") as f:
+            with atomic_write(p, newline="") as f:
                 f.write(f"# Test {t.id}, animal {aid}, stage {t.stage}, trial {t.trial}, "
                         f"unit {app.unit if app else 'px'} (raw columns in pixels)\n")
                 w = csv.writer(f, delimiter=delimiter)
@@ -858,8 +868,10 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
                     if trows is None and project.has_results(t):
                         try:
                             trows = project.analyse_test(t, segmented)
-                        except Exception:
+                        except Exception as e:
+                            log.warning("analysis of test %s failed in the XML export: %s", t.id, e)
                             trows = []
+                            w(f"      <results-error{_attrs(message=str(e))}/>\n")
                     info = {*INFO_COLUMNS, *project.animal_fields}
                     for r in trows or []:
                         w(f"      <results{_attrs(animal=r.get('Animal'), period=r.get('Period', 'Whole test'))}>\n")
@@ -1022,5 +1034,5 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         out.append("<tr>" + "".join(f"<td>{html.escape(value_text(r.get(c)))}</td>" for c in cols) + "</tr>")
     out.append("</table></body></html>")
     path = Path(path)
-    path.write_text("\n".join(out), encoding="utf-8")
+    write_text_atomic(path, "\n".join(out))
     return path

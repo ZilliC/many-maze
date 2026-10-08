@@ -163,9 +163,14 @@ def describe_by(rows: list[dict], measure: str, factors: list[str], orders: dict
 def p_adjust(pvals, method: str = "holm") -> list[float]:
     """Adjust p-values: bonferroni, holm, sidak, fdr (Benjamini-Hochberg) or none."""
     p = np.asarray(pvals, float)
-    m = len(p)
-    if m == 0 or method in (None, "none"):
+    if len(p) == 0 or method in (None, "none"):
         return p.tolist()
+    fin = np.isfinite(p)
+    if not fin.all():  # NaN p-values stay NaN and do not count in m (nor poison the others)
+        res = np.full(len(p), np.nan)
+        res[fin] = p_adjust(p[fin], method)
+        return res.tolist()
+    m = len(p)
     if method == "bonferroni":
         out = np.minimum(1.0, p * m)
     elif method == "sidak":

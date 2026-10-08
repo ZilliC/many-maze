@@ -639,6 +639,8 @@ class AnimalsPage(Page):
         text = item.text().strip()
         p = self.project
         self._loading = True
+        sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)  # a re-sort while editing would move rows under `r`
         try:
             if kind == "id":
                 if text != a.id:
@@ -690,6 +692,7 @@ class AnimalsPage(Page):
                 a.fields[self._cols[item.column()][1]] = text
                 self._changed()
         finally:
+            self.table.setSortingEnabled(sorting)
             self._loading = False
 
     # ------------------------------------------------------------------ retirement, criteria, doses

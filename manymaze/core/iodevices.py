@@ -571,7 +571,8 @@ class ArduinoDevice(_LineDevice):
     def all_off(self):
         for th in self.thermostats.values():
             th.target = th.setpoint = None
-        self.write_line("R")
+        if not self.write_line("R"):
+            return  # not sent (a failed write closes the port): the outputs may still be on, not shown off
         for ch in self.outputs:
             self.outputs[ch] = 0
 
@@ -685,6 +686,8 @@ class AudioDevice(Device):
         return self._play(str(path), vol if cmd == "file" else 1.0)
 
     def _play(self, path: str, volume: float, track: bool = True):
+        if track:  # forget the sounds that have ended
+            self._procs = [p for p in self._procs if not _finished(p)]
         if AudioDevice.player is not None:
             try:
                 h = AudioDevice.player(path, volume)
@@ -719,11 +722,26 @@ class AudioDevice(Device):
                     p.stop()
             except Exception:  # pragma: no cover
                 pass
+        for p in self._procs:
+            if isinstance(p, subprocess.Popen):  # reaped, not left as zombies
+                try:
+                    p.wait(timeout=0.5)
+                except Exception:  # pragma: no cover
+                    pass
         self._procs = []
 
     def close(self):
         self.stop()
         super().close()
+
+
+def _finished(p) -> bool:
+    """Whether a played sound (a player process, a :class:`_Loop`) has ended; GUI player handles: never known."""
+    poll = getattr(p, "poll", None)
+    try:
+        return poll is not None and poll() is not None
+    except Exception:  # pragma: no cover
+        return False
 
 
 def _wav_seconds(path: str) -> float | None:
@@ -741,16 +759,27 @@ class _Loop:
         self.dev, self.path, self.volume, self.repeat = dev, path, volume, max(0, int(repeat))
         self.plays = 0
         self._stop = threading.Event()
+        self._lock = threading.Lock()  # stop() and the thread starting the next play
         self._cur = None
         self._thread = threading.Thread(target=self._run, name="audio-loop", daemon=True)
 
     def start(self):
         self._thread.start()
 
+    def poll(self):
+        """None while playing (or about to), as Popen.poll."""
+        return 0 if self._thread.ident is not None and not self._thread.is_alive() else None
+
     def _run(self):
         length = _wav_seconds(self.path)
         while not self._stop.is_set() and (not self.repeat or self.plays < self.repeat):
-            self._cur = self.dev._play(self.path, self.volume, track=False)
+            cur = self.dev._play(self.path, self.volume, track=False)
+            with self._lock:
+                self._cur = cur
+                stopped = self._stop.is_set()
+            if stopped:  # stopped while this play was starting: stop() did not see it
+                self._halt(cur)
+                return
             self.plays += 1
             if self._cur is None or self._cur is False:
                 if self.dev.backend is None and AudioDevice.player is None:
@@ -770,9 +799,14 @@ class _Loop:
                 return
 
     def stop(self):
-        self._stop.set()
-        cur = self._cur
-        if cur is not None and cur is not False:
+        with self._lock:
+            self._stop.set()
+            cur = self._cur
+        self._halt(cur)
+
+    @staticmethod
+    def _halt(cur):
+        if cur is not None and cur is not False and cur is not True:
             try:
                 cur.terminate() if hasattr(cur, "terminate") else cur.stop()
             except Exception:  # pragma: no cover
@@ -824,6 +858,7 @@ class DeviceManager:
         self._sched: list = []  # timed outputs: (due monotonic, seq, device, channel, value, max_s)
         self._sched_seq = 0
         self._sched_wake = threading.Event()
+        self._opening: set[str] = set()  # devices being opened (outside the lock)
         for c in self.configs:
             cls = drivers().get(c.get("type", "virtual"), VirtualDevice)
             dev = cls(c, (transports or {}).get(c.get("name")))
@@ -838,13 +873,18 @@ class DeviceManager:
 
     def open(self):
         with self._lock:
-            for d in self.devices.values():
-                if not d.connected:
-                    try:
-                        d.open()
-                    except Exception as e:  # pragma: no cover - hardware dependent
-                        d._error(f"{d.name}: {e}")
-            self._start_keepalive()
+            todo = [d for d in self.devices.values() if not d.connected and d.name not in self._opening]
+            self._opening.update(d.name for d in todo)
+        try:  # outside the lock: a board's handshake takes seconds, the other devices and tests go on meanwhile
+            for d in todo:
+                try:
+                    d.open()
+                except Exception as e:  # pragma: no cover - hardware dependent
+                    d._error(f"{d.name}: {e}")
+        finally:
+            with self._lock:
+                self._opening.difference_update(d.name for d in todo)
+                self._start_keepalive()
 
     SERVICE_S = 0.1  # controller period
 
@@ -939,12 +979,13 @@ class DeviceManager:
             self._sched_wake.set()
             return True
 
-    def _cancel_schedule(self, device, channel):
+    def _cancel_schedule(self, device, channel=None):
+        """Drop the timed outputs of a channel (None: of every channel) of a device."""
         import heapq
 
         with self._lock:
             n = len(self._sched)
-            self._sched = [e for e in self._sched if not (e[2] == device and e[3] == channel)]
+            self._sched = [e for e in self._sched if not (e[2] == device and channel in (None, e[3]))]
             if len(self._sched) != n:
                 heapq.heapify(self._sched)
 
@@ -1272,6 +1313,7 @@ class DeviceView:
         for d in self._own():
             if d.name == self.alias:
                 with self.manager._lock:
+                    self.manager._cancel_schedule(self.alias)  # its pending pulse sequences too
                     d.all_off()
             else:
                 d.all_off()

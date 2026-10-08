@@ -16,6 +16,7 @@ from ...core import analyses as an
 from ...core import plots
 from ...core import stats as st
 from ...core.analyses import NONE, WHOLE, cell, label as _label
+from ...core.atomicfile import write_text_atomic
 from ...core.export import write_table
 from ...core.project import result_columns
 from ...core.stats import is_number, numeric_columns
@@ -948,8 +949,7 @@ class StatisticsPage(Page):
         if not path.lower().endswith((".html", ".htm")):
             path += ".html"
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.report_html())
+            write_text_atomic(path, self.report_html())
         except Exception as e:
             error_box(self, "Save report", e)
             return

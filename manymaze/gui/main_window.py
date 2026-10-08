@@ -761,8 +761,7 @@ class MainWindow(QMainWindow):
             if scoring:
                 page_hook(tv, "end_scoring")
             return self.save()
-        self.dirty = False  # discarded: don't ask again on the way to the next experiment
-        return True
+        return True  # discarded: dirty stays set until the next experiment really replaces this one (set_project)
 
     def _stop_live_tests(self) -> bool:
         """Live tests keep running in the background (Run tests): they are stopped and saved, or nothing happens."""
@@ -786,7 +785,7 @@ class MainWindow(QMainWindow):
         path = dlg.project_path()
         if (path / PROJECT_FILE).exists():
             if QMessageBox.question(self, APP_NAME, f"{path} already exists. Open it instead?") == QMessageBox.Yes:
-                self.load_project(str(path))
+                self.load_project(str(path), confirmed=True)
             return
         p = Project(name=dlg.name.text().strip() or "Experiment", protocol=dlg.protocol.currentData(),
                     test_duration_s=dlg.duration.value())
@@ -817,7 +816,7 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Open experiment folder (.mmaze)", self._last_dir())
         if d:
             self._remember_dir(d)
-            self.load_project(d)
+            self.load_project(d, confirmed=True)
 
     def _last_dir(self) -> str:
         d = self.settings.value("last_dir", "")
@@ -828,8 +827,9 @@ class MainWindow(QMainWindow):
         p = Path(path)
         self.settings.setValue("last_dir", str(p.parent if p.suffix == ".mmaze" or p.is_file() else p))
 
-    def load_project(self, path: str):
-        if self.project is not None and not self.maybe_save():
+    def load_project(self, path: str, confirmed: bool = False):
+        """``confirmed``: the caller already ran maybe_save() (don't ask a second time)."""
+        if self.project is not None and not confirmed and not self.maybe_save():
             return
         try:
             p = Project.load(path)
@@ -892,6 +892,7 @@ class MainWindow(QMainWindow):
             return
         import shutil
 
+        self._flush_edits()
         self._for_pages("commit")
         safe = "".join(c for c in self.project.name.strip() if c not in '/\\:*?"<>|') or "experiment"
         dest = Path(d) / f"{safe}.mmaze"
@@ -906,8 +907,10 @@ class MainWindow(QMainWindow):
             # keep video paths valid from the new location: make them absolute, then relative to the copy
             for t in self.project.tests:
                 t.video = self.project.abs_path(t.video)
+            if dest.exists() and (dest / "tracks").exists():
+                shutil.rmtree(dest / "tracks")  # replacing: no stale tracks of the old experiment mixed in
             if old and (old / "tracks").exists():
-                shutil.copytree(old / "tracks", dest / "tracks", dirs_exist_ok=True)
+                shutil.copytree(old / "tracks", dest / "tracks")
             self.project.save(dest)
             for t in self.project.tests:
                 t.video = self.project.rel_path(t.video)
@@ -1145,7 +1148,7 @@ class MainWindow(QMainWindow):
         def done(folder):
             out["folder"] = folder
             self.dirty = False
-            self.load_project(str(folder))
+            self.load_project(str(folder), confirmed=True)
 
         w = run_with_progress(self, "Unpacking the experiment archive",
                               lambda progress, stop: extract_archive(path, dest), on_done=done,
@@ -1169,7 +1172,7 @@ class MainWindow(QMainWindow):
             return
         path = Path(d) / "Demo open field.mmaze"
         if (path / PROJECT_FILE).exists():
-            self.load_project(str(path))
+            self.load_project(str(path), confirmed=True)
             return
         from ..core.demo import create_demo_project
 

@@ -9,9 +9,14 @@ while a virtual switch is on, analogue values per zone visit) and is called by `
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
+
+log = logging.getLogger(__name__)
+
+_STR_VALUES = {"on": 1.0, "true": 1.0, "yes": 1.0, "high": 1.0, "off": 0.0, "false": 0.0, "no": 0.0, "low": 0.0}
 
 ENCODER_TURN_GAP_S = 1.0  # an encoder is turning between two samples that differ and are at most this far apart
 ENCODER_REVERSAL_DEG = 0.0  # turning back by more than this is a reversal (ANY-maze: any pulse the other way)
@@ -52,14 +57,27 @@ class _Log:
         self.series: dict[tuple, list] = {}
         self.types: dict[tuple, set] = {}
         self.events = list(io_events or [])
-        for e in sorted(self.events, key=lambda e: e.get("t", 0)):
-            key = (e.get("kind", "input"), str(e.get("device", "")), str(e.get("channel", "")))
+        good = []
+        for e in self.events:
+            try:
+                t = float(e.get("t"))
+            except (TypeError, ValueError):
+                t = math.nan
             v = e.get("value", 0)
+            if isinstance(v, str):
+                v = _STR_VALUES.get(v.strip().lower(), v)
             try:
                 v = float(v or 0)
             except (TypeError, ValueError):
+                v = math.nan
+            if not (math.isfinite(t) and math.isfinite(v)):
+                log.warning("I/O event skipped (bad time or value): %r", e)
                 continue
-            self.series.setdefault(key, []).append((float(e.get("t", 0)), v))
+            good.append((t, v, e))
+        good.sort(key=lambda g: g[0])
+        for t, v, e in good:
+            key = (e.get("kind", "input"), str(e.get("device", "")), str(e.get("channel", "")))
+            self.series.setdefault(key, []).append((t, v))
             self.types.setdefault(key, set()).add(e.get("type") or "")
         io = [k for k in self.series if k[0] != "variable"]
         names = [k[2] for k in io]

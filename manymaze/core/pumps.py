@@ -959,8 +959,10 @@ class SyringePumpDevice(_LineDevice):
                     return ok
                 if op == "stop":
                     p.stop_requested = True
-                    self.outputs[channel] = 0
-                    return self._send(p, self.protocol.stop(self, p))
+                    ok = self._send(p, self.protocol.stop(self, p))
+                    if ok:  # not sent: the pump may still run, so it is not shown stopped
+                        self.outputs[channel] = 0
+                    return ok
                 if op == "set_syringe":
                     if not self._resolve_syringe(p, kw):
                         if not kw.get("syringe") and kw.get("diameter_mm") in (None, ""):
@@ -994,8 +996,10 @@ class SyringePumpDevice(_LineDevice):
     def all_off(self):
         """Stop every pump."""
         for name, p in self.pumps.items():
-            if self.connected:
-                self.pump(name, "stop")
-            else:
+            if self.connected and (self.pump(name, "stop") or self.connected and self.pump(name, "stop")):
+                continue  # sent (at the second try at most)
+            if self.simulated:
                 p.running = False
                 self.outputs[name] = 0
+            elif p.running or self.outputs.get(name):  # not sent: the pump may still run, it is not shown stopped
+                self._error(f"{self.name}: {name}: could not stop the pump")

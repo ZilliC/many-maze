@@ -56,6 +56,7 @@ class _RecordingThread:
         self.recorder = recorder
         self.error: Exception | None = None
         self._queue: queue.Queue = queue.Queue(maxsize)
+        self._closed = threading.Event()  # set by close(): the encoder ends once the queue is empty
         self._thread = threading.Thread(target=self._run, name="live-recorder", daemon=True)
         self._thread.start()
 
@@ -74,9 +75,10 @@ class _RecordingThread:
         encoder has not finished within timeout (it goes on and closes the file in the background)."""
         timeout = self.CLOSE_TIMEOUT_S if timeout is None else timeout
         deadline = time.monotonic() + timeout
+        self._closed.set()
         try:
             self._queue.put(None, timeout=timeout)
-        except queue.Full:
+        except queue.Full:  # the encoder sees the flag once it has emptied the queue
             pass
         self._thread.join(max(0.0, deadline - time.monotonic()))
         if self._thread.is_alive():
@@ -85,7 +87,15 @@ class _RecordingThread:
             raise self.error
 
     def _run(self):
-        while (item := self._queue.get()) is not None:
+        while True:
+            try:
+                item = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                if self._closed.is_set():
+                    break
+                continue
+            if item is None:
+                break
             if self.error is None:
                 frame, count = item
                 try:
@@ -473,10 +483,14 @@ class _Scoring(Session):
     def _end_if_requested(self):
         """Overridden by sessions whose procedures can end the test (after the engine call has returned)."""
 
+    def _locked(self):
+        """The session lock (sessions that record override it to close stopped recorders after it)."""
+        return self.lock
+
     def score(self, behaviour: str, kind: str = "point", t: float | None = None) -> dict | None:
         """Score a behaviour now: a point event, or start / end of a state event. Returns the event, or None when
         the test is not running."""
-        with self.lock:
+        with self._locked():
             if self.state != "running":
                 return None
             t = round(self.elapsed if t is None else t, 3)
@@ -952,7 +966,7 @@ class LiveSession(_Scoring):
     def continue_test(self) -> bool:
         """Continue a test that is waiting for its end (the Start button, a start key or the test control input):
         the end is forgotten, the data has no gap and the procedures see "test continued"."""
-        with self.lock:
+        with self._locked():
             if not self.waiting_end:
                 return False
             ok = False
@@ -1257,10 +1271,10 @@ class LiveSession(_Scoring):
                 self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
                 self.pause_log.append({"t": round(self._pause_t, 3),
                                        "duration_s": round(time.monotonic() - self._pause_wall, 3)})
-            if self.state in ("running", "paused"):
+            if self.state in ("running", "paused") or (self.state == "waiting" and getattr(eng, "_pretest", False)):
                 self._finishing = True  # test-end handlers ending the test again: this finish() goes on
-                try:
-                    self._call_engine(eng.stop, self.elapsed)
+                try:  # while waiting: the pre-test procedures stop and their outputs go off
+                    self._call_engine(eng.stop, self.elapsed if self.state != "waiting" else eng.t)
                 finally:
                     self._finishing = False
             if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9:

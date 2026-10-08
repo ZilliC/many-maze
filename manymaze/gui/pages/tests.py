@@ -227,6 +227,11 @@ class TestsModel(QAbstractTableModel):
         if t is None or role != Qt.EditRole:
             return False
         c = index.column()
+        if c in (C_TRIAL, C_START, C_DUR):  # validate before anything is changed
+            try:
+                num = int(value) if c == C_TRIAL else float(value)
+            except (TypeError, ValueError):
+                return False
         if c == C_ANIMAL:
             aid = str(value).strip()
             if aid == t.animal_id:
@@ -242,13 +247,13 @@ class TestsModel(QAbstractTableModel):
             p.add_stage(st)
             t.stage = st
         elif c == C_TRIAL:
-            t.trial = int(value)
+            t.trial = num
         elif c == C_APP:
             t.apparatus = str(value)
         elif c == C_START:
-            t.start_s = float(value)
+            t.start_s = num
         elif c == C_DUR:
-            t.duration_s = float(value)
+            t.duration_s = num
         elif c == C_USER:
             if wf.set_experimenter(p, [t], str(value)) == 0:
                 return False

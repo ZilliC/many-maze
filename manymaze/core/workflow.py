@@ -480,6 +480,9 @@ def rename_animal(project: Project, animal: Animal, new_id: str) -> bool:
             t.animal_id = new_id
         if old in t.extra_animals:
             t.extra_animals = [new_id if x == old else x for x in t.extra_animals]
+    done = project.settings_extra.get("completed_stages", {})
+    if old in done:
+        done[new_id] = done.pop(old)
     return True
 
 
@@ -535,6 +538,9 @@ def rename_field(project: Project, old: str, new: str) -> bool:
     for a in project.animals:
         if old in a.fields:
             a.fields[new] = a.fields.pop(old)
+    dose = project.settings_extra.get("dose")
+    if isinstance(dose, dict) and dose.get("weight_field") == old:
+        dose["weight_field"] = new
     return True
 
 
@@ -544,6 +550,9 @@ def remove_field(project: Project, name: str) -> bool:
     project.animal_fields.remove(name)
     for a in project.animals:
         a.fields.pop(name, None)
+    dose = project.settings_extra.get("dose")
+    if isinstance(dose, dict) and dose.get("weight_field") == name:
+        dose.pop("weight_field")  # back to the default weight field (dose_settings)
     return True
 
 

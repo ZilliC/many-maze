@@ -552,15 +552,24 @@ class ProcedureEngine(Actions, LiveState):
 
     @_locked
     def stop(self, t: float):
-        if self.stopped or not self.started:
-            if not self.started:
-                self.stopped = True
+        if self.stopped:
+            return
+        if not self.started and not self._pretest:
+            self.stopped = True
             return
         if self._busy:
             self._pending_stop = t if self._pending_stop is None else max(self._pending_stop, t)
             return
         self._busy = True
         try:
+            if not self.started:  # ended while waiting to start: the pre-test procedures' outputs go off
+                self._pretest = False
+                t = max(self.t, t)
+                for key in list(self._shock_keys):
+                    if self.outputs_state.get(key):
+                        self._safely(f"output {key[0]}/{key[1]}", self._set_out, key[0], key[1], 0, t, "shock")
+                self._cleanup(t)
+                return
             try:
                 self.t = max(self.t, t)
                 t = self.t
@@ -568,30 +577,34 @@ class ProcedureEngine(Actions, LiveState):
                 self._emit("test_end", {}, t)
                 self._run(t, final=True)
             finally:
-                # every cleanup step on its own: one failing device must not leave the others on
-                for th in self.threads:
-                    self._safely("stop", self._kill, th)
-                self.threads = []
-                for key in list(self._trains):
-                    self._safely(f"output {key[0]}/{key[1]}", self._stop_train, key, t)
-                self._tasks, self._task_keys, self._cancelled = [], {}, set()
-                self._ramps.clear()
                 try:
-                    if self.outputs_off_at_end:
-                        self._devices_off(t)
-                        for (dev, ch), v in list(self.outputs_state.items()):
-                            if v:
-                                self._safely(f"output {dev}/{ch}", self._set_out, dev, ch, 0, t, "digital")
-                        for key in list(self._audio_on):
-                            self._safely("audio", self._audio_off, key, t)
-                        for name, v in list(self.switches.items()):
-                            if v:
-                                self._safely(f"switch {name}", self._set_switch, name, 0, t)
+                    self._cleanup(t)
                 finally:
                     self._finalise(t)
         finally:
             self._busy = False
             self.stopped = True
+
+    def _cleanup(self, t):
+        """Threads, pulse trains and timers stopped; outputs, sounds, switches and devices off (end of the test)."""
+        # every cleanup step on its own: one failing device must not leave the others on
+        for th in self.threads:
+            self._safely("stop", self._kill, th)
+        self.threads = []
+        for key in list(self._trains):
+            self._safely(f"output {key[0]}/{key[1]}", self._stop_train, key, t)
+        self._tasks, self._task_keys, self._cancelled = [], {}, set()
+        self._ramps.clear()
+        if self.outputs_off_at_end:
+            self._devices_off(t)
+            for (dev, ch), v in list(self.outputs_state.items()):
+                if v:
+                    self._safely(f"output {dev}/{ch}", self._set_out, dev, ch, 0, t, "digital")
+            for key in list(self._audio_on):
+                self._safely("audio", self._audio_off, key, t)
+            for name, v in list(self.switches.items()):
+                if v:
+                    self._safely(f"switch {name}", self._set_switch, name, 0, t)
 
     def _safely(self, what, fn, *args):
         """A cleanup step at the end of the test: an error is reported and the next step still runs."""

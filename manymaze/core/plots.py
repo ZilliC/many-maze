@@ -4,6 +4,7 @@ and group graphs (matplotlib)."""
 from __future__ import annotations
 
 import io
+import logging
 import math
 
 import matplotlib
@@ -22,6 +23,8 @@ from .apparatus import Apparatus  # noqa: E402
 from .project import Behaviour  # noqa: E402
 from .stats import descriptive, error_value, stars  # noqa: E402
 from .track import Track  # noqa: E402
+
+log = logging.getLogger(__name__)
 
 COLOR_BY = {"none": "Single colour", "time": "Time", "speed": "Speed"}
 HEATMAP_NORMS = {"auto": "Automatic (each map)", "percent": "% of time", "relative": "Relative (max = 1)"}
@@ -59,7 +62,8 @@ def _limits(ax, app: Apparatus | None, track: Track | None, frame=None):
         return
     try:
         x0, y0, x1, y1 = app.arena_or_bounds().bounds()
-    except Exception:
+    except Exception as e:
+        log.debug("no arena bounds, using the track's extent: %s", e)
         x0, y0 = np.nanmin(track.x), np.nanmin(track.y)
         x1, y1 = np.nanmax(track.x), np.nanmax(track.y)
     pad = 0.05 * max(x1 - x0, y1 - y0, 1)
@@ -71,7 +75,8 @@ def _limits(ax, app: Apparatus | None, track: Track | None, frame=None):
 def _bounds(app: Apparatus | None, track: Track | None = None):
     try:
         return app.arena_or_bounds().bounds()
-    except Exception:
+    except Exception as e:
+        log.debug("no arena bounds, using the track's extent: %s", e)
         if track is None or not np.isfinite(track.x).any():
             return (0.0, 0.0, 1.0, 1.0)
         return (float(np.nanmin(track.x)), float(np.nanmin(track.y)), float(np.nanmax(track.x)),
@@ -202,7 +207,8 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
     if values is None and color_by and color_by != "none" and len(x) > 1:
         try:
             values, value_label = _series_for(track, app, color_by, settings)
-        except Exception:
+        except Exception as e:
+            log.warning("colouring the track by %r failed: %s", color_by, e)
             values = None
     if values is not None and len(x) > 1:
         from matplotlib.collections import LineCollection
@@ -277,7 +283,8 @@ def segmented_track_plot(track: Track, app: Apparatus | None, periods: list[tupl
             values, label = _series_for(track, app, color_by, settings)
             fin = np.asarray(values, float)[np.isfinite(values)]
             norm = Normalize(float(fin.min()), float(fin.max())) if len(fin) else None
-        except Exception:
+        except Exception as e:
+            log.warning("colouring the track by %r failed: %s", color_by, e)
             values = None
     mappable = None
     axes = []
@@ -335,9 +342,12 @@ def occupancy(tracks: list[Track], app: Apparatus | None, bins: int = 60, sigma:
     x = np.concatenate(xs) if xs else np.zeros(0)
     y = np.concatenate(ys) if ys else np.zeros(0)
     w = np.concatenate(ws) if ws else np.zeros(0)
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(w)
+    x, y, w = x[ok], y[ok], w[ok]
     try:
         x0, y0, x1, y1 = app.arena_or_bounds().bounds()
-    except Exception:
+    except Exception as e:
+        log.debug("no arena bounds, using the track's extent: %s", e)
         x0, y0, x1, y1 = (x.min(), y.min(), x.max(), y.max()) if len(x) else (0, 0, 1, 1)
     span = max(x1 - x0, y1 - y0, 1e-6)
     nx = max(2, int(round(bins * (x1 - x0) / span)))
@@ -915,8 +925,8 @@ def chart_figure(track: Track, app: Apparatus, names: list[str], settings=None, 
         fig.suptitle(title, fontsize=9)
     try:
         fig.subplots_adjust(left=0.2, right=0.97, top=0.9 if (band_data or title) else 0.96, bottom=0.09)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("subplots_adjust failed: %s", e)
     return fig
 
 
