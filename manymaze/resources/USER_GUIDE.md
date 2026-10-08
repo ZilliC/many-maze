@@ -130,10 +130,11 @@ areas (*Periphery = Arena − Centre*); an area can be in several groups. Every 
 * **Entry rule** – *Default* (analysis setting), *Centre*, *Head*, *Tail base*, **Proportion of the body** (≥ N %
   of the body ellipse inside to enter; leave when < min(N, 100−N) %), or **Not in any other zone**.
 * **Investigate** – the animal counts as in the zone while its head is within this distance of the zone's edge
-  (object investigation). Such a zone also gets separate *investigation* measures: the animal investigates it
-  while its head is in the zone, or within the distance and pointing at it (body orientation within the
-  *exploration facing angle* of the direction to the zone centre; without a tracked orientation, within the
-  distance is enough). Never while hidden; bouts shorter than the minimum entry duration are ignored.
+  (object investigation). Such a zone also gets separate *investigation* measures: as in ANY-maze, the animal
+  investigates it while its head is outside the zone but within the distance of it and pointing at it (the
+  direction from its centre to its head within the *exploration facing angle* of the direction to the zone
+  centre; without a tracked head, within the distance is enough). Never while hidden; bouts shorter than the
+  minimum entry duration are ignored.
 * **Entry only when facing the zone** – an entry counts only once the animal is oriented towards the zone (its body
   orientation within this angle of the direction from its centre to the zone centre). The visit starts at the
   first frame it faces the zone; a visit in which it never does is not counted (e.g. backing into a zone).
@@ -167,7 +168,8 @@ completed, attempts, incomplete, errors, completion %, latency to first (to its 
 start of the first (entry into its first step), first/mean/min/max duration, mean time
 between, rate, total time in sequences, completed reversed, and the distance travelled during the completed
 sequences (from entering the first step to completing the last; total, mean, max, min) and the mean speed during
-them (total distance / total time in sequences).
+them (total distance / total time in sequences). As in ANY-maze, a completed sequence belongs to the time period
+in which it ends (an incomplete attempt to the one in which it starts).
 
 ## 4. Test schedule
 
@@ -1039,34 +1041,43 @@ Enable it in **Experiment ▸ Hardware ▸ Touch screen…** (display, number of
 The I/O log is analysed into measures for each test (and for each time period; paused time is removed, and
 latencies of things that never happen follow *When an event never occurs, its latency is*):
 
-* **digital inputs** — activations, time on, latency to first activation, mean / longest / shortest activation,
-  latency to first deactivation, activations per minute (e.g. lever presses, nose pokes, beam breaks, licks), and
-  **positive / negative reversals**: the number of times the input went from off to on (positive) and from on to
-  off (negative) in the period. An activation already under way when a period starts is clipped to the period and
-  is not a positive reversal (nor an activation) of that period;
-* **analogue inputs** — mean (time-weighted), minimum, maximum and the times of the maximum / minimum; the
-  **baseline** (time-weighted mean over the first *Analogue inputs: baseline period* seconds of the test or period),
-  its **SD**, the **end of the baseline** period, the **mean deviation from baseline** (mean |value − baseline|
-  after the baseline period), the **integral above / below baseline** (value × s, after the baseline period), the
+* **digital inputs** — activations, time on, latency to first activation, mean (time on / activations) /
+  longest / shortest activation, latency to first deactivation, activations per minute (e.g. lever presses, nose
+  pokes, beam breaks, licks), and **positive / negative reversals**: the number of times the input went from off to
+  on (positive) and from on to off (negative) in the period. An activation already under way when a period starts
+  is clipped to the period and is not a positive reversal (nor an activation) of that period. **On/off inputs:
+  positive / negative reversals** (ANY-maze's): give two or more inputs the option `index=<number>`; as they are
+  activated the indices rise or fall, and a change from falling to rising is a positive reversal, from rising to
+  falling a negative one (e.g. a rat running back and forth along a row of beams);
+* **analogue inputs** — mean, minimum, maximum and the times of the maximum / minimum (as ANY-maze, over the samples
+  in the test or period: their simple average; a period without a sample has the value held from before it); the
+  **baseline** (the average of the samples in the first *Analogue inputs: baseline period* seconds of the test or
+  period), its **SD**, the **end of the baseline** period, the **mean deviation from baseline** (mean |value −
+  baseline| after the baseline period), the **integral above / below baseline** (value × s, after the baseline period), the
   time of the **first positive / negative deviation** (more than *a deviation is more than … baseline SD* SDs above
   / below the baseline, after the baseline period) and of the **return to baseline** after it (back within that
   band). Per zone (and zone group) visit: the mean over the visits of the maximum, the minimum, the time from the
-  entry to them, and the mean value at entry and at exit (`temp in Centre: mean max`, …). Values are held from one
-  logged sample to the next;
-* **rotary encoders** — counts, revolutions, distance, maximum rate (counts/s), mean rate (rev/min); **time
-  turning** (between two samples that differ and are at most 1 s apart; a change after a longer still spell
-  counts from one typical sample interval before it); **reversals** (the direction changes after turning back by
-  more than 10°, so a count of jitter is not one); with *counts_per_rev*: **degrees clockwise / anticlockwise**
-  (positive counts are clockwise; swap the encoder's A / B pins to change it), **clockwise / anticlockwise
-  rotations** (completed 360° turns within each run in one direction), **half and quarter rotations** (completed
-  180° / 90° turns per run, both directions), **total rotations** (ANY-maze's *number of rotations*: the clockwise
-  plus the anticlockwise rotations; the *revolutions* are net, clockwise positive), **maximum RPM** (as ANY-maze:
-  the instantaneous velocity is the counts turned in one direction over windows of at least 0.2 s, averaged over
-  the last 10 windows; the maximum of it in the period), **minimum RPM** (the slowest whole second of turning) and
-  **mean RPM while turning** (revolutions turned in either direction / time turning);
+  entry to them, and the mean value at entry and at exit (`temp in Centre: mean max`, …), and the mean / max / min
+  of the samples taken while the animal was in the zone (`temp in Centre: mean`). The integrals and the deviation
+  times hold values from one logged sample to the next;
+* **rotary encoders** — counts, revolutions (net, clockwise positive), maximum rate (counts/s), mean rate (rev/min,
+  revolutions in either direction / the test or period — turning back does not cancel it); **time turning**
+  (between two samples that differ and are at most 1 s apart; a change after a longer still spell counts from one
+  typical sample interval before it); **reversals** (as ANY-maze: a count in one direction followed by one in the
+  other); with *counts_per_rev*: **degrees clockwise / anticlockwise** (positive counts are clockwise; swap the
+  encoder's A / B pins to change it), **clockwise / anticlockwise rotations** (completed 360° turns within each
+  unbroken run in one direction), **half and quarter rotations** (runs of *counts_per_rev* / 2 or / 4 counts,
+  rounded down as ANY-maze), **total rotations** (ANY-maze's *number of rotations*: the clockwise plus the
+  anticlockwise rotations), **distance** (with `cm_per_rev`: the total rotations × the circumference, as
+  ANY-maze), **maximum RPM** (as ANY-maze: the instantaneous velocity is the counts turned in one direction over
+  windows of at least 0.2 s, averaged over the last 10 windows; the maximum of it in the period), **minimum RPM**
+  (ANY-maze's: the lowest instantaneous velocity, 0 if the encoder stopped in the period), **minimum RPM while
+  turning** (the slowest whole second of turning) and **mean RPM while turning** (revolutions turned in either
+  direction / time turning);
 * **outputs, virtual switches, sounds and touch-screen stimuli** — times on, time on, latency to first on,
-  longest / shortest / mean time on (the average activation duration), latency to first off, activations per
-  minute, plus pellets dispensed for pellet dispensers and pulse trains / pulses for optogenetic outputs (lasers);
+  longest / shortest / mean time on (the average activation duration: time on / times on), latency to first off,
+  activations per minute, plus pellets dispensed and the latency to the first pellet for pellet dispensers and
+  pulse trains / pulses for optogenetic outputs (lasers);
   shockers, speakers, lights, dippers and drippers also give their activations per minute;
 * **shockers, speakers and lights** have their own measure groups, named after the device type: *Shocker
   shock: shocks, time on, latency to first shock, longest / shortest / mean shock, latency to first off*;
@@ -1076,8 +1087,8 @@ latencies of things that never happen follow *When an event never occurs, its la
   audio actions, a light for *Light on / off*; any output channel can also be given the option `role=shocker`,
   `role=speaker` or `role=light` in the I/O devices dialog;
 * **movement detectors** — movements, time moving / not moving, latency to first movement, mean movement;
-* **sensors** — initial and final value, mean (time-weighted), maximum, minimum, change, time out of the alert range
-  and times out of range; weight sensors also give the **intake** (initial − final);
+* **sensors** — initial and final value, mean (the average of the readings, as ANY-maze), maximum, minimum, change,
+  time out of the alert range and times out of range; weight sensors also give the **intake** (initial − final);
 * **syringe pumps** — volume infused and withdrawn (ml; from the pump's own counters when it reports them, otherwise
   from the rates and times), infusions, withdrawals, time pumping, latency to first start, stalls;
 * **temperature controllers** — time on, mean target, mean set-point, time at target, latency to target;
@@ -1090,12 +1101,15 @@ latencies of things that never happen follow *When an event never occurs, its la
 * **virtual switches** — distance travelled before the first activation (in the period; the whole distance if
   never, or blank) and distance travelled while the switch is on;
 * **per zone** (and zone group) for inputs, outputs (shockers, speakers, lights, lasers, pellet dispensers…),
-  virtual switches and rotary encoders: the activations that start while the animal is in the zone (count,
-  latency to the first, activations per minute spent in the zone as ANY-maze's frequency in a zone; *pellets
-  dispensed* for pellet dispensers), the time the channel is on while the animal is in the zone, and for encoders
-  the counts turned while the animal is in the zone and, with *counts_per_rev*, the rotations made while it was in
-  the zone throughout and the maximum RPM in the zone — `lever in Centre: activations`, `Shocker shock in Dark:
-  shocks`, `wheel in Nest: total rotations`, …;
+  virtual switches and rotary encoders, as ANY-maze: the activations that start while the animal is in the zone
+  (count, latency to the first, activations per minute spent in the zone; *pellets dispensed* and the latency to
+  the first for pellet dispensers), the latency to the first deactivation in the zone, the time the channel is on
+  while the animal is in the zone and the longest / shortest stretch of it, the distance travelled in the zone
+  while a virtual switch is on, and for encoders the counts turned while the animal is in the zone and, with
+  *counts_per_rev*, the degrees each way, the rotations made while it was in the zone throughout, the distance
+  (wheels) and the maximum RPM in the zone — `lever in Centre: activations`, `Shocker shock in Dark: shocks`,
+  `wheel in Nest: total rotations`, …; sensors and recorded result variables also give the values recorded while
+  the animal was in the zone (`Sensor lux in Dark: mean`, `Variable: score in Dark (sum)`, …);
 * **touches** — activations per area (channel `touch <area>`);
 * **result variables** — the final value of each *Save as a test result* variable (`Variable: name`). A variable
   whose *Record the value* is *Every time it changes* or *Every time it is set* also logs each numeric value with
@@ -1103,7 +1117,8 @@ latencies of things that never happen follow *When an event never occurs, its la
   time it is set* records every assignment — set, increment, append, loop counter; the initial value of the
   declaration is not recorded); these give `Variable: name (count)`, `(mean)`, `(max)`, `(min)`, `(sum)` and
   `(values)` (the list), for the test and per period (a value recorded exactly at a period boundary belongs to the
-  later period; one recorded at the very end of the test to the last one).
+  later period; one recorded at the very end of the test to the last one). As in ANY-maze, a variable never
+  recorded in the test has a max and min of 0 (variables start at 0); in a period they are blank.
 
 **Operant plantar assay (OPAD).** In **Protocol ▸ Analysis ▸ I/O measures** name the digital input of the paw
 contact with the thermal plate (*OPAD: paw contact input*), the lickometer input and the analogue input of the
@@ -1159,7 +1174,10 @@ maps, group heat maps, results and statistics.
   centre, time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the
   body as in ANY-maze — the direction from the centre to the head — or, without a tracked head, a tracked body
   angle (e.g. an imported orientation); only when neither is tracked do they follow the direction of travel (and
-  there are then no separate *path rotations*).
+  there are then no separate *path rotations*). As in ANY-maze, the distance travelled does not include where the
+  animal went while hidden (no distance is counted from where it disappeared to where it reappears), path
+  efficiency and tortuosity are blank when the animal was hidden, and the latency to the last mobile / immobile
+  episode is blank when there is no such episode.
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
   (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
   twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
@@ -1170,43 +1188,59 @@ maps, group heat maps, results and statistics.
   inactive episode* count as active (Protocol ▸ Analysis ▸ Activity). Per zone: time active / inactive in the zone
   and inactive episodes (an episode belongs to the zone it starts in).
 * **Head** (when the head is tracked): head distance (smoothed like the centre), head turn angle — absolute,
-  clockwise and anticlockwise — the cumulative change of the head direction (tail → head). A jump of more than 90°
-  between two frames is a head / tail swap of the tracker and is not counted.
+  clockwise and anticlockwise — the cumulative change of the head direction (as ANY-maze, the direction from the
+  centre to the head). A jump of more than 90° between two frames is a head / tail swap of the tracker and is not
+  counted. The same direction is the animal's *orientation* for the zone and point orientation measures.
 * **Rearing** (*Detect rearing automatically*, Protocol ▸ Analysis ▸ Rearing): rears, time rearing, latency to
   first rear, mean / max / min rear duration, for the whole test and per zone (`Zone: rears` …; a rear belongs to
-  the zone the animal was in when it started). Seen from above, an animal standing on its hind legs looks smaller
-  and shorter: a frame is a rear when the body area falls below *rear area* % (75 %) of the animal's usual (median)
+  the zone the animal was in when it started; as ANY-maze, the mean is the time rearing / the rears, and in a zone
+  a rearing bout also starts on entering the zone while rearing and ends on leaving it). Seen from above, an animal
+  standing on its hind legs looks smaller and shorter: a frame is a rear when the body area falls below *rear area* % (75 %) of the animal's usual (median)
   area and, when the head and tail are tracked (shape or pose model), the head–tail length falls below *rear
   length* % (80 %) of its usual length. Gaps of up to 0.2 s are bridged and rears shorter than *Shortest rear*
   (0.3 s) are ignored. Works on tracks made before the option existed (it needs no re-tracking). Check a few tests
   against manual scoring and adjust the percentages for your camera height and strain.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
-  time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean
-  distance from the zone (as ANY-maze: the distance while outside, weighted by the time spent at it, divided by the
-  whole test or period — so 0 if the animal never leaves the zone), time active / inactive and inactive episodes
-  (an inactive episode also starts when the animal enters the zone already inactive), and:
+  time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean / max /
+  min distance from the zone, time active / inactive and inactive episodes (an inactive episode also starts when
+  the animal enters the zone already inactive), and the rest below. Definitions as ANY-maze's: the **distance**
+  in a zone counts each step in the zone the animal is leaving (the step into the zone is not counted, the step
+  out of it is); the **mean visit** is the time in the zone / the entries; the **longest / shortest visit** and
+  the visit list include a visit under way at the start of the period (clipped to it); a **head entry** is the
+  head going from outside the zone to inside it (a head that starts in the zone has not entered it); the
+  **distance and path efficiency before the first entry** are blank if the animal never entered (the path
+  efficiency also when its route passed through a hidden zone); the **mean distance from the zone** is the
+  distance while outside weighted by the time spent at it, divided by the whole test or period (0 if the animal
+  never leaves the zone), the **max** is 0 if it never left the zone and the **min** is 0 once it has been in it;
+  **time facing the zone** is the time outside it with its orientation (centre → head) within *Oriented towards a
+  zone / point within* (30°) of the direction to some point of the zone's border; **freezing episodes** in a zone
+  are the times the animal starts to freeze there:
   * **visit durations** – the duration of each visit, as a comma-separated list (text, so statistics skip it);
   * **investigation** (investigation zones): bouts, time, latency to the first investigation and to its end, *was
-    first zone investigated*, longest / shortest / mean bout, list of bout durations, distance and mean speed while
-    investigating, distance before the first investigation, time mobile / immobile, immobile episodes, time freezing
-    and freezing episodes while investigating;
+    first zone investigated*, longest / shortest / mean bout (time / bouts), list of bout durations, distance and
+    mean speed while investigating, distance before the first investigation (blank if never), time mobile /
+    immobile, immobile episodes, time freezing and freezing episodes (freezing onsets) while investigating;
   * **head**: latency to the first head exit, distance travelled by the head in the zone, time the head is in the
-    zone while the centre is outside, mean / max head distance from the zone and min when outside, mean / max /
-    min head distance to the border when inside;
-  * **distance to the border when inside** (centre): mean / max / min;
+    zone while the centre is outside (by position, not the entry rules), mean / max / min head distance from the
+    zone (as the centre's: max 0 if the head never left, min 0 once it entered), mean / max / min head distance
+    to the border when inside;
+  * **distance to the border when inside** (centre): mean / max / min (the min is 0 once the animal has left the
+    zone, as ANY-maze);
   * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
-    increasing, outside it), time moving towards / away (mobile, outside, direction of travel within the
-    *exploration facing angle* of the direction to the zone centre, or of the opposite direction);
+    increasing, outside it), time moving towards / away (mobile, outside, direction of travel within ("less than")
+    the *exploration facing angle* of the direction to the zone centre, or of the opposite direction);
   * **heading error**: *initial heading error* (absolute, 0–180°) and *signed initial heading error* (positive =
     the zone is to the animal's right, negative = to its left), as ANY-maze — the direction from the first position
     to the position 1 s later against the direction to the zone centre (blank if the animal starts in the zone) —
     and the mean absolute heading error while moving outside;
-  * **time oriented towards the zone centre when inside** (body orientation within the facing angle);
-  * **absolute turn angle** and **absolute head turn angle** (body orientation) while in the zone;
+  * **time oriented towards the zone centre when inside** (the orientation within *Oriented towards … within* of
+    the direction from the head to the zone centre);
+  * **absolute turn angle** and **absolute head turn angle** while in the zone (a head turn counts in the zone the
+    animal is in after it);
   * **corrected integrated path length** (CIPL, Gallagher): the distance from the zone sampled every second from
-    the start of the period until the first entry (or the end), minus the same sum for an ideal path going
-    straight to the zone at the animal's mean speed;
+    the start of the period until the first entry, minus the same sum for an ideal path going straight to the zone
+    at the animal's mean speed; blank if the animal never entered the zone (as ANY-maze);
   * **line crossings** while in the zone (all lines), and for **hidden zones** the number of *partial exits* (the
     animal seen between two times it is hidden in the zone, never further from it than the hidden-zone distance,
     e.g. peeking out of the nest) and the time partially exited;
@@ -1220,10 +1254,15 @@ maps, group heat maps, results and statistics.
 * **Whole test** lists: **Visited zones** (in the order of their first entry) and **Investigated zones** (order of
   the first investigation), as comma-separated text.
 * **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
-  and distance moving towards / away, mean speed moving towards (distance travelled while moving towards / that
-  time), head oriented towards / away, mean head angle, head turns towards; with a tracked head, mean / max / min
-  head distance and the time the head was moving towards / away (the head's distance shrinking / growing while the
-  head moves faster than the mobility threshold). **Initial heading error**: the angle between the direction from
+  moving towards / away (as ANY-maze: mobile, the direction of travel within the *exploration facing angle* of the
+  direction to the point, or of the opposite direction), distance moved towards / away (how much the distance
+  shrank / grew while mobile), mean speed moving towards (distance travelled while moving towards / that time),
+  time head oriented towards / away (the orientation, centre → head, within *Oriented towards … within* of the
+  direction from the head to the point / of the opposite direction), mean head angle, head turns towards (the
+  times it becomes oriented towards the point, not counting the start of the test); with a tracked head, mean /
+  max / min head distance and the time the head was moving towards / away (the head's direction of movement
+  within the facing angle of the direction to the point, or of the opposite one, while the head moves faster
+  than the mobility threshold). **Initial heading error**: the angle between the direction from
   the first position to the position about 1 s later and the direction to the point (0–180°, as the water maze's);
   **mean absolute heading error**: the mean angle between the direction of travel and the direction to the point
   over the frames the animal is mobile. **X / Y**: the point's coordinates (in units, from the top-left of the
@@ -1234,10 +1273,13 @@ maps, group heat maps, results and statistics.
   time and episodes following, approaches / approached by.
 * **Keys** (scored behaviours): point – count, latency, rate; state and hold – count, duration, %, latency, mean &
   longest bout, rate, list of press durations (`1.5, 0.25, …`); both – distance travelled before the first press
-  (the whole distance if never pressed, or blank, as latencies); optionally per zone (*Split the scored
-  behaviours by zone*): count, latency, rate, distance before the first press and, for state / hold keys,
-  duration, mean / longest / shortest bout, latency to the first release and the list of press durations (a press
-  belongs to the zone the animal was in when it started).
+  (the whole distance if never pressed, or blank, as latencies). As ANY-maze, a *press* is the key going down in
+  the test or period (a bout under way at the start of a period is time pressed, not a press), the mean bout is the
+  time pressed / the presses and the latency to the first release is the first time the key comes up. Optionally
+  per zone (*Split the scored behaviours by zone*): count, latency, rate (per minute spent in the zone), distance
+  before the first press and, for state / hold keys, duration, mean / longest / shortest bout (the longest /
+  shortest stretch pressed while in the zone), latency to the first release in the zone and the list of the
+  presses that started in the zone (a press or release counts in the zone the animal is in at that moment).
 * **I/O** measures (inputs, outputs, shockers, speakers, lights, encoders, analogue signals, virtual switches, OPAD)
   and **result variables** (`Variable: name`, and their recorded values) from procedures — see *I/O results*; they
   have their own *I/O* category in the measure chooser.
