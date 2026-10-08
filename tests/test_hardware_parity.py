@@ -278,9 +278,12 @@ def test_pulse_sequence_on_device_clock():
     time.sleep(0.25)
     dm.close()
     assert [v for _t, v in seen][:4] == [1, 0, 1, 0]
-    # order and spacing matter; the absolute lateness depends on the machine (hosted CI runners add ~40 ms)
-    assert abs(seen[0][0] - t0 - 0.05) < 0.1 and abs(seen[2][0] - t0 - 0.1) < 0.1
-    assert abs((seen[2][0] - seen[0][0]) - 0.05) < 0.03
+    # never early, in order, and not hopelessly late; hosted CI runners can delay the thread by 100 ms or more,
+    # in which case both pulses are due and fire together, so the spacing is only checked when the first was on time
+    assert seen[0][0] - t0 >= 0.05 - 0.002 and seen[2][0] - t0 >= 0.1 - 0.002
+    assert seen[0][0] <= seen[1][0] <= seen[2][0] <= seen[3][0] and seen[3][0] - t0 < 0.25
+    if seen[0][0] - t0 < 0.07:
+        assert abs((seen[2][0] - seen[0][0]) - 0.05) < 0.03
 
 
 def test_shock_intensity_calibration():

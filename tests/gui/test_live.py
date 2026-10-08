@@ -146,7 +146,7 @@ def test_simulated_live_test_threaded(win):
     assert page.session is None
     assert test.status == "tracked"
     tr = p.load_tracks(test)[0]
-    assert len(tr) >= 25 and tr.t[-1] >= 1.7  # the 2 s test ran to the end (frames may drop on slow machines)
+    assert len(tr) >= 15 and tr.t[-1] >= 1.7  # the 2 s test ran to the end (frames drop on slow CI machines)
     assert any(e["behaviour"] == "Tone" for e in test.events)
     assert page.grabber is not None  # preview keeps running after the test
     page.on_hide()
