@@ -122,6 +122,9 @@ class OverlayMixin:
             if j is None or not (math.isfinite(tr.x[j]) and math.isfinite(tr.y[j])):
                 continue
             c = (int(round(tr.x[j])), int(round(tr.y[j])))
+            outline = tr.outline[j] if tr.outline is not None else None
+            if outline is not None and len(outline) > 2:  # whole-body outline recorded by the tracker
+                cv2.polylines(img, [outline.reshape(-1, 1, 2)], True, col, lw, cv2.LINE_AA)
             if math.isfinite(tr.hx[j]) and math.isfinite(tr.tx[j]):
                 hp = (int(round(tr.hx[j])), int(round(tr.hy[j])))
                 tp = (int(round(tr.tx[j])), int(round(tr.ty[j])))
