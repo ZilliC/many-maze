@@ -47,8 +47,10 @@ class Page(QWidget):
 #         "bool", "choice" (options=[(value, label), ...]), "text"
 DETECTION_SPEC = [
     ("method", "Detect the animal using", "choice", [("background", "Background subtraction"),
-                                                     ("threshold", "A grey-level threshold")],
-     "Background subtraction compares each frame with an empty-arena model; thresholding uses absolute grey level."),
+                                                     ("threshold", "A grey-level threshold"),
+                                                     ("colour", "Its colour (or a colour mark)")],
+     "Background subtraction compares each frame with an empty-arena model; thresholding uses absolute grey level; "
+     "colour finds the pixels of the chosen colour (a coloured animal, dye mark, collar or LED)."),
     ("contrast", "Compared with the background the animal is", "choice",
      [("auto", "Darker or lighter"), ("dark", "Darker"), ("light", "Lighter")],
      "Contrast of the animal against the background (e.g. dark mouse on white floor = Darker)."),
@@ -63,6 +65,15 @@ DETECTION_SPEC = [
      "Frame used when the background is built from an empty-arena frame."),
     ("background_samples", "Frames sampled for the median", "int", (3, 501, 2),
      "Frames used for the median background."),
+    ("target_colour", "Colour of the animal or mark (#rrggbb)", "text", None,
+     "Used when the animal is detected by its colour, e.g. #ff0000 for a red mark."),
+    ("colour_tolerance", "Colour tolerance (hue, degrees)", "int", (1, 90, 1),
+     "How far the hue may differ from the colour (shadows and lighting change it a little)."),
+    ("min_saturation", "Ignore pixels greyer than (saturation 0–255)", "int", (0, 255, 5),
+     "White, grey and black pixels have no colour; raise this if pale areas are detected."),
+    ("identity_colours", "Identify several animals by colour marks", "text", None,
+     "One colour per animal in the arena, in order, e.g. “#ff0000, #0000ff” (first animal red, second blue). "
+     "Each animal is the blob carrying most of its colour, so identities never swap. Empty = by position."),
     ("min_area_px", "Ignore objects smaller than (px²)", "int", (1, 1_000_000, 10), "Smaller blobs are ignored."),
     ("max_area_px", "Ignore objects larger than (px², 0 = no limit)", "int", (0, 10_000_000, 100),
      "Larger blobs are ignored. 0 = no limit."),
@@ -93,6 +104,11 @@ DETECTION_SPEC = [
 ]
 
 ANALYSIS_SPEC = [
+    ("end_zone", "End the test when the animal stays in zone", "text", None,
+     "Name of a zone or zone group, e.g. Platform (water maze) or Escape box (Barnes maze). Everything after the "
+     "end is left out of the results. Empty = the test runs for its whole duration."),
+    ("end_zone_s", "… for at least (s)", "float", (0.0, 600.0, 0.5, 1),
+     "How long the animal must stay in the zone; 0 = the test ends on entering it."),
     ("speed_smoothing_s", "Smooth positions for distance and speed over (s)", "float", (0.0, 5.0, 0.05, 2),
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
@@ -144,6 +160,7 @@ ANALYSIS_SPEC = [
 DETECTION_SECTIONS = [
     ("Detection", ["method", "contrast", "threshold", "background", "background_frame", "background_samples",
                    "min_area_px", "max_area_px"]),
+    ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
     ("Body parts", ["head_tail", "tail_strip", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
@@ -157,6 +174,7 @@ ANALYSIS_SECTIONS = [
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "grid_cells", "contact_distance",
                                 "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
+    ("Test end", ["end_zone", "end_zone_s"]),
     ("Time bins", ["bin_length_s"]),
 ]
 

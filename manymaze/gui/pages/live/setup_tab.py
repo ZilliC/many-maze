@@ -276,6 +276,15 @@ class SetupMixin:
         self.record_overlay.setToolTip("Write the test time, the clock time and the latest event labels on the "
                                        "recorded video (otherwise the recording is clean).")
         self.record_overlay.toggled.connect(self._save_live_settings)
+        self.split_min = QDoubleSpinBox()
+        self.split_min.setRange(0, 24 * 60)
+        self.split_min.setDecimals(0)
+        self.split_min.setSuffix(" min")
+        self.split_min.setSpecialValueText("Never (one file)")
+        self.split_min.setToolTip("For long tests (e.g. 24 h home cage): record consecutive files of this length, "
+                                  "listed in a playlist that plays and tracks as one video. A crash loses at most "
+                                  "the end of the current file.")
+        self.split_min.valueChanged.connect(self._save_live_settings)
         self.lost_warn = QDoubleSpinBox()
         self.lost_warn.setRange(0, 3600)
         self.lost_warn.setDecimals(1)
@@ -298,6 +307,7 @@ class SetupMixin:
         f.addRow("", self.bg_status)
         f.addRow(self.record)
         f.addRow(self.record_overlay)
+        f.addRow("Start a new video file every", self.split_min)
         f.addRow("Warn if the animal is lost for", self.lost_warn)
         f.addRow(self.pause_off)
         f.addRow("Serial port", self.serial)

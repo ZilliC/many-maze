@@ -251,7 +251,7 @@ class StatisticsPage(Page):
             ("Select the 1st independent variable", self.f1, {G}),
             ("Optionally select a 2nd independent variable", self.f2, {G}),
             ("Optionally select a 3rd independent variable", self.f3, {G}),
-            ("Optionally colour the points by", self.corr_by, {R}),
+            ("Optionally colour the points by (and compare with ANCOVA)", self.corr_by, {R}),
             ("Select the variable to group the tests by", self.cat_rows, {K}),
             ("head", "Tests to include", {C, T, G, R, K}),
             ("Select the time period to analyse", self.period, {C, T, G, R, K}),
@@ -702,7 +702,7 @@ class StatisticsPage(Page):
 
     # ------------------------------------------------------------------ compute
     def _clear_outputs(self):
-        self.result = self.anova = self.corr = self.reg = self.grouped = self.cat = None
+        self.result = self.anova = self.corr = self.reg = self.grouped = self.cat = self.ancova = None
         self.analyses = {}
         for c in self._canvases:
             c.set_figure(plots.message_figure("No data"))
@@ -775,6 +775,7 @@ class StatisticsPage(Page):
             self.anova = res
         elif i == 2:
             self.corr, self.reg = res, res["regression"]
+            self.ancova = res.get("ancova")  # set by an.correlate when the points are coloured by a factor
         elif i == 3:
             self.grouped = res
         else:

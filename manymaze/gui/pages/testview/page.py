@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFr
 from ....core import workflow as wf
 from ....core.batch import track_tests
 from ....core.plots import heatmap, speed_trace, track_plot
+from ....core.project import INFO_COLUMNS
 from ....core.track import Track
 from ....core.tracking import DetectionSettings
 from ... import ribbon, theme
@@ -28,7 +29,7 @@ from .overlay import OverlayMixin
 from .scoring import ObservationClock, ScoringMixin
 from .track_edit import TrackEditMixin
 
-INFO_KEYS = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"}
+INFO_KEYS = set(INFO_COLUMNS)
 SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
 STATUS_COLORS = {"tracked": "#16a34a", "scored": "#0891b2", "pending": "#d97706", "skipped": "#9333ea",
                  "superseded": "#94a3b8", "excluded": "#94a3b8"}
@@ -510,7 +511,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._fill_moveable()
         self.tracks = self.project.load_tracks(self.test) if self.test is not None else []
         ids = [self.test.animal_id] + list(self.test.extra_animals) if self.test else []
-        for cb in (self.plot_animal, self.edit_animal):
+        for cb in (self.plot_animal, self.edit_animal, self.swap_with):
             cb.blockSignals(True)
             cur = cb.currentIndex()
             cb.clear()
@@ -518,6 +519,9 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                 cb.addItem(ids[i] if i < len(ids) and ids[i] else f"Animal {i + 1}", i)
             cb.setCurrentIndex(cur if 0 <= cur < cb.count() else 0)
             cb.blockSignals(False)
+        self.swap_box.setVisible(len(self.tracks) > 1)
+        if len(self.tracks) > 1 and self.swap_with.currentIndex() == self.edit_animal.currentIndex():
+            self.swap_with.setCurrentIndex((self.edit_animal.currentIndex() + 1) % self.swap_with.count())
 
     def _enable(self, on: bool):
         for w in (self.tabs, self.start_spin, self.dur_spin, self.track_btn):

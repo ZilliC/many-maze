@@ -630,6 +630,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.start_keys.setText(", ".join(d.get("start_keys", DEFAULT_START_KEYS)))
             self.stop_keys.setText(", ".join(d.get("stop_keys", DEFAULT_STOP_KEYS)))
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
+            self.split_min.setValue(float(d.get("split_minutes", 0.0)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
             self.pause_off.setChecked(bool(d.get("pause_outputs_off", True)))
             hh, mm = (str(d.get("schedule_at", "05:00")) + ":0").split(":")[:2]
@@ -643,7 +644,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             return
         new = {"start_keys": parse_keys(self.start_keys.text()), "stop_keys": parse_keys(self.stop_keys.text()),
                "record_overlay": self.record_overlay.isChecked(), "lost_warning_s": self.lost_warn.value(),
-               "schedule_at": self.sched_time.time().toString("HH:mm"),
+               "split_minutes": self.split_min.value(), "schedule_at": self.sched_time.time().toString("HH:mm"),
                "schedule_daily": self.sched_daily.isChecked()}
         d = self._live_settings()
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):

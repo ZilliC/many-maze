@@ -16,6 +16,7 @@ from ....core.camera import CameraView, SourceReader, SourceSpec, camera_setting
 from ....core.live import LiveSession, open_devices
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs
+from ....core.project import INFO_COLUMNS
 from ....core.session import finish_live_test
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
@@ -548,6 +549,7 @@ class SingleTestMixin:
                         record_path=recording_path(p, test, size, fps) if self.record.isChecked() else None,
                         fps=fps, analysis=p.analysis_for(test), devices=devices, variables=p.variables,
                         record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
+                        split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
                         outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test))
         if bg is not None:
@@ -751,7 +753,7 @@ class SingleTestMixin:
                                    f"{test.trial}")
         self.results.setRowCount(0)
         if rows:
-            skip = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period"}
+            skip = set(INFO_COLUMNS) | set(self.project.animal_fields)
             for k, v in rows[0].items():
                 if k in skip:
                     continue

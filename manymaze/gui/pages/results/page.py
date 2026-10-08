@@ -223,9 +223,12 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         m.addAction("Tab-separated text…", lambda: self.save_table(suffix=".tsv"))
         m.addAction("Excel workbook (.xlsx)…", lambda: self.save_table(suffix=".xlsx"))
         m.addAction("Selected cells…", lambda: self.save_table(selection=True))
+        m.addAction("One row per animal (stages / trials as columns)…", lambda: self.export_wide())
+        m.addAction("Mean of each animal's trials per stage…", lambda: self.export_trial_means())
         m.addSeparator()
         m.addAction("Experiment as XML (with raw tracks)…", self.export_xml)
         m.addAction("Raw data per test (CSV)…", self.export_raw)
+        m.addAction("Event log of the shown tests…", lambda: self.export_event_log())
         self.save_act.setMenu(m)
         self.report_act = A("HTML report", "report", self.html_report,
                             "Create a report with the results, statistics, track plots, heat maps and charts")

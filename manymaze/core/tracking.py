@@ -29,7 +29,7 @@ from .video import FrameReader, VideoSource
 
 @dataclass
 class DetectionSettings:
-    method: str = "background"  # "background" | "threshold"
+    method: str = "background"  # "background" | "threshold" | "colour"
     contrast: str = "auto"  # "dark": animal darker than background, "light": brighter, "auto": either
     threshold: int = 25  # grey-level difference (or absolute grey level for method="threshold"); 0 = Otsu
     min_area_px: int = 40
@@ -56,6 +56,19 @@ class DetectionSettings:
     pose_model: str = "topviewmouse_rtmpose_s"  # core.pose.MODELS key or path to a custom .onnx
     pose_min_conf: float = 0.3  # keypoints below this confidence fall back to the contour estimate
     pose_device: str = "auto"  # "auto" (Core ML on macOS) | "cpu"
+    # colour: method "colour" detects pixels of target_colour (a coloured animal, dye mark or collar); with several
+    # animals, identity_colours ("#ff0000, #0000ff", one per animal) identifies each animal by its colour mark
+    target_colour: str = "#ff0000"
+    colour_tolerance: int = 20  # hue difference (degrees) still counted as the colour
+    min_saturation: int = 60  # 0–255: greyer pixels are never coloured
+    identity_colours: str = ""
+
+    def identity_colour_list(self) -> list[str]:
+        return [c.strip() for c in str(self.identity_colours or "").replace(";", ",").split(",") if c.strip()]
+
+    def needs_colour(self) -> bool:
+        """Tracking needs colour frames (otherwise greyscale is decoded, which is faster)."""
+        return self.method == "colour" or (self.n_animals > 1 and len(self.identity_colour_list()) >= self.n_animals)
 
     def to_dict(self):
         return asdict(self)
@@ -81,6 +94,33 @@ class Detection:
     detected: bool = False
     contour: np.ndarray | None = field(default=None, repr=False)
     keypoints: np.ndarray | None = field(default=None, repr=False)  # (K, 3) x, y, confidence from the pose model
+
+
+def hex_to_hsv(colour: str) -> tuple[int, int, int]:
+    """OpenCV HSV (hue 0–179) of a "#rrggbb" colour."""
+    c = str(colour).strip().lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        if len(c) != 6:
+            raise ValueError
+        r, g, b = (int(c[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        raise ValueError(f"Invalid colour {colour!r}: use #rrggbb, e.g. #ff0000 for red") from None
+    h, s_, v = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0, 0]
+    return int(h), int(s_), int(v)
+
+
+def colour_mask(frame_bgr: np.ndarray, colour: str, tolerance_deg: float = 20, min_saturation: int = 60,
+                min_value: int = 40) -> np.ndarray:
+    """uint8 mask (255) of the pixels whose hue is within tolerance_deg of ``colour`` and that are saturated and
+    bright enough to have a colour at all."""
+    h0, _, _ = hex_to_hsv(colour)
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    dh = np.abs(hsv[..., 0].astype(np.int16) - h0)
+    dh = np.minimum(dh, 180 - dh)
+    ok = (dh <= max(0.5, tolerance_deg / 2)) & (hsv[..., 1] >= min_saturation) & (hsv[..., 2] >= min_value)
+    return ok.astype(np.uint8) * 255
 
 
 def to_gray(frame: np.ndarray) -> np.ndarray:
@@ -175,6 +215,10 @@ class ArenaTracker:
         self._flip_votes = [0] * max(1, settings.n_animals)
         self._history: list[list[tuple[float, float]]] = [[] for _ in range(max(1, settings.n_animals))]
         self._single_area: float | None = None
+        if settings.method == "colour":
+            hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
+        for c in settings.identity_colour_list():
+            hex_to_hsv(c)
         if arena_mask is not None:
             ys, xs = np.nonzero(arena_mask)
             m = settings.arena_margin_px
@@ -194,8 +238,18 @@ class ArenaTracker:
         self._bg_float = bg_gray.astype(np.float32)
 
     # ------------------------------------------------------------------
-    def foreground(self, gray: np.ndarray) -> np.ndarray:
+    def foreground(self, gray: np.ndarray, frame: np.ndarray | None = None) -> np.ndarray:
         s = self.s
+        if s.method == "colour":
+            if frame is None or frame.ndim != 3:
+                return np.zeros(gray.shape[:2], np.uint8)  # no colour in a greyscale frame
+            f = frame
+            if s.blur and s.blur > 1:
+                f = cv2.GaussianBlur(f, (_odd(s.blur), _odd(s.blur)), 0)
+            fg = np.zeros(gray.shape[:2], np.uint8)
+            x0, y0, x1, y1 = self.roi if self.roi is not None else (0, 0, gray.shape[1], gray.shape[0])
+            fg[y0:y1, x0:x1] = colour_mask(f[y0:y1, x0:x1], s.target_colour, s.colour_tolerance, s.min_saturation)
+            return self._clean(fg)
         g = gray
         if s.blur and s.blur > 1:
             g = cv2.GaussianBlur(g, (_odd(s.blur), _odd(s.blur)), 0)
@@ -260,7 +314,7 @@ class ArenaTracker:
     def process(self, frame: np.ndarray) -> tuple[list[Detection], np.ndarray]:
         """Detect animals in a frame. Returns (detections, foreground mask)."""
         gray = to_gray(frame)
-        fg = self.foreground(gray)
+        fg = self.foreground(gray, frame)
         n = max(1, self.s.n_animals)
         contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         blobs = []
@@ -279,7 +333,11 @@ class ArenaTracker:
         dets = [self._describe(c, a, fg.shape) for a, c in blobs[:n]]
         if n == 1 and dets and self._single_area is None:
             self._single_area = dets[0].area
-        dets = self._assign(dets, n)
+        colours = self.s.identity_colour_list()
+        if n > 1 and len(colours) >= n and frame.ndim == 3:
+            dets = self._assign_by_colour(frame, dets, n, colours[:n])
+        else:
+            dets = self._assign(dets, n)
         posed = self._apply_pose(frame, dets) if self.pose is not None and frame.ndim == 3 else set()
         self._head_tail_consistency(dets, skip=posed)
         self._motion(gray, dets)
@@ -405,6 +463,36 @@ class ArenaTracker:
         for j, d in enumerate(dets):
             if j not in used and free:
                 out[free.pop(0)] = d
+        return out
+
+    def _assign_by_colour(self, frame: np.ndarray, dets: list[Detection], n: int, colours: list[str]
+                          ) -> list[Detection]:
+        """Identity from colour marks: animal i is the blob with the largest share of pixels of colours[i]
+        (optimal assignment); falls back to the position-based assignment when no mark is visible."""
+        score = np.zeros((n, len(dets)))
+        for j, d in enumerate(dets):
+            if d.contour is None:
+                continue
+            x, y, w, h = cv2.boundingRect(d.contour)
+            blob = np.zeros((h, w), np.uint8)
+            cv2.drawContours(blob, [d.contour - [x, y]], -1, 255, -1)
+            crop = frame[y:y + h, x:x + w]
+            area = max(1, int((blob > 0).sum()))
+            for i, c in enumerate(colours):
+                m = colour_mask(crop, c, self.s.colour_tolerance, self.s.min_saturation)
+                score[i, j] = float(((m > 0) & (blob > 0)).sum()) / area
+        if not dets or score.max() <= 0:
+            return self._assign(dets, n)
+        cost = -score
+        if self.prev:  # tie-break blobs without a visible mark by distance to the previous position
+            for i, p in enumerate(self.prev[:n]):
+                for j, d in enumerate(dets):
+                    if p.detected:
+                        cost[i, j] += 1e-6 * math.hypot(p.x - d.x, p.y - d.y)
+        rows, cols = linear_sum_assignment(cost)
+        out = [Detection() for _ in range(n)]
+        for r, c in zip(rows, cols):
+            out[r] = dets[c]
         return out
 
     def _apply_pose(self, frame: np.ndarray, dets: list[Detection]) -> set[int]:
@@ -591,8 +679,10 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         step = max(1, int(s0.frame_step))
         builders = [[TrackBuilder() for _ in range(max(1, j.settings.n_animals))] for j in jobs]
         total = max(1, end - start)
-    # colour is only needed for the pose model and preview callbacks; otherwise decode straight to grey
-    reader = FrameReader(video_path, start, gray=pose is None and frame_callback is None, threads=decode_threads)
+    # colour is only needed for the pose model, colour tracking and preview callbacks; otherwise decode to grey
+    colour = any(j.settings.needs_colour() for j in jobs)
+    reader = FrameReader(video_path, start, gray=pose is None and frame_callback is None and not colour,
+                         threads=decode_threads)
     with reader:
         for i, frame in reader:
             if i >= end:

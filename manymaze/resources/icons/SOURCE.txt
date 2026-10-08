@@ -69,6 +69,7 @@ schedule: calendar_24_color
 select: cursor_24_filled
 select_all: select_all_on_24_regular
 settings: settings_24_color
+shuffle: arrow_shuffle_24_regular
 sparkle: sparkle_24_filled
 stages: step_24_regular
 stop: stop_24_filled

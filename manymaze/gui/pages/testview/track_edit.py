@@ -6,10 +6,11 @@ import math
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QComboBox, QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
-from ....core.track import Track
+from ....core.apparatus import POSITION_KEY, position_args
+from ....core.track import Track, swap_identities
 
 
 class TrackEditMixin:
@@ -61,6 +62,18 @@ class TrackEditMixin:
         rl.addWidget(self.range_lbl)
         rl.addLayout(r2)
         lay.addWidget(rg)
+        sw = QGroupBox("Swap identities")
+        swl = QHBoxLayout(sw)
+        self.swap_with = QComboBox()
+        self.swap_btn = QPushButton("Swap")
+        self.swap_btn.setToolTip("Exchange the tracks of the edited animal and this animal over the time range, or "
+                                 "from the current time to the end when no range is set")
+        self.swap_btn.clicked.connect(lambda: self.swap_identities())
+        swl.addWidget(QLabel("With"))
+        swl.addWidget(self.swap_with, 1)
+        swl.addWidget(self.swap_btn)
+        self.swap_box = sw
+        lay.addWidget(sw)
         mv = QGroupBox("Moveable zones in this test (e.g. the platform position)")
         mvl = QHBoxLayout(mv)
         self.move_zone = QComboBox()
@@ -75,6 +88,30 @@ class TrackEditMixin:
         mvl.addWidget(self.move_reset)
         self.move_box = mv
         lay.addWidget(mv)
+        pb = QGroupBox("Apparatus position in this test")
+        pb.setToolTip("Move, rotate or scale the apparatus map for this test only (the camera or the apparatus "
+                      "moved between recordings)")
+        pg = QGridLayout(pb)
+        self.pos_spins = {}
+        for i, (key, label, lo, hi, step, dec, suffix) in enumerate((
+                ("dx", "Move right", -5000, 5000, 1, 1, " px"), ("dy", "Move down", -5000, 5000, 1, 1, " px"),
+                ("angle", "Rotate", -180, 180, 0.5, 1, "°"), ("scale", "Scale", 0.2, 5, 0.01, 3, "×"))):
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setDecimals(dec)
+            sp.setSuffix(suffix)
+            sp.setKeyboardTracking(False)
+            sp.valueChanged.connect(self._position_changed)
+            self.pos_spins[key] = sp
+            pg.addWidget(QLabel(label), i, 0)
+            pg.addWidget(sp, i, 1)
+        self.pos_reset = QPushButton("Reset")
+        self.pos_reset.setToolTip("Use the apparatus map as drawn")
+        self.pos_reset.clicked.connect(self.reset_apparatus_position)
+        pg.addWidget(self.pos_reset, 3, 2)
+        self.pos_box = pb
+        lay.addWidget(pb)
         r3 = QHBoxLayout()
         self.edit_lbl = QLabel()
         r3.addWidget(self._tool(self.undo_btn))
@@ -83,7 +120,47 @@ class TrackEditMixin:
         lay.addStretch()
         return w
 
+    def _positioned_base(self):
+        """The test's apparatus with its map position applied, without moveable-zone overrides."""
+        if self.test is None:
+            return None
+        base = self.project.get_apparatus(self.test.apparatus)
+        pos = self.test.zone_overrides.get(POSITION_KEY)
+        return base.positioned(**position_args(pos)) if base is not None and isinstance(pos, dict) else base
+
+    def _fill_position(self):
+        pos = position_args(self.test.zone_overrides.get(POSITION_KEY) if self.test is not None else None)
+        for k, sp in self.pos_spins.items():
+            sp.blockSignals(True)
+            sp.setValue(pos[k])
+            sp.blockSignals(False)
+        self.pos_box.setEnabled(self.test is not None and self.project.get_apparatus(self.test.apparatus) is not None)
+
+    def set_apparatus_position(self, dx: float = 0.0, dy: float = 0.0, angle: float = 0.0, scale: float = 1.0):
+        """Move / rotate / scale the whole apparatus map for this test only."""
+        if self.test is None:
+            return
+        pos = {"dx": dx, "dy": dy, "angle": angle, "scale": scale}
+        if pos == {"dx": 0.0, "dy": 0.0, "angle": 0.0, "scale": 1.0}:
+            changed = self.test.zone_overrides.pop(POSITION_KEY, None) is not None
+        else:
+            changed = self.test.zone_overrides.get(POSITION_KEY) != pos
+            self.test.zone_overrides[POSITION_KEY] = pos
+        self._fill_position()
+        if changed:
+            self.main.mark_dirty()
+            self._mark_stale("results", "plots")
+            self._refresh_frame()
+            self.edit_lbl.setText("Apparatus position changed for this test. Track again if the arena moved a lot.")
+
+    def _position_changed(self, *_):
+        self.set_apparatus_position(**{k: sp.value() for k, sp in self.pos_spins.items()})
+
+    def reset_apparatus_position(self):
+        self.set_apparatus_position()
+
     def _fill_moveable(self):
+        self._fill_position()
         base = self.project.get_apparatus(self.test.apparatus) if self.test is not None else None
         names = [z.name for z in base.zones if z.moveable] if base is not None else []
         self.move_zone.clear()
@@ -95,7 +172,7 @@ class TrackEditMixin:
     def place_moveable_zone(self, x: float, y: float):
         """Centre the selected moveable zone on (x, y) for this test only."""
         name = self.move_zone.currentData()
-        base = self.project.get_apparatus(self.test.apparatus) if self.test is not None else None
+        base = self._positioned_base()
         z = base.zone(name) if base is not None and name else None
         if z is None:
             return
@@ -254,10 +331,43 @@ class TrackEditMixin:
         self._save_tracks(f"Deleted {len(idx)} positions.")
         return True
 
+    def swap_identities(self, other: int | None = None) -> bool:
+        """Exchange the edited animal's track with another animal's over the range (or from now to the end)."""
+        ai = self._edit_index()
+        bi = self.swap_with.currentData() if other is None else other
+        if self.test is None or bi is None or ai == bi or max(ai, bi) >= len(self.tracks):
+            self.edit_lbl.setText("Choose two different tracked animals.")
+            return False
+        a, b = self._range
+        if a is not None and b is not None:
+            t0, t1 = sorted((a, b))
+        else:
+            t0, t1 = self.test_time(), None
+        prev = (self.tracks[ai].copy(), self.tracks[bi].copy())
+        try:
+            n = swap_identities(self.tracks[ai], self.tracks[bi], t0, t1)
+        except ValueError as e:
+            self.edit_lbl.setText(str(e))
+            return False
+        if not n:
+            self.edit_lbl.setText("No track samples to swap.")
+            return False
+        self._undo.append(((ai, bi), prev))
+        del self._undo[:-30]
+        names = [self.edit_animal.itemText(i) for i in (ai, bi)]
+        span = f"{t0:.2f}–{t1:.2f} s" if t1 is not None else f"from {t0:.2f} s"
+        self._save_tracks(f"Swapped {names[0]} and {names[1]} {span} ({n} samples).")
+        return True
+
     def undo_edit(self):
         if not self._undo or self.test is None:
             return
         ai, prev = self._undo.pop()
+        if isinstance(ai, tuple):  # an identity swap: both tracks
+            for i, tr in zip(ai, prev):
+                self.tracks[i] = tr
+            self._save_tracks("Undone.")
+            return
         if prev is None:  # the track was created by the edit
             if ai < len(self.tracks):
                 self.tracks.pop(ai)

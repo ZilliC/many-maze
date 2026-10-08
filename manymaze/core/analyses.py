@@ -363,14 +363,35 @@ def correlate(project, rows: list[dict], mx: str, my: str, method: str = "pearso
         reg = (f"<br><b>Linear regression</b><div>y = {g['slope']:.4g}·x + {g['intercept']:.4g}</div>"
                f"<div>slope 95% CI {g['slope_ci'][0]:.4g} to {g['slope_ci'][1]:.4g}</div>"
                f"<div>R² = {g['r2']:.3f}, {escape(format_p(g['p']))}</div>")
+    # ANCOVA: compare the levels of the colouring factor on Y, adjusted for X as the covariate
+    anc = ""
+    if by and len(set(groups)) >= 2:
+        a = st.ancova(rows, my, mx, by)
+        if "error" in a:
+            anc = f"<br><b>ANCOVA</b><div>{escape(str(a['error']))}</div>"
+        else:
+            res["ancova"] = a
+            eff = a["effects"][0]
+            anc = (f"<br><b>ANCOVA</b> ({escape(label(by))} adjusted for {escape(mx)})"
+                   f"<div>F({eff['df']}, {eff['df_error']}) = {eff['F']:.3f}, {escape(format_p(eff['p']))} "
+                   f"{stars(eff['p'])}</div>"
+                   + "".join(f"<div>{escape(label(lv))}: adjusted mean {d['adjusted_mean']:.4g} ± "
+                             f"{d['adjusted_se']:.3g} SE</div>" for lv, d in a["adjusted_means"].items()))
+            sl = a.get("slopes")
+            if sl:
+                anc += (f"<div>Homogeneity of slopes: {escape(format_p(sl['p']))}"
+                        + (" — <span style='color:#dc2626'>slopes differ</span>" if sl["p"] < 0.05 else "")
+                        + "</div>")
     html = (f"<div style='font-size:16px'><b>{name} = {fmt(r)}</b></div>"
             f"<div style='font-size:14px'>{escape(p_text(p))}, n = {res.get('n', 0)}</div>{ci}<div>{strength}</div>"
-            f"{reg}")
+            f"{reg}{anc}")
     name = {"pearson": "Pearson r", "spearman": "Spearman rho", "kendall": "Kendall tau"}[method]
     text = f"{mx} vs {my}: {name} = {res['r']:.3f}, {format_p(res['p'])}, n = {res['n']}"
     if g.get("slope") == g.get("slope") and g.get("slope") is not None:
         text += (f"\n  Linear regression: slope = {g['slope']:.4g} (95% CI {g['slope_ci'][0]:.4g} to "
                  f"{g['slope_ci'][1]:.4g}), intercept = {g['intercept']:.4g}, R² = {g['r2']:.3f}, {format_p(g['p'])}")
+    if "ancova" in res:
+        text += "\n" + st.ancova_text(res["ancova"], my)
     return Analysis(f"{my} against {mx}", _with(f"N = {len(rows)}", context(period, filt)), html, [], fig, text,
                     res)
 

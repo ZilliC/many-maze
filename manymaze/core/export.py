@@ -14,7 +14,8 @@ from xml.sax.saxutils import escape as _xesc, quoteattr as _qa
 import numpy as np
 
 from .. import __version__
-from .project import INACTIVE_STATUSES, Project, result_columns
+from .apparatus import ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
+from .project import INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
 
 XML_FORMAT_VERSION = 1
@@ -179,7 +180,7 @@ def zone_visit_rows(project: Project, tests=None) -> list[dict]:
     for t in tests if tests is not None else project.tests:
         if t.status in INACTIVE_STATUSES or not project.has_track(t):
             continue
-        app = project.get_apparatus(t.apparatus)
+        app = project.apparatus_of(t)
         if app is None or not app.zones:
             continue
         s = project.analysis_for(t)
@@ -200,6 +201,220 @@ def export_animals(project: Project, path):
         w.writerow(["ID", "Treatment", "Sex"] + list(project.animal_fields))
         for a in project.animals:
             w.writerow([a.id, a.group, a.sex] + [a.fields.get(f, "") for f in project.animal_fields])
+
+
+def event_log_rows(project: Project, test) -> list[dict]:
+    """Chronological log of a test (ANY-maze test event log): zone entries and exits (zones and zone groups),
+    scored keys, I/O changes and pauses. Times are test times in seconds."""
+    from .occupancy import zone_sequence
+
+    rows = []
+    ids = [test.animal_id] + list(test.extra_animals)
+    app = project.apparatus_of(test)
+    if app is not None and project.has_track(test):
+        s = project.analysis_for(test)
+        for i, tr in enumerate(project.load_tracks(test)):
+            who = ids[i] if i < len(ids) else f"#{i + 1}"
+            end = float(tr.t[-1] + tr.frame_durations()[-1]) if len(tr) else 0.0
+            for zone, a, b in zone_sequence(tr, app, app.names(), s):
+                rows.append({"Time (s)": a, "Animal": who, "Event": "Zone entry", "Detail": zone})
+                if b < end - 1e-9:
+                    rows.append({"Time (s)": b, "Animal": who, "Event": "Zone exit", "Detail": zone})
+    kinds = {b.name: b.kind for b in project.behaviours}
+    for e in test.events or []:
+        name = e.get("behaviour", "")
+        if e.get("t_end") is None or kinds.get(name) == "point":
+            rows.append({"Time (s)": float(e["t"]), "Animal": test.animal_id, "Event": "Key", "Detail": name})
+        else:
+            rows.append({"Time (s)": float(e["t"]), "Animal": test.animal_id, "Event": "Key on", "Detail": name})
+            rows.append({"Time (s)": float(e["t_end"]), "Animal": test.animal_id, "Event": "Key off",
+                         "Detail": name})
+    for e in test.io_events or []:
+        kind = "Input" if e.get("kind") == "input" else "Output"
+        ch = ":".join(str(x) for x in (e.get("device"), e.get("channel")) if x not in (None, ""))
+        rows.append({"Time (s)": float(e.get("t", 0.0)), "Animal": test.animal_id, "Event": kind,
+                     "Detail": f"{ch} = {value_text(e.get('value'))}"})
+    for pz in test.pauses or []:
+        rows.append({"Time (s)": float(pz[0]), "Animal": test.animal_id, "Event": "Paused", "Detail": ""})
+        if len(pz) > 1 and pz[1] is not None and float(pz[1]) > float(pz[0]):
+            rows.append({"Time (s)": float(pz[1]), "Animal": test.animal_id, "Event": "Resumed", "Detail": ""})
+    order = {"Zone exit": 0, "Key off": 1, "Resumed": 2}
+    rows.sort(key=lambda r: (r["Time (s)"], order.get(r["Event"], 5)))
+    for r in rows:
+        r["Time (s)"] = round(r["Time (s)"], 3)
+    return rows
+
+
+def wide_rows(rows: list[dict], measures: list[str], across: tuple[str, ...] = ("Stage", "Trial"),
+              keep: tuple[str, ...] = ("Animal", "Group", "Sex")) -> list[dict]:
+    """One row per animal with one column per measure × stage/trial (ANY-maze "one row per animal" layout,
+    ready for Prism or repeated-measures analysis elsewhere). Rows of a time-period analysis are kept apart by
+    their period. Columns are named "<measure> [Day 1 · 2]"."""
+    def label(r):
+        parts = [str(r.get(k, "")) for k in across if r.get(k, "") not in ("", None)]
+        per = r.get("Period", "")
+        if per and per != "Whole test":
+            parts.append(str(per))
+        return " · ".join(parts)
+
+    out: dict = {}
+    levels: list[str] = []
+    for r in rows:
+        key = r.get("Animal", "")
+        row = out.setdefault(key, {k: r.get(k, "") for k in keep if k in r})
+        lab = label(r)
+        if lab not in levels:
+            levels.append(lab)
+        for m in measures:
+            col = f"{m} [{lab}]" if lab else m
+            if m in r and col not in row:  # first attempt wins (superseded attempts are already excluded)
+                row[col] = r[m]
+    return list(out.values())
+
+
+def trial_means(rows: list[dict], measures: list[str], keep: tuple[str, ...] = ("Group", "Sex")) -> list[dict]:
+    """Mean of each animal's trials per stage (and time period): one row per animal × stage, with the number of
+    trials averaged ("Trials"). Text measures are left out. Water-maze style blocks of trials per day."""
+    groups: dict = {}
+    for r in rows:
+        key = (r.get("Animal", ""), r.get("Stage", ""), r.get("Period", "Whole test"))
+        groups.setdefault(key, []).append(r)
+    out = []
+    for (animal, stage, period), rs in groups.items():
+        row = {"Animal": animal, **{k: rs[0].get(k, "") for k in keep if k in rs[0]}, "Stage": stage}
+        if period and period != "Whole test":
+            row["Period"] = period
+        row["Trials"] = len({r.get("Test") for r in rs})
+        for m in measures:
+            vals = [float(r[m]) for r in rs if isinstance(r.get(m), (int, float, np.integer, np.floating))
+                    and not isinstance(r.get(m), bool) and math.isfinite(float(r[m]))]
+            if vals:
+                row[m] = round(float(np.mean(vals)), 4)
+        out.append(row)
+    return out
+
+
+def protocol_report(project: Project, path) -> Path:
+    """Self-contained HTML description of the protocol (ANY-maze protocol report): experiment, stages, keys,
+    apparatus maps with every zone / point / line / group / sequence, animal tracking and analysis settings,
+    procedures, I/O devices and training criteria."""
+    from . import plots
+    from .measures import AnalysisSettings
+    from .procedures import describe_statement, normalize_procedures
+    from .tracking import DetectionSettings
+    from .workflow import criterion_text
+
+    def table(header, body):
+        h = "".join(f"<th>{html.escape(str(c))}</th>" for c in header)
+        b = "".join("<tr>" + "".join(f"<td>{html.escape(value_text(v))}</td>" for v in r) + "</tr>" for r in body)
+        return f"<table><tr>{h}</tr>{b}</table>"
+
+    def settings(obj, default):
+        d, d0 = obj.to_dict(), default.to_dict()
+        return table(("Setting", "Value", ""), [(k.replace("_", " ").capitalize(), v if v != [] else "—",
+                                                 "" if v == d0.get(k) else "changed") for k, v in d.items()])
+
+    css = """
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;margin:24px;color:#0f172a}
+    h1{color:#e11d48} table{border-collapse:collapse;font-size:12px;margin-bottom:10px}
+    td,th{border:1px solid #e2e8f0;padding:3px 6px;text-align:left} th{background:#f1f5f9}
+    .card{border:1px solid #e2e8f0;border-radius:8px;padding:8px;margin-bottom:12px} pre{background:#f8fafc;padding:8px}
+    """
+    p = project
+    out = [f"<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(p.name)} – protocol</title>"
+           f"<style>{css}</style></head><body><h1>{html.escape(p.name)}: protocol</h1>"]
+    if p.description:
+        out.append(f"<p>{html.escape(p.description)}</p>")
+    out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}.</p>")
+    out.append("<h2>Protocol</h2>" + table(("Item", "Value"), [
+        ("Protocol", p.protocol), ("Test duration (s)", p.test_duration_s or "until the end of the video"),
+        ("Test starts", "when the animal is first detected" if p.start_mode == "on_detection"
+         else "at the test's start time"),
+        ("Blind testing", "yes" if p.blind else "no"),
+        ("Confirm the animal's ID", "yes" if p.settings_extra.get("confirm_id") else "no"),
+        ("Stages", ", ".join(p.stages) or "—"), ("Treatments", ", ".join(g.name for g in p.groups) or "—"),
+        ("Animal columns", ", ".join(p.animal_fields) or "—"),
+        ("Animals / tests", f"{len(p.animals)} / {len(p.tests)}")]))
+    if p.behaviours:
+        out.append("<h2>Keys</h2>" + table(("Behaviour", "Key", "Type", "Exclusive set"),
+                                           [(b.name, b.key, b.kind, b.group) for b in p.behaviours]))
+    for app in p.apparatus:
+        out.append(f"<h2>Apparatus: {html.escape(app.name)}</h2><div class='card'>")
+        try:
+            from matplotlib.figure import Figure
+
+            fig = Figure(figsize=(4.2, 4.2))
+            ax = fig.add_subplot(111)
+            plots._draw_apparatus(ax, app, labels=True)
+            plots._limits(ax, app, None)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            out.append(_img(plots.fig_to_png(fig), 380))
+        except Exception:
+            pass
+        cal = (f"{app.px_per_cm:.3f} px/cm" + (f" (line of {app.calibration_length_cm:g} cm)"
+                                                 if app.calibration_length_cm else "")) if app.px_per_cm else \
+            "not calibrated (results in pixels)"
+        out.append(table(("Item", "Value"), [("Template", app.template), ("Calibration", cal),
+                                             ("Arena", app.arena.to_dict()["type"] if app.arena else "—")]))
+        if app.zones:
+            out.append(table(("Zone", "Shape", f"Area ({app.unit}²)", "Entry rule", "Options"), [
+                (z.name, z.shape.to_dict()["type"], round(z.shape.area() * app.scale ** 2, 2),
+                 ENTRY_RULE_TEXT.get(z.entry_rule, z.entry_rule),
+                 ", ".join(x for x, on in (("hidden", z.hidden), ("moveable", z.moveable),
+                                           (f"investigate {z.investigation_distance_cm:g} cm",
+                                            z.investigation_distance_cm > 0)) if on))
+                for z in app.zones]))
+        if app.groups:
+            out.append(table(("Zone group", "Zones", "Excluding"),
+                             [(g.name, ", ".join(g.zones), ", ".join(g.exclude)) for g in app.groups]))
+        if app.points:
+            out.append(table(("Point", "x (px)", "y (px)", "Radius (cm)"),
+                             [(q.name, round(q.x, 1), round(q.y, 1), q.radius_cm) for q in app.points]))
+        if app.lines:
+            out.append(table(("Line", "From (px)", "To (px)"), [
+                (ln.name, f"{ln.x1:.0f}, {ln.y1:.0f}", f"{ln.x2:.0f}, {ln.y2:.0f}") for ln in app.lines]))
+        if app.sequences:
+            out.append(table(("Sequence", "Steps", "Options"), [
+                (q.name, " → ".join(q.steps), ", ".join(x for x, on in (
+                    ("must begin at the first step", q.from_start), ("other zones allowed", q.allow_other),
+                    ("both directions", q.bidirectional), ("overlapping", q.overlap),
+                    (f"time limit {q.max_duration_s:g} s", q.max_duration_s > 0)) if on))
+                for q in app.sequences]))
+        out.append("</div>")
+    out.append("<h2>Animal tracking</h2>" + settings(p.detection, DetectionSettings()))
+    out.append("<h2>Analysis</h2>" + settings(p.analysis, AnalysisSettings()))
+    procs = normalize_procedures(p.procedures)
+    if procs:
+        out.append("<h2>Procedures</h2>")
+        for pr in procs:
+
+            def lines(stmts, depth=0):
+                res = []
+                for st in stmts or []:
+                    res.append("  " * depth + ("" if st.get("enabled", True) else "[off] ") + describe_statement(st))
+                    for k in ("body", "else"):
+                        if isinstance(st.get(k), list):
+                            if k == "else" and st[k]:
+                                res.append("  " * depth + "else")
+                            res += lines(st[k], depth + 1)
+                return res
+
+            state = "" if pr.get("enabled", True) else " (disabled)"
+            out.append(f"<div class='card'><b>{html.escape(pr.get('name', 'Procedure'))}{state}</b>"
+                       f"<pre>{html.escape(chr(10).join(lines(pr.get('statements'))))}</pre></div>")
+    if p.io_devices:
+        out.append("<h2>I/O devices</h2>" + table(("Device", "Type", "Settings"), [
+            (d.get("name", ""), d.get("type", ""), ", ".join(f"{k}={v}" for k, v in d.items()
+                                                             if k not in ("name", "type") and not isinstance(v, (list, dict))))
+            for d in p.io_devices]))
+    if p.training_criteria:
+        out.append("<h2>Training criteria</h2><ul>" + "".join(
+            f"<li>{html.escape(criterion_text(c))}</li>" for c in p.training_criteria) + "</ul>")
+    out.append("</body></html>")
+    path = Path(path)
+    path.write_text("\n".join(out), encoding="utf-8")
+    return path
 
 
 def export_track(track, path):
@@ -379,7 +594,10 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
             if t.variables:
                 w("      <variables>\n" + "".join(f"        <variable{_attrs(name=n, **_value_attrs(v))}/>\n"
                                                  for n, v in t.variables.items()) + "      </variables>\n")
-            ov = t.zone_overrides
+            ov = dict(t.zone_overrides)
+            pos = ov.pop(POSITION_KEY, None)
+            if isinstance(pos, dict):
+                w(f"      <apparatus-position{_attrs(**position_args(pos))}/>\n")
             if ov:
                 w("      <zone-overrides>\n")
                 for zn, sd in ov.items():
@@ -409,8 +627,7 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
                         trows = project.analyse_test(t, segmented)
                     except Exception:
                         trows = []
-                info = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period",
-                        *project.animal_fields}
+                info = {*INFO_COLUMNS, *project.animal_fields}
                 for r in trows or []:
                     w(f"      <results{_attrs(animal=r.get('Animal'), period=r.get('Period', 'Whole test'))}>\n")
                     for c, v in r.items():

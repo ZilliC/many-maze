@@ -158,7 +158,7 @@ def test_exports(page, tmp_path, monkeypatch):
     assert "Period" in tp and tp[-1] == "Centre: time (%)"
     assert wb["Time periods"].max_row == 13
     assert {"Zone visits", "Animals", "Tests", "Settings"} <= set(wb.sheetnames)
-    assert any(r[1].value.startswith("mANY-MAZE") for r in wb["Settings"].iter_rows(min_row=2))
+    assert any(str(r[1].value or "").startswith("mANY-MAZE") for r in wb["Settings"].iter_rows(min_row=2))
     # period filter
     page.period_combo.setCurrentIndex(page.period_combo.findData("0-4 s"))
     assert page.proxy.rowCount() == 6

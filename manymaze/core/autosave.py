@@ -14,6 +14,7 @@ import numpy as np
 
 from .session import Session, save_live_test
 from .tracking import DetectionSettings, TrackBuilder, postprocess
+from .video import recorded_video
 
 SUFFIX = ".autosave.json"
 
@@ -181,7 +182,7 @@ def recover(project) -> list:
                                     trial=int(m.get("trial") or 1))
         rec = d.get("record_path")
         try:
-            ok = save_live_test(project, test, s, rec if rec and Path(rec).exists() else None)
+            ok = save_live_test(project, test, s, recorded_video(rec))
         except Exception:
             ok = False
         if not ok:

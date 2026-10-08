@@ -26,7 +26,13 @@ from .tracking import ArenaJob, DetectionSettings, track_video
 from .video import VideoSource
 
 PROJECT_FILE = "project.json"
+BACKUP_DIR = "backups"
+BACKUP_INTERVAL_S = 600.0  # at most one automatic backup per 10 minutes of saving
+BACKUP_KEEP = 30
 FORMAT_VERSION = 1
+# columns of a results row that describe the test rather than measure it (animal fields are added to these)
+INFO_COLUMNS = ["Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Test date", "Day of week",
+                "Test time", "Test notes", "Period"]
 
 
 # test status values: "pending" (to do), "tracked" (has a track), "scored" (manually scored, no track),
@@ -160,7 +166,48 @@ class Project:
         (self.path / "tracks").mkdir(exist_ok=True)
         tmp = self.path / (PROJECT_FILE + ".tmp")
         tmp.write_text(json.dumps(self.to_dict(), indent=1))
+        if self.settings_extra.get("backups", True):
+            self.backup(min_interval_s=BACKUP_INTERVAL_S)
         os.replace(tmp, self.path / PROJECT_FILE)
+
+    # ---- backups ---------------------------------------------------------------------------------
+    def backups_dir(self) -> Path:
+        return self.path / BACKUP_DIR
+
+    def list_backups(self) -> list[Path]:
+        """Backup copies of the experiment file, newest first."""
+        if self.path is None or not self.backups_dir().exists():
+            return []
+        return sorted(self.backups_dir().glob("project-*.json"), reverse=True)
+
+    def backup(self, min_interval_s: float = 0.0, keep: int = BACKUP_KEEP) -> Path | None:
+        """Copy the saved experiment file (as it is before this save) to ``backups/project-<time>.json`` unless the
+        newest backup is younger than min_interval_s; keeps the ``keep`` newest. Track files are not copied: edits
+        to tracks are kept by the track editor's undo."""
+        if self.path is None or not (self.path / PROJECT_FILE).exists():
+            return None
+        now = _dt.datetime.now()
+        old = self.list_backups()
+        if old and min_interval_s > 0 and now.timestamp() - old[0].stat().st_mtime < min_interval_s:
+            return None
+        self.backups_dir().mkdir(exist_ok=True)
+        dest = self.backups_dir() / f"project-{now:%Y%m%d-%H%M%S}.json"
+        if not dest.exists():
+            import shutil
+
+            shutil.copy2(self.path / PROJECT_FILE, dest)
+            os.utime(dest)
+        for extra in self.list_backups()[max(1, keep):]:
+            try:
+                extra.unlink()
+            except OSError:
+                pass
+        return dest
+
+    def restore_backup(self, backup: str | os.PathLike) -> "Project":
+        """The experiment as stored in a backup (the current file is backed up first). Save it to restore."""
+        self.backup()
+        return Project.from_dict(json.loads(Path(backup).read_text()), self.path)
 
     def to_dict(self) -> dict:
         return {
@@ -370,7 +417,7 @@ class Project:
 
     def track_test(self, test: Test, progress: Callable[[float], None] | None = None,
                    should_stop: Callable[[], bool] | None = None, frame_callback=None) -> list[Track]:
-        app = self.get_apparatus(test.apparatus)
+        app = self.apparatus_of(test)
         settings = self.detection_for(test)
         video = self.abs_path(test.video)
         if self.start_mode == "on_detection":
@@ -389,7 +436,7 @@ class Project:
         if not tests:
             return {}
         video = self.abs_path(tests[0].video)
-        jobs = [ArenaJob(self.get_apparatus(t.apparatus), self.detection_for(t)) for t in tests]
+        jobs = [ArenaJob(self.apparatus_of(t), self.detection_for(t)) for t in tests]
         res = track_video(video, jobs, progress, should_stop)
         out = {}
         for t, tracks in zip(tests, res):
@@ -419,7 +466,15 @@ class Project:
         aid = animal_id if animal_id is not None else test.animal_id
         a = self.get_animal(aid)
         info = {"Test": test.id, "Animal": aid, "Group": a.group if a else "", "Sex": a.sex if a else "",
-                "Stage": test.stage, "Trial": test.trial, "Apparatus": test.apparatus}
+                "Stage": test.stage, "Trial": test.trial, "Apparatus": test.apparatus,
+                "Test date": "", "Day of week": "", "Test time": "", "Test notes": test.notes or ""}
+        try:
+            when = _dt.datetime.fromisoformat(test.recorded_at) if test.recorded_at else None
+        except ValueError:
+            when = None
+        if when is not None:
+            info.update({"Test date": when.date().isoformat(), "Day of week": when.strftime("%A"),
+                         "Test time": when.strftime("%H:%M:%S")})
         if a:
             for f in self.animal_fields:
                 info[f] = a.fields.get(f, "")

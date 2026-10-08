@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 from .geometry import (Ellipse, Polygon, Shape, clip_convex, concentric_rings, radial_sectors, shape_from_dict,
-                       square_grid)
+                       similarity_points, square_grid)
+
+# Test.zone_overrides key holding the position of the whole apparatus map in that test (the camera or the
+# apparatus moved between recordings): {"dx", "dy" (px), "angle" (degrees, clockwise), "scale"}, about the centre
+# of the arena.
+POSITION_KEY = "@position"
 
 ENTRY_RULES = {
     "": "Default (analysis settings)",
@@ -305,17 +312,52 @@ class Apparatus:
         """Zone and zone-group names (the targets of sequences, periods and procedures)."""
         return [z.name for z in self.zones] + [g.name for g in self.groups]
 
-    def with_overrides(self, overrides: dict | None) -> "Apparatus":
-        """Copy with per-test positions of moveable zones / points applied.
+    def origin(self) -> tuple[float, float]:
+        """Centre about which the apparatus map is rotated and scaled (the arena's centre)."""
+        try:
+            x0, y0, x1, y1 = self.arena_or_bounds().bounds()
+            return (x0 + x1) / 2, (y0 + y1) / 2
+        except ValueError:
+            return 0.0, 0.0
 
-        overrides: {zone name: shape dict} or {point name: {"x", "y"}}. Points lying inside a moved zone (e.g.
-        "Platform centre" in "Platform") move with it.
+    def positioned(self, dx: float = 0.0, dy: float = 0.0, angle: float = 0.0, scale: float = 1.0) -> "Apparatus":
+        """Copy of the whole map moved by (dx, dy) px, rotated by ``angle`` degrees (clockwise) and scaled about
+        the arena centre. The calibration follows the scale, so distances in cm are unchanged."""
+        scale = float(scale) if scale and scale > 0 else 1.0
+        if not (dx or dy or angle) and scale == 1.0:
+            return self
+        ox, oy = self.origin()
+        kw = dict(dx=dx, dy=dy, angle_deg=angle, scale=scale, ox=ox, oy=oy)
+        app = self.copy()
+        if app.arena is not None:
+            app.arena = app.arena.similarity(**kw)
+        for z in app.zones:
+            z.shape = z.shape.similarity(**kw)
+        for pt in app.points:
+            (pt.x, pt.y), = similarity_points([[pt.x, pt.y]], **kw).tolist()
+        for ln in app.lines:
+            (ln.x1, ln.y1), (ln.x2, ln.y2) = similarity_points([[ln.x1, ln.y1], [ln.x2, ln.y2]], **kw).tolist()
+        if app.calibration_line:
+            a, b = similarity_points(np.reshape(app.calibration_line, (2, 2)), **kw).tolist()
+            app.calibration_line = (*a, *b)
+        if app.px_per_cm:
+            app.px_per_cm *= scale
+        return app
+
+    def with_overrides(self, overrides: dict | None) -> "Apparatus":
+        """Copy with the per-test map position and positions of moveable zones / points applied.
+
+        overrides: {zone name: shape dict} or {point name: {"x", "y"}}, plus optionally POSITION_KEY: {"dx",
+        "dy", "angle", "scale"} for the whole map (applied first; zone and point positions are in video pixels).
+        Points lying inside a moved zone (e.g. "Platform centre" in "Platform") move with it.
         """
         if not overrides:
             return self
-        app = self.copy()
+        pos = overrides.get(POSITION_KEY)
+        app = self.positioned(**position_args(pos)) if isinstance(pos, dict) else self
+        app = app.copy() if app is self else app
         for name, v in overrides.items():
-            if not isinstance(v, dict):
+            if not isinstance(v, dict) or name == POSITION_KEY:
                 continue
             z = app.zone(name)
             if z is not None and "type" in v:
@@ -386,6 +428,12 @@ class Apparatus:
 
     def copy(self) -> "Apparatus":
         return Apparatus.from_dict(self.to_dict())
+
+
+def position_args(pos: dict | None) -> dict:
+    """Keyword arguments of Apparatus.positioned from a stored POSITION_KEY value."""
+    pos = pos or {}
+    return {k: float(pos.get(k, d) or d) for k, d in (("dx", 0.0), ("dy", 0.0), ("angle", 0.0), ("scale", 1.0))}
 
 
 # ------------------------------------------------------------------------------- grids
@@ -491,3 +539,28 @@ def remove_grid(app: Apparatus, name: str) -> bool:
         q.steps = [s for s in q.steps if s not in cells and s != name]
     app.grids.remove(g)
     return True
+
+
+# ------------------------------------------------------------------------------- sharing
+APPARATUS_FILE_FORMAT = "manymaze-apparatus"
+
+
+def save_apparatus_file(apps: list[Apparatus], path) -> Path:
+    """Save apparatus maps (zones, points, lines, groups, sequences, grids, calibration) to a JSON file to share
+    them between experiments or labs."""
+    path = Path(path)
+    path.write_text(json.dumps({"format": APPARATUS_FILE_FORMAT, "version": 1,
+                                "apparatus": [a.to_dict() for a in apps]}, indent=1), encoding="utf-8")
+    return path
+
+
+def load_apparatus_file(path) -> list[Apparatus]:
+    """Apparatus maps from an apparatus file (save_apparatus_file) or from another experiment (its .mmaze folder
+    or project.json)."""
+    p = Path(path)
+    if p.is_dir():
+        p = p / "project.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(d, dict) or not isinstance(d.get("apparatus"), list):
+        raise ValueError(f"{p.name} contains no apparatus")
+    return [Apparatus.from_dict(a) for a in d["apparatus"]]

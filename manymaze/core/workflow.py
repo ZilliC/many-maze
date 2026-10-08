@@ -634,3 +634,83 @@ def compute_doses(project: Project, animals: list[Animal] | None = None, write: 
     if write and VOLUME_FIELD not in project.animal_fields:
         project.animal_fields.append(VOLUME_FIELD)
     return out
+
+
+# ---------------------------------------------------------------------------- protocol copy
+# settings_extra entries that belong to the protocol (others, e.g. blind codes and completed stages, are data)
+PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose")
+
+
+def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Project:
+    """Give ``dst`` the protocol of ``src`` (ANY-maze: new experiment based on another one's protocol).
+
+    Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
+    procedures, I/O devices, training criteria, blind testing and animal ID options, and the animal columns;
+    with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
+    """
+    import copy as _copy
+
+    from .measures import AnalysisSettings
+    from .tracking import DetectionSettings
+
+    dst.protocol = src.protocol
+    dst.test_duration_s = src.test_duration_s
+    dst.start_mode = src.start_mode
+    dst.detection = DetectionSettings.from_dict(src.detection.to_dict())
+    dst.analysis = AnalysisSettings.from_dict(_copy.deepcopy(src.analysis.to_dict()))
+    dst.apparatus = [a.copy() for a in src.apparatus]
+    dst.behaviours = [Behaviour.from_dict(asdict(b)) for b in src.behaviours]
+    dst.stages = list(src.stages)
+    dst.procedures = _copy.deepcopy(src.procedures)
+    dst.io_devices = _copy.deepcopy(src.io_devices)
+    dst.training_criteria = _copy.deepcopy(src.training_criteria)
+    dst.blind = src.blind
+    dst.animal_fields = list(src.animal_fields)
+    for k in PROTOCOL_EXTRAS:
+        if k in src.settings_extra:
+            dst.settings_extra[k] = _copy.deepcopy(src.settings_extra[k])
+    if treatments:
+        have = {g.name for g in dst.groups}
+        dst.groups += [Group(g.name, g.color) for g in src.groups if g.name not in have]
+    return dst
+
+
+# ---------------------------------------------------------------------------- random allocation
+def randomise_treatments(project: Project, animals: list[Animal] | None = None, groups: list[str] | None = None,
+                         stratify_by: str = "", seed: int | None = None) -> dict[str, str]:
+    """Allocate animals to treatments at random in balanced numbers (block randomisation).
+
+    Each stratum (all animals, or the animals sharing a value of ``stratify_by`` — "Sex" or an animal column) is
+    shuffled and dealt round-robin over the treatments in a random order, so group sizes differ by at most one and
+    each stratum is spread evenly. Writes the treatments and returns {animal id: treatment}."""
+    animals = [a for a in (animals if animals is not None else project.animals) if not a.retired]
+    groups = list(groups if groups is not None else [g.name for g in project.groups])
+    if not groups:
+        raise ValueError("Add treatments first")
+    rng = random.Random(seed)
+
+    def key(a: Animal) -> str:
+        if not stratify_by:
+            return ""
+        return str(a.sex if stratify_by == "Sex" else a.fields.get(stratify_by, ""))
+
+    strata: dict[str, list[Animal]] = {}
+    for a in animals:
+        strata.setdefault(key(a), []).append(a)
+    counts = {g: 0 for g in groups}
+    out = {}
+    for k in sorted(strata):
+        members = strata[k][:]
+        rng.shuffle(members)
+        # deal from the currently smallest treatments first so the totals stay balanced across strata
+        order = sorted(groups, key=lambda g: (counts[g], rng.random()))
+        for i, a in enumerate(members):
+            g = order[i % len(order)]
+            a.group = g
+            counts[g] += 1
+            out[a.id] = g
+    have = {g.name for g in project.groups}
+    for g in groups:
+        if g not in have:
+            project.groups.append(Group(g))
+    return out

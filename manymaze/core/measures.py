@@ -66,6 +66,8 @@ class AnalysisSettings:
     paired_chamber: str = "Chamber A"  # conditioned place preference: drug-paired chamber
     nose_contact_distance: float = 0.0  # social: nose-to-nose / nose-to-body distance (units); 0 = auto
     follow_distance: float = 0.0  # social: max distance for following (units); 0 = 2 body lengths
+    end_zone: str = ""  # the test ends when the animal has stayed in this zone (or group) for end_zone_s seconds
+    end_zone_s: float = 0.0  # e.g. 2 s on the water-maze platform; 0 = on entering it
 
     def to_dict(self):
         return asdict(self)
@@ -221,6 +223,22 @@ class _Prepared:
                                                    value=True))
 
 
+def end_of_test(track: Track, app: Apparatus, s: AnalysisSettings) -> float | None:
+    """Test time at which the test ends because the animal has stayed in ``s.end_zone`` for ``s.end_zone_s``
+    seconds without leaving (the water-maze platform, the Barnes escape box…), or None."""
+    if not s.end_zone or not len(track):
+        return None
+    memb = occupancy(track, app, s)[0].get(s.end_zone)
+    if memb is None:
+        return None
+    t, dur = track.t, track.frame_durations()
+    need = max(0.0, float(s.end_zone_s or 0.0))
+    for a, b in runs(memb):
+        if float(t[b - 1] + dur[b - 1] - t[a]) >= need - 1e-9:
+            return float(t[a] + need)
+    return None
+
+
 def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_events=None, other_tracks=None,
              zone_overrides=None, pauses=None, duration=None) -> _Prepared:
     app = apply_overrides(app, zone_overrides)
@@ -228,6 +246,16 @@ def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_
     events = shift_events(events, pauses)
     io_events = shift_events(io_events, pauses)
     others = [drop_pauses(o, pauses)[0] for o in (other_tracks or [])]
+    t_end = end_of_test(track, app, s) if s.end_zone else None
+    if t_end is not None:  # the test ended there: nothing after it is analysed
+        keep = track.t <= t_end + 1e-9
+        track, breaks = track.slice_index(0, int(keep.sum())), breaks[:int(keep.sum())]
+        others = [o.slice_time(-math.inf, t_end + 1e-9) for o in others]
+        events = [{**e, "t_end": min(float(e["t_end"]), t_end)} if e.get("t_end") is not None else e
+                  for e in (events or []) if e["t"] <= t_end]
+        io_events = [e for e in (io_events or []) if float(e.get("t", 0)) <= t_end]
+        T = t_end - float(track.t[0]) if len(track) else 0.0
+        duration = T if duration is None else min(duration, T)
     clean = track
     n = len(track)
     if n == 0:
@@ -378,6 +406,9 @@ def _locomotion(res, p: _Period):
     total = float(k.step.sum())
     res[f"Total distance ({u})"] = _r(total, 2)
     res[f"Mean speed ({u}/s)"] = _r(total / T if T > 0 else math.nan)
+    if p.hidden:
+        t_vis = float(dur[~p.hid_any].sum())
+        res[f"Mean speed when not hidden ({u}/s)"] = _r(k.step[~p.hid_any].sum() / t_vis if t_vis > 0 else math.nan)
     res[f"Max speed ({u}/s)"] = _r(np.nanmax(p.sp) if np.isfinite(p.sp).any() else math.nan)
     t_mob = float(dur[k.mobile].sum())
     res["Time mobile (s)"] = _r(t_mob)
@@ -392,6 +423,12 @@ def _locomotion(res, p: _Period):
     imm_time = (T - t_mob) if p.whole else p.ep_time(imm)
     res["Mean immobile episode (s)"] = _r(imm_time / len(imm) if imm else 0.0)
     res["Longest immobile episode (s)"] = _r(max((dur[a:b].sum() for a, b in imm), default=0.0))
+    res["Shortest immobile episode (s)"] = _r(min((dur[a:b].sum() for a, b in imm), default=0.0))
+    res["Longest mobile episode (s)"] = _r(max((dur[a:b].sum() for a, b in mob), default=0.0))
+    res["Shortest mobile episode (s)"] = _r(min((dur[a:b].sum() for a, b in mob), default=0.0))
+    res["Latency to first mobile episode (s)"] = _r(p.lat(mob))
+    res["Latency to last mobile episode (s)"] = _r(float(p.t[mob[-1][0]] - p.t0) if mob else p.never)
+    res["Latency to last immobile episode (s)"] = _r(float(p.t[imm[-1][0]] - p.t0) if imm else p.never)
     if np.isfinite(k.motion_pct).any():
         fr = p.eps(K.freezing)
         t_fr = float(dur[k.freezing].sum())
@@ -402,6 +439,7 @@ def _locomotion(res, p: _Period):
         res["Mean freezing episode (s)"] = _r(p.ep_time(fr) / len(fr) if fr else 0.0)
         res["Mean motion (% body)"] = _r(np.nanmean(k.motion_pct), 2)
         res["Longest freezing episode (s)"] = _r(max((dur[a:b].sum() for a, b in fr), default=0.0))
+        res["Shortest freezing episode (s)"] = _r(min((dur[a:b].sum() for a, b in fr), default=0.0))
     _path_shape(res, p, total, t_mob)
 
 
@@ -474,6 +512,15 @@ def _arena_position(res, p: _Period):
 def _zones(res, p: _Period):
     P, s, k, K, app, t, dur, T, u = p.P, p.P.s, p.k, p.P.k, p.P.app, p.t, p.dur, p.T, p.P.app.unit
     has_motion = np.isfinite(k.motion_pct).any()
+    grid_cells = {c for g in app.grids for c in g.zones}
+    zone_names = [z.name for z in app.zones if z.name in p.memb and z.name not in grid_cells]
+    first_zone = None
+    if zone_names:
+        firsts = [(t[v[0][0]], i) for i, zn in enumerate(zone_names)
+                  if (v := p.eps(P.visits_mask(zn, P.memb[zn]), entries=True))]
+        first_zone = zone_names[min(firsts)[1]] if firsts else None
+        res["First zone entered"] = first_zone or "None"
+    total = float(k.step.sum())
     for zn in p.memb:
         fm = P.visits_mask(zn, P.memb[zn])  # whole test, short visits removed
         vm = fm[p.sl]  # time in the zone: every visit, including the initial one and one carried into the period
@@ -500,7 +547,15 @@ def _zones(res, p: _Period):
         exits = [b for a, b in runs(fm) if p.i0 < b < p.i1]
         res[f"{zn}: time of last exit (s)"] = _r(float(K.t[exits[-1] - 1] + K.dur[exits[-1] - 1] - p.t0)
                                                 if exits else math.nan)
-        res[f"{zn}: longest visit (s)"] = _r(max((float(dur[a:b].sum()) for a, b in visits), default=0.0))
+        res[f"{zn}: exits"] = len(exits)
+        res[f"{zn}: latency to first exit (s)"] = _r(float(K.t[exits[0] - 1] + K.dur[exits[0] - 1] - p.t0)
+                                                    if exits else p.never)
+        res[f"{zn}: latency to last entry (s)"] = _r(float(t[visits[-1][0]] - p.t0) if visits else p.never)
+        if zn in zone_names:
+            res[f"{zn}: was first zone entered"] = "Yes" if zn == first_zone else "No"
+        vdur = [float(dur[a:b].sum()) for a, b in visits]
+        res[f"{zn}: longest visit (s)"] = _r(max(vdur, default=0.0))
+        res[f"{zn}: shortest visit (s)"] = _r(min(vdur, default=0.0))
         res[f"{zn}: entries (/min)"] = _r(len(visits) / (T / 60) if T > 0 else math.nan)
         res[f"{zn}: time mobile (s)"] = _r(dur[vm & k.mobile].sum())
         res[f"{zn}: immobile episodes"] = len(p.eps(fm & ~K.mobile))
@@ -508,7 +563,32 @@ def _zones(res, p: _Period):
             res[f"{zn}: freezing episodes"] = len(p.eps(fm & K.freezing))
         sp = p.sp
         res[f"{zn}: max speed ({u}/s)"] = _r(np.nanmax(sp[vm]) if vm.any() and np.isfinite(sp[vm]).any() else math.nan)
+        # route to the zone: distance travelled and path efficiency (straight line / path) up to the first entry
+        if visits:
+            j = visits[0][0]
+            d_first = float(k.step[1:j + 1].sum()) if j > 0 else 0.0
+            ok_xy = np.flatnonzero(np.isfinite(k.ux[:j + 1]))
+            straight = (math.hypot(k.ux[j] - k.ux[ok_xy[0]], k.uy[j] - k.uy[ok_xy[0]])
+                        if len(ok_xy) and math.isfinite(k.ux[j]) else math.nan)
+            res[f"{zn}: distance before first entry ({u})"] = _r(d_first, 2)
+            res[f"{zn}: path efficiency to first entry"] = _r(straight / d_first if d_first > 0 else math.nan)
+        else:
+            res[f"{zn}: distance before first entry ({u})"] = _r(total if s.latency_if_never == "duration"
+                                                                 else math.nan, 2)
+            res[f"{zn}: path efficiency to first entry"] = math.nan
         zobj = app.zone(zn)
+        if zobj is not None and zn not in grid_cells:
+            dz_full = P.cached(("dist", zn), lambda z=zobj, m=P.memb[zn]: np.where(
+                m, 0.0, z.shape.distance_to_edge(K.x, K.y) * K.scale))
+            dzs = dz_full[p.sl]
+            res[f"{zn}: mean distance from zone ({u})"] = _r(np.nanmean(dzs) if np.isfinite(dzs).any() else math.nan,
+                                                             2)
+            out_d = dzs[~vm & np.isfinite(dzs)]
+            fin = np.flatnonzero(np.isfinite(dzs))
+            res[f"{zn}: initial distance from zone ({u})"] = _r(dzs[fin[0]] if len(fin) else math.nan, 2)
+            res[f"{zn}: max distance from zone ({u})"] = _r(out_d.max() if len(out_d) else math.nan, 2)
+            res[f"{zn}: min distance from zone when outside ({u})"] = _r(out_d.min() if len(out_d) else math.nan, 2)
+            res[f"{zn}: cumulative distance from zone ({u}·s)"] = _r(np.nansum(dzs * dur), 1)
         if p.facing is not None and zobj is not None:
             hxf, hyf, ang_body = p.facing
             zx, zy = zobj.shape.centroid()
@@ -579,6 +659,7 @@ def _lines(res, p: _Period):
     if not P.app.lines or N < 2:
         return
     xy = P.cached("xy", lambda: np.column_stack([K.x, K.y]))
+    n_cross = 0
     for ln in P.app.lines:
         def cross(ln=ln):
             hit, sign = segments_intersect(xy[:-1], xy[1:], (ln.x1, ln.y1), (ln.x2, ln.y2))
@@ -591,6 +672,8 @@ def _lines(res, p: _Period):
         res[f"{ln.name}: crossings right-to-left"] = int((hit & (sign < 0)).sum())
         idx = np.flatnonzero(hit)
         res[f"{ln.name}: latency to first crossing (s)"] = _r(float(K.t[idx[0] + 1] - p.t0) if len(idx) else p.never)
+        n_cross += int(hit.sum())
+    res["Total line crossings"] = n_cross
 
 
 def _grids_and_sequences(res, p: _Period):
@@ -829,6 +912,8 @@ def behaviour_measures(events: list, behaviours: list[Behaviour], t0: float, t1:
             out[f"{name}: latency (s)"] = _r(spans[0][0] - t0 if spans else never)
             out[f"{name}: mean bout (s)"] = _r(total / len(spans) if spans else 0.0)
             out[f"{name}: longest bout (s)"] = _r(max((bb - a for a, bb in spans), default=0.0))
+            out[f"{name}: shortest bout (s)"] = _r(min((bb - a for a, bb in spans), default=0.0))
+            out[f"{name}: latency to first release (s)"] = _r(spans[0][1] - t0 if spans else never)
             out[f"{name}: rate (/min)"] = _r(len(spans) / (T / 60) if T > 0 else math.nan)
             if zones and t is not None and len(t):
                 d = dur if dur is not None else np.full(len(t), (t1 - t0) / max(len(t), 1))

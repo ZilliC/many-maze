@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
-from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
+                               QWidget)
 
 from ....core import templates
-from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, make_grid, remove_grid,
-                                unique_name)
+from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, load_apparatus_file,
+                                make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
 from ....core.templates import PALETTE, TEMPLATES
 from ... import theme
@@ -88,6 +90,10 @@ class ApparatusPage(Page):
         self.new_act = self._action("New", "add", "Add an empty apparatus and draw its map yourself",
                                     self.add_apparatus)
         self.dup_act = self._action("Duplicate", "copy", "Duplicate the current apparatus", self.duplicate_apparatus)
+        self.import_act = self._action("Import…", "import", "Copy apparatus from another experiment or from an "
+                                       "apparatus file", self.import_apparatus)
+        self.export_act = self._action("Export…", "save", "Save the current apparatus to a file to use it in "
+                                       "other experiments or share it", self.export_apparatus)
         self.ren_act = self._action("Rename", "edit", "Rename the current apparatus (tests that use it follow)",
                                     self.rename_apparatus)
         self.del_act = self._action("Delete", "delete", "Delete the current apparatus", self.delete_apparatus)
@@ -159,7 +165,8 @@ class ApparatusPage(Page):
         t = self.tool_actions
         return [
             ("Apparatus", [(self.tpl_act, "large"), (self.new_act, "small"), (self.dup_act, "small"),
-                           (self.ren_act, "small"), (self.del_act, "small")]),
+                           (self.ren_act, "small"), (self.del_act, "small"), (self.import_act, "small"),
+                           (self.export_act, "small")]),
             ("Apparatus map", [(t["select"], "large"), (t["polygon"], "large"), (t["rect"], "small"),
                                (t["ellipse"], "small"), (t["line"], "small"), (self.select_all_act, "small"),
                                (self.delete_sel_act, "small"), (self.snap_act, "small")]),
@@ -331,13 +338,14 @@ class ApparatusPage(Page):
     def _set_enabled(self, on: bool):
         for a in list(self.tool_actions.values()) + [
                 self.undo_act, self.redo_act, self.grid_act, self.copy_act, self.paste_act, self.dup_act,
-                self.ren_act, self.del_act, self.bg_act, self.testvid_act, self.clear_cal_act, self.select_all_act,
-                self.delete_sel_act, self.group_act, self.seq_act]:
+                self.ren_act, self.del_act, self.export_act, self.bg_act, self.testvid_act, self.clear_cal_act,
+                self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
             a.setEnabled(on)
         for w in (self.panel.tabs, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
             w.setEnabled(on)
         self.bg.set_enabled(on)
         self.new_act.setEnabled(self.project is not None)
+        self.import_act.setEnabled(self.project is not None)
         self.tpl_act.setEnabled(self.project is not None)
 
     def _names(self, exclude: Apparatus | None = None):
@@ -364,6 +372,53 @@ class ApparatusPage(Page):
         self.main.mark_dirty()
         self._refresh_app_list(select=app)
         return app
+
+    def import_apparatus(self, source: str | None = None, names: list[str] | None = None) -> list[Apparatus]:
+        """Copy apparatus maps from another experiment (.mmaze folder) or an apparatus file (.json)."""
+        if self.project is None:
+            return []
+        if source is None:
+            source, _ = QFileDialog.getOpenFileName(
+                self, "Import apparatus from an experiment (project.json) or an apparatus file",
+                str(self.project.path.parent if self.project.path else Path.home()),
+                "Experiments and apparatus files (project.json *.json);;All files (*)")
+            if not source:
+                return []
+        try:
+            apps = load_apparatus_file(source)
+        except Exception as e:
+            QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{e}")
+            return []
+        if names is None and len(apps) > 1:
+            choices = ["All"] + [a.name for a in apps]
+            item, ok = QInputDialog.getItem(self, "Import apparatus", "Apparatus to import:", choices, 0, False)
+            if not ok:
+                return []
+            names = None if item == "All" else [item]
+        if names is not None:
+            apps = [a for a in apps if a.name in names]
+        for a in apps:
+            a.name = unique_name(a.name, self._names())
+            self.project.apparatus.append(a)
+        if apps:
+            self.main.mark_dirty()
+            self._refresh_app_list(select=apps[0])
+            self.main.status(f"Imported {', '.join(a.name for a in apps)}.")
+        return apps
+
+    def export_apparatus(self, path: str | None = None) -> Path | None:
+        app = self.app
+        if app is None:
+            return None
+        if path is None:
+            base = self.project.path.parent if self.project.path else Path.home()
+            path, _ = QFileDialog.getSaveFileName(self, "Save apparatus to a file", str(base / f"{app.name}.json"),
+                                                  "Apparatus file (*.json)")
+            if not path:
+                return None
+        out = save_apparatus_file([app], path)
+        self.main.status(f"Saved {app.name} to {out}")
+        return out
 
     def rename_apparatus(self, new_name: str | None = None) -> bool:
         app = self.app

@@ -7,18 +7,21 @@ import importlib
 import os
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QToolButton, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
+                               QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
+from ..core.export import protocol_report
 from ..core.project import PROJECT_FILE, Project
 from ..core.templates import TEMPLATES
+from ..core.workflow import copy_protocol
 from . import theme
 from .icons import icon
 from .ribbon import Ribbon
@@ -66,10 +69,24 @@ class NewProjectDialog(QDialog):
         self.duration.setRange(0, 1e6)
         self.duration.setSuffix(" s")
         self.duration.setValue(TEMPLATES["open_field"].default_duration_s)
+        self.based_on = QLineEdit()
+        self.based_on.setPlaceholderText("Optional: copy the protocol of an existing experiment")
+        self.based_on.setToolTip("Apparatus, stages, keys, procedures, I/O devices, tracking and analysis settings "
+                                 "are copied; animals and tests are not.")
+        self.based_on.textChanged.connect(self._based_changed)
+        based_btn = QPushButton("Choose…")
+        based_btn.clicked.connect(self._browse_based)
+        brow = QHBoxLayout()
+        brow.addWidget(self.based_on, 1)
+        brow.addWidget(based_btn)
+        self.copy_treatments = QCheckBox("Also copy the treatments")
+        self.copy_treatments.setEnabled(False)
         f.addRow("Name", self.name)
         f.addRow("Save in", row)
         f.addRow("Protocol", self.protocol)
         f.addRow("Test duration", self.duration)
+        f.addRow("Based on", brow)
+        f.addRow("", self.copy_treatments)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -80,6 +97,17 @@ class NewProjectDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, "Folder for the experiment", self.folder.text())
         if d:
             self.folder.setText(d)
+
+    def _browse_based(self):
+        d = QFileDialog.getExistingDirectory(self, "Experiment whose protocol to copy (.mmaze)", self.folder.text())
+        if d:
+            self.based_on.setText(d)
+
+    def _based_changed(self, text):
+        on = bool(text.strip())
+        self.copy_treatments.setEnabled(on)
+        self.protocol.setEnabled(not on)
+        self.duration.setEnabled(not on)
 
     def _proto_changed(self):
         self.duration.setValue(TEMPLATES[self.protocol.currentData()].default_duration_s)
@@ -117,6 +145,10 @@ class WelcomePage(QWidget):
                               ("save", "Save", main.save), ("save_as", "Save as", main.save_as),
                               ("close", "Close experiment", main.close_project),
                               ("import", "Import from ANY-maze", main.import_menu),
+                              ("protocol_report", "Protocol report", lambda: main.protocol_report()),
+                              ("restore", "Restore a backup", lambda: main.restore_backup()),
+                              ("archive", "Archive experiment", lambda: main.archive_experiment()),
+                              ("open_archive", "Open archive", lambda: main.open_archive()),
                               ("folder", "Show in folder", main.reveal_folder),
                               ("help", "User guide", main._open_guide), ("info", "About", main.about)):
             b = QPushButton(text)
@@ -166,7 +198,7 @@ class WelcomePage(QWidget):
             it.setFlags(Qt.NoItemFlags)
             self.recent.addItem(it)
         has = self.main.project is not None
-        for k in ("save", "save_as", "close", "folder", "import"):
+        for k in ("save", "save_as", "close", "folder", "import", "protocol_report", "restore", "archive"):
             self.side_buttons[k].setEnabled(has)
 
 
@@ -396,6 +428,10 @@ class MainWindow(QMainWindow):
         act(fm, "Close experiment", self.close_project)
         fm.addSeparator()
         act(fm, "Reveal experiment folder", self.reveal_folder)
+        act(fm, "Protocol report…", lambda: self.protocol_report())
+        act(fm, "Restore a backup…", lambda: self.restore_backup())
+        act(fm, "Archive experiment…", lambda: self.archive_experiment())
+        act(fm, "Open archive…", lambda: self.open_archive())
         fm.addSeparator()
         act(fm, "Quit", self.close, QKeySequence.Quit)
         gm = mb.addMenu("&Go")
@@ -629,6 +665,13 @@ class MainWindow(QMainWindow):
             return
         p = Project(name=dlg.name.text().strip() or "Experiment", protocol=dlg.protocol.currentData(),
                     test_duration_s=dlg.duration.value())
+        base = dlg.based_on.text().strip()
+        if base:
+            try:
+                copy_protocol(Project.load(base), p, treatments=dlg.copy_treatments.isChecked())
+            except Exception as e:
+                error_box(self, "Copy protocol", e)
+                return
         try:
             p.save(path)
         except Exception as e:
@@ -636,8 +679,12 @@ class MainWindow(QMainWindow):
             return
         self._add_recent(path)
         self.set_project(p)
-        self.status(f"Created {path}. Next: add an apparatus, then tests.")
-        self.goto("ApparatusPage")
+        if base:
+            self.status(f"Created {path} with the protocol of {Path(base).name}. Next: add animals, then tests.")
+            self.goto("AnimalsPage")
+        else:
+            self.status(f"Created {path}. Next: add an apparatus, then tests.")
+            self.goto("ApparatusPage")
 
     def open_project_dialog(self):
         if not self.maybe_save():
@@ -748,6 +795,125 @@ class MainWindow(QMainWindow):
         self.status(f"Imported {n} {'animals' if kind == 'animals' else 'tests'}.")
         self.show_page(self.page("AnimalsPage" if kind == "animals" else "TestsPage"))
         return dlg.result
+
+    def protocol_report(self, path: str | None = None):
+        """Save a printable HTML description of the protocol (apparatus maps, keys, stages, settings, procedures)."""
+        if self.project is None:
+            return None
+        for page in self.pages:
+            if hasattr(page, "commit"):
+                try:
+                    page.commit()
+                except Exception:
+                    traceback.print_exc()
+        interactive = path is None
+        if interactive:
+            base = self.project.exports_dir() if self.project.path else Path(self._last_dir())
+            path, _ = QFileDialog.getSaveFileName(self, "Save protocol report",
+                                                  str(Path(base) / f"{self.project.name} protocol.html"),
+                                                  "HTML file (*.html)")
+            if not path:
+                return None
+        try:
+            out = protocol_report(self.project, path)
+        except Exception as e:
+            error_box(self, "Protocol report", e)
+            return None
+        self.status(f"Saved the protocol report {out}")
+        if interactive:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+        return out
+
+    def restore_backup(self, backup: str | None = None):
+        """Go back to an automatic backup of the experiment file (made when saving, at most every 10 minutes)."""
+        p = self.project
+        if p is None or p.path is None or not self.maybe_save():
+            return None
+        if backup is None:
+            backups = p.list_backups()
+            if not backups:
+                QMessageBox.information(self, "Restore a backup", "This experiment has no backups yet. A backup "
+                                        "of the experiment file is made when it is saved (at most every 10 minutes).")
+                return None
+            labels = []
+            for b in backups:
+                stamp = b.stem.split("-", 1)[1]
+                try:
+                    stamp = datetime.strptime(stamp, "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    pass
+                labels.append(stamp)
+            item, ok = QInputDialog.getItem(self, "Restore a backup",
+                                            "Experiment as it was saved at (the current state is backed up first):",
+                                            labels, 0, False)
+            if not ok:
+                return None
+            backup = str(backups[labels.index(item)])
+        try:
+            restored = p.restore_backup(backup)
+            restored.save()
+        except Exception as e:
+            error_box(self, "Restore a backup", e)
+            return None
+        self.dirty = False
+        self.set_project(restored)
+        self.status(f"Restored the experiment from {Path(backup).name}.")
+        return restored
+
+    def archive_experiment(self, path: str | None = None, wait: bool = False):
+        """Save the whole experiment, with the videos of every test, to one zip file."""
+        from ..core.archive import archive_project
+
+        p = self.project
+        if p is None or not self.save():
+            return None
+        if path is None:
+            safe = "".join(c for c in p.name.strip() if c not in '/\\:*?"<>|') or "experiment"
+            path, _ = QFileDialog.getSaveFileName(self, "Archive experiment", str(Path(self._last_dir()) /
+                                                                               f"{safe} archive.zip"),
+                                                  "Zip archive (*.zip)")
+            if not path:
+                return None
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+
+        def work(progress, stop):
+            return archive_project(p, path, progress=progress, should_stop=stop)
+
+        def done(out):
+            if out:
+                self.status(f"Archived the experiment with its videos to {out}")
+
+        w = run_with_progress(self, "Archiving the experiment", work, on_done=done)
+        if wait:  # scripting / tests: block until written
+            w.wait()
+            QApplication.processEvents()
+            return path if Path(path).exists() else None
+        return w
+
+    def open_archive(self, path: str | None = None, dest: str | None = None):
+        """Unpack an experiment archive into a folder and open it."""
+        from ..core.archive import extract_archive
+
+        if not self.maybe_save():
+            return None
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Open experiment archive", self._last_dir(),
+                                                  "Zip archive (*.zip)")
+            if not path:
+                return None
+        if dest is None:
+            dest = QFileDialog.getExistingDirectory(self, "Unpack the experiment into", self._last_dir())
+            if not dest:
+                return None
+        try:
+            folder = extract_archive(path, dest)
+        except Exception as e:
+            error_box(self, "Open archive", e)
+            return None
+        self.dirty = False
+        self.load_project(str(folder))
+        return folder
 
     def reveal_folder(self):
         if self.project and self.project.path:

@@ -18,7 +18,7 @@ from ...core.workflow import treatment_code, treatment_text
 from .. import ribbon, theme
 from ..icons import icon
 from ..widgets import color_icon, error_box
-from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog
+from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog, RandomiseDialog
 from .base import Page
 
 SEXES = ["", "Male", "Female"]
@@ -170,6 +170,9 @@ class AnimalsPage(Page):
                               "and new schedules leave them out), or reinstate retired animals")
         self.a_dose = act("Dose calculator", "calculator", self.dose_dialog,
                           "Injection volume from body weight, dose and concentration")
+        self.a_random = act("Randomise treatments", "shuffle", lambda: self.randomise_dialog(),
+                            "Allocate the animals to the treatments at random, balanced (optionally within sex or "
+                            "another column)")
         self.a_criteria = act("Training criteria", "criteria", self.criteria_dialog,
                               "Evaluate the training criteria (Protocol) against the results: complete stages and "
                               "retire animals that failed")
@@ -275,7 +278,7 @@ class AnimalsPage(Page):
             return [exp, ("Treatments", [self.a_treat_add, (self.a_treat_rename, "small"),
                                          (self.a_treat_color, "small"), (self.a_treat_delete, "small")])]
         return [exp,
-                ("Animals", [self.retire_btn, self.a_dose, self.a_criteria, self.a_export,
+                ("Animals", [self.retire_btn, self.a_random, self.a_dose, self.a_criteria, self.a_export,
                              (self.a_add_one, "small"), (self.a_dup, "small")]),
                 ("Fields", [(self.a_field_add, "small"), (self.a_field_rename, "small"),
                             (self.a_field_remove, "small")])]
@@ -738,6 +741,34 @@ class AnimalsPage(Page):
         if dlg.exec() != QDialog.Accepted:
             return None
         return self.calculate_doses(dlg.settings(), sel if dlg.only_sel.isChecked() else None)
+
+    def randomise_dialog(self):
+        p = self.project
+        if p is None:
+            return None
+        if len(p.groups) < 2:
+            QMessageBox.information(self, "Randomise treatments", "Add at least two treatments first.")
+            return None
+        sel = self.selected_animals()
+        dlg = RandomiseDialog(p, len(sel), self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return self.randomise(dlg.chosen_groups(), dlg.strata.currentData(), dlg.seed.value() or None,
+                              sel if dlg.only_sel.isChecked() else None)
+
+    def randomise(self, groups: list[str] | None = None, stratify_by: str = "", seed: int | None = None,
+                  animals: list[Animal] | None = None) -> dict:
+        p = self.project
+        try:
+            res = wf.randomise_treatments(p, animals, groups, stratify_by, seed)
+        except ValueError as e:
+            error_box(self, "Randomise treatments", e)
+            return {}
+        self._changed()
+        self.refresh()
+        self.main.status(f"Allocated {len(res)} animals at random to {len(set(res.values()))} treatments"
+                         + (f", balanced within {stratify_by}" if stratify_by else "") + ".")
+        return res
 
     def calculate_doses(self, settings: dict | None = None, animals: list[Animal] | None = None) -> dict:
         p = self.project

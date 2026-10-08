@@ -8,6 +8,8 @@ import copy
 import datetime as _dt
 from pathlib import Path
 
+from .video import playlist_parts, recorded_video
+
 
 class Session:
     """The defaults of sessions without a camera, procedures or crash-recovery file.  (Every session also has an
@@ -71,7 +73,8 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         test.status = "scored"
         if session.duration_s and session.elapsed < session.duration_s - 0.05:
             test.duration_s = round(session.elapsed, 3)
-    if record_path and Path(record_path).exists():
+    record_path = recorded_video(record_path)
+    if record_path:
         test.video = project.rel_path(record_path)
         test.start_s = 0.0
     test.events = sorted(list(test.events) + [dict(e) for e in session.events], key=lambda e: e.get("t", 0))
@@ -110,10 +113,19 @@ def finish_live_test(project, test, session: Session, record_path: str | None = 
         return True
     session.remove_autosave()
     if record_path:
-        try:
-            Path(record_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        files = [record_path]
+        playlist = Path(record_path).with_suffix(".m3u")  # a split recording: its parts and playlist
+        if playlist.exists():
+            try:
+                files += playlist_parts(playlist)
+            except OSError:
+                pass
+            files.append(playlist)
+        for f in files:
+            try:
+                Path(f).unlink(missing_ok=True)
+            except OSError:
+                pass
     if new_test and project is not None and test in project.tests:
         project.tests.remove(test)
     return False

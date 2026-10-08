@@ -22,7 +22,7 @@ from .procedures import Outputs, ProcedureEngine
 from .session import Session
 from .track import Track
 from .tracking import ArenaTracker, Detection, DetectionSettings, TrackBuilder, postprocess, to_gray
-from .video import VideoRecorder
+from .video import SplitRecorder, VideoRecorder
 
 START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual")
 
@@ -361,6 +361,7 @@ class LiveSession(_Scoring):
     devices: object = None  # core.iodevices.DeviceManager (or a per-test DeviceView)
     variables: dict | None = None  # procedure variables shared between tests (project.variables)
     record_overlay: bool = False  # burn the test time and event labels into the recording
+    split_minutes: float = 0.0  # start a new video file every N minutes (long tests; 0 = one file)
     experimenter_area_px: int = 0  # foreground area counted as the experimenter; 0 = auto
     lost_warning_s: float = 3.0  # warn when the animal is not detected for this long (0 = never)
     name: str = ""
@@ -659,7 +660,12 @@ class LiveSession(_Scoring):
             self._rec_frames = 0
             self._last_rec_frame = None
             try:
-                self.recorder = _RecordingThread(VideoRecorder(self.record_path, self.fps, (w, h), fragmented=True))
+                if self.split_minutes > 0:
+                    rec = SplitRecorder(self.record_path, self.fps, (w, h),
+                                        int(round(self.split_minutes * 60 * self.fps)))
+                else:
+                    rec = VideoRecorder(self.record_path, self.fps, (w, h), fragmented=True)
+                self.recorder = _RecordingThread(rec)
             except Exception as e:
                 self.recorder = None
                 self.warn(f"Cannot record: {e}", 0.0)

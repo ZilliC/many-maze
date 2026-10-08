@@ -55,6 +55,12 @@ class Shape:
     def scaled(self, sx: float, sy: float, ox: float = 0.0, oy: float = 0.0) -> "Shape":  # pragma: no cover
         raise NotImplementedError
 
+    def similarity(self, dx: float = 0.0, dy: float = 0.0, angle_deg: float = 0.0, scale: float = 1.0,
+                   ox: float = 0.0, oy: float = 0.0) -> "Shape":
+        """Rotate by angle_deg (clockwise on screen) and scale about (ox, oy), then translate by (dx, dy)."""
+        pts = similarity_points(self.polygon(), dx, dy, angle_deg, scale, ox, oy)
+        return Polygon([(float(a), float(b)) for a, b in pts])
+
 
 @dataclass
 class Polygon(Shape):
@@ -150,6 +156,24 @@ class Ellipse(Shape):
 
     def scaled(self, sx, sy, ox=0.0, oy=0.0):
         return Ellipse(ox + (self.cx - ox) * sx, oy + (self.cy - oy) * sy, self.rx * abs(sx), self.ry * abs(sy))
+
+    def similarity(self, dx=0.0, dy=0.0, angle_deg=0.0, scale=1.0, ox=0.0, oy=0.0):
+        a = angle_deg % 180.0
+        if abs(self.rx - self.ry) < 1e-9 or min(a, 180.0 - a) < 1e-9 or abs(a - 90.0) < 1e-9:
+            (cx, cy), = similarity_points([[self.cx, self.cy]], dx, dy, angle_deg, scale, ox, oy)
+            rx, ry = (self.ry, self.rx) if abs(a - 90.0) < 1e-9 else (self.rx, self.ry)
+            return Ellipse(float(cx), float(cy), rx * scale, ry * scale)  # stays an axis-aligned ellipse
+        return super().similarity(dx, dy, angle_deg, scale, ox, oy)
+
+
+def similarity_points(pts, dx: float = 0.0, dy: float = 0.0, angle_deg: float = 0.0, scale: float = 1.0,
+                      ox: float = 0.0, oy: float = 0.0) -> np.ndarray:
+    """(N, 2) points rotated by angle_deg (clockwise on screen, y down) and scaled about (ox, oy), then moved."""
+    p = np.asarray(pts, float).reshape(-1, 2)
+    a = math.radians(angle_deg)
+    c, s = math.cos(a) * scale, math.sin(a) * scale
+    x, y = p[:, 0] - ox, p[:, 1] - oy
+    return np.column_stack([ox + dx + c * x - s * y, oy + dy + s * x + c * y])
 
 
 def rect(x: float, y: float, w: float, h: float) -> Polygon:

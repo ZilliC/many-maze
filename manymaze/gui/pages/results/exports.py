@@ -9,11 +9,13 @@ from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QDialog, QFileDialog
 
-from ....core.export import (display_text, export_raw_data, export_xml, html_report, results_workbook, table_text,
-                             write_table, write_xlsx)
+from ....core.export import (display_text, event_log_rows, export_raw_data, export_xml, html_report, results_workbook,
+                             table_text, trial_means, wide_rows, write_table, write_xlsx)
+from ....core.project import result_columns
 from ....core.stats import is_number, numeric_columns
 from ...figures import TABLE_FILTER
 from ...widgets import error_box, run_with_progress
+from .._results_cache import info_columns
 from .dialogs import ReportDialog
 from .table import column_label, measure_category
 
@@ -54,6 +56,87 @@ class ExportsMixin:
             return
         self.main.status(f"Exported {len(rows)} rows × {len(cols)} columns to {path}")
         return path
+
+    def _measure_columns(self) -> list[str]:
+        """The shown columns that are measures (not animal / test information)."""
+        info = set(info_columns(self.project)) | {"Period", "Test"}
+        return [c for c in self.shown_columns() if c not in info]
+
+    def wide_rows(self) -> tuple[list[dict], list[str]]:
+        """The shown results with one row per animal and one column per measure × stage / trial (× period)."""
+        rows = wide_rows(self.shown_rows(), self._measure_columns())
+        return rows, result_columns(rows)
+
+    def export_wide(self, path: str | None = None):
+        if not self.rows:
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export one row per animal", self._default_path(".xlsx").replace(" results", " by animal"),
+                TABLE_FILTER)
+            if not path:
+                return None
+        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+            path += ".xlsx"
+        rows, cols = self.wide_rows()
+        try:
+            write_table(rows, path, cols, sheet="By animal")
+        except Exception as e:
+            error_box(self, "Export one row per animal", e)
+            return None
+        self.main.status(f"Exported {len(rows)} animals × {len(cols)} columns to {path}")
+        return path
+
+    def export_trial_means(self, path: str | None = None):
+        """One row per animal and stage with the mean of its trials (e.g. 4 water-maze trials a day)."""
+        if not self.rows:
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export the mean of each animal's trials",
+                self._default_path(".xlsx").replace(" results", " trial means"), TABLE_FILTER)
+            if not path:
+                return None
+        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+            path += ".xlsx"
+        rows = trial_means(self.shown_rows(), self._measure_columns())
+        try:
+            write_table(rows, path, result_columns(rows), sheet="Trial means")
+        except Exception as e:
+            error_box(self, "Export trial means", e)
+            return None
+        self.main.status(f"Exported {len(rows)} animal × stage means to {path}")
+        return path
+
+    def export_event_log(self, path: str | None = None):
+        """Chronological events (zone entries / exits, keys, I/O, pauses) of every shown test."""
+        p = self.project
+        if p is None or not self.rows:
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export event log", self._default_path(".csv").replace(" results", " event log"), TABLE_FILTER)
+            if not path:
+                return None
+        if Path(path).suffix.lower() not in (".csv", ".tsv", ".txt", ".xlsx"):
+            path += ".csv"
+        tests = self._shown_tests()
+
+        def work(progress, stop):
+            out = []
+            for i, t in enumerate(tests):
+                if stop():
+                    return None
+                out += [{"Test": t.id, "Stage": t.stage, "Trial": t.trial, **r} for r in event_log_rows(p, t)]
+                progress((i + 1) / max(1, len(tests)))
+            write_table(out, path, sheet="Event log")
+            return out
+
+        def done(out):
+            if out is not None:
+                self.main.status(f"Exported {len(out)} events of {len(tests)} tests to {path}")
+
+        return self._run("Exporting the event log", work, on_done=done)
 
     def _shown_tests(self):
         p = self.project

@@ -1,13 +1,17 @@
-"""Dialogs of the Experiment tab: numbered series of animals, dose calculator and training criteria."""
+"""Dialogs of the Experiment tab: numbered series of animals, dose calculator, randomisation and training
+criteria."""
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFormLayout, QHeaderView, QLabel, QLineEdit, QSpinBox, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout)
+                               QFormLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QSpinBox,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
+from ...core.workflow import treatment_text
+from ..widgets import color_icon
 
 
 class AddSeveralDialog(QDialog):
@@ -97,6 +101,54 @@ class DoseDialog(QDialog):
     def settings(self) -> dict:
         return {"weight_field": self.weight.currentText().strip() or wf.WEIGHT_FIELD,
                 "dose_mg_kg": self.dose.value(), "conc_mg_ml": self.conc.value()}
+
+
+class RandomiseDialog(QDialog):
+    """Random allocation of animals to treatments, balanced overall and within an optional stratum (sex, …)."""
+
+    def __init__(self, project, n_selected: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Randomise treatments")
+        f = QFormLayout(self)
+        info = QLabel("Animals are allocated to the ticked treatments at random, in numbers that differ by at most "
+                      "one. Their current treatments are replaced; retired animals are left out.")
+        info.setWordWrap(True)
+        f.addRow(info)
+        self.groups = QListWidget()
+        for g in project.groups:
+            it = QListWidgetItem(color_icon(wf.display_color(project, g.name)), treatment_text(project, g.name))
+            it.setData(Qt.UserRole, g.name)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked)
+            self.groups.addItem(it)
+        self.groups.setMaximumHeight(140)
+        self.strata = QComboBox()
+        self.strata.addItem("- Nothing -", "")
+        self.strata.addItem("Sex", "Sex")
+        for fld in project.animal_fields:
+            self.strata.addItem(fld, fld)
+        self.strata.setToolTip("Spread each sex (or each value of a column such as litter or cage) evenly over the "
+                               "treatments")
+        self.seed = QSpinBox()
+        self.seed.setRange(0, 999_999)
+        self.seed.setSpecialValueText("New random order")
+        self.seed.setToolTip("Enter a number to reproduce an allocation")
+        self.only_sel = QCheckBox(f"Only the {n_selected} selected animal{'s' if n_selected != 1 else ''}")
+        self.only_sel.setEnabled(n_selected > 0)
+        self.only_sel.setChecked(n_selected > 1)
+        f.addRow("Treatments", self.groups)
+        f.addRow("Balance within", self.strata)
+        f.addRow("Seed", self.seed)
+        f.addRow("", self.only_sel)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Allocate")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def chosen_groups(self) -> list[str]:
+        return [self.groups.item(i).data(Qt.UserRole) for i in range(self.groups.count())
+                if self.groups.item(i).checkState() == Qt.Checked]
 
 
 class CriteriaDialog(QDialog):
