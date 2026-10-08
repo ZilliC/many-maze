@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 
 from ....core.camera import CameraView
+from ....core.camhw import CONTROL_BY_NAME
+from ....core.camsources import is_native_source
 from ....core.video import VideoRecorder, VideoSource
 
 RESOLUTIONS = [("Camera default", None), ("640 × 480", (640, 480)), ("800 × 600", (800, 600)),
@@ -77,10 +79,11 @@ def peek_frame(path) -> np.ndarray | None:
         return None
 
 
-def describe_view(view: CameraView, second, layout: str) -> str:
+def describe_view(view: CameraView, second, layout: str, hardware=None) -> str:
     parts = []
     if second is not None:
-        parts.append(f"merged with {second if not isinstance(second, str) else Path(second).name} "
+        other = second if not isinstance(second, str) or is_native_source(second) else Path(second).name
+        parts.append(f"merged with {other} "
                      f"({'side by side' if layout == 'side' else 'stacked'})")
     if view.rotate:
         parts.append(f"rotated {view.rotate}°")
@@ -90,4 +93,7 @@ def describe_view(view: CameraView, second, layout: str) -> str:
         parts.append(f"region {view.crop[2]}×{view.crop[3]}")
     if view.zoom > 1:
         parts.append(f"zoom {view.zoom:g}×")
+    if hardware is not None and not hardware.is_empty:
+        names = [CONTROL_BY_NAME[k].label.lower() for k in hardware.to_dict() if k in CONTROL_BY_NAME]
+        parts.append("camera settings" + (f" ({', '.join(names)})" if names else ""))
     return ", ".join(parts) if parts else "Whole image"

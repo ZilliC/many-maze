@@ -501,6 +501,35 @@ frames, recording errors and procedure errors.
 The options are saved per camera with the experiment. Draw the apparatus on the transformed image (the apparatus
 page shows what the camera delivers); changing the options later moves the image under the apparatus.
 
+**Camera settings** (second tab, for cameras) — exposure, gain, brightness, contrast, saturation, white balance
+and focus, each with **Auto** where the camera has an automatic mode (the check box's middle state leaves the
+camera's own setting). With the camera image on, every change applies at once; **Cancel** puts the camera back and
+**Reset to camera defaults** forgets the settings. They are saved per camera with the other options and applied
+every time the camera opens. Values are in the camera's own units: driver units for webcams and capture cards,
+µs of exposure and dB of gain for most industrial cameras. Many webcam drivers ignore some settings — and the macOS
+camera driver used through OpenCV accepts almost none — so the dialog marks what the camera refused
+(**Not supported**) or changed (**camera used …**), and the session log lists the settings a camera did not accept
+when it opened.
+
+### Cameras: webcams, capture cards and industrial cameras
+
+- **Webcams, USB (UVC) cameras and analogue capture cards** — a frame grabber or USB video converter for an
+  analogue (CCTV / IR) camera shows up as a video device: it is listed as *Camera 0, 1, …* like any webcam.
+- **Industrial GigE Vision / USB3 Vision cameras** are read through their vendor's SDK, when installed
+  (Add source ▸ **Industrial cameras…** shows which are and what to install):
+
+  | Cameras | Install |
+  |---|---|
+  | Basler | `pip install pypylon` |
+  | FLIR / Teledyne | the Spinnaker SDK and its PySpin wheel |
+  | IDS | the IDS peak SDK, then `pip install ids_peak ids_peak_ipl` |
+  | Any GenICam camera (Allied Vision, MATRIX VISION, Hikrobot, …) | `pip install harvesters` and add the GenTL producer (`.cti` file) of the vendor's SDK in Industrial cameras (or set `GENICAM_GENTL64_PATH`) |
+
+  **Scan** lists them after the OpenCV cameras (e.g. *Basler acA1300-60gm (40012345)*); they are remembered by
+  serial number. Their Camera settings add **pixel format** (Mono8, Bayer, RGB8: converted to colour images) and
+  an **external trigger** (one frame per pulse on the chosen input line; the camera waiting for its trigger is not
+  an error). Image size and frame rate (Setup ▸ Video source) are set on the camera.
+
 ### Recording
 
 **Record video of the test** saves one file per test in the experiment's `recordings` folder and links it to the

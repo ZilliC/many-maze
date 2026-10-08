@@ -10,6 +10,7 @@ from PySide6.QtCore import QRectF
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
 
 from ....core.camera import CameraView, SourceSpec, camera_settings, set_camera_settings
+from ....core.camhw import CameraHardware
 from ....core.iodevices import DeviceView
 from ....core.livegroup import device_plan
 from ....core.procedures import Outputs
@@ -26,13 +27,15 @@ class MultiTestMixin:
     LiveGroup, saving the finished tests."""
 
     def add_source(self, source, second=None, layout: str = "side") -> str:
-        """Add a camera index or a video file (simulated camera) to the multi-test sources; returns its key."""
+        """Add a camera index, a native camera id or a video file (simulated camera) to the multi-test sources;
+        returns its key."""
         spec = SourceSpec(source)
         d = camera_settings(self.project, spec.key)
         spec.view = CameraView.from_dict(d.get("view"))
         spec.second = second if second is not None else d.get("second")
         spec.layout = d.get("layout", layout) if second is None else layout
-        if not isinstance(source, str) or str(source).isdigit():
+        spec.hardware = CameraHardware.from_dict(d.get("hardware")) if not spec.is_file else CameraHardware()
+        if not spec.is_file:
             spec.size = self.resolution.currentData()
             spec.fps = self.cam_fps.value() or None
         key = self.group.add_source(spec)
@@ -399,10 +402,12 @@ class MultiTestMixin:
         raw, raw2 = r.raw_frames() if r is not None else (None, None)
         if raw is None and spec.is_file:
             raw = peek_frame(spec.source)
-        if raw2 is None and isinstance(spec.second, str):
+        if raw2 is None and spec.second is not None and SourceSpec(spec.second).is_file:
             raw2 = peek_frame(spec.second)
+        camera = r.camera() if r is not None and not spec.is_file else None
         dlg = CameraOptionsDialog(raw, spec.view, spec.second, spec.layout, self._merge_choices(spec.source), raw2,
-                                  self, title=f"Camera options — {spec.label}")
+                                  self, title=f"Camera options — {spec.label}", hardware=spec.hardware,
+                                  camera=camera, is_camera=not spec.is_file, genicam=spec.is_native)
         if dlg.exec() != QDialog.Accepted:
             return False
         self.apply_source_options(key, dlg.result())
@@ -410,18 +415,25 @@ class MultiTestMixin:
 
     def apply_source_options(self, key: str, res: dict):
         spec = self.group.sources[key]
+        old = (spec.view, spec.second, spec.layout)
         spec.view = CameraView.from_dict(res.get("view"))
         spec.second = res.get("second")
         spec.layout = res.get("layout", "side")
+        if "hardware" in res:
+            spec.hardware = CameraHardware.from_dict(res["hardware"])  # already applied live by the dialog
         settings = {}
         if not spec.view.is_identity:
             settings["view"] = spec.view.to_dict()
         if spec.second is not None:
             settings.update(second=spec.second, layout=spec.layout)
+        if not spec.hardware.is_empty:
+            settings["hardware"] = spec.hardware.to_dict()
         set_camera_settings(self.project, SourceSpec(spec.source).key, settings)
-        self._group_bgs.pop(key, None)
         self.main.mark_dirty()
         self._save_group_layout()
+        if old == (spec.view, spec.second, spec.layout):
+            return
+        self._group_bgs.pop(key, None)
         if key in self.group.runners:
             self.group.stop_sources([key])
             self.group.start_sources(speed=self.sim_speed.currentData() or 1.0, keys=[key])

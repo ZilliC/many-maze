@@ -97,6 +97,11 @@ python3 -m venv .venv
 .venv/bin/manymaze                        # launch the GUI
 ```
 
+Cameras: webcams, UVC cameras and analogue capture cards work through OpenCV. Industrial GigE Vision / USB3 Vision
+cameras need their vendor's SDK: `pip install -e ".[basler]"` (pypylon) or `".[genicam]"` (harvesters + the
+vendor's GenTL `.cti` producer); FLIR / Teledyne (PySpin) and IDS (ids_peak) wheels come with their SDKs. Exposure,
+gain, white balance, focus, pixel format and external trigger are set per camera (user guide, *Camera options*).
+
 Also works on Linux and Windows.
 
 ## Quick start
