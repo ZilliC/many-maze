@@ -293,6 +293,8 @@ def test_harvard_ultra_protocol():
     port.st(0)["i"], port.st(0)["p"] = 0.5, "T*"
     ch = step(dev, clock, n=1) + step(dev, clock, n=1)
     assert ("a.target_reached", 1) in ch and dev.inputs["a.running"] == 0
+    ch = step(dev, clock)  # the pump keeps answering "T*" until the next run: no new edge
+    assert ("a.target_reached", 1) not in ch and dev.inputs["a.target_reached"] == 0
     assert dev.pump("b", "withdraw", rate_ml_min=3)
     assert port.written[-3:] == ["01wrate 3 ml/min", "01ctvolume", "01wrun"]
     step(dev, clock)
@@ -329,6 +331,8 @@ def test_harvard_legacy_protocol():
     assert ("a.target_reached", 1) in ch and dev.inputs["a.infused_ml"] == 2
     dev.pump("a", "withdraw", rate_ml_min=1)
     assert port.written[-2:] == ["CLT", "REV"]
+    step(dev, clock)  # the VOL read before CLV belongs to the infusion, not to the withdrawal that follows
+    assert dev.inputs["a.infused_ml"] == 2 and dev.inputs["a.withdrawn_ml"] == 0
     dev.pump("a", "withdraw", rate_ml_min=1)
     assert port.written[-1] == "RUN"  # already withdrawing
 

@@ -329,8 +329,9 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
 def _pump(res, log, key, lab, ev, t0, t1, T, never):
     """A syringe pump: the commands (infuse / withdraw at a rate, up to a volume) and, when the pump reports them,
     the volumes it delivered; without reports the volumes are computed from the rates and times."""
-    cmds = sorted((float(e["t"]), e) for e in log.events
-                  if e.get("type") == "pump" and str(e.get("device")) == key[1] and str(e.get("channel")) == key[2])
+    cmds = sorted(((float(e["t"]), e) for e in log.events
+                   if e.get("type") == "pump" and str(e.get("device")) == key[1] and str(e.get("channel")) == key[2]),
+                  key=lambda te: te[0])  # stable: same-time commands keep their logged order
     runs = []  # (start, end, direction, rate, volume target)
     cur = None
     for t, e in cmds:

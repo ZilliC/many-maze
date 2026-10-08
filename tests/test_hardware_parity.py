@@ -400,6 +400,10 @@ def test_pump_actions_events_and_estimated_volumes():
         m = io_measures(eng.io_events, 6, devices=dm.configs)
         assert m["Pump pump1: volume infused (ml)"] == pytest.approx(0.2)  # 6 ml/min up to the 0.2 ml target
         assert m["Pump pump1: volume withdrawn (ml)"] == pytest.approx(0.02)  # 1.2 ml/min for 1 s
+        # two commands at the same time (a stop and an infusion in one block) sort without comparing the events
+        same_t = [dict(e, t=5.0) for e in eng.io_events if e.get("type") == "pump"]
+        m2 = io_measures(list(eng.io_events) + same_t, 6, devices=dm.configs)
+        assert m2["Pump pump1: infusions"] >= 1
         assert m["Pump pump1: infusions"] == 1 and m["Pump pump1: withdrawals"] == 1
         assert m["Pump pump1: stalls"] == 1 and m["Pump pump1: time pumping (s)"] == pytest.approx(3.0)
     finally:

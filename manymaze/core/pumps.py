@@ -494,7 +494,9 @@ class HarvardLegacyProtocol(HarvardUltraProtocol):
         a = self._a(p)
         r, unit = _rate_units(rate, (("MLM", 1.0), ("ULM", 1e3), ("ULH", 6e4)))
         go = "RUN" if direction == p.direction else "REV"  # REV reverses the direction and runs
-        cmds = [(f"{a}VOL", "vol"), (f"{a}CLV", "clear"), (f"{a}{unit} {_g(r)}", "ack")]
+        # the VOL reply belongs to the direction the pump ran in so far, not to the new one
+        cmds = [(f"{a}VOL", "wvol" if p.direction == "wdr" else "ivol"), (f"{a}CLV", "clear"),
+                (f"{a}{unit} {_g(r)}", "ack")]
         cmds.append((f"{a}MLT {_g(volume)}", "ack") if volume else (f"{a}CLT", "ack"))
         p.direction = direction
         return cmds + [(f"{a}{go}", "run")]
@@ -503,7 +505,9 @@ class HarvardLegacyProtocol(HarvardUltraProtocol):
         return [(f"{self._a(p)}STP", "stop")]
 
     def poll(self, dev, p):
-        return [(f"{self._a(p)}VOL", "vol")]
+        # tagged with the direction at the time of the query: a reply that is still pending when a run reverses
+        # the pump must not land in the other counter
+        return [(f"{self._a(p)}VOL", "wvol" if p.direction == "wdr" else "ivol")]
 
 
 class ChemyxProtocol(_Protocol):
@@ -812,7 +816,8 @@ class SyringePumpDevice(_LineDevice):
             p.stalled = True
             running = False
         if target:
-            p.target_hit = True
+            if p.armed:  # the "ultra" pumps keep reporting T* until the next run: one edge per target
+                p.target_hit = True
             p.armed = False
             running = False
         if running is None:

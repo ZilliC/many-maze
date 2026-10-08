@@ -877,11 +877,13 @@ class DeviceManager:
                                 d._error(f"{d.name}: {e}")
             if now >= next_service:
                 next_service = now + self.SERVICE_S
-            if not periods and not self._sched:
+            with self._lock:
+                due = self._sched[0][0] if self._sched else None
+            if not periods and due is None:
                 return
             wait = max(0.02, min(periods) / 4) if periods else 0.5
-            if self._sched:
-                wait = min(wait, max(0.0, self._sched[0][0] - time.monotonic()))
+            if due is not None:
+                wait = min(wait, max(0.0, due - time.monotonic()))
             self._sched_wake.clear()
             if wait > 0:
                 self._sched_wake.wait(wait)
@@ -890,9 +892,11 @@ class DeviceManager:
     def _run_schedule(self, now):
         import heapq
 
-        while self._sched and self._sched[0][0] <= now + 0.0005:
-            _due, _seq, dev, ch, value, max_s = heapq.heappop(self._sched)
-            with self._lock:
+        while True:
+            with self._lock:  # all_off / close / _cancel_schedule / pulse_sequence edit the heap under the lock
+                if not self._sched or self._sched[0][0] > now + 0.0005:
+                    return
+                _due, _seq, dev, ch, value, max_s = heapq.heappop(self._sched)
                 d = self.devices.get(dev)
                 if d is not None:
                     try:
