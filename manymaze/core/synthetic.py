@@ -29,10 +29,11 @@ def draw_mouse(img, x, y, angle_deg, length=36, width=18, color=40, tail=True):
 
 def make_video(path: str | Path, positions: np.ndarray, size=(400, 400), fps=25.0, arena=None, noise=2.0,
                bg_level=200, seed=0, angles: np.ndarray | None = None, extra_animals: list[np.ndarray] | None = None,
-               objects: list[tuple[int, int, int]] | None = None) -> np.ndarray:
+               objects: list[tuple[int, int, int]] | None = None, lengths: np.ndarray | None = None) -> np.ndarray:
     """Render a video of a dark mouse following `positions` (N, 2).
 
     Returns an (N, 2) array of true nose positions.
+    lengths: optional body length per frame (px, default 36), e.g. shorter while the mouse rears.
     arena: ("rect", x, y, w, h) or ("circle", cx, cy, r) drawn as a slightly darker outline.
     """
     rng = np.random.default_rng(seed)
@@ -62,7 +63,8 @@ def make_video(path: str | Path, positions: np.ndarray, size=(400, 400), fps=25.
     noses = np.zeros((n, 2))
     for i in range(n):
         img = base.copy()
-        noses[i] = draw_mouse(img, positions[i, 0], positions[i, 1], angles[i])
+        noses[i] = draw_mouse(img, positions[i, 0], positions[i, 1], angles[i],
+                              **({} if lengths is None else {"length": float(lengths[i])}))
         for ex in extra_animals or []:
             j = min(i, len(ex) - 1)
             jd = ex[min(j + 1, len(ex) - 1)] - ex[max(j - 1, 0)]

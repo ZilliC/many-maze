@@ -15,7 +15,11 @@ GENERAL_PREFIXES = ("Test duration", "Detection", "Total distance", "Mean speed"
                     "Time immobile", "Immobile episodes", "Latency to first immobility", "Time freezing",
                     "Freezing", "Latency to first freezing", "Mean freezing episode", "Mean motion",
                     "Path efficiency", "Absolute turn angle", "Meander", "Rotations", "Mean distance from wall",
-                    "Thigmotaxis", "Time outside arena", "Time not detected")
+                    "Thigmotaxis", "Time outside arena", "Time not detected", "Centre positions recorded",
+                    "Head positions recorded", "Head tracked", "Tracking quality", "Average freezing score",
+                    "Time active", "Time inactive", "Active episodes", "Inactive episodes", "Longest active",
+                    "Shortest active", "Longest inactive", "Shortest inactive", "Head distance", "Head turn angle",
+                    "Rears", "Time rearing", "Latency to first rear", "Mean rear", "Max rear", "Min rear")
 CATEGORY_ORDER = ["Information", "General", "Zones", "Points of interest", "Lines", "Test-specific", "Behaviours",
                   "Social", "Other"]
 COLUMN_LABELS = {"Group": "Treatment"}

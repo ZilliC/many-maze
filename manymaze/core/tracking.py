@@ -23,7 +23,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
-from .track import COLUMNS, Track
+from .track import COLUMNS, Track, simplify_outline
 from .video import FrameReader, VideoSource
 
 
@@ -45,6 +45,7 @@ class DetectionSettings:
     n_animals: int = 1
     head_tail: bool = True
     tail_strip: float = 0.3  # opening kernel relative to sqrt(area) used to strip the tail before head/tail
+    record_outline: bool = True  # store the animal's whole-body outline (a simplified polygon) in each frame
     motion_threshold: int = 20  # grey-level change counted as motion (freezing)
     max_gap_s: float = 1.0  # interpolate gaps up to this length
     smoothing: int = 0  # moving-average window (frames), 0 = off
@@ -94,6 +95,7 @@ class Detection:
     detected: bool = False
     contour: np.ndarray | None = field(default=None, repr=False)
     keypoints: np.ndarray | None = field(default=None, repr=False)  # (K, 3) x, y, confidence from the pose model
+    outline: np.ndarray | None = field(default=None, repr=False)  # simplified body outline (k, 2) stored in the track
 
 
 def hex_to_hsv(colour: str) -> tuple[int, int, int]:
@@ -396,6 +398,8 @@ class ArenaTracker:
         else:
             cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
         d = Detection(x=float(cx), y=float(cy), area=float(area), detected=True, contour=contour)
+        if self.s.record_outline:
+            d.outline = simplify_outline(contour)
         if not self.s.head_tail:
             return d
         # strip the tail with an opening, then find extremes along the major axis
@@ -596,16 +600,21 @@ class ArenaTracker:
 
 
 class TrackBuilder:
-    """The columns of a track (track.COLUMNS), one detection at a time.  Rows are only ever appended, so a copy
-    of the first n rows (:meth:`snapshot`) is safe while another thread keeps adding."""
+    """The columns of a track (track.COLUMNS, then the body outlines), one detection at a time.  Rows are only ever
+    appended, so a copy of the first n rows (:meth:`snapshot`) is safe while another thread keeps adding."""
 
     def __init__(self, cols: dict | None = None):
-        self.cols: dict[str, list] = {c: list((cols or {}).get(c) or []) for c in COLUMNS}
+        cols = cols or {}
+        self.cols: dict[str, list] = {c: list(cols.get(c) or []) for c in COLUMNS}
+        # older side files have no outlines: those frames have none
+        self.cols["outline"] = list(cols.get("outline") or []) + [None] * (len(self.cols["t"])
+                                                                          - len(cols.get("outline") or []))
 
     def __len__(self) -> int:
         return len(self.cols["t"])
 
     def add(self, t: float, d: Detection):
+        self.cols["outline"].append(d.outline)
         self.cols["t"].append(t)
         for c in COLUMNS[1:]:
             self.cols[c].append(getattr(d, c))
@@ -615,7 +624,9 @@ class TrackBuilder:
         return {c: v[:n] for c, v in self.cols.items()}
 
     def build(self, fps: float) -> Track:
-        return Track(**self.snapshot(), fps=fps)
+        cols = self.snapshot()
+        outline = cols.pop("outline")
+        return Track(**cols, fps=fps, outline=outline if any(o is not None for o in outline) else None)
 
 
 @dataclass
@@ -724,6 +735,7 @@ ANIMAL_COLORS = [(0, 200, 255), (255, 0, 200), (0, 255, 0), (255, 255, 0), (0, 1
 TRAIL_BGR = (214, 120, 37)  # live images: blue trail, green centre, orange head
 CENTRE_BGR = (60, 200, 60)
 HEAD_BGR = (31, 138, 255)
+OUTLINE_BGR = (230, 230, 60)  # whole-body outline (cyan)
 
 
 def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
@@ -735,7 +747,7 @@ def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
 
 
 def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True) -> np.ndarray:
-    """The animal's position (green centre, orange head) and trail drawn on a BGR copy of the frame (live camera
+    """The animal's position (green centre, orange head, cyan body outline) and trail drawn on a BGR copy of the frame (live camera
     images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom)."""
     img = frame
     if img.ndim == 2:
@@ -750,6 +762,8 @@ def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy
     for d in dets or []:
         if not d.detected or not math.isfinite(d.x):
             continue
+        if d.outline is not None and len(d.outline) > 2:
+            cv2.polylines(img, [d.outline.reshape(-1, 1, 2)], True, OUTLINE_BGR, s, cv2.LINE_AA)
         cv2.circle(img, (int(d.x), int(d.y)), 2 + 2 * s, CENTRE_BGR, -1, cv2.LINE_AA)
         if math.isfinite(d.hx) and math.isfinite(d.hy):
             cv2.circle(img, (int(d.hx), int(d.hy)), 1 + 2 * s, HEAD_BGR, -1, cv2.LINE_AA)

@@ -86,6 +86,9 @@ DETECTION_SPEC = [
     ("head_tail", "Detect the head and the tail", "bool", None, ""),
     ("tail_strip", "Tail removal strength", "float", (0.0, 1.0, 0.05, 2),
      "Opening kernel relative to body size used to strip the tail before locating head/tail."),
+    ("record_outline", "Record the animal's whole-body outline", "bool", None,
+     "Stores a simplified outline of the animal in every frame, drawn when the test is reviewed or exported "
+     "as a video."),
     ("body_parts", "Locate the body parts using", "choice", [("contour", "The animal's shape"),
                                                               ("pose", "A pose model (AI)")],
      "Animal shape: head and tail from the blob outline (fast, no model needed). Pose model: a deep-learning "
@@ -117,6 +120,20 @@ ANALYSIS_SPEC = [
      "Pixel change, as a % of the animal's area, under which freezing begins."),
     ("freeze_off_pct", "Freezing ends when movement rises above (% of body)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_freeze_s", "Shortest freezing episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("activity_threshold_pct", "The animal is active when movement reaches (% of body)", "float",
+     (0.0, 1000.0, 0.5, 2),
+     "Activity comes from the pixels that change between frames (as a % of the animal's area), not from its "
+     "speed: an animal grooming in place is active but immobile."),
+    ("min_inactive_s", "Shortest inactive episode (s)", "float", (0.0, 60.0, 0.1, 2),
+     "Inactive episodes shorter than this count as active."),
+    ("rearing", "Detect rearing automatically", "bool", None,
+     "Rears are detected from the animal's shape: seen from above, an animal standing on its hind legs looks "
+     "smaller and shorter. Adds rear count, time, latency and durations, overall and per zone."),
+    ("rear_area_pct", "A rear makes the body area fall below (% of usual)", "float", (1.0, 100.0, 5.0, 0),
+     "The usual area is the animal's median area over the test."),
+    ("rear_length_pct", "… and the head–tail length below (% of usual)", "float", (1.0, 100.0, 5.0, 0),
+     "Used when the head and tail are tracked (from the animal's shape or the pose model)."),
+    ("min_rear_s", "Shortest rear (s)", "float", (0.0, 60.0, 0.1, 2), "Shorter rears are ignored."),
     ("zone_body_part", "Decide whether the animal is in a zone using its", "choice",
      [("centre", "Centre of body"), ("head", "Head"), ("tail", "Tail base"), ("body", "Proportion of the body")],
      "Default entry rule; each zone can override it in the apparatus designer."),
@@ -161,7 +178,7 @@ DETECTION_SECTIONS = [
     ("Detection", ["method", "contrast", "threshold", "background", "background_frame", "background_samples",
                    "min_area_px", "max_area_px"]),
     ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
-    ("Body parts", ["head_tail", "tail_strip", "body_parts", "pose_min_conf", "pose_device"]),
+    ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
 ]
@@ -169,6 +186,8 @@ DETECTION_SECTIONS = [
 ANALYSIS_SECTIONS = [
     ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s"]),
     ("Freezing", ["freeze_on_pct", "freeze_off_pct", "min_freeze_s"]),
+    ("Activity", ["activity_threshold_pct", "min_inactive_s"]),
+    ("Rearing", ["rearing", "rear_area_pct", "rear_length_pct", "min_rear_s"]),
     ("Zones", ["zone_body_part", "body_proportion_pct", "hidden_zone_margin", "entry_min_duration_s",
                "count_initial_entry", "latency_if_never"]),
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "grid_cells", "contact_distance",

@@ -21,6 +21,9 @@ class Track:
     area: blob area (px²); motion: changed pixels since previous frame (for freezing);
     angle: body orientation in degrees (tail→head, 0 = +x, clockwise positive since y is down);
     detected: True if the animal was found in this frame (False = interpolated / missing).
+    outline: optional whole-body outline per frame — an object array of (k, 2) int32 polygons (px), None in frames
+    without one — or None when the track has no outlines (older tracks, outline recording off). Stored in the
+    track CSV as an extra "outline" column of space-separated x y pairs; files without it still load.
     """
 
     t: np.ndarray
@@ -36,6 +39,7 @@ class Track:
     detected: np.ndarray = None
     fps: float = 25.0
     meta: dict = field(default_factory=dict)
+    outline: np.ndarray | None = None
 
     def __post_init__(self):
         n = len(self.t)
@@ -48,6 +52,9 @@ class Track:
         if self.detected is None:
             self.detected = np.isfinite(self.x) & np.isfinite(self.y)
         self.detected = np.asarray(self.detected, bool)
+        if self.outline is not None and not (isinstance(self.outline, np.ndarray) and self.outline.dtype == object
+                                             and len(self.outline) == n):
+            self.outline = _outline_array(self.outline, n)
 
     # ------------------------------------------------------------------
     def __len__(self):
@@ -84,7 +91,11 @@ class Track:
 
     def take(self, index) -> "Track":
         """The frames selected by `index` (a slice gives views of the columns; a mask or indices give copies)."""
-        return Track(**{c: getattr(self, c)[index] for c in COLUMNS}, fps=self.fps, meta=dict(self.meta))
+        return Track(**{c: getattr(self, c)[index] for c in COLUMNS}, fps=self.fps, meta=dict(self.meta),
+                     outline=None if self.outline is None else self.outline[index])
+
+    def has_outline(self) -> bool:
+        return self.outline is not None and any(o is not None for o in self.outline)
 
     def copy(self) -> "Track":
         return self.take(np.arange(len(self)))
@@ -142,10 +153,15 @@ class Track:
             for k, v in self.meta.items():
                 f.write(f"# {k}={v}\n")
             w = csv.writer(f)
-            w.writerow(COLUMNS)
+            outline = self.outline if self.has_outline() else None
+            w.writerow(COLUMNS + (["outline"] if outline is not None else []))
             arr = np.column_stack([getattr(self, c).astype(float) for c in COLUMNS])
-            for row in arr:
-                w.writerow(["" if not np.isfinite(v) else (f"{v:.4f}" if i else f"{v:.5f}") for i, v in enumerate(row)])
+            for j, row in enumerate(arr):
+                cells = ["" if not np.isfinite(v) else (f"{v:.4f}" if i else f"{v:.5f}") for i, v in enumerate(row)]
+                if outline is not None:
+                    o = outline[j]
+                    cells.append("" if o is None else " ".join(map(str, o.ravel().tolist())))
+                w.writerow(cells)
         finally:
             if close:
                 f.close()
@@ -172,14 +188,18 @@ class Track:
         r = csv.reader(io.StringIO("\n".join(lines)))
         header = next(r)
         rows = list(r)
-        data = {c: np.full(len(rows), np.nan) for c in header}
+        data = {c: np.full(len(rows), np.nan) for c in header if c != "outline"}
+        outline = [None] * len(rows) if "outline" in header else None
         for i, row in enumerate(rows):
             for c, v in zip(header, row):
-                data[c][i] = float(v) if v != "" else np.nan
+                if c == "outline":
+                    outline[i] = np.array(v.split(), np.int32).reshape(-1, 2) if v.strip() else None
+                else:
+                    data[c][i] = float(v) if v != "" else np.nan
         kw = {c: data[c] for c in COLUMNS if c in data}
         if "detected" in kw:
             kw["detected"] = np.nan_to_num(kw["detected"]).astype(bool)
-        return cls(**kw, fps=fps, meta=meta)
+        return cls(**kw, fps=fps, meta=meta, outline=outline)
 
     @classmethod
     def empty(cls, fps=25.0) -> "Track":
@@ -201,7 +221,37 @@ def swap_identities(a: Track, b: Track, t0: float, t1: float | None = None) -> i
             continue
         va, vb = getattr(a, c), getattr(b, c)
         va[m], vb[m] = vb[m].copy(), va[m].copy()
+    if a.outline is not None or b.outline is not None:
+        oa = a.outline if a.outline is not None else _outline_array(None, len(a))
+        ob = b.outline if b.outline is not None else _outline_array(None, len(b))
+        oa[m], ob[m] = ob[m].copy(), oa[m].copy()
+        a.outline, b.outline = oa, ob
     return int(m.sum())
+
+
+def _outline_array(v, n: int) -> np.ndarray:
+    """Per-frame outlines as an object array of n (k, 2) int32 polygons or None (from a list, e.g. of nested lists
+    read back from JSON)."""
+    out = np.empty(n, object)
+    if v is not None:
+        for i, o in enumerate(list(v)[:n]):
+            if o is not None and len(o):
+                out[i] = np.asarray(o, np.int32).reshape(-1, 2)
+    return out
+
+
+def simplify_outline(contour: np.ndarray, tolerance: float = 0.015, max_points: int = 24) -> np.ndarray:
+    """A compact polygon of a body contour (OpenCV contour or (k, 2) points): Douglas–Peucker with a tolerance of
+    `tolerance` × the perimeter (at least 1 px), coarsened until it has at most max_points vertices."""
+    import cv2
+
+    c = np.asarray(contour, np.int32).reshape(-1, 1, 2)
+    eps = max(1.0, tolerance * cv2.arcLength(c, True))
+    poly = cv2.approxPolyDP(c, eps, True)
+    while len(poly) > max_points:
+        eps *= 1.5
+        poly = cv2.approxPolyDP(c, eps, True)
+    return poly.reshape(-1, 2).astype(np.int32)
 
 
 def _fill_gaps(t: np.ndarray, v: np.ndarray, max_gap_s: float):

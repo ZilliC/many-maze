@@ -203,6 +203,9 @@ when no range is set. *Undo* reverts the swap.
 4. The **centre** is the blob centroid. **Head and tail**: the tail is stripped morphologically, the body axis
    is found by PCA, and the end that the animal moves towards is the head (with frame-to-frame consistency).
 5. **Motion** (changed pixels between frames, normalised by body area) is stored for freezing / immobility.
+   The **whole-body outline** (a simplified polygon of the animal's blob, up to 24 points) is stored too and drawn
+   in the test view, live images and exported videos (*Record the animal's whole-body outline*, on by default;
+   tracks from older versions simply have no outline).
 6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
 
 ### Tracking by colour
@@ -775,6 +778,25 @@ maps, group heat maps, results and statistics.
   episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity, meander,
   body and path rotations, thigmotaxis, distance from wall and centre, time outside the arena, arena quadrants,
   zone transitions, grid crossings.
+* **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
+  (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
+  twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
+* **Activity** (from the pixels that change between frames, separate from mobility, which comes from the centre's
+  speed): average freezing score (the mean motion, % of body, that freezing is detected from), time active /
+  inactive, active and inactive episodes, longest / shortest active and inactive episode. The animal is active when
+  its motion reaches *The animal is active when movement reaches*; inactive episodes shorter than *Shortest
+  inactive episode* count as active (Protocol ▸ Analysis ▸ Activity).
+* **Head** (when the head is tracked): head distance (smoothed like the centre), head turn angle — absolute,
+  clockwise and anticlockwise — the cumulative change of the head direction (tail → head). A jump of more than 90°
+  between two frames is a head / tail swap of the tracker and is not counted.
+* **Rearing** (*Detect rearing automatically*, Protocol ▸ Analysis ▸ Rearing): rears, time rearing, latency to
+  first rear, mean / max / min rear duration, for the whole test and per zone (`Zone: rears` …; a rear belongs to
+  the zone the animal was in when it started). Seen from above, an animal standing on its hind legs looks smaller
+  and shorter: a frame is a rear when the body area falls below *rear area* % (75 %) of the animal's usual (median)
+  area and, when the head and tail are tracked (shape or pose model), the head–tail length falls below *rear
+  length* % (80 %) of its usual length. Gaps of up to 0.2 s are bridged and rears shorter than *Shortest rear*
+  (0.3 s) are ignored. Works on tracks made before the option existed (it needs no re-tracking). Check a few tests
+  against manual scoring and adjust the percentages for your camera height and strain.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
   time / latency, time facing the zone, distance travelled and path efficiency before the first entry, mean

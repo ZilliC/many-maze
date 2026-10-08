@@ -159,6 +159,8 @@ class OverlayRenderer:
             if o.body_points and np.isfinite(tr.x[j]):
                 col = ANIMAL_COLORS[ai % len(ANIMAL_COLORS)]
                 c = tuple(self._scaled_pts([tr.x[j], tr.y[j]]))
+                if tr.outline is not None and tr.outline[j] is not None and len(tr.outline[j]) > 2:
+                    cv2.polylines(img, [self._scaled_pts(tr.outline[j]).reshape(-1, 1, 2)], True, col, 1, cv2.LINE_AA)
                 cv2.circle(img, c, 5, col, -1, cv2.LINE_AA)
                 cv2.circle(img, c, 5, (0, 0, 0), 1, cv2.LINE_AA)
                 if np.isfinite(tr.hx[j]):
