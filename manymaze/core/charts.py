@@ -15,7 +15,7 @@ import numpy as np
 
 from .apparatus import Apparatus
 from .project import Behaviour
-from .measures import AnalysisSettings, kinematics
+from .measures import AnalysisSettings, _angle_diff, _body_angle, _head_direction, kinematics, turn_series
 from .occupancy import occupancy, zone_visits
 from .series import ffill, moving_average, runs
 from .track import Track
@@ -155,10 +155,10 @@ def _definitions(app: Apparatus, track: Track | None, behaviours, n_others: int)
         lambda c: np.convolve(c.k.step, np.ones(c.win1s), mode="full")[:len(c.k.step)])
     add("Path efficiency", "", VALUE, "Locomotion", _path_eff)
     add("Mobile", "", STATE, "Locomotion", lambda c: c.k.mobile.astype(float))
-    add("Immobile", "", STATE, "Locomotion", lambda c: (~c.k.mobile).astype(float))
+    add("Immobile", "", STATE, "Locomotion", lambda c: _immobile(c).astype(float))
     add("Time mobile", "s", VALUE, "Locomotion", lambda c: np.cumsum(np.where(c.k.mobile, c.k.dur, 0)))
-    add("Time immobile", "s", VALUE, "Locomotion", lambda c: np.cumsum(np.where(~c.k.mobile, c.k.dur, 0)))
-    add("Immobile episodes", "", COUNT, "Locomotion", lambda c: _episode_count(~c.k.mobile))
+    add("Time immobile", "s", VALUE, "Locomotion", lambda c: np.cumsum(np.where(_immobile(c), c.k.dur, 0)))
+    add("Immobile episodes", "", COUNT, "Locomotion", lambda c: _episode_count(_immobile(c)))
     # ---- motion / freezing -------------------------------------------------------------
     add("Motion", "% body", VALUE, "Freezing", lambda c: c.k.motion_pct)
     add("Freezing", "", STATE, "Freezing", lambda c: c.k.freezing.astype(float))
@@ -167,8 +167,9 @@ def _definitions(app: Apparatus, track: Track | None, behaviours, n_others: int)
     # ---- direction / body -------------------------------------------------------------
     add("Movement direction", "deg", VALUE, "Direction", lambda c: c.k.heading)
     add("Turn rate", "deg/s", VALUE, "Direction", lambda c: _unwrapped_rate(c.k.t, c.k.heading))
+    # as the result: the turns of the direction of travel between the frames in which the animal moves
     add("Absolute turn angle", "deg", VALUE, "Direction",
-        lambda c: cum(c, np.abs(_unwrapped_rate(c.k.t, c.k.heading)) * c.k.dur))
+        lambda c: cum(c, turn_series(c.k.heading, c.k.speed, c.s.mobility_threshold, c.k.breaks)[0]))
     if orient:
         add("Head angle", "deg", VALUE, "Direction", _orientation)
         add("Angular velocity", "deg/s", VALUE, "Direction", lambda c: _unwrapped_rate(c.k.t, _orientation(c)))
@@ -192,8 +193,7 @@ def _definitions(app: Apparatus, track: Track | None, behaviours, n_others: int)
     # ---- points -----------------------------------------------------------------------------
     for p in app.points:
         add(f"{p.name}: distance", u, VALUE, "Points", lambda c, p=p: np.hypot(c.k.x - p.x, c.k.y - p.y) * c.scale)
-        add(f"{p.name}: near", "", STATE, "Points",
-            lambda c, p=p: (np.hypot(c.k.x - p.x, c.k.y - p.y) * c.scale <= (p.radius_cm or 0)).astype(float))
+        add(f"{p.name}: near", "", STATE, "Points", lambda c, p=p: _point_near(c, p).astype(float))
         if head:
             add(f"{p.name}: head distance", u, VALUE, "Points",
                 lambda c, p=p: np.hypot(c.hx - p.x, c.hy - p.y) * c.scale)
@@ -290,11 +290,26 @@ def _entry_count(t, dur, inside, s):
     return np.cumsum(start)
 
 
+def _immobile(c):
+    """Not mobile, at a known position (as the result: an animal never detected is not immobile)."""
+    return ~c.k.mobile & np.isfinite(c.k.x) & np.isfinite(c.k.y)
+
+
 def _orientation(c):
-    a = c.tr.angle
-    if np.isfinite(a).sum() > 2:
-        return a
-    return c.k.heading
+    """The orientation of the animal as the results define it: the direction from the centre to the head, else
+    the tracked body angle, else (neither tracked) the direction of travel."""
+    a = _body_angle(c.tr)
+    return a if a is not None else c.k.heading
+
+
+def _point_near(c, p):
+    """Near a point as the result: the head (when tracked, else the centre) within the point's radius."""
+    if c.tr.has_head():
+        d = np.hypot(c.hx - p.x, c.hy - p.y) * c.scale
+    else:
+        d = np.hypot(c.k.x - p.x, c.k.y - p.y) * c.scale
+    with np.errstate(invalid="ignore"):
+        return d <= (p.radius_cm or 0)
 
 
 def _cum_rotation(c):
@@ -336,7 +351,11 @@ def _dist_zone(c, zn):
 
 
 def _head_point_angle(c, p):
-    """Angle (deg, 0 = facing the point) between body orientation and the head→point direction."""
+    """Angle (deg, 0 = facing the point) between body orientation and the head→point direction (as the result
+    "mean head angle": the direction from the centre to the head, forward filled, vs the head→point direction)."""
+    hd = _head_direction(c.tr)
+    if np.isfinite(hd).any():
+        return _angle_diff(np.arctan2(p.y - c.hy, p.x - c.hx), np.radians(ffill(hd)))
     ang = np.radians(_orientation(c))
     hx = np.where(np.isfinite(c.hx), c.hx, c.k.x)
     hy = np.where(np.isfinite(c.hy), c.hy, c.k.y)

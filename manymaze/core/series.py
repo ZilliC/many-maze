@@ -97,23 +97,32 @@ def count_rotations(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[int
     in one direction; the reference is reset if the animal turns back by more than reset_deg.
     In image coordinates (y down) a positive angle change is clockwise.
     """
+    _, sign = rotation_events(angle_deg, reset_deg)
+    return int((sign > 0).sum()), int((sign < 0).sum())
+
+
+def rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[np.ndarray, np.ndarray]:
+    """The rotations count_rotations() counts, as (index in angle_deg of the sample completing each rotation,
+    +1 clockwise / -1 anticlockwise) - so that the rotations of a whole test can be shared out between periods."""
     a = np.asarray(angle_deg, float)
-    a = a[np.isfinite(a)]
-    if len(a) < 2:
-        return 0, 0
-    u = np.degrees(np.unwrap(np.radians(a)))
-    cw = acw = 0
+    idx = np.flatnonzero(np.isfinite(a))
+    if len(idx) < 2:
+        return np.zeros(0, int), np.zeros(0, int)
+    u = np.degrees(np.unwrap(np.radians(a[idx])))
+    at, sign = [], []
     ref = u[0]
     hi = lo = u[0]
-    for v in u[1:]:
+    for i, v in enumerate(u[1:], 1):
         hi = max(hi, v)
         lo = min(lo, v)
         if v - ref >= 360:
-            cw += 1
+            at.append(idx[i])
+            sign.append(1)
             ref = v
             hi = lo = v
         elif ref - v >= 360:
-            acw += 1
+            at.append(idx[i])
+            sign.append(-1)
             ref = v
             hi = lo = v
         elif hi - v > reset_deg and hi > ref:
@@ -122,4 +131,4 @@ def count_rotations(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[int
         elif v - lo > reset_deg and lo < ref:
             ref = v
             hi = lo = v
-    return cw, acw
+    return np.asarray(at, int), np.asarray(sign, int)

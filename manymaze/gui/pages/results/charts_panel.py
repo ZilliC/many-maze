@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, Q
 
 from ....core import charts, plots
 from ....core.export import display_text, write_table
+from ....core.pauses import to_recording_time
 from ....core.project import INACTIVE_STATUSES
 from ...figures import FIG_FILTER, figure_to_clipboard
 from ...widgets import error_box
@@ -279,8 +280,12 @@ class ChartsPanel(QWidget):
             self.data = {}
             names = []
         title = self.test_combo.currentText()
+        t_range = self.period_combo.currentData()
+        if t_range is not None and self.test.pauses:  # periods are in test time, the chart in recording time
+            t_range = (float(to_recording_time([t_range[0]], self.test.pauses, True)[0]),
+                       float(to_recording_time([t_range[1]], self.test.pauses, False)[0]))
         plots.chart_figure(self.track, self.app, names, s, events, self.beh, bands=self.checked_bands(),
-                            show_events=self.events_check.isChecked(), t_range=self.period_combo.currentData(),
+                            show_events=self.events_check.isChecked(), t_range=t_range,
                             data=self.data, title=title, fig=self.figure, other_tracks=self.others or None)
         self._attach_spans()
         axes = self.figure.axes

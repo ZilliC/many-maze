@@ -28,7 +28,9 @@ from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
 from .pauses import drop_pauses, shift_events
-from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs, seg_moving_average, segments
+from .series import count_rotations  # noqa: F401 (re-exported)
+from .series import (drop_short_runs, ffill, rotation_events, round_result as _r, runs, seg_moving_average,
+                     segments)
 from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides
 from .track import Track
@@ -464,7 +466,7 @@ def _detection(res, p: _Period):
 
 
 def _locomotion(res, p: _Period):
-    k, K, T, dur, u = p.k, p.P.k, p.T, p.dur, p.P.app.unit
+    P, k, K, T, dur, u = p.P, p.k, p.P.k, p.T, p.dur, p.P.app.unit
     total = float(k.step.sum())
     res[f"Total distance ({u})"] = _r(total, 2)
     res[f"Mean speed ({u}/s)"] = _r(total / T if T > 0 else math.nan)
@@ -473,16 +475,19 @@ def _locomotion(res, p: _Period):
         res[f"Mean speed when not hidden ({u}/s)"] = _r(k.step[~p.hid_any].sum() / t_vis if t_vis > 0 else math.nan)
     res[f"Max speed ({u}/s)"] = _r(np.nanmax(p.sp) if np.isfinite(p.sp).any() else math.nan)
     t_mob = float(dur[k.mobile].sum())
+    # immobile: not mobile at a known position (an animal never detected is neither mobile nor immobile)
+    seen_full = P.cached("seen", lambda: np.isfinite(K.x) & np.isfinite(K.y))
+    t_imm = float(dur[~k.mobile & seen_full[p.sl]].sum())
     res["Time mobile (s)"] = _r(t_mob)
-    res["Time immobile (s)"] = _r(T - t_mob)
-    imm = p.eps(~K.mobile)
+    res["Time immobile (s)"] = _r(t_imm)
+    imm = p.eps(~K.mobile & seen_full)
     mob = p.eps(K.mobile)
     res["Immobile episodes"] = len(imm)
     res["Latency to first immobility (s)"] = _r(p.lat(imm))
     res[f"Mean speed while mobile ({u}/s)"] = _r(k.step[k.mobile].sum() / t_mob if t_mob > 0 else math.nan)
     res["Mobile episodes"] = len(mob)
     res["Mean mobile episode (s)"] = _r(p.ep_time(mob) / len(mob) if mob else 0.0)
-    imm_time = (T - t_mob) if p.whole else p.ep_time(imm)
+    imm_time = t_imm if p.whole else p.ep_time(imm)
     res["Mean immobile episode (s)"] = _r(imm_time / len(imm) if imm else 0.0)
     res["Longest immobile episode (s)"] = _r(max((dur[a:b].sum() for a, b in imm), default=0.0))
     res["Shortest immobile episode (s)"] = _r(min((dur[a:b].sum() for a, b in imm), default=0.0))
@@ -507,8 +512,9 @@ def _locomotion(res, p: _Period):
 
 
 def _path_shape(res, p: _Period, total: float, t_mob: float):
-    """Path efficiency, turning and rotations (no turn or rotation across a pause)."""
-    s, k, n, u = p.P.s, p.k, p.n, p.P.app.unit
+    """Path efficiency, turning and rotations (no turn or rotation across a pause or a reappearance; computed on the
+    whole test, so that the periods add up - see _turns)."""
+    k, u = p.k, p.P.app.unit
     ok = np.isfinite(k.ux)
     if ok.sum() >= 2:
         j0, j1 = np.flatnonzero(ok)[[0, -1]]
@@ -517,39 +523,72 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
         hid = bool(p.hid_any.any())
         res["Path efficiency"] = _r(straight / total if total > 0 and not hid else math.nan)
         res["Path tortuosity"] = _r(total / straight if straight > 0 and not hid else math.nan)
-    h = k.heading.copy()
-    seg_id = np.cumsum(k.breaks) if k.breaks is not None else np.zeros(n, int)
-    moving = np.isfinite(h) & (k.speed > max(s.mobility_threshold, 1e-9))
-    mi = np.flatnonzero(moving)
-    if len(mi) > 1:
-        dturn = np.abs((np.diff(h[mi]) + 180) % 360 - 180)
-        dturn = dturn[seg_id[mi[1:]] == seg_id[mi[:-1]]]
-        abs_turn = float(dturn.sum())
-    else:
-        dturn = np.zeros(0)
-        abs_turn = 0.0
+    T = _turns(p.P)
+    dturn = T["turn"][p.sl]
+    dturn = dturn[np.isfinite(dturn)]
+    abs_turn = float(dturn.sum())
     res["Absolute turn angle (deg)"] = _r(abs_turn, 1)
     res[f"Meander (deg/{u})"] = _r(abs_turn / total if total > 0 else math.nan)
     res["Mean turn angle (deg)"] = _r(dturn.mean() if len(dturn) else math.nan, 2)
     res["Angular velocity (deg/s)"] = _r(abs_turn / t_mob if t_mob > 0 else math.nan, 2)
 
-    def rotations(angle):
-        cw = acw = 0
-        for a, b in segments(n, k.breaks):
-            c1, c2 = count_rotations(angle[a:b], s.rotation_reset_deg)
-            cw, acw = cw + c1, acw + c2
-        return cw, acw
+    def rotations(key):
+        at, sign = T[key]
+        sign = sign[(at >= p.i0) & (at < p.i1)]  # a rotation belongs to the period in which it is completed
+        return int((sign > 0).sum()), int((sign < 0).sum())
 
-    # body rotations follow the body (as ANY-maze: the vector from the centre to the head), else the tracked body
-    # angle (e.g. an imported orientation); only without either do they follow the direction of travel
-    angle = _body_angle(p.track)
-    body = angle is not None
-    cw, acw = rotations(angle if body else h)
+    cw, acw = rotations("body_rot" if T["body"] else "path_rot")
     res["Rotations clockwise"], res["Rotations anticlockwise"] = cw, acw
     res["Total rotations"] = cw + acw
-    if body and np.isfinite(h).sum() > 2:
+    if T["body"] and np.isfinite(k.heading).sum() > 2:
         # rotations of the direction of travel (the rotations above follow the body / head orientation)
-        res["Path rotations clockwise"], res["Path rotations anticlockwise"] = rotations(h)
+        res["Path rotations clockwise"], res["Path rotations anticlockwise"] = rotations("path_rot")
+
+
+def turn_series(heading: np.ndarray, speed: np.ndarray, mobility_threshold: float,
+                cuts: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Per frame: the absolute change (deg) of the direction of travel since the previous frame in which the animal
+    moved (speed above the mobility threshold, direction known), in the frames where it moves (NaN elsewhere), and
+    that previous frame (-1: none). cuts: frames that start a new stretch (after a pause or a reappearance) - no
+    turn is counted across them. The absolute turn angle is the sum of the turns."""
+    n = len(heading)
+    seg_id = np.cumsum(cuts) if cuts is not None else np.zeros(n, int)
+    mi = np.flatnonzero(np.isfinite(heading) & (speed > max(mobility_threshold, 1e-9)))
+    turn = np.full(n, np.nan)
+    prev = np.full(n, -1)
+    if len(mi) > 1:
+        d = np.abs((np.diff(heading[mi]) + 180) % 360 - 180)
+        same = seg_id[mi[1:]] == seg_id[mi[:-1]]
+        turn[mi[1:][same]] = d[same]
+        prev[mi[1:][same]] = mi[:-1][same]
+    return turn, prev
+
+
+def _turns(P: _Prepared) -> dict:
+    """Whole test, so that periods add up: the absolute change of the direction of travel into each frame where the
+    animal moves (NaN elsewhere) and the previous moving frame it is measured from (-1: none), and the rotations
+    (frame completing each one, ±1) of the body and of the direction of travel. Nothing is counted across a pause or
+    a reappearance after being hidden."""
+    def make():
+        K, s = P.k, P.s
+        n = len(K.t)
+        cuts = P.cuts()
+        h = K.heading
+        turn, prev = turn_series(h, K.speed, s.mobility_threshold, cuts)
+
+        def rot(angle):
+            at, sign = [], []
+            for a, b in segments(n, cuts):
+                ia, sa = rotation_events(angle[a:b], s.rotation_reset_deg)
+                at.append(ia + a)
+                sign.append(sa)
+            return np.concatenate(at), np.concatenate(sign)
+        # body rotations follow the body (as ANY-maze: the vector from the centre to the head), else the tracked
+        # body angle (e.g. an imported orientation); only without either do they follow the direction of travel
+        angle = _body_angle(P.track)
+        return {"turn": turn, "prev": prev, "body": angle is not None, "path_rot": rot(h),
+                "body_rot": rot(angle) if angle is not None else None}
+    return P.cached("turns", make)
 
 
 def _body_angle(tr: Track) -> np.ndarray | None:
@@ -583,12 +622,14 @@ def _arena_position(res, p: _Period):
         x0, y0, x1, y1 = arena.bounds()
         thr = 0.25 * min(x1 - x0, y1 - y0) / 2 * k.scale
     inside_arena = arena.contains(k.x, k.y)
-    res[f"Mean distance from wall ({u})"] = _r(np.nanmean(np.where(inside_arena, dwall, np.nan)), 2)
+    din = np.where(inside_arena, dwall, np.nan)
+    res[f"Mean distance from wall ({u})"] = _r(np.nanmean(din) if np.isfinite(din).any() else math.nan, 2)
     res["Thigmotaxis (%)"] = p.pct((dwall <= thr) & inside_arena)
-    res["Time outside arena (s)"] = _r(p.dur[~inside_arena].sum())
+    # a position outside the arena (an animal never detected is not outside it)
+    res["Time outside arena (s)"] = _r(p.dur[~inside_arena & np.isfinite(k.x) & np.isfinite(k.y)].sum())
     acx, acy = arena.centroid()
     dc = np.hypot(k.x - acx, k.y - acy) * k.scale
-    res[f"Mean distance from centre ({u})"] = _r(np.nanmean(dc), 2)
+    res[f"Mean distance from centre ({u})"] = _r(np.nanmean(dc) if np.isfinite(dc).any() else math.nan, 2)
     res[f"Max distance from centre ({u})"] = _r(np.nanmax(dc) if np.isfinite(dc).any() else math.nan, 2)
     if s.arena_quadrants:
         east, south = k.x >= acx, k.y >= acy
@@ -636,7 +677,8 @@ def _zones(res, p: _Period):
             res[f"{zn}: head time (s)"] = _r(dur[hfm[p.sl]].sum())
             res[f"{zn}: latency to head entry (s)"] = _r(p.lat(hv))
         res[f"{zn}: latency to second entry (s)"] = _r(float(t[visits[1][0]] - p.t0) if len(visits) > 1 else p.never)
-        exits = [b for a, b in runs(fm) if p.i0 <= b < p.i1 and b > 0]  # an exit on a bin's first frame is in it
+        # an exit on a bin's first frame is in it; as entries, none across a pause (out of the zone after it)
+        exits = [b for a, b in runs(fm) if p.i0 <= b < p.i1 and b > 0 and not P.breaks[b]]
         res[f"{zn}: time of last exit (s)"] = _r(float(K.t[exits[-1] - 1] + K.dur[exits[-1] - 1] - p.t0)
                                                 if exits else math.nan)
         res[f"{zn}: exits"] = len(exits)
@@ -950,7 +992,7 @@ def _zone_more(res, p: _Period, zn: str, fm: np.ndarray, vm: np.ndarray, visits:
     if geo is not None:
         _zone_border(res, p, geo, vm)
         _zone_heading(res, p, geo, vm)
-    _zone_turning(res, p, zn, vm)
+    _zone_turning(res, p, zn, vm, fm)
     if geo is not None:
         _zone_cipl(res, p, geo, visits)
     _zone_lines(res, p, zn, fm)
@@ -1027,7 +1069,9 @@ def _zone_head(res, p: _Period, zn: str, z):
         return
     hfm = P.visits_mask(("head", zn), P.head_memb[zn])
     hin = hfm[p.sl]
-    ends = P.cached(("head_exits", zn), lambda: np.array([b for _, b in runs(hfm)], int))
+    # as head entries, no head exit across a pause
+    ends = P.cached(("head_exits", zn), lambda: np.array([b for _, b in runs(hfm)
+                                                          if b >= len(P.breaks) or not P.breaks[b]], int))
     exits = ends[(ends >= p.i0) & (ends < p.i1) & (ends > 0)]
     res[f"{zn}: latency to first head exit (s)"] = _r(float(K.t[exits[0] - 1] + K.dur[exits[0] - 1] - p.t0)
                                                      if len(exits) else p.never)
@@ -1137,20 +1181,14 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
         res[f"{zn}: time oriented towards zone centre when inside (s)"] = _r(dur[vm & ~p.hid_any & towards].sum())
 
 
-def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray):
-    """Absolute turn angle (direction of travel, as the whole-test measure) and absolute head turn angle (the
-    direction from the centre to the head) while in the zone; nothing across a pause."""
-    s, k = p.P.s, p.k
-    brk = np.asarray(k.breaks, bool) if k.breaks is not None else np.zeros(p.n, bool)
-    seg_id = np.cumsum(brk)
-    h = k.heading
-    mi = np.flatnonzero(np.isfinite(h) & (k.speed > max(s.mobility_threshold, 1e-9)))
-    turn = 0.0
-    if len(mi) > 1:
-        d = np.abs((np.diff(h[mi]) + 180) % 360 - 180)
-        keep = (seg_id[mi[1:]] == seg_id[mi[:-1]]) & vm[mi[1:]] & vm[mi[:-1]]
-        turn = float(d[keep].sum())
-    res[f"{zn}: absolute turn angle (deg)"] = _r(turn, 1)
+def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray, fm: np.ndarray):
+    """Absolute turn angle (direction of travel, as the whole-test measure: the turns between two moving frames
+    both in the zone) and absolute head turn angle (the direction from the centre to the head) while in the zone;
+    nothing across a pause or a reappearance."""
+    T = _turns(p.P)
+    turn, prev = T["turn"][p.sl], T["prev"][p.sl]
+    keep = np.isfinite(turn) & fm[p.sl] & fm[np.maximum(prev, 0)] & (prev >= 0)
+    res[f"{zn}: absolute turn angle (deg)"] = _r(float(turn[keep].sum()), 1)
     if p.P.clean.has_head():
         # as the whole-test head turn angle; a turn counts in the zone the animal is in after it (as ANY-maze)
         turn_h = p.P.cached("head_motion", lambda: _head_arrays(p.P))["turn"][p.sl]
@@ -1310,7 +1348,7 @@ def _line_hits(P: _Prepared, ln) -> tuple[np.ndarray, np.ndarray]:
 def _grids_and_sequences(res, p: _Period):
     s, app = p.P.s, p.P.app
     for g in app.grids:
-        res.update(grid_measures(g, p.memb, p.t, p.dur, p.t0, p.T, s))
+        res.update(grid_measures(g, p.memb, p.t, p.dur, p.t0, p.T, s, breaks=p.k.breaks))
     if app.sequences:
         from .sequences import find_sequences, other_zones, sequence_measures
 
@@ -1655,8 +1693,9 @@ def _point_arrays(P: _Prepared, p) -> dict:
 
 
 def grid_measures(g, memb: dict, t: np.ndarray, dur: np.ndarray, t0: float, T: float,
-                  s: AnalysisSettings) -> "OrderedDict[str, object]":
-    """Crossings and coverage of a grid of zones (any kind: square, rings, sectors)."""
+                  s: AnalysisSettings, breaks: np.ndarray | None = None) -> "OrderedDict[str, object]":
+    """Crossings and coverage of a grid of zones (any kind: square, rings, sectors). breaks: frames that follow a
+    pause (no crossing is counted across a pause)."""
     out: OrderedDict[str, object] = OrderedDict()
     cells = [c for c in g.zones if c in memb]
     n = len(t)
@@ -1665,8 +1704,13 @@ def grid_measures(g, memb: dict, t: np.ndarray, dur: np.ndarray, t0: float, T: f
     cur = np.full(n, -1)
     for i, c in enumerate(cells):
         cur[memb[c] & (cur < 0)] = i
-    seen = cur[cur >= 0]
-    out[f"{g.name}: crossings"] = int(np.count_nonzero(np.diff(seen))) if len(seen) > 1 else 0
+    idx = np.flatnonzero(cur >= 0)
+    seen = cur[idx]
+    ch = seen[1:] != seen[:-1]
+    if breaks is not None and len(breaks) == n and np.any(breaks):
+        bc = np.cumsum(np.asarray(breaks, bool))
+        ch &= bc[idx[1:]] == bc[idx[:-1]]
+    out[f"{g.name}: crossings"] = int(np.count_nonzero(ch))
     visited = set(seen.tolist())
     out[f"{g.name}: cells visited"] = len(visited)
     out[f"{g.name}: cells visited (%)"] = _r(100 * len(visited) / len(cells), 2)

@@ -20,6 +20,7 @@ from scipy.ndimage import gaussian_filter  # noqa: E402
 
 from . import charts  # noqa: E402
 from .apparatus import Apparatus  # noqa: E402
+from .pauses import period_frames, to_recording_time  # noqa: E402
 from .project import Behaviour  # noqa: E402
 from .stats import descriptive, error_value, stars  # noqa: E402
 from .track import Track  # noqa: E402
@@ -269,8 +270,9 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
 
 def segmented_track_plot(track: Track, app: Apparatus | None, periods: list[tuple[str, float, float]], frame=None,
                          color_by: str = "time", part: str = "centre", markers: list | None = None,
-                         settings=None, ncols: int = 0, size=None, title: str = "") -> Figure:
-    """Small multiples: one track plot per time period, on a shared colour scale."""
+                         settings=None, ncols: int = 0, size=None, title: str = "", pauses=None) -> Figure:
+    """Small multiples: one track plot per time period, on a shared colour scale. The periods are in test time
+    (as the results; pauses: Test.pauses), the track and markers in recording time: paused frames are left out."""
     periods = list(periods) or [("Whole test", float(track.t[0]) if len(track) else 0.0, math.inf)]
     n = len(periods)
     ncols = ncols or min(n, 4)
@@ -291,8 +293,10 @@ def segmented_track_plot(track: Track, app: Apparatus | None, periods: list[tupl
     for i, (lab, a, b) in enumerate(periods):
         ax = fig.add_subplot(nrows, ncols, i + 1)
         axes.append(ax)
-        m = (track.t >= a) & (track.t < b)
-        sub = track.slice_time(a, b)
+        m = period_frames(track, pauses, (a, b))
+        sub = track.take(m)
+        a, b = (float(to_recording_time([a], pauses, True)[0]), float(to_recording_time([b], pauses, False)[0])) \
+            if pauses else (a, b)
         mk = [dict(mm, t=max(mm["t"], a), t_end=None if mm.get("t_end") is None else min(mm["t_end"], b))
               for mm in markers or [] if mm["t"] < b and (mm.get("t_end") if mm.get("t_end") is not None
                                                            else mm["t"]) >= a]
@@ -456,6 +460,7 @@ def group_heatmap(project, tests_by_group: dict[str, list], heat_of: str | None 
             for tr in project.load_tracks(t)[:1]:
                 mask = charts.state_mask(tr, app, heat_of, project.analysis_for(t), t.events,
                                          project.behaviours) if heat_of else None
+                rng = None
                 if period:
                     try:
                         rng = next(((a, b) for lab, a, b in project.test_periods(t, tr) if lab == period), None)
@@ -463,9 +468,12 @@ def group_heatmap(project, tests_by_group: dict[str, list], heat_of: str | None 
                         rng = None
                     if rng is None:
                         continue
-                    keep = (tr.t >= rng[0]) & (tr.t < rng[1])
+                # the frames of the test (none while it was paused) in the period, which is in test time (as the
+                # results); the track keeps its recording times
+                keep = period_frames(tr, t.pauses, rng)
+                if not keep.all():
                     mask = None if mask is None else mask[keep]
-                    tr = tr.slice_time(*rng)
+                    tr = tr.take(keep)
                 ms.append(mask)
                 trs.append(align_track(tr, app, (t.variables or {}).get("heatmap_transform", "none"), ref))
             k += 1
