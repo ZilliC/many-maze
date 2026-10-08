@@ -21,6 +21,7 @@ class Session:
     outputs = None  # procedures.Outputs (legacy serial port and action log)
     devices = None
     stats = None  # live.LiveStats
+    calibration = None  # apparatus.calibration_override() when the calibration was adjusted during the test
 
     @property
     def elapsed(self) -> float:
@@ -79,6 +80,10 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         test.start_s = 0.0
     test.events = sorted(list(test.events) + [dict(e) for e in session.events], key=lambda e: e.get("t", 0))
     test.pauses = [list(p) for p in session.pauses]
+    if session.calibration:  # adjusted during the test: the test's own scale, used by its analysis
+        from .apparatus import CALIBRATION_KEY
+
+        test.zone_overrides = {**test.zone_overrides, CALIBRATION_KEY: dict(session.calibration)}
     test.io_events = list(test.io_events) + session.io_events
     rv = session.result_variables
     if rv:
@@ -96,6 +101,8 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     outs = session.outputs
     if outs is not None and outs.log:
         notes.append("Live procedures: " + "; ".join(outs.log[:50]))
+    for t_change, cal in getattr(session, "calibration_log", None) or []:
+        notes.append(f"Calibration adjusted at {t_change:.2f} s: {cal['px_per_cm']:.4g} px/cm")
     if session.pause_log:
         notes.append("Paused: " + "; ".join(f"at {p['t']:.2f} s for {p['duration_s']:.1f} s"
                                             for p in session.pause_log))

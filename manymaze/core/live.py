@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from .apparatus import Apparatus
+from .apparatus import Apparatus, calibration_override
 from .autosave import Autosaver
 from .geometry import body_fraction_inside
 from .measures import AnalysisSettings
@@ -184,8 +184,7 @@ class LiveStats:
 
     def __init__(self, apparatus: Apparatus | None, fps: float, analysis: AnalysisSettings,
                  history_s: float = 300.0, sample_s: float = 0.1):
-        self.scale = apparatus.scale if apparatus else 1.0
-        self.unit = apparatus.unit if apparatus else "px"
+        self.set_scale(apparatus)
         self.names = ([z.name for z in apparatus.zones] + [g.name for g in apparatus.groups]) if apparatus else []
         self.a = analysis
         self.fps = fps or 25.0
@@ -206,6 +205,16 @@ class LiveStats:
         self._xy = None
         self._slow_since: float | None = None
         self._first = True
+
+    def set_scale(self, apparatus: Apparatus | None):
+        """Use the apparatus calibration; the distance and speed so far (tracked in pixels) are converted to it."""
+        scale = apparatus.scale if apparatus else 1.0
+        old = getattr(self, "scale", None)
+        if old:
+            self.distance *= scale / old
+            self.speed *= scale / old
+        self.scale = scale
+        self.unit = apparatus.unit if apparatus else "px"
 
     def update(self, t: float, d: Detection, zones: dict[str, bool], freezing: bool):
         dt = 0.0 if self._last_t is None else max(0.0, t - self._last_t)
@@ -397,6 +406,8 @@ class LiveSession(_Scoring):
             self.outputs = self.engine.outputs
         self.stats = LiveStats(self.apparatus, self.fps, self.analysis)
         self.occupancy = LiveOccupancy(self.apparatus, self.analysis)
+        self.calibration: dict | None = None  # set_calibration(): this test's own calibration
+        self.calibration_log: list[tuple[float, dict]] = []
         self.start_phase = ""  # experimenter_leaves: "experimenter" -> "leaving" -> "animal"
         self._frame_shape: tuple[int, int] | None = None
         self._detect_since: float | None = None
@@ -422,6 +433,28 @@ class LiveSession(_Scoring):
     def set_background(self, frame: np.ndarray):
         self._ensure_tracker(frame)
         self.tracker.set_background(to_gray(frame))
+
+    def set_calibration(self, px_per_cm: float, line=None, length_cm: float | None = None) -> dict:
+        """Adjust the apparatus calibration while the test runs (or waits to start): live distances and speeds use
+        the new scale from now on, and the saved test keeps it as its own calibration (Test.zone_overrides
+        [CALIBRATION_KEY]) so that its analysis uses it. Positions are tracked in pixels, so the whole test is
+        analysed with the corrected scale. Returns the stored calibration."""
+        cal = calibration_override(px_per_cm, line, length_cm)
+        with self.lock:
+            if self.state == "finished":
+                raise RuntimeError("The test has finished")
+            app = (self.apparatus or Apparatus()).copy()  # never change the project's apparatus map
+            app.px_per_cm = cal["px_per_cm"]
+            app.calibration_line = tuple(cal["calibration_line"]) if cal["calibration_line"] else None
+            app.calibration_length_cm = cal["calibration_length_cm"]
+            self.apparatus = app
+            self.occupancy.app = app
+            self.stats.set_scale(app)
+            self.calibration = cal
+            t = self.elapsed if self.state in ("running", "paused") else 0.0
+            self.calibration_log.append((round(t, 3), dict(cal)))
+            self.log.append((t, f"Calibration adjusted: {cal['px_per_cm']:.4g} px/cm"))
+        return cal
 
     def _ensure_tracker(self, frame):
         if self.tracker is None:
@@ -714,7 +747,8 @@ class LiveSession(_Scoring):
                  "open_states": list(self.open_states), "pauses": [list(p) for p in self.pauses],
                  "pause_log": [dict(p) for p in self.pause_log], "io_events": self.io_events,
                  "log": list(self.log), "warnings": list(self.warnings),
-                 "result_variables": self.result_variables,
+                 "result_variables": self.result_variables, "calibration": self.calibration,
+                 "calibration_log": [[t, dict(c)] for t, c in self.calibration_log],
                  "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
         d["cols"] = self._track.snapshot(n)
         return d

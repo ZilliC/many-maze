@@ -112,17 +112,31 @@ def camera_backend() -> int:
     return cv2.CAP_ANY
 
 
-def list_cameras(max_index: int = 6) -> list[int]:
-    """Probe camera indices that can be opened."""
+MAX_CAMERAS = 64  # camera indices offered (ANY-maze supports up to 48 cameras)
+
+
+def list_cameras(max_index: int = MAX_CAMERAS, max_gap: int = 4, opener=None) -> list[int]:
+    """Probe camera indices that can be opened, up to max_index; the scan stops after max_gap consecutive indices
+    without a camera (indices can have gaps, e.g. Linux metadata nodes, but probing absent ones is slow).
+    opener(i) -> a cv2.VideoCapture-like object (tests)."""
+    if opener is None:
+        opener = lambda i: cv2.VideoCapture(i, camera_backend())
     found = []
+    misses = 0
     for i in range(max_index):
-        cap = cv2.VideoCapture(i, camera_backend())
+        cap = opener(i)
+        ok = False
         if cap is not None and cap.isOpened():
             ok, _ = cap.read()
-            if ok:
-                found.append(i)
         if cap is not None:
             cap.release()
+        if ok:
+            found.append(i)
+            misses = 0
+        else:
+            misses += 1
+            if misses >= max_gap:
+                break
     return found
 
 
