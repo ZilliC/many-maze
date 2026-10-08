@@ -728,6 +728,10 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 rows, zones = s.stats.rows(), (s.stats.current_zones() if s.stats.detected else [])
             self.single_panel.set_zone_rows(rows, zones)
         if self.group.entries:
+            for e in self.group.entries:  # the procedures' pop-up messages (multi-test mode)
+                take = getattr(e.session, "take_popups", None)
+                for pop in (take() if take is not None else ()):
+                    self._show_popup(pop, e)
             self.group.tick(now)
             self._save_finished_entries()
             if self.mode == "multi":

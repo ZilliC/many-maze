@@ -15,7 +15,7 @@ from ....core import autosave
 from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
 from ....core.camhw import CameraHardware
 from ....core.camsources import is_native_source, list_native_cameras
-from ....core.live import LiveSession, open_devices
+from ....core.live import LiveSession, draw_display_texts, open_devices
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs
 from ....core.project import INFO_COLUMNS
@@ -399,6 +399,9 @@ class SingleTestMixin:
                 zones = [k for k, v in zm.items() if bool(np.asarray(v).ravel()[0])]
             info["zones"] = zones
         disp = draw_tracking(frame, [d] if d is not None else [], trail)
+        if s is not None:  # the procedures' texts on the display and pop-up messages
+            disp = draw_display_texts(disp, s.display_texts)
+            info["popups"] = s.take_popups()
         return disp, info
 
     def _make_preview_tracker(self, frame, app):
@@ -434,6 +437,8 @@ class SingleTestMixin:
         self.vals["zone"].setText(", ".join(info["zones"]) if info["zones"] else
                                   ("—" if info["detected"] else "not detected"))
         # a preview frame, or a stale one of the previous test, may arrive just after arming
+        for pop in info.get("popups") or ():
+            self._show_popup(pop)
         if info.get("session") is not None and info["session"] is self.session:
             el = info["elapsed"]
             dur = info["duration"]
@@ -585,10 +590,22 @@ class SingleTestMixin:
                         record_overlay=self.record_overlay.isChecked(), lost_warning_s=self.lost_warn.value(),
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
-                        outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test))
+                        outputs_off_on_pause=self.pause_off.isChecked(), **self._autosave_args(test),
+                        context_extra={"test": test.id, "animal": test.animal_id, "apparatus": test.apparatus,
+                                       "stage": test.stage, "trial": test.trial})
         if bg is not None:
             s.set_background(bg)
         return s
+
+    def _show_popup(self, pop: dict, entry=None):
+        """A procedure's "show a pop-up message": a non-modal message box (the test keeps running)."""
+        prefix = f"{entry.label} · " if entry is not None else ""
+        self._log(f"{prefix}{fmt_time(pop.get('t', 0))}  message: {pop.get('text', '')}", entry)
+        box = QMessageBox(QMessageBox.Information, f"{prefix}{pop.get('title') or 'Procedure'}",
+                          str(pop.get("text", "")), QMessageBox.Ok, self)
+        box.setModal(False)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.show()
 
     def _close_devices(self):
         if self.devices is not None and not self.any_active():

@@ -74,7 +74,12 @@ def _params_text(spec: dict, st: dict) -> str:
         v = st.get(p["name"], p["default"])
         if v is None or v == "" or typ in ("device", "audio"):
             continue
-        if typ in ("input", "output"):
+        if typ == "bool":
+            if v and str(v).lower() not in ("false", "0", "no"):
+                bits.append(p["label"].lower())
+        elif typ in ("point", "plugin", "clock"):
+            bits.append(_short(v))
+        elif typ in ("input", "output"):
             dev = st.get("device")
             bits.append(f"{dev}/{v}" if dev else str(v))
         elif typ in _NAME_TYPES:
@@ -105,6 +110,11 @@ def describe_statement(st: dict) -> str:
             extra.append("once")
         if st.get("mode", "ignore") != "ignore":
             extra.append(WHEN_MODES.get(st.get("mode"), st.get("mode", "")).lower())
+        if st.get("times") not in (None, "", 0, 1):
+            extra.append(f"{st['times']} times" + (f" within {st['within']} s" if st.get("within") not in (None, "")
+                                                    else ""))
+        if st.get("trials") not in (None, ""):
+            extra.append(f"trials {st['trials']}")
         return f"When {describe_event(st)}" + (f"  [{', '.join(extra)}]" if extra else "")
     if t == "wait":
         mode = wait_mode(st)

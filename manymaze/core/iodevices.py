@@ -205,7 +205,9 @@ class Device:
             th.set_target(kw.get("target"), kw.get("ramp", 0.0))
         return True
 
-    def notify(self, subject: str, text: str) -> bool:
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        """Send an alert (alert devices); kinds: ("email",) / ("sms",) / None = both; to: addresses / numbers
+        (comma-separated) instead of the configured ones."""
         return False
 
     def service(self, now: float):
@@ -1041,10 +1043,11 @@ class DeviceManager:
         self._start_keepalive()
         return ok
 
-    def notify(self, subject: str, text: str) -> bool:
-        """Send an alert through every alert device (e-mail / SMS, in the background)."""
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        """Send an alert through every alert device (e-mail / SMS, in the background); see Device.notify."""
+        kw = {k: v for k, v in (("kinds", kinds), ("to", to)) if v}
         with self._lock:
-            sent = [d.notify(subject, text) for d in self.devices.values() if d.type == "notify"]
+            sent = [d.notify(subject, text, **kw) for d in self.devices.values() if d.type == "notify"]
         return any(sent)
 
     def set_input(self, device: str, channel: str, value: float):
@@ -1227,8 +1230,8 @@ class DeviceView:
         self.manager._start_keepalive()
         return ok
 
-    def notify(self, subject: str, text: str) -> bool:
-        return self.manager.notify(subject, text)
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        return self.manager.notify(subject, text, kinds=kinds, to=to)
 
     def pulse_sequence(self, device: str, channel: str, pulses, level: float = 1) -> bool:
         name = self._map(device)
