@@ -152,7 +152,8 @@ class IODevicesDialog(QDialog):
         hh.setSectionResizeMode(len(CH_COLS) - 1, QHeaderView.Stretch)
         self.ch_table.itemChanged.connect(lambda *_: self._save_channels())
         self.ch_table.setToolTip("Options (key=value, comma separated): pullup, debounce_ms, counts_per_rev, "
-                                 "cm_per_rev, scale, period_ms, deadband")
+                                 "cm_per_rev, scale, period_ms, deadband, role (shocker, speaker or light: the "
+                                 "output's results are grouped as such)")
         cv.addWidget(self.ch_table)
         cb = QHBoxLayout()
         b1 = QPushButton("Add channel")

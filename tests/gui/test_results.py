@@ -198,3 +198,19 @@ def test_cache_shared(page):
         fp = _results_cache.fingerprint(p)
         change()
         assert _results_cache.fingerprint(p) != fp
+
+
+def test_io_categories():
+    """I/O measures have their own category, with shockers, speakers, lights, OPAD and result variables apart."""
+    p = Project()
+    p.io_devices = [{"name": "box", "channels": [{"name": "lever", "kind": "input"}, {"name": "temp", "kind": "analog"}]}]
+    names = _names(p)
+    assert measure_category("Shocker shock: shocks", names) == ("I/O", "Shockers")
+    assert measure_category("Speaker tone: sounds", names) == ("I/O", "Speakers")
+    assert measure_category("Light house: time on (s)", names) == ("I/O", "Lights")
+    assert measure_category("OPAD at 45°: licks", names) == ("I/O", "OPAD")
+    assert measure_category("Variable: score (mean)", names) == ("I/O", "Result variables")
+    assert measure_category("lever: activations", names) == ("I/O", "lever")
+    assert measure_category("box/lever: activations", names) == ("I/O", "box/lever")
+    assert measure_category("temp in Centre: mean max", names) == ("I/O", "temp in Centre")
+    assert measure_category("Unknown: x", names) == ("Other", "Unknown")

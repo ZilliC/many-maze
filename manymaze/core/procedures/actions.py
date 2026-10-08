@@ -43,8 +43,8 @@ class _Timer:
 
 
 # actions that are an output switched on / off under a name of its own
-_ALIASES = {"light_on": "output_on", "light_off": "output_off", "door_open": "output_on", "door_close": "output_off",
-            "lever_extend": "output_on", "lever_retract": "output_off"}
+_ALIASES = {"door_open": "output_on", "door_close": "output_off", "lever_extend": "output_on",
+            "lever_retract": "output_off"}
 
 
 class Actions:
@@ -116,6 +116,13 @@ class Actions:
         dev, ch = self._resolve(th, p, device, channel)
         self._stop_train((dev, ch), self.t)
         self._set_out(dev, ch, 0, self.t, typ)
+
+    def _a_light_on(self, th, p, device, channel):
+        """An output switched on, logged as a light (the "Light" measures of the I/O results)."""
+        self._a_output_on(th, p, device, channel, "light")
+
+    def _a_light_off(self, th, p, device, channel):
+        self._a_output_off(th, p, device, channel, "light")
 
     def _a_output_toggle(self, th, p, device, channel):
         dev, ch = self._resolve(th, p, device, channel)

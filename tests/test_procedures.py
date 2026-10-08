@@ -437,7 +437,7 @@ def test_pulse_train_and_shock_safety():
     assert ttl == [(pytest.approx(4.1), 1), (pytest.approx(4.35), 0)]
     m = P.io_measures(eng.io_events, 6)
     assert m["laser: pulse trains"] == 2 and m["laser: pulses"] == 16
-    assert m["shock: times on"] == 2 and m["shock: time on (s)"] == pytest.approx(2.0)
+    assert m["Shocker shock: shocks"] == 2 and m["Shocker shock: time on (s)"] == pytest.approx(2.0)
 
 
 def test_audio_actions_logged_without_device():

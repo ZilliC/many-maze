@@ -169,6 +169,20 @@ ANALYSIS_SPEC = [
      "0 = no time bins."),
     ("novel_object", "The novel object is the point named", "text", None, "Name of the point that is the novel object."),
     ("social_side", "The social stimulus is on the", "choice", [("Left", "Left"), ("Right", "Right")], ""),
+    ("io_baseline_s", "Analogue inputs: baseline period (s)", "float", (0.0, 100000.0, 1.0, 1),
+     "The baseline of an analogue input is its mean over the first seconds of the test (or period). 0 = off."),
+    ("io_deviation_sd", "Analogue inputs: a deviation is more than (baseline SD)", "float", (0.0, 100.0, 0.5, 2),
+     "The signal deviates from the baseline when it is further from it than this many baseline SDs."),
+    ("opad_contact", "OPAD: paw contact input", "text", None,
+     "Operant plantar assay: name of the digital input of the paw contact with the thermal plate. Empty = no "
+     "OPAD measures."),
+    ("opad_lick", "OPAD: lick input", "text", None, "Name of the digital input of the lickometer."),
+    ("opad_temperature", "OPAD: temperature input", "text", None,
+     "Name of the analogue input of the plate temperature."),
+    ("opad_temperatures", "OPAD: temperatures of interest", "text", None,
+     "Comma-separated temperatures, e.g. 10, 45: time in contact, contacts made / broken and licks at each."),
+    ("opad_tolerance", "OPAD: at a temperature within ±", "float", (0.0, 100.0, 0.5, 2),
+     "The plate is at a temperature of interest when within this of it."),
 ]
 
 
@@ -193,6 +207,8 @@ ANALYSIS_SECTIONS = [
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "grid_cells", "contact_distance",
                                 "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
+    ("I/O measures", ["io_baseline_s", "io_deviation_sd", "opad_contact", "opad_lick", "opad_temperature",
+                      "opad_temperatures", "opad_tolerance"]),
     ("Test end", ["end_zone", "end_zone_s"]),
     ("Time bins", ["bin_length_s"]),
 ]

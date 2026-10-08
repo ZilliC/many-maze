@@ -38,9 +38,11 @@ Statements (``"type"``)::
     do       {"action": name, <action parameters>}
     stop     {"what": "handler"|"loop"|"procedure"|"all"|"test"}
     comment  {"text": "..."}
-    var      {"name": name, "value": expr, "keep": bool, "result": bool}  top level only.
-             keep: the value is kept between tests (``Project.variables``); result: a numeric variable saved as
-             a test result (``Test.result_variables``).
+    var      {"name": name, "value": expr, "keep": bool, "result": bool, "record": "end"|"changes"|"set"}
+             top level only. keep: the value is kept between tests (``Project.variables``); result: a numeric
+             variable's final value saved as a test result (``Test.result_variables``); record: "changes" / "set"
+             also log each numeric value, time-stamped, when it changes / every time it is set (I/O log entries of
+             kind "variable", analysed into mean, max, min, sum, count and the list of values).
 
 Any statement may carry ``"enabled": false`` to skip it. Expressions are strings (or numbers); conditions are
 expressions whose truth value is used. Text parameters may embed expressions in braces: ``"count = {count}"``.
@@ -79,9 +81,9 @@ from .examples import EXAMPLES
 from .expr import (FUNCTIONS, MAX_EXPR_LEN, MAX_SEQ, RANDOM_FUNCTIONS, Evaluator, ExprError, check_expr, compile_expr,
                    expr_names, interpolate)
 from .legacy import ACTIONS, TRIGGERS, Outputs, convert_rule, describe_rule, is_legacy_rule
-from .model import (describe, describe_event, describe_statement, iter_statements, new_procedure, new_statement,
-                    normalize_procedures, path_text, repeat_mode, spec_defaults, statement_at, statement_fields,
-                    wait_mode)
+from .model import (RECORD_MODES, describe, describe_event, describe_statement, iter_statements, new_procedure,
+                    new_statement, normalize_procedures, path_text, record_mode, repeat_mode, spec_defaults,
+                    statement_at, statement_fields, wait_mode)
 from .validate import declared_names, project_context, validate
 
 # the procedure editor's names from before the split

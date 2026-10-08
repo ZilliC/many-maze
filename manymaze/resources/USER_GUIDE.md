@@ -156,7 +156,9 @@ Ordered steps of zones/groups. Options: must begin at the first step (off = rota
 spontaneous alternation), other zones allowed between steps, both directions, overlapping, complete on entering or
 leaving the last step, time limit. Entering a step zone out of order is an error and ends the attempt. Measures:
 completed, attempts, incomplete, errors, completion %, latency to first, first/mean/min/max duration, mean time
-between, rate, total time in sequences, completed reversed.
+between, rate, total time in sequences, completed reversed, and the distance travelled during the completed
+sequences (from entering the first step to completing the last; total, mean, max, min) and the mean speed during
+them (total distance / total time in sequences).
 
 ## 4. Test schedule
 
@@ -531,7 +533,7 @@ range…) are reported in the live-test log without stopping the test.
 | **Do** *action* | Performs an action (see below). |
 | **Stop** | Exits this block, exits the loop, stops this procedure, stops all procedures, or ends the test. |
 | **Comment** | A note; does nothing. |
-| **Variable** | Declares a variable and its initial value (top level). *Keep the value between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list); *Save as a test result* stores its final value with the test, where it appears as a result measure. |
+| **Variable** | Declares a variable and its initial value (top level). *Keep the value between tests* carries it over to the next test (e.g. a session counter or a counterbalancing list); *Save as a test result* stores its final value with the test, where it appears as a result measure. *Record the value* — *Every time it changes* / *Every time it is set* — also records each value with its time, for its mean, max, min, sum, count and list of values (see *I/O results*). |
 
 Statements written at the top level of a procedure (outside any When) run in order from the start of the test,
 so a timed protocol is simply: *Wait 120 → Do tone 30 s → Wait 28 → Do shock 2 s → …*.
@@ -714,7 +716,8 @@ sending heartbeats, e.g. after a crash.
 
 Channels have a name (used by procedures), a kind (digital input, digital output, PWM output, analogue input,
 rotary encoder), a pin, *Invert* for active-low hardware, and options such as `pullup=0`, `debounce_ms=20`,
-`counts_per_rev=1024`, `cm_per_rev=50`, `scale=0.0049`, `period_ms=50`, `deadband=2`.
+`counts_per_rev=1024`, `cm_per_rev=50`, `scale=0.0049`, `period_ms=50`, `deadband=2`, and `role=shocker` /
+`role=speaker` / `role=light` to group an output's results with that device type.
 
 *Connect* opens the devices and shows every input and output live; *Toggle* switches an output, *Simulate*
 switches a simulated input, *Test* pulses the selected output for 0.5 s or plays a 1 kHz tone. pyserial
@@ -733,16 +736,60 @@ Enable it in **Experiment ▸ Hardware ▸ Touch screen…** (display, number of
 
 ### I/O results
 
-The I/O log is analysed into measures for each test (and for each time period):
+The I/O log is analysed into measures for each test (and for each time period; paused time is removed, and
+latencies of things that never happen follow *When an event never occurs, its latency is*):
 
-* **digital inputs** — activations, time on, latency to first activation, mean activation (duration),
-  activations per minute (e.g. lever presses, nose pokes, beam breaks, licks);
-* **analogue inputs** — mean (time-weighted), minimum, maximum;
-* **rotary encoders** — counts, revolutions, distance, maximum rate (counts/s), mean rate (rev/min);
-* **outputs, virtual switches, sounds and touch-screen stimuli** — times on, time on, latency to first on, plus
-  pellets dispensed for pellet dispensers and pulse trains / pulses for optogenetic outputs;
+* **digital inputs** — activations, time on, latency to first activation, mean / longest / shortest activation,
+  latency to first deactivation, activations per minute (e.g. lever presses, nose pokes, beam breaks, licks), and
+  **positive / negative reversals**: the number of times the input went from off to on (positive) and from on to
+  off (negative) in the period. An activation already under way when a period starts is clipped to the period and
+  is not a positive reversal (nor an activation) of that period;
+* **analogue inputs** — mean (time-weighted), minimum, maximum and the times of the maximum / minimum; the
+  **baseline** (time-weighted mean over the first *Analogue inputs: baseline period* seconds of the test or period),
+  its **SD**, the **end of the baseline** period, the **mean deviation from baseline** (mean |value − baseline|
+  after the baseline period), the **integral above / below baseline** (value × s, after the baseline period), the
+  time of the **first positive / negative deviation** (more than *a deviation is more than … baseline SD* SDs above
+  / below the baseline, after the baseline period) and of the **return to baseline** after it (back within that
+  band). Per zone (and zone group) visit: the mean over the visits of the maximum, the minimum, the time from the
+  entry to them, and the mean value at entry and at exit (`temp in Centre: mean max`, …). Values are held from one
+  logged sample to the next;
+* **rotary encoders** — counts, revolutions, distance, maximum rate (counts/s), mean rate (rev/min); **time
+  turning** (between two samples that differ and are at most 1 s apart; a change after a longer still spell
+  counts from one typical sample interval before it); **reversals** (the direction changes after turning back by
+  more than 10°, so a count of jitter is not one); with *counts_per_rev*: **degrees clockwise / anticlockwise**
+  (positive counts are clockwise; swap the encoder's A / B pins to change it), **clockwise / anticlockwise
+  rotations** (completed 360° turns within each run in one direction), **half and quarter rotations** (completed
+  180° / 90° turns per run, both directions), **minimum RPM** (the slowest whole second of turning) and **mean RPM
+  while turning** (revolutions turned in either direction / time turning);
+* **outputs, virtual switches, sounds and touch-screen stimuli** — times on, time on, latency to first on,
+  longest / shortest time on, latency to first off, plus pellets dispensed for pellet dispensers and pulse trains /
+  pulses for optogenetic outputs;
+* **shockers, speakers and lights** have their own measure groups, named after the device type: *Shocker
+  shock: shocks, time on, latency to first shock, longest / shortest / mean shock, latency to first off*;
+  *Speaker tone: sounds, time on, latency to first sound, longest / shortest / mean sound, …*; *Light house: times
+  on, time on, latency to first on, longest / shortest on, latency to first off* and, for dimmable (PWM) lights,
+  the time-weighted *mean level* (0–1). An output is a shocker when a shock action drove it, a speaker for the
+  audio actions, a light for *Light on / off*; any output channel can also be given the option `role=shocker`,
+  `role=speaker` or `role=light` in the I/O devices dialog;
+* **virtual switches** — distance travelled before the first activation (in the period; the whole distance if
+  never, or blank) and distance travelled while the switch is on;
 * **touches** — activations per area (channel `touch <area>`);
-* **result variables** — the final value of each *Save as a test result* variable.
+* **result variables** — the final value of each *Save as a test result* variable (`Variable: name`). A variable
+  whose *Record the value* is *Every time it changes* or *Every time it is set* also logs each numeric value with
+  its time (in the I/O log, as kind `variable`; *every time it changes* skips assignments of the same value, *every
+  time it is set* records every assignment — set, increment, append, loop counter; the initial value of the
+  declaration is not recorded); these give `Variable: name (count)`, `(mean)`, `(max)`, `(min)`, `(sum)` and
+  `(values)` (the list), for the test and per period (a value recorded exactly at a period boundary belongs to the
+  later period; one recorded at the very end of the test to the last one).
+
+**Operant plantar assay (OPAD).** In **Protocol ▸ Analysis ▸ I/O measures** name the digital input of the paw
+contact with the thermal plate (*OPAD: paw contact input*), the lickometer input and the analogue input of the
+plate temperature, and optionally the temperatures of interest (e.g. `10, 45`, each ± *OPAD: at a temperature
+within*). Measures: *OPAD: contacts made*, *contacts broken*, *time in contact*, *licks*, *non-lick contacts*
+(contacts during which the animal never licked), *mean temperature when contact broken* and the list of
+*temperatures when contact broken*; per temperature of interest (`OPAD at 45°: …`): time in contact while the plate
+was at that temperature, contacts made and broken and licks at that temperature. Channel names may be written
+`device/channel`.
 
 ### Projects from older versions
 
@@ -834,13 +881,24 @@ maps, group heat maps, results and statistics.
 * **Whole test** lists: **Visited zones** (in the order of their first entry) and **Investigated zones** (order of
   the first investigation), as comma-separated text.
 * **Per point**: mean / min / max distance, time near, approaches, latency, exploration time / bouts / latency, time
-  and distance moving towards / away, head oriented towards / away, mean head angle, head turns towards.
+  and distance moving towards / away, mean speed moving towards (distance travelled while moving towards / that
+  time), head oriented towards / away, mean head angle, head turns towards; with a tracked head, mean / max / min
+  head distance and the time the head was moving towards / away (the head's distance shrinking / growing while the
+  head moves faster than the mobility threshold). **Initial heading error**: the angle between the direction from
+  the first position to the position about 1 s later and the direction to the point (0–180°, as the water maze's);
+  **mean absolute heading error**: the mean angle between the direction of travel and the direction to the point
+  over the frames the animal is mobile. **X / Y**: the point's coordinates (in units, from the top-left of the
+  image). **Approximate time at point**: the time (from the start of the test or period) at which the animal was
+  closest to the point.
 * **Lines**: crossings in each direction, latency.
 * **Per other animal**: mean / min / max distance, contact time and count, nose-to-nose and nose-to-body contacts,
   time and episodes following, approaches / approached by.
 * **Keys** (scored behaviours): point – count, latency, rate; state and hold – count, duration, %, latency, mean &
-  longest bout, rate; optionally per zone.
-* **I/O** measures (inputs, outputs, encoders) and **result variables** (`Variable: name`) from procedures.
+  longest bout, rate, list of press durations (`1.5, 0.25, …`); both – distance travelled before the first press
+  (the whole distance if never pressed, or blank, as latencies); optionally per zone.
+* **I/O** measures (inputs, outputs, shockers, speakers, lights, encoders, analogue signals, virtual switches, OPAD)
+  and **result variables** (`Variable: name`, and their recorded values) from procedures — see *I/O results*; they
+  have their own *I/O* category in the measure chooser.
 
 **Test-specific**
 
@@ -849,6 +907,7 @@ maps, group heat maps, results and statistics.
 | Elevated plus / zero maze | open arm time %, open arm entries %, open/closed/total arm entries, head dips |
 | Y maze | arm entry sequence, total arm entries, spontaneous alternations, alternation %, same / alternate arm returns |
 | Radial arm maze | entries, different arms visited, working-memory errors, correct entries before first error, entries to visit all arms |
+| Radial arm place conditioning (RAPC) | type 1 errors, type 2 errors, total errors, door sequence, total arm entries, baited arms visited, correct entries before first error, entries to visit all baited arms |
 | T maze | first choice, choice latency, arm alternations |
 | Morris water maze | escape latency, found platform, path length to platform, platform crossings (vs other positions), mean / cumulative distance to platform (Gallagher proximity), initial heading error, target / opposite quadrant time %, wall hugging, search strategy |
 | Barnes maze | primary latency, primary errors, primary path length, total errors, escape-hole visits, hole sequence, search strategy (direct / serial / random) |
@@ -873,6 +932,14 @@ The novel object and the social side can be set per test (test variables) or as 
 * **Hole board**: head dips per hole and total, head-dip time, latency, holes explored, repeated dips, dips/min.
 * **Thermal gradient ring**: preferred sector, time-weighted mean sector, sector entries.
 * **Home cage** (food zone, hidden nest) and **activity wheel** (revolutions clockwise / anticlockwise, per minute).
+* **Radial arm place conditioning (RAPC)**: a radial arm maze with a door at the entrance of each arm (lines
+  *Door 1*, *Door 2*, … — their crossings are counted like any line) and the rewarded arms in the zone group
+  *Baited arms* (template parameter *Baited arms*, e.g. `1, 3, 5, 7`; edit the group to change them). Following the
+  usual radial-maze convention, a **type 1 error** (working memory) is a re-entry into a baited arm already entered
+  in the test (or period) and a **type 2 error** (reference memory) is any entry into an arm that is not baited
+  (re-entries included), so each entry is at most one error. The **door sequence** lists the doors (arm numbers)
+  the animal went through, in order, e.g. `1 4 2 1`. Without a *Baited arms* group every arm is baited.
+* **Operant plantar assay (OPAD)**: measures from the I/O log — see *I/O results*.
 
 ### Time periods
 

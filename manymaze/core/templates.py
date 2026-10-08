@@ -175,6 +175,28 @@ def radial_arm_maze(x, y, w, h, n_arms=8, arm_length_cm=35.0, arm_width_cm=10.0,
     return app
 
 
+def radial_arm_place_conditioning(x, y, w, h, n_arms=8, arm_length_cm=35.0, arm_width_cm=10.0,
+                                  centre_diameter_cm=30.0, baited_arms="1, 3, 5, 7") -> Apparatus:
+    """Radial arm place conditioning (RAPC): a radial arm maze with a door at the entrance of each arm ("Door N",
+    lines) and the arms that hold the reward in the "Baited arms" group (baited_arms: arm numbers)."""
+    app = radial_arm_maze(x, y, w, h, n_arms, arm_length_cm, arm_width_cm, centre_diameter_cm)
+    app.name, app.template = "Radial arm place conditioning", "rapc"
+    s = app.px_per_cm
+    cx, cy = x + w / 2, y + h / 2
+    r_c, half = centre_diameter_cm * s / 2, arm_width_cm * s / 2
+    for i in range(n_arms):
+        a = math.radians(-90 + i * 360 / n_arms)
+        ux, uy = math.cos(a), math.sin(a)
+        dx, dy = cx + ux * r_c, cy + uy * r_c
+        app.lines.append(Line(f"Door {i + 1}", dx - uy * half, dy + ux * half, dx + uy * half, dy - ux * half))
+    nums = []
+    for part in str(baited_arms).replace(",", " ").split():
+        if part.isdigit() and 1 <= int(part) <= n_arms and int(part) not in nums:
+            nums.append(int(part))
+    app.groups.append(ZoneGroup("Baited arms", [f"Arm {k}" for k in nums]))
+    return app
+
+
 def morris_water_maze(x, y, w, h, pool_diameter_cm=150.0, platform_diameter_cm=10.0, platform_quadrant="NE",
                       platform_distance_fraction=0.5) -> Apparatus:
     """Water maze with four quadrants and a platform in the given quadrant."""
@@ -530,6 +552,11 @@ TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
     TemplateInfo("radial_arm_maze", "Radial arm maze", radial_arm_maze,
                  "Central platform with N arms; computes working/reference memory errors.",
                  {"n_arms": 8, "arm_length_cm": 35.0, "arm_width_cm": 10.0, "centre_diameter_cm": 30.0}, 600),
+    TemplateInfo("rapc", "Radial arm place conditioning (RAPC)", radial_arm_place_conditioning,
+                 "Radial arm maze with a door on each arm and baited arms; type 1 (re-entry into a baited arm) and "
+                 "type 2 (entry into an unbaited arm) errors and the door sequence.",
+                 {"n_arms": 8, "arm_length_cm": 35.0, "arm_width_cm": 10.0, "centre_diameter_cm": 30.0,
+                  "baited_arms": "1, 3, 5, 7"}, 600),
     TemplateInfo("water_maze", "Morris water maze", morris_water_maze,
                  "Circular pool with quadrants, hidden platform and annulus zones.",
                  {"pool_diameter_cm": 150.0, "platform_diameter_cm": 10.0, "platform_quadrant": "NE",
