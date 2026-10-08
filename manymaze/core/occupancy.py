@@ -118,6 +118,8 @@ def occupancy(track: Track, app: Apparatus, s: AnalysisSettings, part: str | Non
             zones[z.name] = z.shape.contains(*pos("centre"))
         else:
             zones[z.name] = z.shape.contains(*pos(rule))
+        if z.entry_orientation_deg and z.entry_orientation_deg > 0 and not part:
+            zones[z.name] = oriented_visits(zones[z.name], z, *pos("centre"), track.angle)
     for z in excl:
         others = [o for o in app.zones if o is not z and o not in excl and not o.hidden
                   and o.shape.area() < z.shape.area()]
@@ -140,6 +142,26 @@ def occupancy(track: Track, app: Apparatus, s: AnalysisSettings, part: str | Non
                 hz_[zn] = hz_[zn] & ~hm
         head_memb = app.combine_groups(hz_, (n,))
     return memb, head_memb, hidden
+
+
+def oriented_visits(inside: np.ndarray, z, x: np.ndarray, y: np.ndarray, angle_deg: np.ndarray) -> np.ndarray:
+    """Zone membership where each visit only starts at the first frame the animal is oriented towards zone z: its
+    body orientation (angle_deg, forward filled) within z.entry_orientation_deg of the direction from its centre
+    (x, y) to the zone centre. A visit in which it never is does not count. Without any orientation the rule
+    cannot apply and inside is returned unchanged."""
+    ang = ffill(np.asarray(angle_deg, float))
+    if not np.isfinite(ang).any():
+        return inside
+    zx, zy = z.shape.centroid()
+    with np.errstate(invalid="ignore"):
+        brg = np.degrees(np.arctan2(zy - y, zx - x))
+        diff = np.abs((ang - brg + 180.0) % 360.0 - 180.0)
+        ok = ~np.isfinite(diff) | (diff <= float(z.entry_orientation_deg))
+    out = np.asarray(inside, bool).copy()
+    for a, b in runs(out):
+        hit = np.flatnonzero(ok[a:b])
+        out[a:a + (hit[0] if len(hit) else b - a)] = False
+    return out
 
 
 def _hidden_frames(track: Track, app: Apparatus, s: AnalysisSettings, n: int) -> dict[str, np.ndarray]:

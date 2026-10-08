@@ -526,6 +526,7 @@ def _zones(res, p: _Period):
                   if (v := p.eps(P.visits_mask(zn, P.memb[zn]), entries=True))]
         first_zone = zone_names[min(firsts)[1]] if firsts else None
         res["First zone entered"] = first_zone or "None"
+        _zone_lists(res, p, zone_names)
     total = float(k.step.sum())
     for zn in p.memb:
         fm = P.visits_mask(zn, P.memb[zn])  # whole test, short visits removed
@@ -584,8 +585,7 @@ def _zones(res, p: _Period):
             res[f"{zn}: path efficiency to first entry"] = math.nan
         zobj = app.zone(zn)
         if zobj is not None and zn not in grid_cells:
-            dz_full = P.cached(("dist", zn), lambda z=zobj, m=P.memb[zn]: np.where(
-                m, 0.0, z.shape.distance_to_edge(K.x, K.y) * K.scale))
+            dz_full = P.cached(("dist", zn), lambda z=zobj, m=P.memb[zn]: np.where(m, 0.0, _edge(P, z)))
             dzs = dz_full[p.sl]
             res[f"{zn}: mean distance from zone ({u})"] = _r(np.nanmean(dzs) if np.isfinite(dzs).any() else math.nan,
                                                              2)
@@ -601,6 +601,8 @@ def _zones(res, p: _Period):
             diff = _angle_diff(np.arctan2(zy - hyf, zx - hxf), ang_body)
             head_in = p.head_memb[zn] if p.head_memb is not None and zn in p.head_memb else np.zeros(p.n, bool)
             res[f"{zn}: time facing (s)"] = _r(dur[(diff <= s.exploration_facing_deg) & ~head_in & ~p.hid_any].sum())
+        if zn not in grid_cells:
+            _zone_more(res, p, zn, fm, vm, visits, vdur)
     for hz in p.hidden:
         res[f"{hz}: time hidden (s)"] = _r(dur[p.hidden[hz]].sum())
     if app.zones:
@@ -623,6 +625,331 @@ def _transitions(P: _Prepared) -> np.ndarray:
         bc = np.cumsum(P.breaks)
         ch &= bc[idx[1:]] == bc[idx[:-1]]
     return idx[1:][ch]
+
+
+# ---------------------------------------------------------------------------
+# more zone measures: visited / investigated zone lists, investigation, hidden-zone partial exits, head, distance
+# to the border, heading towards the zone, turning, CIPL and line crossings in the zone
+
+def _list_text(values) -> str:
+    """A list result (e.g. visit durations): comma-separated values, as text so that statistics skip it."""
+    return ", ".join(format(_r(v), ".10g") for v in values)
+
+
+def _stats3(v: np.ndarray) -> tuple[float, float, float]:
+    """(mean, max, min) of the finite values (NaN if none)."""
+    v = v[np.isfinite(v)]
+    return (float(v.mean()), float(v.max()), float(v.min())) if len(v) else (math.nan,) * 3
+
+
+def _edge(P: _Prepared, z) -> np.ndarray:
+    """Whole test: distance of the centre from the edge of zone z (units), inside or outside."""
+    K = P.k
+    return P.cached(("edge", z.name), lambda: z.shape.distance_to_edge(K.x, K.y) * K.scale)
+
+
+def _head(P: _Prepared):
+    """Whole test: (head x, head y in px forward filled, distance the head travels into each frame in units), or
+    None without a tracked head. The head path is smoothed like the centre's; nothing is counted across a pause."""
+    def make():
+        tr, K = P.track, P.k
+        if not tr.has_head():
+            return None
+        hx, hy = ffill(tr.hx), ffill(tr.hy)
+        win = max(1, int(round(P.s.speed_smoothing_s / max(tr.dt, 1e-6))))
+        ux = seg_moving_average(hx, win, P.breaks) * K.scale
+        uy = seg_moving_average(hy, win, P.breaks) * K.scale
+        step = np.zeros(len(hx))
+        if len(hx) > 1:
+            step[1:] = np.nan_to_num(np.hypot(np.diff(ux), np.diff(uy)))
+            step[P.breaks] = 0.0
+        return hx, hy, step
+    return P.cached("head", make)
+
+
+def _investigation(P: _Prepared, z) -> np.ndarray:
+    """Whole test: frames in which the animal investigates zone z - its head is in the zone, or within the zone's
+    investigation distance and (when the body orientation is tracked) pointing at it (within the exploration
+    facing angle of the direction to the zone centre); never while hidden. Bouts shorter than the minimum entry
+    duration are ignored."""
+    def make():
+        K, s = P.k, P.s
+        H = _head(P)
+        hx, hy = (H[0], H[1]) if H is not None else (K.x, K.y)
+        inside = z.shape.contains(hx, hy)
+        with np.errstate(invalid="ignore"):
+            inv = inside | ((z.shape.distance_to_edge(hx, hy) <= z.investigation_distance_cm / P.app.scale)
+                            & np.isfinite(hx))
+            ang = ffill(P.track.angle)
+            if np.isfinite(ang).any():
+                zx, zy = z.shape.centroid()
+                diff = _angle_diff(np.arctan2(zy - hy, zx - hx), np.radians(ang))
+                inv &= inside | ~np.isfinite(diff) | (diff <= s.exploration_facing_deg)
+        return drop_short_runs(inv & ~P.hid_any, K.t, K.dur, s.entry_min_duration_s, value=True)
+    return P.cached(("inv", z.name), make)
+
+
+def _investigation_firsts(p: _Period) -> list[tuple[float, str]]:
+    """(time of the first investigation, zone) of the investigation zones investigated in the period, in order."""
+    P = p.P
+
+    def make():
+        out = []
+        for z in P.app.zones:
+            if z.investigation_distance_cm > 0 and z.name in P.memb:
+                ep = p.eps(_investigation(P, z))
+                if ep:
+                    out.append((float(p.t[ep[0][0]]), z.name))
+        return sorted(out, key=lambda e: e[0])
+    return P.cached(("inv_firsts", p.i0, p.i1), make)
+
+
+def _zone_lists(res, p: _Period, zone_names: list[str]):
+    """Visited zones (in the order of their first entry) and investigated zones (order of first investigation)."""
+    P = p.P
+    firsts = []
+    for zn in zone_names:
+        v = p.eps(P.visits_mask(zn, P.memb[zn]), entries=True)
+        if v:
+            firsts.append((float(p.t[v[0][0]]), zn))
+    res["Visited zones"] = ", ".join(zn for _, zn in sorted(firsts, key=lambda e: e[0]))
+    if any(z.investigation_distance_cm > 0 for z in P.app.zones):
+        res["Investigated zones"] = ", ".join(zn for _, zn in _investigation_firsts(p))
+
+
+def _zone_more(res, p: _Period, zn: str, fm: np.ndarray, vm: np.ndarray, visits: list, vdur: list):
+    """The zone measures beyond time / entries / distance (fm: whole-test visits, vm: in the zone in the period,
+    visits: entries in the period, vdur: their durations)."""
+    z = p.P.app.zone(zn)  # None for a zone group
+    res[f"{zn}: visit durations (s)"] = _list_text(vdur)
+    if z is not None and z.investigation_distance_cm > 0:
+        _zone_investigation(res, p, z)
+    if z is not None and z.hidden:
+        _zone_partial_exits(res, p, z)
+    _zone_head(res, p, zn, z)
+    if z is not None:
+        _zone_border(res, p, z, vm)
+        _zone_heading(res, p, z, vm)
+    _zone_turning(res, p, zn, vm)
+    if z is not None:
+        _zone_cipl(res, p, z, visits)
+    _zone_lines(res, p, zn, fm)
+
+
+def _zone_investigation(res, p: _Period, z):
+    """Investigation of an investigation zone as separate measures (see _investigation)."""
+    P, K, k, dur, u, zn = p.P, p.P.k, p.k, p.dur, p.P.app.unit, z.name
+    inv_full = _investigation(P, z)
+    inv = inv_full[p.sl]
+    bouts = p.eps(inv_full)
+    bd = [float(dur[a:b].sum()) for a, b in bouts]
+    ti = float(dur[inv].sum())
+    res[f"{zn}: investigation bouts"] = len(bouts)
+    res[f"{zn}: time investigating (s)"] = _r(ti)
+    res[f"{zn}: latency to first investigation (s)"] = _r(p.lat(bouts))
+    res[f"{zn}: latency to end of first investigation (s)"] = _r(
+        float(p.t[bouts[0][1] - 1] + dur[bouts[0][1] - 1] - p.t0) if bouts else p.never)
+    firsts = _investigation_firsts(p)
+    res[f"{zn}: was first zone investigated"] = "Yes" if firsts and firsts[0][1] == zn else "No"
+    res[f"{zn}: longest investigation bout (s)"] = _r(max(bd, default=0.0))
+    res[f"{zn}: shortest investigation bout (s)"] = _r(min(bd, default=0.0))
+    res[f"{zn}: mean investigation bout (s)"] = _r(sum(bd) / len(bd) if bd else 0.0)
+    res[f"{zn}: investigation durations (s)"] = _list_text(bd)
+    di = float(k.step[inv].sum())
+    res[f"{zn}: distance while investigating ({u})"] = _r(di, 2)
+    if bouts:
+        j = bouts[0][0]
+        d_first = float(k.step[1:j + 1].sum()) if j > 0 else 0.0
+    else:
+        d_first = float(k.step.sum()) if P.s.latency_if_never == "duration" else math.nan
+    res[f"{zn}: distance before first investigation ({u})"] = _r(d_first, 2)
+    res[f"{zn}: mean speed while investigating ({u}/s)"] = _r(di / ti if ti > 0 else math.nan)
+    res[f"{zn}: time mobile while investigating (s)"] = _r(dur[inv & k.mobile].sum())
+    res[f"{zn}: time immobile while investigating (s)"] = _r(dur[inv & ~k.mobile].sum())
+    res[f"{zn}: immobile episodes while investigating"] = len(p.eps(inv_full & ~K.mobile))
+    if np.isfinite(k.motion_pct).any():
+        res[f"{zn}: time freezing while investigating (s)"] = _r(dur[inv & k.freezing].sum())
+        res[f"{zn}: freezing episodes while investigating"] = len(p.eps(inv_full & K.freezing))
+
+
+def _zone_partial_exits(res, p: _Period, z):
+    """Hidden zone: a partial exit is a stretch in which the animal is seen between two times it is hidden in the
+    zone without going further from the zone than the hidden-zone distance (e.g. peeking out of a nest)."""
+    P, zn = p.P, z.name
+
+    def make():
+        hm = P.hidden.get(zn)
+        out = np.zeros(len(P.k.t), bool)
+        if hm is None:
+            return out
+        margin = (P.s.hidden_zone_margin if P.s.hidden_zone_margin and P.s.hidden_zone_margin > 0
+                  else 0.5 * math.sqrt(max(z.shape.area(), 1.0)) * P.app.scale)
+        near = P.cached(("cin", zn), lambda: z.shape.contains(P.k.x, P.k.y)) | (_edge(P, z) <= margin)
+        hr = runs(hm)
+        for (_, e0), (s1, _) in zip(hr[:-1], hr[1:]):
+            if near[e0:s1].all() and not P.breaks[e0:s1 + 1].any():
+                out[e0:s1] = True
+        return out
+    part = P.cached(("partial", zn), make)
+    res[f"{zn}: partial exits"] = len(p.eps(part))
+    res[f"{zn}: time partially exited (s)"] = _r(p.dur[part[p.sl]].sum())
+
+
+def _zone_head(res, p: _Period, zn: str, z):
+    """Head measures: first head exit, distance travelled by the head in the zone, time the head is in while the
+    centre is out, head distance from the zone and from its border when inside."""
+    P, K, dur, u = p.P, p.P.k, p.dur, p.P.app.unit
+    H = _head(P)
+    if H is None or P.head_memb is None or zn not in P.head_memb:
+        return
+    hfm = P.visits_mask(("head", zn), P.head_memb[zn])
+    hin = hfm[p.sl]
+    ends = P.cached(("head_exits", zn), lambda: np.array([b for _, b in runs(hfm)], int))
+    exits = ends[(ends > p.i0) & (ends < p.i1)]
+    res[f"{zn}: latency to first head exit (s)"] = _r(float(K.t[exits[0] - 1] + K.dur[exits[0] - 1] - p.t0)
+                                                     if len(exits) else p.never)
+    res[f"{zn}: head distance ({u})"] = _r(H[2][p.sl][hin].sum(), 2)
+    cin = P.cached(("occ", "centre"), lambda: occupancy(P.track, P.app, P.s, part="centre")[0])
+    if zn in cin:
+        res[f"{zn}: time head in zone with centre outside (s)"] = _r(dur[hin & ~cin[zn][p.sl]].sum())
+    if z is None:
+        return
+    hx, hy = H[0], H[1]
+    h_in = P.cached(("hin", zn), lambda: z.shape.contains(hx, hy))[p.sl]
+    h_edge = P.cached(("hedge", zn), lambda: z.shape.distance_to_edge(hx, hy) * K.scale)[p.sl]
+    seen = ~p.hid_any
+    mean = np.where(h_in, 0.0, h_edge)[seen]
+    res[f"{zn}: mean head distance from zone ({u})"] = _r(np.nanmean(mean) if np.isfinite(mean).any()
+                                                          else math.nan, 2)
+    _, mx, mn = _stats3(h_edge[~h_in & seen])
+    res[f"{zn}: max head distance from zone ({u})"] = _r(mx, 2)
+    res[f"{zn}: min head distance from zone when outside ({u})"] = _r(mn, 2)
+    mean, mx, mn = _stats3(h_edge[h_in & seen])
+    res[f"{zn}: mean head distance to border when inside ({u})"] = _r(mean, 2)
+    res[f"{zn}: max head distance to border when inside ({u})"] = _r(mx, 2)
+    res[f"{zn}: min head distance to border when inside ({u})"] = _r(mn, 2)
+
+
+def _zone_border(res, p: _Period, z, vm: np.ndarray):
+    """Distance of the centre from the zone border while the animal is in the zone (and its centre inside it)."""
+    P, zn, u = p.P, z.name, p.P.app.unit
+    c_in = P.cached(("cin", zn), lambda: z.shape.contains(P.k.x, P.k.y))[p.sl]
+    mean, mx, mn = _stats3(_edge(P, z)[p.sl][vm & c_in & ~p.hid_any])
+    res[f"{zn}: mean distance to border when inside ({u})"] = _r(mean, 2)
+    res[f"{zn}: max distance to border when inside ({u})"] = _r(mx, 2)
+    res[f"{zn}: min distance to border when inside ({u})"] = _r(mn, 2)
+
+
+def _zone_heading_arrays(P: _Prepared, z) -> dict:
+    """Whole test: change of the (smoothed) distance from the zone into each frame (0 across a pause), and the
+    signed heading error (direction of travel minus direction to the zone centre, -180..180 deg; positive =
+    clockwise of the zone on screen)."""
+    K = P.k
+    with np.errstate(invalid="ignore"):
+        px, py = K.ux / K.scale, K.uy / K.scale
+        d = np.where(z.shape.contains(px, py), 0.0, z.shape.distance_to_edge(px, py) * K.scale)
+        dd = np.zeros(len(d))
+        if len(d) > 1:
+            dd[1:] = np.nan_to_num(np.diff(d))
+            dd[P.breaks] = 0.0
+        zx, zy = z.shape.centroid()
+        brg = np.degrees(np.arctan2(zy * K.scale - K.uy, zx * K.scale - K.ux))
+        err = (K.heading - brg + 180.0) % 360.0 - 180.0
+    return {"dd": dd, "err": err}
+
+
+def _zone_heading(res, p: _Period, z, vm: np.ndarray):
+    """Getting closer / further away, moving towards / away, heading errors and orientation towards the zone."""
+    P, s, k, dur, zn = p.P, p.P.s, p.k, p.dur, z.name
+    A = P.cached(("zheading", zn), lambda: _zone_heading_arrays(P, z))
+    dd, err = A["dd"][p.sl], A["err"][p.sl]
+    out = ~vm & ~p.hid_any
+    tol = s.exploration_facing_deg
+    res[f"{zn}: time getting closer (s)"] = _r(dur[out & (dd < -1e-9)].sum())
+    res[f"{zn}: time getting further away (s)"] = _r(dur[out & (dd > 1e-9)].sum())
+    with np.errstate(invalid="ignore"):
+        ae = np.abs(err)
+        res[f"{zn}: time moving towards (s)"] = _r(dur[out & k.mobile & (ae <= tol)].sum())
+        res[f"{zn}: time moving away (s)"] = _r(dur[out & k.mobile & (ae >= 180.0 - tol)].sum())
+    moving = ae[out & k.mobile]
+    res[f"{zn}: mean absolute heading error (deg)"] = _r(np.nanmean(moving) if np.isfinite(moving).any()
+                                                         else math.nan, 1)
+    # initial heading error: direction from the first position to the position ~1 s later vs direction to the zone
+    signed = math.nan
+    ok = np.flatnonzero(np.isfinite(k.ux))
+    if len(ok) > 2:
+        i0 = ok[0]
+        j = min(max(int(np.searchsorted(p.t, p.t[i0] + 1.0)), i0 + 1), p.n - 1)
+        zx, zy = z.shape.centroid()
+        hdx, hdy = k.ux[j] - k.ux[i0], k.uy[j] - k.uy[i0]
+        tdx, tdy = zx * k.scale - k.ux[i0], zy * k.scale - k.uy[i0]
+        start_in = bool(z.shape.contains(np.array([k.ux[i0] / k.scale]), np.array([k.uy[i0] / k.scale]))[0])
+        if not start_in and math.hypot(hdx, hdy) > 1e-9 and math.hypot(tdx, tdy) > 0:
+            signed = (math.degrees(math.atan2(hdy, hdx) - math.atan2(tdy, tdx)) + 180.0) % 360.0 - 180.0
+    res[f"{zn}: initial heading error (deg)"] = _r(signed, 1)
+    res[f"{zn}: initial absolute heading error (deg)"] = _r(abs(signed), 1)
+    if p.facing is not None:
+        def orient():
+            K, (zx, zy) = P.k, z.shape.centroid()
+            with np.errstate(invalid="ignore"):
+                return _angle_diff(np.arctan2(zy - K.y, zx - K.x), np.radians(ffill(P.track.angle))) <= tol
+        towards = P.cached(("oriented", zn), orient)[p.sl]
+        res[f"{zn}: time oriented towards zone centre when inside (s)"] = _r(dur[vm & ~p.hid_any & towards].sum())
+
+
+def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray):
+    """Absolute turn angle (direction of travel, as the whole-test measure) and absolute head turn angle (body
+    orientation) while in the zone; nothing across a pause."""
+    s, k = p.P.s, p.k
+    brk = np.asarray(k.breaks, bool) if k.breaks is not None else np.zeros(p.n, bool)
+    seg_id = np.cumsum(brk)
+    h = k.heading
+    mi = np.flatnonzero(np.isfinite(h) & (k.speed > max(s.mobility_threshold, 1e-9)))
+    turn = 0.0
+    if len(mi) > 1:
+        d = np.abs((np.diff(h[mi]) + 180) % 360 - 180)
+        keep = (seg_id[mi[1:]] == seg_id[mi[:-1]]) & vm[mi[1:]] & vm[mi[:-1]]
+        turn = float(d[keep].sum())
+    res[f"{zn}: absolute turn angle (deg)"] = _r(turn, 1)
+    ang = p.track.angle
+    if np.isfinite(ang).sum() > 2:
+        d = np.abs((np.diff(ang) + 180) % 360 - 180)
+        keep = np.isfinite(d) & ~brk[1:] & vm[1:] & vm[:-1]
+        res[f"{zn}: absolute head turn angle (deg)"] = _r(float(d[keep].sum()), 1)
+
+
+def _zone_cipl(res, p: _Period, z, visits: list):
+    """Corrected integrated path length (Gallagher): the distance from the zone sampled every second from the
+    start of the period to the first entry (or the end of the period), minus the same sum for an ideal path
+    straight to the zone at the animal's mean speed over that time."""
+    P, k, zn = p.P, p.k, z.name
+    cipl = math.nan
+    ok = np.flatnonzero(np.isfinite(k.ux))
+    stop = visits[0][0] if visits else p.n
+    if len(ok) and stop > ok[0]:
+        i0 = ok[0]
+        dz = P.cached(("dist", zn), lambda: np.where(P.memb[zn], 0.0, _edge(P, z)))[p.sl]
+        t_stop = float(p.t[stop]) if stop < p.n else p.t0 + p.T
+        span = t_stop - float(p.t[i0])
+        idx = np.searchsorted(p.t, p.t[i0] + np.arange(0.0, span, 1.0), "right") - 1
+        d = dz[np.clip(idx, i0, stop - 1)]
+        d = d[np.isfinite(d)]
+        v = float(k.step[i0 + 1:stop].sum()) / span if span > 0 else 0.0
+        if len(d) and v > 0:  # the ideal path, sampled over the same seconds, stays at 0 once it arrives
+            ideal = np.maximum(float(d[0]) - v * np.arange(len(d)), 0.0)
+            cipl = float(d.sum() - ideal.sum())
+    res[f"{zn}: corrected integrated path length ({p.P.app.unit}·s)"] = _r(cipl, 1)
+
+
+def _zone_lines(res, p: _Period, zn: str, fm: np.ndarray):
+    """Crossings of any line while the animal is in the zone (in it before and after the crossing)."""
+    P = p.P
+    N = len(P.k.t)
+    if not P.app.lines or N < 2:
+        return
+    j = np.arange(1, N)
+    inside = fm[1:] & fm[:-1] & (j >= p.i0) & (j < p.i1)
+    res[f"{zn}: line crossings"] = int(sum(int((_line_hits(P, ln)[0] & inside).sum()) for ln in P.app.lines))
 
 
 def _points(res, p: _Period):
@@ -664,13 +991,9 @@ def _lines(res, p: _Period):
     N = len(K.t)
     if not P.app.lines or N < 2:
         return
-    xy = P.cached("xy", lambda: np.column_stack([K.x, K.y]))
     n_cross = 0
     for ln in P.app.lines:
-        def cross(ln=ln):
-            hit, sign = segments_intersect(xy[:-1], xy[1:], (ln.x1, ln.y1), (ln.x2, ln.y2))
-            return np.asarray(hit, bool) & ~P.breaks[1:], np.asarray(sign)
-        hit, sign = P.cached(("line", ln.name), cross)
+        hit, sign = _line_hits(P, ln)
         j = np.arange(1, N)  # frame each segment ends in
         hit = hit & (j >= p.i0) & (j < p.i1)
         res[f"{ln.name}: crossings"] = int(hit.sum())
@@ -680,6 +1003,18 @@ def _lines(res, p: _Period):
         res[f"{ln.name}: latency to first crossing (s)"] = _r(float(K.t[idx[0] + 1] - p.t0) if len(idx) else p.never)
         n_cross += int(hit.sum())
     res["Total line crossings"] = n_cross
+
+
+def _line_hits(P: _Prepared, ln) -> tuple[np.ndarray, np.ndarray]:
+    """Whole test: (crossed, direction sign) of line ln for each step between consecutive frames (none across a
+    pause); step i ends in frame i + 1."""
+    K = P.k
+
+    def cross():
+        xy = P.cached("xy", lambda: np.column_stack([K.x, K.y]))
+        hit, sign = segments_intersect(xy[:-1], xy[1:], (ln.x1, ln.y1), (ln.x2, ln.y2))
+        return np.asarray(hit, bool) & ~P.breaks[1:], np.asarray(sign)
+    return P.cached(("line", ln.name), cross)
 
 
 def _grids_and_sequences(res, p: _Period):

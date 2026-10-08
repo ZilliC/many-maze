@@ -363,7 +363,9 @@ def protocol_report(project: Project, path) -> Path:
                  ENTRY_RULE_TEXT.get(z.entry_rule, z.entry_rule),
                  ", ".join(x for x, on in (("hidden", z.hidden), ("moveable", z.moveable),
                                            (f"investigate {z.investigation_distance_cm:g} cm",
-                                            z.investigation_distance_cm > 0)) if on))
+                                            z.investigation_distance_cm > 0),
+                                           (f"entry facing the zone (±{z.entry_orientation_deg:g}°)",
+                                            z.entry_orientation_deg > 0)) if on))
                 for z in app.zones]))
         if app.groups:
             out.append(table(("Zone group", "Zones", "Excluding"),

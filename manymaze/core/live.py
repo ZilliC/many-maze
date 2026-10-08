@@ -88,6 +88,8 @@ class LiveOccupancy:
         self._last: Detection | None = None
         self._hidden: str | None = None  # hidden zone of the current lost episode
         self._lost = False
+        self._oriented: dict[str, bool] = {}  # zones entered with the orientation rule (entry_orientation_deg)
+        self._angle = math.nan  # last known body orientation
 
     def _pos(self, d: Detection, part: str):
         if part == "head" and math.isfinite(d.hx):
@@ -114,6 +116,8 @@ class LiveOccupancy:
         if L is None:
             return {}, {}
         s = self.s
+        if math.isfinite(L.angle):
+            self._angle = L.angle
         zones: dict[str, bool] = {}
         excl = []
         for z in app.zones:
@@ -138,6 +142,8 @@ class LiveOccupancy:
                 zones[z.name] = bool(z.shape.contains(*self._pos(L, "centre"))[0])
             else:
                 zones[z.name] = bool(z.shape.contains(*self._pos(L, rule))[0])
+            if z.entry_orientation_deg and z.entry_orientation_deg > 0:
+                zones[z.name] = self._orientation_rule(z, zones[z.name], L)
         for z in excl:
             for o in app.zones:
                 if o is not z and o not in excl and not o.hidden and o.shape.area() < z.shape.area() and zones[o.name]:
@@ -155,6 +161,20 @@ class LiveOccupancy:
             head = {k: bool(np.asarray(v).ravel()[0]) for k, v in
                     app.combine_groups({k: np.array([v]) for k, v in hz.items()}, (1,)).items()}
         return memb, head
+
+    def _orientation_rule(self, z, inside: bool, L: Detection) -> bool:
+        """A visit starts once the animal faces the zone (as occupancy.oriented_visits)."""
+        was = self._oriented.get(z.name, False)
+        if not inside:
+            now = False
+        elif was or not math.isfinite(self._angle):
+            now = True
+        else:
+            zx, zy = z.shape.centroid()
+            brg = math.degrees(math.atan2(zy - L.y, zx - L.x))
+            now = abs((self._angle - brg + 180.0) % 360.0 - 180.0) <= z.entry_orientation_deg
+        self._oriented[z.name] = now
+        return now
 
     def _hidden_zone(self, d: Detection) -> str | None:
         if d.detected or self._last is None:
