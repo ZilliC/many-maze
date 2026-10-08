@@ -304,9 +304,10 @@ def test_route_to_zone_measures():
     assert r["Goal: latency to first entry (s)"] == pytest.approx(6.0)
     assert r["Goal: distance before first entry (px)"] == pytest.approx(60.0)
     assert r["Goal: path efficiency to first entry"] == pytest.approx(1.0)
-    # 0 inside the zone, else the distance to its nearest edge
-    d = np.where((x >= 60) & (x <= 80), 0.0, np.where(x < 60, 60 - x, x - 80))
-    assert r["Goal: mean distance from zone (px)"] == pytest.approx(d.mean(), abs=0.01)
+    # as ANY-maze: the mean distance to the zone's nearest edge over the frames outside it
+    out = (x < 60) | (x >= 80)  # the rectangle is half-open: x = 80 is outside (at 0 from its edge)
+    d = np.where(x < 60, 60 - x, x - 80)
+    assert r["Goal: mean distance from zone (px)"] == pytest.approx(d[out].mean(), abs=0.01)
     assert r["Far: distance before first entry (px)"] == pytest.approx(r["Total distance (px)"])
     assert math.isnan(r["Far: path efficiency to first entry"])
     # a detour halves the efficiency

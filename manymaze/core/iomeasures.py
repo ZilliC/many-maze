@@ -240,17 +240,7 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
     total_on = sum(lens)
     ty = log.types[key]
     group = log.group(key)
-    if group == "shocker":
-        g, n_name, what = f"Shocker {lab}", "shocks", "shock"
-    elif group == "speaker":
-        g, n_name, what = f"Speaker {lab}", "sounds", "sound"
-    elif group == "dipper":
-        g, n_name, what = f"Dipper {lab}", "presentations", "presentation"
-    elif group == "dripper":
-        g, n_name, what = f"Dripper {lab}", "drops", "drop"
-    else:
-        g = f"Light {lab}" if group == "light" else lab
-        n_name, what = "times on", None
+    g, n_name, what = _output_names(log, key, lab)
     res[f"{g}: {n_name}"] = len(onsets)
     res[f"{g}: time on (s)"] = _r(total_on)
     if what:
@@ -262,7 +252,9 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: latency to first on (s)"] = _r(onsets[0] - t0 if onsets else never)
         res[f"{g}: longest on (s)"] = _r(max(lens, default=0.0))
         res[f"{g}: shortest on (s)"] = _r(min(lens, default=0.0))
+        res[f"{g}: mean on (s)"] = _r(total_on / len(spans) if spans else 0.0)
     res[f"{g}: latency to first off (s)"] = _r(offsets[0] - t0 if offsets else never)
+    res[f"{g}: activations per minute"] = _r(len(onsets) / (T / 60) if T > 0 else math.nan)
     if group == "light" and any(0 < v < 1 for _t, v in ev):
         seg = _steps([(t, min(max(v, 0.0), 1.0)) for t, v in ev], t0, t1)
         tot = sum(b - a for a, b, _ in seg)
@@ -289,6 +281,21 @@ def _output(res, log, key, lab, ev, t0, t1, T, never):
                   and e.get("train_start") and t0 <= float(e.get("t", 0)) <= t1]
         res[f"{g}: pulse trains"] = len(trains)
         res[f"{g}: pulses"] = len(onsets)
+
+
+def _output_names(log, key, lab) -> tuple[str, str, str | None]:
+    """(measure prefix, name of the count, name of one activation or None) of an output: shockers, speakers,
+    dippers, drippers and lights are named after their group ("Shocker <channel>", "shocks", "shock")."""
+    group = log.group(key)
+    if group == "shocker":
+        return f"Shocker {lab}", "shocks", "shock"
+    if group == "speaker":
+        return f"Speaker {lab}", "sounds", "sound"
+    if group == "dipper":
+        return f"Dipper {lab}", "presentations", "presentation"
+    if group == "dripper":
+        return f"Dripper {lab}", "drops", "drop"
+    return (f"Light {lab}" if group == "light" else lab), "times on", None
 
 
 def _pir(res, log, key, lab, ev, t0, t1, T, never):
@@ -491,6 +498,8 @@ def _encoder(res, lab, ev, c, t0, t1, T):
     if cpr > 0:
         revs = counts / cpr
         res[f"{lab}: revolutions"] = _r(revs)
+        # unsigned: revolutions turned in either direction (revolutions above are net, clockwise positive)
+        res[f"{lab}: total rotations"] = _r(sum(abs(x) for x in deltas) / cpr)
         res[f"{lab}: mean rate (rev/min)"] = _r(abs(revs) / (T / 60) if T > 0 else math.nan)
         cm = float(c.get("cm_per_rev", 0) or 0)
         if cm > 0:
@@ -513,6 +522,8 @@ def _encoder(res, lab, ev, c, t0, t1, T):
                 and any(a <= t0 + i + 1e-9 and b >= t0 + i + 1 - 1e-9 for a, b in turning)]
         moving = fb[full] if full else fb[fb > 0]
         res[f"{lab}: min rate while turning (rev/min)"] = _r(moving.min() / cpr * 60 if len(moving) else math.nan)
+        # maximum RPM: the fastest 1-s window of the period
+        res[f"{lab}: max rate (rev/min)"] = _r(fb.max() / cpr * 60 if len(fb) else math.nan)
         res[f"{lab}: mean rate while turning (rev/min)"] = _r(np.abs(d).sum() / cpr / (t_turn / 60) if t_turn > 0
                                                              else math.nan)
 
@@ -607,13 +618,15 @@ def parse_numbers(text: str) -> list[float]:
 
 def io_track_measures(io_events: list, t: np.ndarray, dur: np.ndarray, step: np.ndarray, t_range: tuple,
                       unit: str = "cm", visits: dict | None = None, devices: list | None = None,
-                      latency_if_never: str = "duration") -> dict:
+                      latency_if_never: str = "duration", zones: dict | None = None) -> dict:
     """I/O measures that need the track, for frames t (durations dur, distance travelled into each frame step) of a
     period t_range = (t0, t1):
 
     * virtual switches — distance travelled before the first activation and while the switch is on;
     * analogue inputs, per zone (visits: {zone: [(start, end) frame indices of each entry in the period]}) — mean of
-      the maximum and minimum of each visit and of the time from the entry to them, mean value at entry and exit.
+      the maximum and minimum of each visit and of the time from the entry to them, mean value at entry and exit;
+    * inputs, outputs (shockers, speakers, lights, lasers, pellet dispensers…), virtual switches and rotary
+      encoders, per zone (zones: {zone: per-frame bool, in the zone in the period}) — see _zone_device.
     """
     res: dict[str, object] = {}
     n = len(t)
@@ -665,7 +678,61 @@ def io_track_measures(io_events: list, t: np.ndarray, dur: np.ndarray, step: np.
                 res[f"{g}: mean time to min (s)"] = _r(np.mean(tmn))
                 res[f"{g}: mean at entry"] = _r(np.mean(ent))
                 res[f"{g}: mean at exit"] = _r(np.mean(ext))
+        if zones and kind in ("input", "output", "switch", "encoder"):
+            _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never)
     return res
+
+
+def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never):
+    """A device's activity per zone: the activations that start while the animal is in the zone (their count,
+    latency, rate), the time the channel is on while the animal is in the zone; pellets dispensed in the zone;
+    for a rotary encoder the counts (and, with counts per revolution, the revolutions in either direction) turned
+    while the animal is in the zone. Measures are named "<channel> in <zone>: …" (groups as in io_measures:
+    "Shocker <channel> in <zone>: shocks", …)."""
+    t0, t1 = float(t_range[0]), float(t_range[1])
+    T = max(0.0, t1 - t0)
+    never = T if latency_if_never == "duration" else math.nan
+    n = len(t)
+
+    def frame(x):
+        """The frame of time x, or -1 outside the period's frames."""
+        j = int(np.searchsorted(t, x, "right")) - 1
+        return j if 0 <= j < n and t0 <= x <= t1 else -1
+
+    if kind == "encoder":
+        cpr = float(log.conf(key).get("counts_per_rev", 0) or 0)
+        start = [v for x, v in ev if x <= t0]
+        prev = start[-1] if start else 0.0
+        moved = []  # (frame, counts) of each change
+        for x, v in ev:
+            if x > t0:
+                moved.append((frame(x), abs(v - prev)))
+            prev = v
+        for zn, m in zones.items():
+            c = sum(d for j, d in moved if j >= 0 and m[j])
+            res[f"{lab} in {zn}: encoder counts"] = _r(c, 0)
+            if cpr > 0:
+                res[f"{lab} in {zn}: total rotations"] = _r(c / cpr)
+        return
+    if kind == "input":
+        g, n_name, what = lab, "activations", "activation"
+    else:
+        g, n_name, what = _output_names(log, key, lab)
+    onsets = _digital(ev, t0, t1)[1]
+    ts = np.asarray([x for x, _ in ev])
+    vs = np.asarray([v for _, v in ev])
+    j = np.searchsorted(ts, t, "right") - 1
+    on = np.where(j >= 0, vs[np.clip(j, 0, len(vs) - 1)] != 0, False)
+    pellets = "pellet" in log.types[key]
+    for zn, m in zones.items():
+        zo = [x for x in onsets if (f := frame(x)) >= 0 and m[f]]
+        p = f"{g} in {zn}"
+        res[f"{p}: {n_name}"] = len(zo)
+        res[f"{p}: time on (s)"] = _r(dur[on & m].sum())
+        res[f"{p}: latency to first {what or 'on'} (s)"] = _r(zo[0] - t0 if zo else never)
+        res[f"{p}: activations per minute"] = _r(len(zo) / (T / 60) if T > 0 else math.nan)
+        if pellets:
+            res[f"{p}: pellets dispensed"] = len(zo)
 
 
 def _was_on(ev, t0) -> bool:
