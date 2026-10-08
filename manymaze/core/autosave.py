@@ -6,17 +6,22 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
+from . import explock
 from .atomicfile import atomic_write
 from .session import END_RECOVERED, Session, save_live_test
 from .tracking import DetectionSettings, TrackBuilder, postprocess
 from .video import recorded_video
 
 SUFFIX = ".autosave.json"
+# a side file written by another computer is taken as that computer's running test until it is this old (live
+# tests rewrite it every few seconds)
+OTHER_HOST_STALE_S = 900.0
 
 
 def path_for(project, test) -> str:
@@ -36,9 +41,27 @@ def _json_default(o):
 
 
 def write(path: str, data: dict):
-    """Atomically (write + fsync + rename) write a side file."""
+    """Atomically (write + fsync + rename) write a side file, stamped with the program writing it ("owner": host and
+    process) so that another program opening the experiment does not take a running test for a crashed one."""
+    owner = explock.me()
+    data = {**data, "owner": {"host": owner["host"], "pid": owner["pid"]}}
     with atomic_write(path) as fh:
         json.dump(data, fh, default=_json_default)
+
+
+def owner_running(d: dict, path=None) -> bool:
+    """The program that wrote a side file is still running (so its test is not interrupted): a process of this
+    computer that is alive (this one excepted), or another computer that rewrote the file recently."""
+    owner = d.get("owner")
+    if not isinstance(owner, dict) or explock.is_mine(owner):
+        return False
+    if owner.get("host") != explock.me()["host"]:
+        try:
+            age = time.time() - Path(path).stat().st_mtime if path is not None else 0.0
+        except OSError:
+            age = 0.0
+        return age < OTHER_HOST_STALE_S
+    return explock.pid_alive(owner.get("pid"))
 
 
 def read(path: str) -> dict:
@@ -151,8 +174,14 @@ def recover(project) -> list:
     """Tests interrupted by a crash: rebuild them from the side files left in the recordings folder.  Each
     recovered test gets the track, events, pauses and I/O log written up to the last autosave (and its recording,
     playable up to the last fragment).  The project is saved, then the side files are deleted.  Returns the
-    recovered tests."""
-    if project is None or project.path is None:
+    recovered tests.
+
+    Nothing is recovered from an experiment opened read-only or locked by another program that is still running,
+    nor from side files whose writer is still running: those tests are not interrupted, they are running elsewhere.
+    A side file whose test id now belongs to another animal's test becomes a new test."""
+    if project is None or project.path is None or getattr(project, "read_only", False):
+        return []
+    if explock.held_by_other(project.path) is not None:
         return []
     folder = Path(project.path) / "recordings"
     if not folder.is_dir():
@@ -163,12 +192,16 @@ def recover(project) -> list:
             d = read(str(f))
         except Exception:
             continue
+        if owner_running(d, f):
+            continue
         s = RecoveredSession(d)
         if not len(s._track):
             f.unlink(missing_ok=True)
             continue
         m = d.get("meta") or {}
         test = project.get_test(m["test_id"]) if m.get("test_id") is not None else None
+        if test is not None and str(m.get("animal") or "") not in ("", test.animal_id):
+            test = None  # the test id was given to another animal's test since: recover as a new test
         if test is not None and (test.recorded_at or "") >= str(d.get("saved_at") or "~"):
             f.unlink(missing_ok=True)  # stale: the test was saved after this side file was written
             continue

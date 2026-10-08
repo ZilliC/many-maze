@@ -3,15 +3,24 @@
 A project is a directory (``Name.mmaze``) containing ``project.json`` plus
 ``tracks/`` (per-test track CSVs), ``recordings/`` (videos captured live) and
 ``exports/``.  Video paths are stored relative to the project when possible so
-projects can be moved between machines.
+projects can be moved between machines (videos outside the folder also keep their absolute path, tried when the
+relative one no longer leads to the file; :func:`relink_videos` finds moved videos by name).
+
+Passwords and tokens of I/O devices (alert e-mail / SMS) are kept out of ``project.json`` in ``io-secrets.json``
+(readable by the owner only; left out of archives, reports and protocol copies). ``.manymaze.lock`` says which
+program has the experiment open (see :mod:`.explock`).
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import math
 import os
+import re
+import shutil
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -20,6 +29,7 @@ import numpy as np
 
 from .apparatus import Apparatus, from_known
 from .atomicfile import write_text_atomic
+from .ioconfig import is_secret
 from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures
 from .session import END_ZONE
 from .templates import apply_overrides
@@ -28,6 +38,7 @@ from .tracking import ArenaJob, DetectionSettings, track_video
 from .video import VideoSource
 
 PROJECT_FILE = "project.json"
+SECRETS_FILE = "io-secrets.json"  # I/O device passwords and tokens (not in project.json)
 BACKUP_DIR = "backups"
 BACKUP_INTERVAL_S = 600.0  # at most one automatic backup per 10 minutes of saving
 BACKUP_KEEP = 30
@@ -45,6 +56,8 @@ OPTIONAL_INFO_COLUMNS = ["Treatment code", "Animal notes", "Time of day", "Reaso
                          "Segment of test"]
 # ANY-maze "time of day" of a live test: (first hour, name), the name of the last band whose hour has passed
 TIME_OF_DAY = ((0, "Night"), (5, "Morning"), (12, "Afternoon"), (17, "Evening"), (21, "Night"))
+ERROR_COLUMN = "Analysis error"  # results row of a test whose analysis failed (the other tests still get results)
+log = logging.getLogger(__name__)
 
 
 # test status values: "pending" (to do), "tracked" (has a track), "scored" (manually scored, no track),
@@ -173,6 +186,9 @@ class Project:
     current_user: str = ""  # who is using the app (not saved: set by the GUI); stamped on tests run or tracked
     file_version: int = FORMAT_VERSION  # the version of the file it was loaded from (not saved)
     unknown: dict = field(default_factory=dict)  # top-level keys this version does not know: written back as read
+    read_only: bool = False  # opened while another program has it open (not saved): save() refuses
+    # stored video path -> absolute path saved with it, for videos outside the experiment folder (not saved as such)
+    video_alternatives: dict = field(default_factory=dict, repr=False)
 
     # ---- persistence -----------------------------------------------------
     @staticmethod
@@ -187,16 +203,119 @@ class Project:
             self.path = self.project_dir(path)
         if self.path is None:
             raise ValueError("No project path")
+        self.check_writable()
+        self.path.mkdir(parents=True, exist_ok=True)
+        (self.path / "tracks").mkdir(exist_ok=True)
+        text = dumps_json(self.to_dict())
+        if self.settings_extra.get("backups", True):
+            self.backup(min_interval_s=BACKUP_INTERVAL_S)
+        write_text_atomic(self.path / PROJECT_FILE, text)
+        self._save_secrets()
+
+    def check_writable(self):
+        """Raise ValueError if this experiment must not be saved: opened read-only, or written by a newer version."""
+        if self.read_only:
+            raise ValueError("This experiment was opened read-only because another mANY-MAZE has it open. Close it "
+                             "there and open it again here to save, or save a copy (Save as).")
         if self.file_version > FORMAT_VERSION:
             raise ValueError(f"This experiment was saved by a newer version of mANY-MAZE (file version "
                              f"{self.file_version}, this version reads {FORMAT_VERSION}); saving it here would lose "
                              f"what this version does not know. Update mANY-MAZE to save it.")
-        self.path.mkdir(parents=True, exist_ok=True)
-        (self.path / "tracks").mkdir(exist_ok=True)
-        text = json.dumps(self.to_dict(), indent=1)
-        if self.settings_extra.get("backups", True):
-            self.backup(min_interval_s=BACKUP_INTERVAL_S)
-        write_text_atomic(self.path / PROJECT_FILE, text)
+
+    def save_as(self, dest: str | os.PathLike) -> bool:
+        """Save a copy of the experiment (file and tracks) in the folder ``dest`` and continue in the copy; video
+        paths are rewritten so they still lead to the videos. Recordings and exports stay in the original folder.
+
+        A ``dest`` that is this experiment's own folder (whatever the spelling: letter case, symbolic link, relative
+        path) is a plain save. An existing experiment in ``dest`` is replaced: its tracks are swapped for a complete
+        copy of this experiment's tracks only once that copy is made. Returns True when a copy was made."""
+        dest = self.project_dir(dest)
+        old = self.path
+        if old is not None and same_folder(dest, old):
+            self.save()
+            return False
+        if self.file_version > FORMAT_VERSION:
+            self.check_writable()
+        videos, read_only = [t.video for t in self.tests], self.read_only
+        dest.mkdir(parents=True, exist_ok=True)
+        tag = uuid.uuid4().hex[:8]
+        staged, trash = dest / f"tracks.copy-{tag}", dest / f"tracks.old-{tag}"
+        moved_old = False
+        try:
+            # keep video paths valid from the new location: make them absolute, then relative to the copy
+            for t in self.tests:
+                t.video = self.abs_path(t.video)
+            if old is not None and (old / "tracks").exists():
+                shutil.copytree(old / "tracks", staged)  # a full copy first: nothing is deleted before this
+            if (dest / "tracks").exists():
+                os.replace(dest / "tracks", trash)  # replacing: no stale tracks of the old experiment mixed in
+                moved_old = True
+            if staged.exists():
+                os.replace(staged, dest / "tracks")
+            self.path, self.read_only = dest, False
+            for t in self.tests:
+                t.video = self.rel_path(t.video)
+            self.save()
+        except BaseException:
+            self.path, self.read_only = old, read_only
+            for t, v in zip(self.tests, videos):
+                t.video = v
+            if moved_old:
+                shutil.rmtree(dest / "tracks", ignore_errors=True)
+                try:
+                    os.replace(trash, dest / "tracks")
+                except OSError:
+                    pass
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
+        shutil.rmtree(trash, ignore_errors=True)
+        return True
+
+    # ---- I/O device secrets ------------------------------------------------------------------------
+    def io_secrets(self) -> dict:
+        """{device name: {secret field: value}} of the I/O devices (alert passwords and tokens that are set)."""
+        out = {}
+        for d in self.io_devices:
+            s = {k: v for k, v in d.items() if is_secret(k) and v not in (None, "")}
+            if s and d.get("name"):
+                out[str(d["name"])] = s
+        return out
+
+    def _save_secrets(self):
+        """Write io-secrets.json (owner read / write only), or remove it when no device has a secret."""
+        f = self.path / SECRETS_FILE
+        sec = self.io_secrets()
+        if not sec:
+            if f.exists():
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            return
+        write_text_atomic(f, json.dumps({"format": "manymaze-io-secrets", "devices": sec}, indent=1))
+        try:
+            os.chmod(f, 0o600)
+        except OSError:  # pragma: no cover - file systems without permissions
+            pass
+
+    def _load_secrets(self):
+        """Put the secrets of io-secrets.json back into the device configurations (values still in project.json,
+        written by older versions, are kept until the next save moves them)."""
+        if self.path is None:
+            return
+        try:
+            d = json.loads((self.path / SECRETS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        devices = d.get("devices") if isinstance(d, dict) else None
+        if not isinstance(devices, dict):
+            return
+        for dev in self.io_devices:
+            s = devices.get(str(dev.get("name", "")))
+            if isinstance(s, dict):
+                for k, v in s.items():
+                    if is_secret(k) and not dev.get(k):
+                        dev[k] = v
 
     # ---- backups ---------------------------------------------------------------------------------
     def backups_dir(self) -> Path:
@@ -234,6 +353,7 @@ class Project:
 
     def restore_backup(self, backup: str | os.PathLike) -> "Project":
         """The experiment as stored in a backup (the current file is backed up first). Save it to restore."""
+        self.check_writable()
         data = json.loads(Path(backup).read_text(encoding="utf-8"))  # read first: backup() prunes the oldest copy
         self.backup()
         return Project.from_dict(data, self.path)
@@ -254,11 +374,11 @@ class Project:
             "animals": [asdict(a) for a in self.animals],
             "groups": [asdict(g) for g in self.groups],
             "behaviours": [asdict(b) for b in self.behaviours],
-            "tests": [asdict(t) for t in self.tests],
+            "tests": [self._test_dict(t) for t in self.tests],
             "animal_fields": self.animal_fields,
             "stages": self.stages,
             "procedures": self.procedures,
-            "io_devices": self.io_devices,
+            "io_devices": [without_secrets(d) for d in self.io_devices],
             "variables": self.variables,
             "training_criteria": self.training_criteria,
             "blind": self.blind,
@@ -266,6 +386,22 @@ class Project:
             "settings_extra": self.settings_extra,
             "created": self.created,
         }
+
+    def _test_dict(self, t: Test) -> dict:
+        d = asdict(t)
+        alt = self._outside_video(t.video)
+        if alt:
+            d["video_abs"] = alt
+        return d
+
+    def _outside_video(self, v: str) -> str:
+        """The absolute path of a video stored relative to the experiment but outside its folder ("../.."), saved
+        with it so the video is still found when the experiment folder moves without it ("" otherwise)."""
+        if not v or Path(v).is_absolute() or not Path(v).parts or Path(v).parts[0] != "..":
+            return ""
+        if self.path is None:
+            return self.video_alternatives.get(v, "")
+        return self.abs_path(v)
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> "Project":
@@ -306,6 +442,9 @@ class Project:
             p.file_version = FORMAT_VERSION
         known = set(cls().to_dict())
         p.unknown = {k: v for k, v in d.items() if k not in known}
+        p.video_alternatives = {str(t["video"]): str(t["video_abs"]) for t in d.get("tests", [])
+                                if isinstance(t, dict) and t.get("video") and t.get("video_abs")}
+        p._load_secrets()
         return p
 
     # ---- lookup -----------------------------------------------------------
@@ -390,12 +529,23 @@ class Project:
             return str(p)
 
     def abs_path(self, p: str) -> str:
+        """The absolute path of a stored path (relative to the experiment folder). A video outside the folder
+        whose relative path no longer leads to it (the experiment was moved) is looked for at the absolute path saved
+        with it."""
         if not p:
             return p
         pp = Path(p)
         if pp.is_absolute() or self.path is None:
             return str(pp)
-        return str((self.path / pp).resolve())
+        out = (self.path / pp).resolve()
+        alt = self.video_alternatives.get(p)
+        if alt and not out.exists() and Path(alt).exists():
+            return alt
+        return str(out)
+
+    def missing_videos(self) -> list[Test]:
+        """Tests whose video file cannot be found."""
+        return [t for t in self.tests if t.video and not Path(self.abs_path(t.video)).exists()]
 
     def track_path(self, test: Test, animal_index: int = 0) -> Path:
         if self.path is None:
@@ -515,7 +665,10 @@ class Project:
         from the track (animal contrast and length, frames tracked, video times) are filled by :meth:`track_info`."""
         aid = animal_id if animal_id is not None else test.animal_id
         a = self.get_animal(aid)
-        info = {"Test": test.id, "Animal": aid, "Group": a.group if a else "",
+        # testing blind: the treatment's code, never its name (as the Experiment page shows it)
+        group = (self.treatment_code(a.group) or ("??" if a.group else "")) if a and self.blind else \
+            (a.group if a else "")
+        info = {"Test": test.id, "Animal": aid, "Group": group,
                 "Treatment code": self.treatment_code(a.group) if a else "", "Sex": a.sex if a else "",
                 "Animal notes": a.notes if a else "", "Stage": test.stage, "Trial": test.trial,
                 "Apparatus": test.apparatus, "Test date": "", "Day of week": "", "Test time": "", "Time of day": "",
@@ -650,10 +803,98 @@ class Project:
         rows = []
         for i, t in enumerate(tests):
             if self.has_results(t):
-                rows.extend(self.analyse_test(t, segmented))
+                try:
+                    rows.extend(self.analyse_test(t, segmented))
+                except Exception as e:  # one unreadable track must not lose the results of every other test
+                    log.warning("analysis of test %s failed: %s", t.id, e)
+                    rows.append(self.error_row(t, e))
             if progress:
                 progress((i + 1) / max(1, len(tests)))
         return rows
+
+
+    def error_row(self, test: Test, error: Exception) -> dict:
+        """A results row noting that a test could not be analysed (its information columns and the error)."""
+        try:
+            row = self.test_info(test)
+        except Exception:
+            row = {"Test": test.id, "Animal": test.animal_id}
+        row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: f"{type(error).__name__}: {error}"})
+        return row
+
+
+def same_folder(a, b) -> bool:
+    """Two paths are the same folder (also when spelt with another letter case on a case-insensitive disk, through
+    a symbolic link or as a relative path)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def without_secrets(device: dict) -> dict:
+    """An I/O device configuration without its passwords and tokens (see ioconfig.is_secret)."""
+    return {k: v for k, v in device.items() if not is_secret(k)}
+
+
+def _finite_json(o):
+    """o with NaN / infinite floats replaced by None (JSON has no NaN: other programs reject such a file)."""
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: _finite_json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_finite_json(v) for v in o]
+    if isinstance(o, np.generic):
+        return _finite_json(o.item())
+    return o
+
+
+def dumps_json(d: dict) -> str:
+    """Experiment JSON text: standard JSON (missing / infinite numbers as null). Files with NaN / Infinity
+    written by older versions are still read."""
+    return json.dumps(_finite_json(d), indent=1)
+
+
+def relink_videos(project: "Project", folder, tests: list[Test] | None = None) -> dict:
+    """Find the missing videos of tests (default: every test whose video is missing) under ``folder`` and its
+    subfolders by file name (letter case ignored) and point the tests to them. When several files have the name, the
+    one whose parent folders best match the stored path is used; a tie is left alone.
+
+    Returns {"relinked": {test id: new path}, "not_found": [test ids], "ambiguous": [test ids]}. Save the
+    experiment to keep the new paths."""
+    folder = Path(folder)
+    todo = [t for t in (tests if tests is not None else project.missing_videos()) if t.video]
+    out = {"relinked": {}, "not_found": [], "ambiguous": []}
+    if not todo:
+        return out
+    index: dict[str, list[Path]] = {}
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            index.setdefault(f.lower(), []).append(Path(root) / f)
+    for t in todo:
+        parts = [x for x in re.split(r"[\\/]", t.video) if x and x not in (".", "..")]
+        cands = index.get(parts[-1].lower(), []) if parts else []
+        if not cands:
+            out["not_found"].append(t.id)
+            continue
+
+        def score(c: Path) -> int:  # number of trailing path parts in common
+            n = 0
+            for a, b in zip(reversed(parts), reversed(c.parts)):
+                if a.lower() != b.lower():
+                    break
+                n += 1
+            return n
+
+        ranked = sorted(((score(c), c) for c in cands), key=lambda x: -x[0])
+        if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+            out["ambiguous"].append(t.id)
+            continue
+        t.video = project.rel_path(str(ranked[0][1]))
+        out["relinked"][t.id] = str(ranked[0][1])
+    return out
 
 
 def _trim_all_on_detection(tracks: list[Track], duration: float, t0: float | None = None) -> list[Track]:
