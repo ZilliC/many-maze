@@ -187,16 +187,17 @@ def test_towards_away_and_heading_errors():
     assert res["B: time getting further away (s)"] == pytest.approx(49 / FPS, abs=0.05)
     assert res["B: time moving towards (s)"] == pytest.approx(49 / FPS, abs=0.1)
     assert res["B: time moving away (s)"] == pytest.approx(49 / FPS, abs=0.1)
-    assert res["B: initial heading error (deg)"] == 0 and res["B: initial absolute heading error (deg)"] == 0
+    assert res["B: initial heading error (deg)"] == 0 and res["B: signed initial heading error (deg)"] == 0
     assert res["B: mean absolute heading error (deg)"] == pytest.approx(90, abs=3)
     # setting off 45 deg clockwise (on screen) of the zone direction
     pts2 = line((50, 200), (150, 300), 50)
     res2 = analyse(make_track(pts2, head=False), app, S)
+    assert res2["B: signed initial heading error (deg)"] == pytest.approx(45, abs=0.5)
     assert res2["B: initial heading error (deg)"] == pytest.approx(45, abs=0.5)
-    assert res2["B: initial absolute heading error (deg)"] == pytest.approx(45, abs=0.5)
     pts3 = line((50, 200), (150, 100), 50)
     res3 = analyse(make_track(pts3, head=False), app, S)
-    assert res3["B: initial heading error (deg)"] == pytest.approx(-45, abs=0.5)
+    assert res3["B: signed initial heading error (deg)"] == pytest.approx(-45, abs=0.5)
+    assert res3["B: initial heading error (deg)"] == pytest.approx(45, abs=0.5)  # ANY-maze: the absolute angle
 
 
 def test_time_oriented_towards_centre_when_inside():
