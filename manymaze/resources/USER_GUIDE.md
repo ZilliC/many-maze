@@ -1288,10 +1288,22 @@ the data from ANY-maze instead (ANY-maze ▸ **File ▸ Export**) and import it 
 | *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand) |
 
 Import the zone maps first: an apparatus that does not exist yet is otherwise created from the zones' bounding
-boxes (rectangles), which is all the XML export contains about zone shapes. Positions exported relative to the
-apparatus centre (ANY-maze's option) are recognised by their negative coordinates. ANY-maze's documentation names
-only the result tags of the XML file, so the other fields are recognised by name (case and separators do not
-matter); if a field of your file is not picked up, the import keeps the rest and you can complete it by hand.
+boxes and the apparatus' box (its arena), which is all the XML export contains about zone shapes. When the export
+holds ANY-maze's zone entries and exits (`<zone_entry>` / `<zone_exit>` in the results), they refine the boxes: a
+zone becomes the ellipse inside its box if that matches where ANY-maze had the animal better than the rectangle,
+and a zone inside another one is cut out of it if ANY-maze counted the animal as leaving the outer zone on
+entering the inner one (ANY-maze zones are made of areas that do not overlap, e.g. a quadrant without the
+platform). Positions exported relative to the apparatus centre (ANY-maze's option) are recognised by their negative
+coordinates. Fields are recognised by name (case and separators do not matter), including ANY-maze's nested
+`<date><day>…` / `<time><hours>…` form; if a field of your file is not picked up, the import keeps the rest and you
+can complete it by hand.
+
+**Checked against ANY-maze.** `scripts/verify_anymaze.py export.xml` imports an export and compares mANY-MAZE's zone
+entries, time in zone and latency to first entry with ANY-maze's own entries and exits. On a real water-maze export
+(600 tests, 5 zones; ANY-maze 2023) entries agree in 99–100 % of test × zone pairs, time in zone to the sample
+(median difference 0 s) and latencies in 94–100 %; the remaining differences are single samples on the edge of the
+round platform, whose exact pixels the XML does not contain. Set `MANYMAZE_ANYMAZE_XML` to an export to run this
+check in the test suite.
 
 #### XML format (`format-version="1"`)
 

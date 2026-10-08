@@ -4,6 +4,7 @@ calibration adjustment stored per test, and live testing at ANY-maze's scale (48
 import datetime as dt
 import io
 import json
+import os
 import struct
 import threading
 import time
@@ -16,8 +17,9 @@ import pytest
 from manymaze.core import synthetic as syn
 from manymaze.core import templates, updates
 from manymaze.core.anymaze import (import_anymaze_xml, is_anymaze_xml, read_anymaze_xml, read_zone_map,
-                                   track_from_columns, zone_maps_apparatus)
+                                   track_from_columns, zone_maps_apparatus, zone_reference)
 from manymaze.core.apparatus import CALIBRATION_KEY, Apparatus, calibration_override
+from manymaze.core.geometry import Ellipse
 from manymaze.core.autosave import RecoveredSession, _json_default
 from manymaze.core.camera import SourceSpec
 from manymaze.core.export import (TABLE_SUFFIXES, dbf_field_names, export_results, export_xml, read_sylk, write_dbf,
@@ -341,7 +343,7 @@ def test_import_anymaze_xml(tmp_path):
     assert len(tr) == 4 and not tr.detected[1] and tr.x[2] == 100 and tr.hx[0] == 12
     # the second test: other scaling (a per-test calibration), moved centre zone, centre-origin coordinates
     assert t2.zone_overrides[CALIBRATION_KEY]["px_per_cm"] == 4.0
-    assert p.apparatus_of(t2).zone("Centre").shape.bounds()[0] == pytest.approx(100)
+    assert p.apparatus_of(t2).zone("Centre").shape.bounds()[0] == pytest.approx(99.5)  # boxes are inclusive pixels
     tr2 = p.load_tracks(t2)[0]
     cx, cy = app.origin()
     assert tr2.x[0] == pytest.approx(cx - 50) and tr2.y[0] == pytest.approx(cy - 20)
@@ -359,6 +361,76 @@ def test_track_origin_option():
     assert track_from_columns(cols, "auto").x[0] == 1.0
     with pytest.raises(ValueError):
         track_from_columns({k: np.zeros(0) for k in cols})
+
+
+# the layout of a real ANY-maze export: nested dates and times, zone entries / exits in the results, the zones and
+# the apparatus after the results; Pool is a square, Platform a disc cut out of it (ANY-maze areas do not overlap)
+def _real_layout_xml() -> str:
+    rows, inside = [], {"Pool": False, "Platform": False}
+    pts = [(20 + 4 * i, 50) for i in range(15)] + [(20 + 2 * i, 20 + 2 * i) for i in range(30)]
+    for i, (x, y) in enumerate(pts):
+        now = {"Platform": (x - 50) ** 2 + (y - 50) ** 2 <= 10 ** 2}
+        now["Pool"] = 0 <= x <= 99 and 0 <= y <= 99 and not now["Platform"]
+        tags = "".join(f"<zone_exit>{z}</zone_exit>" for z in ("Pool", "Platform") if inside[z] and not now[z])
+        tags += "".join(f"<zone_entry>{z}</zone_entry>" for z in ("Pool", "Platform") if now[z] and not inside[z])
+        inside = now
+        rows.append(f"<r>\n<tm>{i * 0.04:.3f}</tm>\n<c><x>{x}</x><y>{y}</y></c>\n{tags}</r>")
+    return ('<?xml version="1.0" encoding="Windows-1252"?>\n'
+            '<experiment xmlns="http://www.anymaze.com/anymazeexperiment">\n<title>Pool</title>\n'
+            '<creationdate><day>25</day><month>2</month><year>2023</year></creationdate>\n'
+            '<animal>\n<number>1</number>\n<id>1</id>\n<treatment>a</treatment>\n<test>\n<number>1</number>\n'
+            '<date><day>27</day><month>2</month><year>2023</year></date>\n'
+            '<time><hours>12</hours><minutes>56</minutes><seconds>34</seconds><milliseconds>49</milliseconds></time>\n'
+            '<stage>Spatial</stage>\n<trial>1</trial>\n<apparatus>Pool</apparatus>\n'
+            '<testendreason>Test duration</testendreason>\n<pixelspermetre>234.83</pixelspermetre>\n'
+            + "\n".join(rows) +
+            '\n<zone>\n<name>Pool</name>\n<centre><x>50</x><y>50</y></centre>\n'
+            '<boundingbox><x>0</x><y>0</y><w>99</w><h>99</h></boundingbox>\n</zone>\n'
+            '<zone>\n<name>Platform</name>\n<centre><x>50</x><y>50</y></centre>\n'
+            '<boundingbox><x>40</x><y>40</y><w>20</w><h>20</h></boundingbox>\n</zone>\n'
+            '<apparatus>\n<centre><x>50</x><y>50</y></centre>\n'
+            '<boundingbox><x>0</x><y>0</y><w>99</w><h>99</h></boundingbox>\n</apparatus>\n'
+            '</test>\n</animal>\n</experiment>\n')
+
+
+def test_anymaze_xml_real_layout(tmp_path):
+    src = tmp_path / "real.xml"
+    src.write_text(_real_layout_xml(), encoding="cp1252")
+    d = read_anymaze_xml(src)
+    assert d["created"] == "2023-02-25"
+    t = d["animals"][0]["tests"][0]
+    assert t["recorded_at"] == "2023-02-27T12:56:34" and t["apparatus"] == "Pool" and t["px_per_m"] == 234.83
+    assert t["arena"]["bbox"] == (0, 0, 99, 99) and [z["name"] for z in t["zones"]] == ["Pool", "Platform"]
+    assert t["zone_events"][0] == (0.0, "Pool", True) and any(e[1] == "Platform" for e in t["zone_events"])
+    p = Project(name="imp")
+    p.save(tmp_path / "imp.mmaze")
+    res = import_anymaze_xml(p, src)
+    app = p.get_apparatus("Pool")
+    assert app.arena.bounds() == (-0.5, -0.5, 99.5, 99.5)
+    # fitted from ANY-maze's own entries and exits: the platform is a disc, cut out of the pool
+    assert isinstance(app.zone("Platform").shape, Ellipse)
+    assert not app.zone("Pool").shape.contains(50, 50) and app.zone("Pool").shape.contains(20, 50)
+    assert res["tests"][0].recorded_at == "2023-02-27T12:56:34"
+    tr = p.load_tracks(res["tests"][0])[0]
+    ref = zone_reference(t["zone_events"], float(tr.t[-1] + tr.dt))
+    row = p.results()[0]
+    for z in ("Pool", "Platform"):
+        assert row[f"{z}: entries"] == ref[z]["entries"]
+        assert row[f"{z}: time (s)"] == pytest.approx(ref[z]["time"], abs=1e-6)
+
+
+@pytest.mark.skipif(not os.environ.get("MANYMAZE_ANYMAZE_XML"), reason="set MANYMAZE_ANYMAZE_XML to a real export")
+def test_anymaze_reference_export(capsys):
+    """Zone measures against ANY-maze's own zone entries / exits in a real export (not shipped: no licence)."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / "verify_anymaze.py"
+    spec = importlib.util.spec_from_file_location("verify_anymaze", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main([os.environ["MANYMAZE_ANYMAZE_XML"]]) == 0
+    for line in capsys.readouterr().out.splitlines()[1:]:
+        assert float(line.split("entries equal in")[1].split("%")[0]) >= 95.0
 
 
 # ====================================================================== ANY-maze zone maps
