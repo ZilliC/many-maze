@@ -95,6 +95,15 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         from .apparatus import CALIBRATION_KEY
 
         test.zone_overrides = {**test.zone_overrides, CALIBRATION_KEY: dict(session.calibration)}
+    moved = getattr(session, "procedure_zone_overrides", None)
+    if moved:  # zones / points moved by the procedures: the test's own positions
+        test.zone_overrides = {**test.zone_overrides, **copy.deepcopy(moved)}
+    eng = session.engine
+    labels = getattr(eng, "zone_labels", None)
+    if labels:  # "set zone label"
+        test.variables = {**test.variables, "zone_labels": dict(labels)}
+    for s in getattr(eng, "scheduled_tests", None) or []:  # "schedule another test for this animal"
+        _schedule_test(project, test, s)
     test.io_events = list(test.io_events) + session.io_events
     rv = session.result_variables
     if rv:
@@ -111,7 +120,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
                 pass
     kept = session.kept_variables
     if kept:  # procedure variables kept between tests: only from tests that are saved
-        project.variables.update(copy.deepcopy(kept))
+        from .procedures import merge_kept_variables
+
+        merge_kept_variables(project.variables, kept)
     test.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
     test.end_reason = session.end_reason or END_USER
     if getattr(project, "current_user", ""):
@@ -130,9 +141,28 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     if session.pause_log:
         notes.append("Paused: " + "; ".join(f"at {p['t']:.2f} s for {p['duration_s']:.1f} s"
                                             for p in session.pause_log))
+    rec_log = getattr(session, "recording_log", None)
+    if rec_log:
+        notes.append("Video recording: " + "; ".join(f"{m} at {t:.2f} s" for t, m in rec_log))
+    parts = getattr(session, "record_parts", None) or []
+    if len(parts) > 1:
+        notes.append("Recorded files: " + ", ".join(project.rel_path(p) for p in parts))
     if notes:
         test.notes = (test.notes + "\n" + "\n".join(notes)).strip()
     return True
+
+
+def _schedule_test(project, test, s: dict):
+    """A test the procedures scheduled for this test's animal: added to the experiment, due after a delay."""
+    stage = s.get("stage") or test.stage
+    if stage:
+        project.add_stage(stage)
+    due = _dt.datetime.now() + _dt.timedelta(minutes=float(s.get("delay_min") or 0))
+    trial = max([t.trial for t in project.tests if t.animal_id == test.animal_id and t.stage == stage],
+                default=0) + 1
+    project.add_test(animal_id=test.animal_id, apparatus=s.get("apparatus") or test.apparatus, stage=stage,
+                     trial=trial, notes=f"Scheduled by a procedure of test {test.id}",
+                     variables={"scheduled_for": due.isoformat(timespec="minutes")})
 
 
 def finish_live_test(project, test, session: Session, record_path: str | None = None, save: bool = True,

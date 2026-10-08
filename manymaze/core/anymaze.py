@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from .apparatus import CALIBRATION_KEY, Apparatus, Zone, calibration_override
-from .geometry import Polygon
+from .geometry import Ellipse, Polygon, Shape, rect
 from .track import Track
 
 ZONE_COLORS = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#84cc16",
@@ -93,6 +93,25 @@ def _xy(e) -> tuple[float, float]:
     return math.nan, math.nan
 
 
+def _date_part(e, *names) -> str:
+    """A date or time child as text: plain text, or ANY-maze's nested form (<date><day>27</day><month>2</month>
+    <year>2023</year></date>, <time><hours>12</hours><minutes>56</minutes><seconds>34</seconds>
+    <milliseconds>49</milliseconds></time>) turned into "2023-02-27" / "12:56:34"."""
+    text = _get(e, *names)
+    if text:
+        return text
+    d = next(iter(_children(e, *names)), None)
+    if d is None:
+        return ""
+    day, month, year = (_num(_get(d, k)) for k in ("day", "month", "year"))
+    if all(math.isfinite(v) for v in (day, month, year)):
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    h, m, sec = (_num(_get(d, *k)) for k in (("hours", "hour"), ("minutes", "minute"), ("seconds", "second")))
+    if math.isfinite(h) and math.isfinite(m):
+        return f"{int(h):02d}:{int(m):02d}:{int(sec) if math.isfinite(sec) else 0:02d}"
+    return ""
+
+
 def _when(date: str, time_: str) -> str:
     """ISO date-time of a test from ANY-maze's date and time texts ('' if they cannot be read)."""
     text = f"{date} {time_}".strip()
@@ -141,6 +160,40 @@ def _zone_info(z) -> dict:
     return {"name": name, "centre": (cx, cy), "bbox": (bx, by, bw, bh)}
 
 
+def _zone_events(test) -> list[tuple[float, str, bool]]:
+    """ANY-maze's own zone entries and exits, (time, zone, entered), from the <zone_entry> / <zone_exit> tags of
+    the results (written when the export includes them)."""
+    out = []
+    for r in test.iter():
+        if _norm(r.tag) not in ("r", "result"):
+            continue
+        tm = _num(_get(r, "tm", "time"))
+        for c in r:
+            tag = _norm(c.tag)
+            if tag in ("zoneentry", "zoneexit") and (c.text or "").strip():
+                out.append((tm, c.text.strip(), tag == "zoneentry"))
+    return out
+
+
+def zone_reference(events: list, end: float) -> dict[str, dict]:
+    """ANY-maze's entries, time in the zone and latency to first entry per zone, from the entry / exit events of
+    an exported test ("zone_events" of :func:`read_anymaze_xml`); visits still open at `end` (s) end there."""
+    out: dict[str, dict] = {}
+    open_at: dict[str, float] = {}
+    for t, zone, entered in sorted(events, key=lambda e: (e[0], e[2])):  # exits before entries at the same time
+        z = out.setdefault(zone, {"entries": 0, "time": 0.0, "latency": math.nan})
+        if entered:
+            z["entries"] += 1
+            open_at[zone] = t
+            if math.isnan(z["latency"]):
+                z["latency"] = t
+        elif zone in open_at:
+            z["time"] += t - open_at.pop(zone)
+    for zone, t0 in open_at.items():
+        out[zone]["time"] += end - t0
+    return out
+
+
 def _results(test) -> dict[str, np.ndarray]:
     rows = [r for r in test.iter() if _norm(r.tag) in ("r", "result")]
     n = len(rows)
@@ -161,7 +214,8 @@ def _results(test) -> dict[str, np.ndarray]:
 def read_anymaze_xml(path) -> dict:
     """ANY-maze's experiment XML export as plain data: {"title", "created", "notes", "animals": [{"number", "id",
     "treatment", "notes", "tests": [{"number", "recorded_at", "stage", "trial", "apparatus", "end_reason", "notes",
-    "px_per_m", "zones": [{"name", "centre", "bbox"}], "track": {t, x, y, hx, hy, tx, ty}}]}]}."""
+    "px_per_m", "zones": [{"name", "centre", "bbox"}], "arena": {"centre", "bbox"} or None,
+    "track": {t, x, y, hx, hy, tx, ty}, "zone_events": [(t, zone, entered)]}]}]}."""
     import xml.etree.ElementTree as ET
 
     root = ET.parse(str(path)).getroot()
@@ -170,8 +224,8 @@ def read_anymaze_xml(path) -> dict:
         if exp is None:
             raise ValueError(f"{Path(path).name} is not an ANY-maze experiment XML export (no <Experiment>)")
         root = exp
-    out = {"title": _get(root, "title", "name", "experimenttitle"), "created": _get(root, "creationdate", "created",
-                                                                                     "datecreated", "date"),
+    out = {"title": _get(root, "title", "name", "experimenttitle"),
+           "created": _date_part(root, "creationdate", "created", "datecreated", "date"),
            "notes": _get(root, "notes", "note"), "animals": []}
     for a in (e for e in root.iter() if _norm(e.tag) == "animal"):
         animal = {"number": _get(a, "number", "animalnumber", "num", "no"),
@@ -180,11 +234,12 @@ def read_anymaze_xml(path) -> dict:
                   "notes": _get(a, "notes", "note"), "tests": []}
         for t in (e for e in a.iter() if _norm(e.tag) == "test"):
             zones = [_zone_info(z) for z in t.iter() if _norm(z.tag) == "zone"]
+            arena = next((_zone_info(e) for e in _children(t, "apparatus") if len(e)), None)
             scale = _get(t, "scaling", "scale", "pixelspermetre", "pixelspermeter", "pixelsmetre", "pixelsmeter",
                          "calibration")
             animal["tests"].append({
                 "number": _get(t, "number", "testnumber", "num", "no"),
-                "recorded_at": _when(_get(t, "date", "testdate"), _get(t, "time", "testtime")),
+                "recorded_at": _when(_date_part(t, "date", "testdate"), _date_part(t, "time", "testtime")),
                 "stage": _get(t, "stage", "stagename"),
                 "trial": _get(t, "trial", "trialnumber"),
                 "apparatus": _get(t, "apparatus", "apparatusname"),
@@ -193,22 +248,93 @@ def read_anymaze_xml(path) -> dict:
                 "notes": _get(t, "notes", "note", "testnotes"),
                 "px_per_m": _num(scale),
                 "zones": zones,
-                "track": _results(t)})
+                "arena": arena,
+                "track": _results(t),
+                "zone_events": _zone_events(t)})
         out["animals"].append(animal)
     return out
 
 
-def _bbox_apparatus(name: str, zones: list[dict], px_per_m: float) -> Apparatus:
-    """An apparatus whose zones are the exported bounding boxes (the XML has no zone outlines: import the zone
-    maps for the real shapes)."""
-    app = Apparatus(name=name or "ANY-maze apparatus")
-    for k, z in enumerate(zones):
-        bx, by, bw, bh = z["bbox"]
-        if not all(math.isfinite(v) for v in (bx, by, bw, bh)) or bw <= 0 or bh <= 0:
+def _bbox_shape(bbox) -> Polygon | None:
+    """The rectangle of an exported bounding box. ANY-maze's boxes are inclusive pixel ranges (x … x + w), so the
+    rectangle runs from the outer edges of those pixels; adjacent zones then tile without a gap."""
+    bx, by, bw, bh = bbox
+    if not all(math.isfinite(v) for v in (bx, by, bw, bh)) or bw <= 0 or bh <= 0:
+        return None
+    return rect(bx - 0.5, by - 0.5, bw + 1, bh + 1)
+
+
+def _occupancy(t: np.ndarray, events: list, zone: str) -> np.ndarray:
+    """Whether ANY-maze had the animal in `zone` at each sample, from its entry / exit events."""
+    ev = sorted((e for e in events if e[1] == zone), key=lambda e: (e[0], e[2]))
+    times = np.array([e[0] for e in ev], float)
+    states = np.array([e[2] for e in ev], bool)
+    k = np.searchsorted(times, np.asarray(t, float) + 1e-9, side="right") - 1
+    return np.where(k >= 0, states[np.clip(k, 0, None)] if len(ev) else False, False)
+
+
+def _keyhole(outer: Shape, inner: Shape) -> Polygon:
+    """`outer` with the hole `inner` as one polygon (joined by a zero-width slit), for the even-odd point test."""
+    o = [tuple(map(float, p)) for p in outer.polygon()]
+    h = [tuple(map(float, p)) for p in inner.polygon()][::-1]
+    i, j = min(((i, j) for i in range(len(o)) for j in range(len(h))),
+               key=lambda ij: math.dist(o[ij[0]], h[ij[1]]))
+    return Polygon(o[:i + 1] + h[j:] + h[:j + 1] + o[i:])
+
+
+def _fit_zones(zones: list[dict], tests: list[dict]) -> dict[str, Shape]:
+    """Zone outlines from the exported bounding boxes, checked against ANY-maze's own zone entries and exits when
+    the export has them: a zone becomes the ellipse inside its box if that matches ANY-maze's occupancy better
+    than the rectangle, and a zone lying inside another is cut out of it if ANY-maze counted the animal as
+    leaving the outer zone when it entered the inner one (ANY-maze zones are made of areas that do not overlap)."""
+    shapes = {z["name"]: s for z in zones if (s := _bbox_shape(z["bbox"])) is not None}
+    xs, ys, occ = [], [], {n: [] for n in shapes}
+    for t in tests:
+        if not t.get("zone_events"):
             continue
-        app.zones.append(Zone(z["name"] or f"Zone {k + 1}",
-                              Polygon([(bx, by), (bx + bw, by), (bx + bw, by + bh), (bx, by + bh)]),
-                              ZONE_COLORS[k % len(ZONE_COLORS)]))
+        tr = t["track"]
+        good = np.isfinite(tr["x"]) & np.isfinite(tr["y"]) & np.isfinite(tr["t"])
+        xs.append(tr["x"][good])
+        ys.append(tr["y"][good])
+        for n in shapes:
+            occ[n].append(_occupancy(tr["t"][good], t["zone_events"], n))
+    if not xs:
+        return shapes
+    x, y = np.concatenate(xs), np.concatenate(ys)
+    occ = {n: np.concatenate(v) for n, v in occ.items()}
+
+    def errors(n, shape):
+        return int(np.count_nonzero(shape.contains(x, y) != occ[n]))
+
+    for n, r in list(shapes.items()):
+        x0, y0, x1, y1 = r.bounds()
+        ell = Ellipse((x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2)
+        if errors(n, ell) < errors(n, r):
+            shapes[n] = ell
+    for n in sorted(shapes, key=lambda k: -shapes[k].area()):
+        for m in shapes:
+            ob, ib = shapes[n].bounds(), shapes[m].bounds()
+            if m == n or not (ob[0] <= ib[0] and ob[1] <= ib[1] and ib[2] <= ob[2] and ib[3] <= ob[3]):
+                continue
+            if (occ[n] & occ[m]).any() or not occ[m].any():
+                continue  # ANY-maze had the animal in both at once: the zones overlap
+            cut = _keyhole(shapes[n], shapes[m])
+            if errors(n, cut) < errors(n, shapes[n]):
+                shapes[n] = cut
+    return shapes
+
+
+def _bbox_apparatus(name: str, zones: list[dict], px_per_m: float, arena: dict | None = None,
+                    tests: list[dict] | None = None) -> Apparatus:
+    """An apparatus whose zones (and arena) are the exported bounding boxes, refined with ANY-maze's zone entries
+    and exits in `tests` (see :func:`_fit_zones`); import the zone maps for the exact shapes."""
+    app = Apparatus(name=name or "ANY-maze apparatus")
+    if arena:
+        app.arena = _bbox_shape(arena["bbox"])
+    shapes = _fit_zones(zones, tests or [])
+    for k, z in enumerate(zones):
+        if z["name"] in shapes:
+            app.zones.append(Zone(z["name"] or f"Zone {k + 1}", shapes[z["name"]], ZONE_COLORS[k % len(ZONE_COLORS)]))
     if math.isfinite(px_per_m) and px_per_m > 0:
         app.px_per_cm = px_per_m / 100.0
     return app
@@ -223,7 +349,7 @@ def _moved_zones(app: Apparatus, zones: list[dict], tol: float = 1.5) -> dict:
         if zone is None or not all(math.isfinite(v) for v in (bx, by, bw, bh)):
             continue
         x0, y0, x1, y1 = zone.shape.bounds()
-        dx, dy = bx - x0, by - y0
+        dx, dy = bx + bw / 2 - (x0 + x1) / 2, by + bh / 2 - (y0 + y1) / 2
         if math.hypot(dx, dy) > tol and abs((x1 - x0) - bw) <= max(2.0, 0.05 * bw):
             out[zone.name] = zone.shape.translated(dx, dy).to_dict()
     return out
@@ -291,7 +417,8 @@ def import_anymaze_xml(project, path, origin: str = "auto", progress=None) -> di
             name = t["apparatus"] or "ANY-maze apparatus"
             app = project.get_apparatus(name) if any(x.name == name for x in project.apparatus) else None
             if app is None:
-                app = _bbox_apparatus(name, t["zones"], t["px_per_m"])
+                app = _bbox_apparatus(name, t["zones"], t["px_per_m"], t["arena"],
+                                      [x for b in data["animals"] for x in b["tests"] if x["apparatus"] == t["apparatus"]])
                 project.apparatus.append(app)
                 out["apparatus"].append(app.name)
             try:

@@ -75,10 +75,73 @@ def _choice(rng, a):
     return rng.choice(s)
 
 
-def _shuffle(rng, a):
+def _shuffle(rng, a, max_run=0):
+    """A shuffled copy of a list; with max_run > 0, no value appears more than max_run times in a row (ANY-maze's
+    "randomise array" with a maximum number of consecutive repeats)."""
     s = _seq(a)
-    rng.shuffle(s)
-    return s
+    k = int(max_run or 0)
+    if k <= 0 or len(s) < 2:
+        rng.shuffle(s)
+        return s
+    groups: list[list] = []  # [value, count]: values may be lists, so they are grouped by equality
+    for v in s:
+        g = next((g for g in groups if g[0] == v and type(g[0]) is type(v)), None)
+        if g is None:
+            groups.append([v, 1])
+        else:
+            g[1] += 1
+    most = max(g[1] for g in groups)
+    if most > k * (len(s) - most + 1):
+        raise ExprError(f"shuffle(): the list cannot be arranged with at most {k} repeats in a row")
+    for _ in range(200):
+        out = _bounded_runs(rng, groups, len(s), k)
+        if out is not None:
+            return out
+    raise ExprError(f"shuffle(): no arrangement with at most {k} repeats in a row was found")
+
+
+def _bounded_runs(rng, groups, n, k):
+    """One random arrangement of the grouped values with runs of at most k (None if this attempt got stuck)."""
+    left = [g[1] for g in groups]
+    out, last, run = [], -1, 0
+    for i in range(n):
+        rest = n - i
+        allowed = [j for j in range(len(groups)) if left[j] and not (j == last and run >= k)]
+        if not allowed:
+            return None
+        # a value that would otherwise have too few separators left must be placed now
+        forced = [j for j in allowed if left[j] > k * (rest - left[j])]
+        pool = forced or allowed
+        j = rng.choices(pool, weights=[left[x] for x in pool])[0]
+        out.append(groups[j][0])
+        left[j] -= 1
+        run = run + 1 if j == last else 1
+        last = j
+    return out
+
+
+def _undefined(x) -> int:
+    return int(x is None or (isinstance(x, float) and math.isnan(x)))
+
+
+def _deg(f):
+    return lambda x: f(math.radians(x))
+
+
+def _to_deg(f):
+    return lambda *a: math.degrees(f(*a))
+
+
+def _log10_or_base(x, base=None):
+    return math.log10(x) if base is None else math.log(x, base)
+
+
+# ANY-maze's maths: angles in degrees and Log in base 10. Used by the procedures that have "anymaze_maths" set
+# (e.g. imported from ANY-maze protocols); the d-suffixed functions are available everywhere.
+ANYMAZE_FUNCTIONS: dict[str, Callable] = {
+    "sin": _deg(math.sin), "cos": _deg(math.cos), "tan": _deg(math.tan), "asin": _to_deg(math.asin),
+    "acos": _to_deg(math.acos), "atan": _to_deg(math.atan), "atan2": _to_deg(math.atan2), "log": _log10_or_base,
+}
 
 
 # random numbers: the implementations take the evaluator's (seedable) generator first
@@ -100,6 +163,14 @@ FUNCTIONS: dict[str, tuple] = {
     "tan": (1, 1, math.tan, ""), "asin": (1, 1, math.asin, ""), "acos": (1, 1, math.acos, ""),
     "atan": (1, 1, math.atan, ""), "atan2": (2, 2, math.atan2, ""), "hypot": (2, 2, math.hypot, ""),
     "degrees": (1, 1, math.degrees, ""), "radians": (1, 1, math.radians, ""),
+    "sind": (1, 1, ANYMAZE_FUNCTIONS["sin"], "sine of an angle in degrees"),
+    "cosd": (1, 1, ANYMAZE_FUNCTIONS["cos"], "cosine of an angle in degrees"),
+    "tand": (1, 1, ANYMAZE_FUNCTIONS["tan"], "tangent of an angle in degrees"),
+    "asind": (1, 1, ANYMAZE_FUNCTIONS["asin"], "arc sine in degrees"),
+    "acosd": (1, 1, ANYMAZE_FUNCTIONS["acos"], "arc cosine in degrees"),
+    "atand": (1, 1, ANYMAZE_FUNCTIONS["atan"], "arc tangent in degrees"),
+    "atan2d": (2, 2, ANYMAZE_FUNCTIONS["atan2"], "atan2(y, x) in degrees"),
+    "is_undefined": (1, 1, _undefined, "1 if the value is #N/A (NA), none or not a number"),
     "int": (1, 1, int, ""), "float": (1, 1, float, ""), "bool": (1, 1, bool, ""), "str": (1, 1, str, ""),
     "sign": (1, 1, lambda x: (x > 0) - (x < 0), "-1, 0 or 1"),
     "clamp": (3, 3, lambda x, lo, hi: max(lo, min(hi, x)), "clamp(x, low, high)"),
@@ -116,7 +187,7 @@ FUNCTIONS: dict[str, tuple] = {
     "randint": (2, 2, None, "random integer a..b (inclusive)"),
     "gauss": (2, 2, None, "normal random number (mean, sd)"),
     "choice": (1, 1, None, "random element of a list"),
-    "shuffle": (1, 1, None, "shuffled copy of a list"),
+    "shuffle": (1, 2, None, "shuffled copy of a list; shuffle(list, n): at most n equal values in a row"),
     # live test state
     "time": (0, 0, None, "test time (s)"),
     "zone": (1, 1, None, "1 if the animal's centre is in the zone"),
@@ -137,6 +208,26 @@ FUNCTIONS: dict[str, tuple] = {
     "responses": (1, 1, None, "responses registered on a schedule"),
     "reinforcers": (1, 1, None, "reinforcers earned on a schedule"),
     "requirement": (1, 1, None, "current requirement of a schedule"),
+    "test_running": (0, 0, None, "1 while the test runs (not paused, not waiting to start)"),
+    "test_paused": (0, 0, None, "1 while the test is paused"),
+    "stage": (0, 0, None, "the test's stage"), "trial": (0, 0, None, "the test's trial number"),
+    "apparatus": (0, 0, None, "the test's apparatus"),
+    "treatment": (0, 0, None, "the animal's treatment group (its code when testing blind)"),
+    "animal": (0, 0, None, "the animal's number (id)"),
+    "animal_field": (1, 1, None, "animal_field('Sex'): a value from the animal's information"),
+    "date": (0, 0, None, "today's date, 'YYYY-MM-DD'"),
+    "time_of_day": (0, 0, None, "the clock time in seconds since midnight"),
+    "freezing_time": (0, 0, None, "total freezing time so far (s)"),
+    "immobile_time": (0, 0, None, "total immobile time so far (s)"),
+    "zone_distance": (1, 1, None, "distance from the animal's centre to a zone (0 inside it)"),
+    "point_distance": (1, 1, None, "distance from the animal's centre to a point"),
+    "head_x": (0, 0, None, "head x position"), "head_y": (0, 0, None, "head y position"),
+    "tail_x": (0, 0, None, "tail x position"), "tail_y": (0, 0, None, "tail y position"),
+    "x_percent": (0, 0, None, "x position as % of the arena's width (0 = left)"),
+    "y_percent": (0, 0, None, "y position as % of the arena's height (0 = top)"),
+    "sequence_duration": (1, 1, None, "duration of the last completed run of an apparatus zone sequence (s)"),
+    "speaker": (0, 1, None, "speaker([device]): 1 while a sound is playing"),
+    "output_volts": (1, 2, None, "output_volts([device,] channel): analogue output level in volts"),
 }
 
 _BIN = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv, ast.FloorDiv: op.floordiv,
@@ -204,6 +295,10 @@ def _check_node(n):
         raise ExprError(f"'{type(n).__name__}' is not allowed in expressions")
 
 
+# ANY-maze's undefined value; outside quoted text it reads as the constant NA
+_NA = re.compile(r"""('[^']*'|"[^"]*")|#N/A""")
+
+
 def compile_expr(src):
     """Parse and check an expression; returns an AST node (cached). Raises ExprError."""
     if isinstance(src, bool) or isinstance(src, (int, float)):
@@ -211,6 +306,8 @@ def compile_expr(src):
     if isinstance(src, list):
         return ast.Constant(None) if not src else ast.List([compile_expr(x) for x in src], ast.Load())
     s = "" if src is None else str(src).strip()
+    if "#N/A" in s:
+        s = _NA.sub(lambda m: m.group(1) or "NA", s)
     hit = _cache.get(s)
     if hit is not None:
         if isinstance(hit, ExprError):
@@ -273,12 +370,15 @@ def _limit(v):
 
 class Evaluator:
     """Safe evaluation of a checked AST. lookup(name) -> value (raise ExprError if unknown);
-    call(name, args) -> value for engine functions."""
+    call(name, args) -> value for engine functions. anymaze: ANY-maze's maths (ANYMAZE_FUNCTIONS: degrees, Log in
+    base 10)."""
 
-    def __init__(self, lookup: Callable, call: Callable | None = None, rng: random.Random | None = None):
+    def __init__(self, lookup: Callable, call: Callable | None = None, rng: random.Random | None = None,
+                 anymaze: bool = False):
         self.lookup = lookup
         self.call_engine = call
         self.rng = rng or random.Random()
+        self.anymaze = anymaze
 
     def eval(self, src):
         return self._ev(compile_expr(src))
@@ -381,7 +481,8 @@ class Evaluator:
             raise ExprError(f"invalid operands: {e}") from None
 
     def _call(self, name, args):
-        fn = FUNCTIONS[name][2]
+        fn = ANYMAZE_FUNCTIONS.get(name) if self.anymaze else None
+        fn = fn or FUNCTIONS[name][2]
         try:
             if fn is not None:
                 return fn(*args)

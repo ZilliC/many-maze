@@ -12,6 +12,7 @@ from typing import Callable
 import numpy as np
 
 from .camera import SourceReader, SourceSpec
+from .live import draw_display_texts
 from .session import END_SOURCE, END_SOURCE_FAILED, Session
 from .tracking import draw_tracking
 
@@ -242,6 +243,9 @@ class LiveGroup:
             if s is not None:
                 draw_tracking(img, self._last_dets.get(e.id, []), s.trail(self.trail_len) if self.trail_len else None,
                               copy=False)
+                texts = getattr(s, "display_texts", None)
+                if texts:  # the procedures' "output text on the display"
+                    img = draw_display_texts(img, texts)
         return img
 
     # ------------------------------------------------------------------ control
