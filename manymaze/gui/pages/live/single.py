@@ -396,7 +396,7 @@ class SingleTestMixin:
                 info = {"session": s, "state": state, "elapsed": elapsed, "duration": s.duration_s,
                         "events": len(s.events), "fired": list(s.engine.fired),
                         "outputs": list(s.outputs.log) if s.outputs is not None else [],
-                        "proc_log": list(s.log), "phase": s.start_phase}
+                        "proc_log": list(s.log), "phase": s.start_phase, "waiting_end": s.waiting_end}
                 info["distance"] = s.stats.distance
                 info["unit"] = s.stats.unit
             else:
@@ -447,8 +447,9 @@ class SingleTestMixin:
         state = info["state"]
         if self.session is not None or not self._hold_finished:
             self._set_state_display(state)
-        if state != self._btn_state:
-            self._btn_state = state
+        btn_state = state + ("/end" if info.get("waiting_end") else "")  # "waiting for test end"
+        if btn_state != self._btn_state:
+            self._btn_state = btn_state
             self._update_buttons()
         self.vals["zone"].setText(", ".join(info["zones"]) if info["zones"] else
                                   ("—" if info["detected"] else "not detected"))
@@ -607,6 +608,7 @@ class SingleTestMixin:
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
                         outputs_off_on_pause=self.pause_off.isChecked(), test_info=test_context(p, test),
+                        control_input=self.control_input.text().strip(),
                         **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)
@@ -648,6 +650,11 @@ class SingleTestMixin:
     # ================================================================== run control (one test)
     def _arm_clicked(self):
         s = self.session
+        if s is not None and s.waiting_end:
+            if s.continue_test():  # "waiting for test end": the button continues the test
+                self._log(f"{fmt_time(s.elapsed)}  test continued")
+            self._update_buttons()
+            return
         if s is not None and s.state == "waiting":
             s.request_start()  # armed: the button now starts the test immediately
             self._log("Start requested.")
@@ -710,6 +717,9 @@ class SingleTestMixin:
 
     def start_now(self) -> bool:
         """▶ ▾ Start now: arm the test if needed and start it without waiting for its start condition."""
+        if self.session is not None and self.session.waiting_end:
+            self._arm_clicked()  # continue a test waiting for its end
+            return True
         if self.session is None and not self.arm():
             return False
         s = self.session

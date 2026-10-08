@@ -151,6 +151,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     if session.pause_log:
         notes.append("Paused: " + "; ".join(f"at {p['t']:.2f} s for {p['duration_s']:.1f} s"
                                             for p in session.pause_log))
+    vlabels = getattr(session, "video_labels", None)
+    if vlabels:  # markers in the recorded video ("label the video recording")
+        test.variables = {**test.variables, "video_labels": [dict(v) for v in vlabels]}
     rec_log = getattr(session, "recording_log", None)
     if rec_log:
         notes.append("Video recording: " + "; ".join(f"{m} at {t:.2f} s" for t, m in rec_log))

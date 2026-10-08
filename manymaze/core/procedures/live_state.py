@@ -74,11 +74,14 @@ class LiveState:
     on_display = None
     on_video = None
     on_zone = None
+    on_end_pending = None  # on_end_pending(t): "End the test" allowing continuation fired
     wall_clock = staticmethod(_dt.datetime.now)
 
     def _reset_extra(self):
         self.end_reason = ""
-        self.awaiting_continuation = False
+        self.end_at: float | None = None  # when "End the test" fired (the data after it is dropped if it ends)
+        self.awaiting_continuation = False  # "waiting for test end" (End the test allowing continuation)
+        self._continue_until = 0.0
         self.scheduled_tests: list[dict] = []
         self.user_warnings: list[tuple[float, str]] = []
         self.zone_labels: dict[str, str] = {}
@@ -102,6 +105,11 @@ class LiveState:
         """The newer parts of a frame's state: "investigating" {zone: bool}, "orientation" {zone or point: angle
         between the body's orientation and the direction to it, degrees}, "hx", "hy", "tx", "ty", "rearing" and
         "events" [(event name, args)] reported by the live test."""
+        if self.awaiting_continuation and t + 1e-9 >= self._continue_until:
+            # not continued in time: the test really ends (at end_at, see LiveSession)
+            self.awaiting_continuation = False
+            self._log_line(t, "Test not continued: it ends")
+            self._end_test()
         if self._rearing:
             self.rear_time += dt
         inv = st.get("investigating")
@@ -127,6 +135,18 @@ class LiveState:
             self._rearing = v
         for name, args in st.get("events") or ():
             self._emit(name, dict(args or {}), t)
+
+    def continue_test(self, t: float) -> bool:
+        """The experimenter continues a test that is "waiting for test end": the end is forgotten and "test
+        continued" fires. False if the test is not waiting for its end."""
+        with self._lock:
+            if not self.awaiting_continuation or self.ended or self.stopped:
+                return False
+            self.awaiting_continuation = False
+            self.end_reason, self.end_at = "", None
+            self._log_line(t, "Test continued by the experimenter")
+            self._external(t, "test_continuation", {})
+            return True
 
     def system_event(self, t: float, name: str, args: dict | None = None):
         """An event the live test reports (disk space low, disk full, recording error …); thread-safe."""

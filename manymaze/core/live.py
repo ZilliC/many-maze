@@ -535,6 +535,7 @@ class LiveSession(_Scoring):
     disk_low_mb: float = 1024.0  # "disk space low" below this much free space on the recording disk
     disk_full_mb: float = 50.0  # below this the recording stops ("disk full")
     disk_check_s: float = 5.0  # how often the free space is checked while recording (test time)
+    control_input: str = ""  # test control switch: "[device/]channel"; closing it continues a test waiting to end
     test_info: dict | None = None  # the test for the procedures (procedures.test_context): trial(), animal() …
 
     def __post_init__(self):
@@ -564,6 +565,7 @@ class LiveSession(_Scoring):
                                       outputs_off_on_pause=bool(self.outputs_off_on_pause), commit_kept=False)
         self.engine.on_display, self.engine.on_video, self.engine.on_zone = \
             self._display_cmd, self._video_cmd, self._zone_cmd
+        self.engine.on_end_pending = self._end_pending
         if self.outputs is None:
             self.outputs = self.engine.outputs
         self.stats = LiveStats(self.apparatus, self.fps, self.analysis)
@@ -572,11 +574,14 @@ class LiveSession(_Scoring):
         self.popups: list[dict] = []  # pop-up messages of the procedures not yet shown (take_popups)
         self.recording_log: list[tuple[float, str]] = []  # what the procedures did to the recording
         self.record_parts: list[str] = []  # the files recorded (more than one after a stop and a new start)
+        self.video_labels: list[dict] = []  # "label the video recording": {"t", "video_t", "text", "file"}
         self._video_paused = False
         self._video_pause_t = 0.0
         self._rec_offset = 0.0  # test time not in the recording (recording paused / started late)
         self._video_label: tuple[str, float | None] | None = None  # (text, until test time)
         self._disk_last = -1e9
+        self._control_prev = False
+        self._cut_t: float | None = None  # ended by a procedure allowing continuation: the data ends here
         self._disk_low_sent = False
         self._user_warnings_seen = 0
         self.calibration: dict | None = None  # set_calibration(): this test's own calibration
@@ -730,6 +735,10 @@ class LiveSession(_Scoring):
         """The "end the test" action: the reason it gives is the test's end reason."""
         self.finish(self.engine.end_reason or END_PROCEDURE)
 
+    def _end_pending(self, t: float):
+        """"End the test" allowing continuation: the test is waiting for its end (see continue_test)."""
+        self.warn("Waiting for test end: press Start (or a start key) within 10 s to continue the test", t)
+
     def _display_cmd(self, cmd: str, params: dict):
         """Pop-up messages are queued for the GUI (take_popups); texts on the display are in display_texts."""
         if cmd == "popup":
@@ -785,10 +794,16 @@ class LiveSession(_Scoring):
             self._video_paused = False
             self._rec_offset += t - self._video_pause_t
             msg = "recording resumed"
-        elif cmd == "label":
+        elif cmd == "label":  # a marker in the video (as ANY-maze's video labels), optionally shown on it
             text, dur = str(params.get("text") or ""), float(params.get("duration") or 0)
-            self._video_label = (text, t + dur if dur > 0 else None) if text else None
-            msg = f"recording label “{text}”" if text else "recording label removed"
+            if self.recorder is None:
+                raise RuntimeError("the video is not being recorded")
+            video_t = self._rec_frames / self.fps
+            self.video_labels.append({"t": round(t, 3), "video_t": round(video_t, 3), "text": text,
+                                      "file": Path(self.record_parts[-1]).name if self.record_parts else ""})
+            if dur > 0:
+                self._video_label = (text, t + dur)
+            msg = f"label “{text}”"
         if msg:
             self.recording_log.append((round(t, 3), msg))
             self.log.append((t, f"Video: {msg}"))
@@ -877,9 +892,76 @@ class LiveSession(_Scoring):
             if self.state == "waiting":
                 self._start_requested = True
 
+    @property
+    def waiting_end(self) -> bool:
+        """"Waiting for test end": a procedure ended the test allowing continuation; tracking goes on and the
+        experimenter can continue the test (:meth:`continue_test`) for 10 s."""
+        return self.state == "running" and bool(getattr(self.engine, "awaiting_continuation", False))
+
+    def continue_test(self) -> bool:
+        """Continue a test that is waiting for its end (the Start button, a start key or the test control input):
+        the end is forgotten, the data has no gap and the procedures see "test continued"."""
+        with self.lock:
+            if not self.waiting_end:
+                return False
+            ok = False
+            try:
+                ok = self.engine.continue_test(self.elapsed)
+            except Exception as e:
+                self.warn(f"Procedure error: {e}")
+            if ok:
+                self.log.append((self.elapsed, "Test continued"))
+            return ok
+
+    def _cut_data(self, t_end: float):
+        """A test ended by a procedure allowing continuation and not continued: as ANY-maze, only the data up to
+        the moment the procedure ended it is kept (track rows, scored events, pauses and the I/O log; outputs
+        still on then are logged off at that time). The recording is kept whole."""
+        self._cut_t = t_end
+        cols = self.cols
+        n = sum(1 for x in cols["t"] if x <= t_end + 1e-9)
+        for v in cols.values():
+            del v[n:]
+        self.pauses = [p for p in self.pauses if p[0] <= t_end + 1e-9]
+        self.pause_log = [p for p in self.pause_log if p["t"] <= t_end + 1e-9]
+        self.log.append((t_end, "Test ended by procedure: the data after this time is discarded"))
+
+    @property
+    def io_events(self) -> list:
+        evs = list(self.engine.io_events) if self.engine is not None else []
+        c = self._cut_t
+        if c is None:
+            return evs
+        out, on = [], {}
+        for e in evs:
+            if e["t"] <= c + 1e-9:
+                out.append(e)
+                if e["kind"] == "output":
+                    on[(e["device"], e["channel"], e.get("type"))] = e
+        for (dev, ch, typ), e in on.items():  # still on at the end: off at the cut
+            v = e.get("value")
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v and typ not in ("thermostat",):
+                out.append({**{k: x for k, x in e.items() if k in ("device", "channel", "kind", "type")},
+                            "t": round(c, 4), "value": 0})
+        return out
+
+    def _check_continuation(self, fg):
+        """While waiting for the test end: the test control input continues the test; the experimenter walking
+        into view confirms its end."""
+        if self.control_input:
+            dev, _, ch = self.control_input.rpartition("/")
+            on = bool(self.engine._input_value(dev, ch) or 0)
+            if on and not self._control_prev and self.continue_test():
+                self._control_prev = on
+                return
+            self._control_prev = on
+        if self._intruder(fg):
+            self.log.append((self.elapsed, "Experimenter in view: the test ends"))
+            self.finish(END_USER)
+
     def pause(self) -> bool:
         with self.lock:
-            if self.state != "running":
+            if self.state != "running" or self.waiting_end:  # nothing to pause while waiting for the test end
                 return False
             self.state = "paused"
             self._pause_ts = self._last_ts
@@ -964,6 +1046,10 @@ class LiveSession(_Scoring):
             self._record(frame, t)
             self._check_disk(t)
         self._update_engine(t, d, zones, head_zones, freezing, rearing)
+        if self.state == "running" and self.waiting_end:
+            self._check_continuation(fg)
+            if self.state == "finished":
+                return dets
         if self.duration_s and t >= self.duration_s:
             self.finish(END_DURATION)
         elif self._autosaver is not None and t - self._autosave_last >= self.autosave_s:
@@ -1109,19 +1195,28 @@ class LiveSession(_Scoring):
         with self.lock:
             if self.state == "finished":
                 return
-            if reason == END_USER and getattr(self.engine, "awaiting_continuation", False):
-                reason = self.engine.end_reason or END_PROCEDURE  # ended by a procedure, not continued
+            eng = self.engine
+            waiting = self.waiting_end
+            if waiting:  # waiting for the test end and not continued: the procedure ended the test
+                reason = eng.end_reason or END_PROCEDURE
+            end_at = getattr(eng, "end_at", None)
             self.end_reason = reason
             if self.state == "paused":
                 self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
                 self.pause_log.append({"t": round(self._pause_t, 3),
                                        "duration_s": round(time.monotonic() - self._pause_wall, 3)})
             if self.state in ("running", "paused"):
-                self._call_engine(self.engine.stop, self.elapsed)
+                self._call_engine(eng.stop, self.elapsed)
+            if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9:
+                self._cut_data(end_at)
             self._close_states()
             for m in self.engine.state_events:  # "mark start / end" actions
                 self.events.append({"behaviour": m["behaviour"], "t": m["t"],
                                     "t_end": m["t_end"] if m["t_end"] is not None else round(self.elapsed, 3)})
+            if self._cut_t is not None:
+                c = self._cut_t
+                self.events = [dict(e, t_end=min(e["t_end"], c) if e.get("t_end") is not None else None)
+                               for e in self.events if e["t"] <= c + 1e-9]
             self.state = "finished"
             err = self._close_recorder()
             if err is not None:

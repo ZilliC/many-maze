@@ -324,8 +324,10 @@ class MultiTestMixin:
                         p.set_zone_rows(rows, zones)
                 p.vals["events"].setText(str(len(s.events)))
             active = st in ("waiting", "running", "paused")
-            p.start_btn.setEnabled(st != "running" and self.project is not None)
-            p.start_btn.setText("Start now" if st == "waiting" else "Resume" if st == "paused" else "Arm / Start test")
+            wend = bool(getattr(s, "waiting_end", False)) if s is not None else False
+            p.start_btn.setEnabled((st != "running" or wend) and self.project is not None)
+            p.start_btn.setText("Continue test" if wend else "Start now" if st == "waiting" else
+                                "Resume" if st == "paused" else "Arm / Start test")
             p.start_btn.setToolTip(p.start_btn.text())
             p.pause_btn.setEnabled(st in ("running", "paused"))
             p.pause_btn.setText("Resume" if st == "paused" else "Pause")

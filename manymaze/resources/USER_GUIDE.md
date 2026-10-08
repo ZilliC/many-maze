@@ -756,7 +756,7 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 | Logic | Reinforcer earned (`reinforcer_earned`) | Schedule |
 | Touch screen | Touch in area (`touch`) | Area *(optional)* |
 | Touch screen | Touch outside all areas (`touch_outside`) | — |
-| Test | Test continued (`test_continuation`) — the test was ended by “End the test” with “allow continuation” and the experimenter continued it | — |
+| Test | Test continued (`test_continuation`) — “End the test” with “allow continuation” fired and the experimenter continued the test within 10 s | — |
 | Test | Time until the test ends (`time_before_end`) — once, this long before the end of the test duration | Time before the end (s) |
 | Test | At random intervals (`random_interval`) — each interval is drawn uniformly between the shortest and the longest | Shortest interval (s), Longest interval (s) |
 | Test | Time of day reached (`time_of_day`) — once, when the computer's clock passes this time during the test | Time of day (HH:MM[:SS]) |
@@ -864,7 +864,7 @@ sounds and virtual switches are switched off when the test ends.
 | Test | Start state event (`mark_start`) | Event |
 | Test | End state event (`mark_end`) | Event |
 | Test | Write to log (`log`) | Message |
-| Test | End the test (`end_test`) — with “allow continuation” the test pauses: continuing it fires “Test continued”, stopping it ends it | Reason *(optional)*, Allow the test to be continued *(optional)* |
+| Test | End the test (`end_test`) — with “allow continuation” the test is “waiting for test end”: tracking goes on and for 10 s the experimenter can continue it (Start button, start key or test control input; fires “Test continued”); otherwise it ends, its data cut back to this moment | Reason *(optional)*, Allow the test to be continued *(optional)* |
 | Test | Pause the test (`pause_test`) | — |
 | Test | Resume the test (`resume_test`) | — |
 | Test | Prevent test start (`prevent_test_start`) — in a “test is waiting to start” block: the test does not start (not even when asked to) until Allow test start | — |
@@ -885,7 +885,7 @@ sounds and virtual switches are switched off when the test ends.
 | Video | Stop video recording (`video_stop`) | — |
 | Video | Pause video recording (`video_pause`) | — |
 | Video | Resume video recording (`video_unpause`) | — |
-| Video | Label the video recording (`video_label`) — burned into the recorded frames | Label *(optional)*, For (s) *(optional)* |
+| Video | Label the video recording (`video_label`) — a marker at this moment of the video (saved with the test, with its time in the video file); optionally also burned into the recorded frames | Label, Also show it on the video for (s) *(optional)* |
 | Communication | Show a pop-up message (`popup`) | Message, Title *(optional)* |
 | Communication | Output text on the display (`display_text`) | Text name, Text, x (px) *(optional)*, y (px) *(optional)*, Colour *(optional)* |
 | Communication | Remove text from the display (`display_remove`) | Text name |
@@ -900,12 +900,19 @@ sounds and virtual switches are switched off when the test ends.
 | Audio | Set speaker volume (`set_volume`) — scales the volume of the sounds played afterwards | Audio device *(optional)*, Volume (0–1) |
 
 **Ending and continuing a test.** *End the test* stores its *Reason* as the test's *Reason for test end*. With
-*Allow the test to be continued* the test pauses instead: press *Resume* to continue it (procedures see *Test
-continued*) or *Stop* to end it with that reason.
+*Allow the test to be continued* (as in ANY-maze, e.g. a water-maze animal that finds the island but jumps off
+again) the test is not ended at once but is **waiting for test end**: tracking, the test clock, the recording and
+the procedures carry on, and for 10 seconds you can continue the test with the *Continue test* button (the start
+button), a start key or the *Test control input* (Setup tab: an input such as `box/door`; closing it continues the
+test). The end is then forgotten, the test goes on with no gap in its data, and procedures see *Test continued*.
+Otherwise the test ends, with the procedure's reason, when the 10 seconds are up, when you click *Stop*, or as soon
+as you walk into the camera's view to take the animal out; its data (track, scored events, I/O log) is then kept
+only up to the moment the procedure ended it. The test cannot be paused while it is waiting for its end.
 
 **Video recording.** The recorder actions work when the test is set to record. *Pause* leaves the paused time
-out of the video; *Stop* closes the file and a later *Start* records into a new file (`…_part2`); *Label* burns a
-text into the recorded frames. The test notes list what the procedures did to the recording, and the recording
+out of the video; *Stop* closes the file and a later *Start* records into a new file (`…_part2`); *Label* marks
+the moment in the video, as ANY-maze's video labels (saved in the test's variables as `video_labels`, each with
+its test time and its time in the video file) and can also burn the text into the frames for a while. The test notes list what the procedures did to the recording, and the recording
 stops with a warning (and the *Disk full* / *Recording error* events) if the disk fills up; *Disk space low* fires
 once when less than 1 GB is free.
 

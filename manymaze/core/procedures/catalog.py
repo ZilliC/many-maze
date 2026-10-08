@@ -122,7 +122,7 @@ _ev("touch", "Touch screen", "Touch in area", [P("area", "area", "", "Area", hel
 _ev("touch_outside", "Touch screen", "Touch outside all areas")
 # --- test timing (event wizard)
 _ev("test_continuation", "Test", "Test continued",
-    help="the test was ended by “End the test” with “allow continuation” and the experimenter continued it")
+    help="“End the test” with “allow continuation” fired and the experimenter continued the test within 10 s")
 _ev("time_before_end", "Test", "Time until the test ends", [P("seconds", "number", 10, "Time before the end (s)", True)],
     False, "once, this long before the end of the test duration")
 _ev("random_interval", "Test", "At random intervals", [P("min", "number", 5, "Shortest interval (s)", True),
@@ -308,7 +308,9 @@ _ac("log", "Test", "Write to log", [P("text", "text", "", "Message", True)])
 _ac("end_test", "Test", "End the test",
     [P("reason", "text", "", "Reason", help="stored as the reason for the test end; empty = ended by procedure"),
      P("allow_continuation", "bool", False, "Allow the test to be continued")],
-    "with “allow continuation” the test pauses: continuing it fires “Test continued”, stopping it ends it")
+    "with “allow continuation” the test is “waiting for test end”: tracking goes on and for 10 s the "
+    "experimenter can continue it (Start button, start key or test control input; fires “Test continued”); "
+    "otherwise it ends, its data cut back to this moment")
 _ac("pause_test", "Test", "Pause the test")
 _ac("resume_test", "Test", "Resume the test")
 _ac("prevent_test_start", "Test", "Prevent test start",
@@ -350,8 +352,10 @@ _ac("video_stop", "Video", "Stop video recording")
 _ac("video_pause", "Video", "Pause video recording")
 _ac("video_unpause", "Video", "Resume video recording")
 _ac("video_label", "Video", "Label the video recording",
-    [P("text", "text", "", "Label", help="empty = remove the label"),
-     P("duration", "number", 0, "For (s)", help="0 = until changed")], "burned into the recorded frames")
+    [P("text", "text", "", "Label", True),
+     P("duration", "number", 0, "Also show it on the video for (s)", help="0 = a marker only")],
+    "a marker at this moment of the video (saved with the test, with its time in the video file); optionally "
+    "also burned into the recorded frames")
 # --- display and messages
 _ac("popup", "Communication", "Show a pop-up message", [P("text", "text", "", "Message", True),
                                                          P("title", "text", "Procedure", "Title")])
@@ -404,6 +408,7 @@ CONSTANTS = {"true": True, "false": False, "True": True, "False": False, "pi": m
              "inf": math.inf, "nan": math.nan, "none": None, "None": None,
              "NA": math.nan}  # NA: ANY-maze's #N/A (undefined), see is_undefined()
 SHOCK_MAX_S = 60.0  # hard cap on any continuous shock
+CONTINUATION_S = 10.0  # "End the test" allowing continuation: how long the experimenter has to continue the test
 STALL_S = 0.25  # a software pulse train later than this (frames stalled) is delayed instead of bursting
 SAFETY_TASKS = ("shock", "audio")  # scheduled tasks that keep running in real time while the test is paused
 STEP_BUDGET = 5000  # statements a thread may run per frame before yielding
