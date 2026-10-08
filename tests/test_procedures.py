@@ -259,7 +259,7 @@ def test_event_loop_guard():
     pr = proc(WHEN("signal", [DO("signal", name="a")], name="a", mode="parallel"),
               WHEN("test_start", [DO("signal", name="a")]))
     eng = run([pr], 0.2)
-    assert any("too many events" in e for e in eng.errors)
+    assert any("trigger each other in a loop" in e for e in eng.errors)
 
 
 # ====================================================================== events
@@ -451,7 +451,7 @@ def test_audio_actions_logged_without_device():
 def test_audio_device_receives_commands():
     dm = DeviceManager([{"name": "spk", "type": "audio", "backend": "none"}])
     run([proc(DO("tone", frequency=4000, duration=0.05), DO("beep"))], 0.2, devices=dm)
-    assert [c for c, _ in dm.devices["spk"].played] == ["tone", "tone"]
+    assert [c for c, _ in dm.devices["spk"].played] == ["tone", "tone", "stop"]  # sounds stopped at the end
     assert dm.devices["spk"].played[0][1]["frequency"] == 4000
 
 
@@ -487,7 +487,7 @@ def test_touch_marks_pause_and_procedure_enable():
     assert [n for n, _ in marks if n != "later"] == ["hit left", "miss"]
     assert paused == [2.0, -3.0] and eng.pauses == [[2.0, 3.0]]
     assert eng.state_events == [{"behaviour": "Light", "t": 1.0, "t_end": 5.0}]
-    assert [t for n, t in marks if n == "later"] == [1.1, 2.0, 3.0, 4.0]  # enabled at 1 s: catches up
+    assert [t for n, t in marks if n == "later"] == [2.0, 3.0, 4.0]  # enabled at 1 s: every second from then
     assert any(m == "marked hit left" for _, m in eng.log_lines)
 
 
@@ -505,7 +505,7 @@ def test_enabling_a_procedure_starts_it_fully():
     eng = run([starter, later], 3.5, variables=variables)
     assert eng.errors == []
     assert mark_times(eng, "later started") == [1.0]  # top-level statements ran once
-    assert eng.result_variables == {"hits": 11 + 3}  # declared 10, +1 at start, +1 at 1, 2 and 3 s
+    assert eng.result_variables == {"hits": 11 + 2}  # declared 10, +1 at start, +1 at 2 and 3 s (from the enable)
     assert variables == {"kept": 7}
 
 

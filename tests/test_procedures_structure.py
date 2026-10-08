@@ -102,7 +102,8 @@ def test_repeat_until_runs_the_body_at_least_once():
     assert P.repeat_mode({"type": "repeat", "mode": "until"}) == "until"
     assert P.describe_statement(p["statements"][1]) == "Repeat until true"
     assert messages([proc({"type": "repeat", "mode": "until", "until": "", "body": []})]) == \
-        ["Repeat: Condition is required"]
+        ["Repeat: Condition is required", "Repeat: warning: the loop has nothing to do (it only uses up time, one "
+                                          "check per frame)"]
 
 
 # ====================================================================== go to / labels
