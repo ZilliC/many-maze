@@ -38,17 +38,38 @@ can start right away — **Protocol → Experiment → Test → Results**.
 water maze, Barnes maze, Y/T/radial maze, novel object recognition, light/dark box, three-chamber sociability,
 fear conditioning, forced swim / tail suspension, or custom). The experiment is saved as a folder
 `Name.mmaze/` containing `project.json`, `tracks/`, `recordings/` and `exports/`. Videos are referenced by
-relative path when they live inside the experiment folder, so the folder can be moved or shared.
+relative path when they live inside the experiment folder, so the folder can be moved or shared. Videos stored
+elsewhere are referenced by relative path *and* by their absolute path, so they are still found when the experiment
+folder moves on its own. When videos have moved too, `manymaze project DIR relink --folder FOLDER` (command line)
+finds each missing video by its file name under that folder and its subfolders (letter case ignored; when several
+files have the name, the one whose folders best match the old path; a tie is left alone and listed) and saves the
+experiment. `manymaze project DIR info` lists the tests whose video is missing. There is no relink button in the
+window yet.
+
+**Open in one place at a time**: while an experiment is open, its folder holds a small `.manymaze.lock` file naming
+the computer, user and program. Opening an experiment that another mANY-MAZE window, the command line or another
+computer has open asks whether to open it **read-only** (look, export and *Save as* a copy; saving is refused) or
+**open anyway** (only if it is not really open there any more: both would save over each other). A lock left by a
+program that is no longer running on this computer (e.g. after a crash) is ignored; one written by another
+computer cannot be checked, so you are asked. Live tests interrupted by a crash are recovered only when the program
+that ran them is no longer running. `manymaze project DIR track` and `relink` refuse to run on an experiment open
+elsewhere.
+
+**Save as** (File tab) saves a copy of the experiment file and its tracks in another folder and continues there
+(recordings and exports stay in the original folder). Choosing the experiment's own folder — however it is spelt —
+simply saves it; replacing another experiment swaps its tracks only once the copy is complete.
 
 **Based on another experiment**: choose an existing experiment under *Based on* and the new one gets its protocol —
 apparatus, stages, keys, test duration and start, animal tracking and analysis settings, procedures, I/O devices,
 training criteria, blind testing and animal ID options, animal columns and (optionally) the treatments. Animals,
-tests and results are not copied. Use it for a new cohort or a replication.
+tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again). Use it for a new
+cohort or a replication.
 
 **Protocol report** (*File ▸ Protocol report*) saves a printable HTML description of the protocol: the experiment
 options, stages, keys, a map of each apparatus with its zones, zone groups, points, lines and sequences (shape,
 area, entry rule, options), the animal tracking and analysis settings (changed values are marked), the procedures
-statement by statement, the I/O devices and the training criteria — for lab notebooks, methods sections and SOPs.
+statement by statement, the I/O devices (without passwords and tokens) and the training criteria — for lab
+notebooks, methods sections and SOPs.
 
 **Backups**: each time the experiment is saved, the previous experiment file is kept in `backups/` (at most one
 backup every 10 minutes, the 30 newest are kept). *File ▸ Restore a backup* lists them by date and time and goes
@@ -58,7 +79,7 @@ back to the chosen one (the current state is backed up first). Tracks are not pa
 recordings, exports and the video of every test — also videos stored outside the experiment folder, which are copied
 into `videos/external/` (the tests in the archive point to the copies). Use it to move an experiment to another
 computer or to keep it with a publication. **Open archive** unpacks an archive into a folder and opens it.
-Automatic backups are not archived.
+Automatic backups, the lock file and the I/O devices' passwords and tokens (`io-secrets.json`) are not archived.
 
 *File ▸ Create demo experiment* builds a complete open-field experiment from synthetic videos so you can try
 everything without a camera.
@@ -419,9 +440,10 @@ skipped). To end a stage for one animal without a criterion, use **End stage for
 
 Tick **Blind testing** on the Protocol tab: on the Experiment, Test schedule, Run tests and Review and score pages the treatments are
 replaced by stable random codes (e.g. *Group NJ55*) with a neutral colour, and groups cannot be renamed or
-re-coloured. Results, statistics and exports keep the real groups. Unticking the box (unblinding) asks for
-confirmation. The **Reveal treatment coding** button on the Experiment tab (and unticking the box) unblinds after a
-confirmation; Results and Statistics always show the real treatments.
+re-coloured. While blind, the *Treatment* (Group) column of the results, statistics, exports and HTML report also
+shows the code (the same as the *Treatment code* column), never the treatment's name, so results can be analysed
+blind too. Unticking the box (unblinding) asks for confirmation. The **Reveal treatment coding** button on the
+Experiment tab (and unticking the box) unblinds after a confirmation; the results then show the real treatments.
 
 ### Animal identification
 
@@ -1010,7 +1032,7 @@ sending heartbeats, e.g. after a crash.
 | **LabJack** | LabJack T4 / T7 / T8 through LJM (`pip install labjack-ljm`): `FIO`/`EIO` digital lines, `AIN` analogue inputs, `DAC` outputs, quadrature encoders on two `DIO` lines. |
 | **Syringe pump(s)** | One or several pumps (daisy-chained by address where the protocol allows): New Era / WPI Aladdin and OEMs, Harvard Apparatus (Ultra and legacy command sets), KD Scientific, Chemyx, Cavro-type pumps, a custom text protocol, or *simulated*. Channels of kind *Syringe pump* with `syringe=` (131 predefined syringes from 14 makers — check the inner diameter against your syringe's data sheet) or `diameter_mm=`. Each pump reports `<pump>.running`, `.stalled`, `.target_reached`, `.infused_ml` and `.withdrawn_ml`. |
 | **Balance** | Serial balances (Mettler Toledo MT-SICS, Ohaus, Sartorius, A&D, Kern, or any balance that sends its weight continuously): **Animals ▸ Weigh** records each animal's weight with the date (*Weight (g)* column and weight history), and the *Weigh the animal* action does it during a test. |
-| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device. |
+| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device. The SMTP password and Twilio token are not stored in `project.json`: they go to `io-secrets.json` in the experiment folder (readable only by your user account), which archives, protocol reports and experiments based on this one leave out. |
 | **Simulated device** | For designing and testing procedures without hardware: outputs are shown, inputs are switched by hand (*Simulate*). |
 
 Channels have a name (used by procedures), a kind (digital input, movement detector, digital output, PWM output,
@@ -1401,6 +1423,7 @@ unticked):
 | Video time at test start (s) | Where in the video the test starts (0 for recordings). |
 | Moveable zone positions | The positions of the moveable zones and points in this test (centre, in video pixels), and the apparatus position when it was moved. |
 | Period, Segment of test | With time periods: the period's label (e.g. *0-60 s*) and its number (1, 2, …; blank for the whole test). |
+| Analysis error | Only when a test could not be analysed (e.g. a damaged track file): the error. The other tests keep their results; HTML reports list such tests under *Problems*. |
 
 *Day of week*, *Time of day*, *User* and *Animal lighter / darker* can also be used to group results in Statistics.
 In the *one row per animal* export, *Treatment code* and *Animal notes* are kept when they are shown.
@@ -1502,7 +1525,9 @@ Select a test in the results table and click **Export video…**. You can choose
 - playback speed (0.5× to 8×) and output size (100 %, 75 % or 50 %).
 
 The video is written in the background with a progress bar and can be cancelled. It is encoded as H.264 where
-available (VideoToolbox on Apple Silicon). Frames are streamed, so memory use does not depend on the video's length.
+available (VideoToolbox on Apple Silicon). It is written to `<name>.part.mp4` and renamed when complete, so a
+cancelled or failed export leaves any earlier file of that name as it was; the test's own video cannot be chosen as
+the output. Frames are streamed, so memory use does not depend on the video's length.
 From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", OverlayOptions(...))`.
 
 ### Data transfer (Data page)
@@ -1541,8 +1566,8 @@ the data from ANY-maze instead (ANY-maze ▸ **File ▸ Export**) and import it 
 | In ANY-maze | Import as | What you get |
 |---|---|---|
 | *Export zone maps* (individual or combined, CSV) | **Zone maps (apparatus zones)…** — select all the files | an apparatus per ANY-maze apparatus, with its zones traced from the pixels (border maps are filled; a moveable zone gets its first position). An existing apparatus of the same name keeps its other elements and calibration |
-| *Export experiment as XML* (with the default top-left coordinates) | **Experiment exported as XML…** | the animals (ID or *Animal N*, treatment, notes), every performed test with its stage, trial, date and time, notes, reason for ending, its track (centre, head, tail; frames without a position stay undetected) and its scaling as calibration; zones moved in a test become moveable-zone positions |
-| *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand) |
+| *Export experiment as XML* (with the default top-left coordinates) | **Experiment exported as XML…** | the animals (ID, or *Animal N* — *Animal N (2)* when an earlier import already made *Animal N*, so animals without an ID never merge), treatment, notes, every performed test with its stage, trial, date and time (day/month order read from all the file's dates: 13/02 means day first, 02/13 month first; day first when nothing tells), notes, reason for ending, its track (centre, head, tail; frames without a position stay undetected) and its scaling as calibration; zones moved in a test become moveable-zone positions |
+| *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand). Decimal commas are recognised for the whole file at once: *0,125* is 0.125 in a file written with decimal commas, *1,234,567* is 1234567 in one written with thousands separators |
 
 Import the zone maps first: an apparatus that does not exist yet is otherwise created from the zones' bounding
 boxes and the apparatus' box (its arena), which is all the XML export contains about zone shapes. When the export
