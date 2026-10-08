@@ -151,6 +151,8 @@ class ScoringMixin:
             return
         t = round(self.test_time() if t is None else t, 3)
         if b.kind == "point":
+            if self._refuse_outside(b, t):
+                return
             self.test.events.append({"behaviour": b.name, "t": t, "t_end": None})
             self.main.status(f"{b.name} at {t:.2f} s")
             self._scoring_changed()
@@ -164,6 +166,8 @@ class ScoringMixin:
         if self.test is None or b.name in self._open_states:
             return
         t = round(self.test_time() if t is None else t, 3)
+        if self._refuse_outside(b, t):
+            return
         for o in wf.exclusive_partners(self.project.behaviours, b):
             if o.name in self._open_states:
                 self._end_state(o.name, t)
@@ -179,8 +183,23 @@ class ScoringMixin:
         self.main.status(f"{b.name} off at {t:.2f} s")
         self._scoring_changed()
 
+    def _test_end(self) -> float | None:
+        """The end of the test (its duration, s from the test start), None when open-ended."""
+        dur = (self.test.duration_s or self.project.test_duration_s) if self.test is not None else 0.0
+        return float(dur) if dur and dur > 0 else None
+
+    def _refuse_outside(self, b, t: float) -> bool:
+        """Events are only scored within the test (from its start to its end): outside, nothing is stored."""
+        end = self._test_end()
+        where = "before the test start" if t < 0 else "after the test end" if end is not None and t > end else ""
+        if where:
+            self.main.status(f"{b.name} not scored: {t:.2f} s is {where}.")
+        return bool(where)
+
     def _end_state(self, name, t):
         t0 = self._open_states.pop(name)
+        end = self._test_end()
+        t = max(0.0, min(t, end) if end is not None else t)  # a behaviour ends at the latest with the test
         a, z = sorted((t0, t))
         if z > a:
             self.test.events.append({"behaviour": name, "t": a, "t_end": z})

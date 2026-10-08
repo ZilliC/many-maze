@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QWidget
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
+                               QWidget)
 
 from ....core import workflow as wf
 from ...widgets import fmt_time
@@ -38,13 +39,10 @@ class KeysMixin:
         self._shortcuts = []
         for w in self.setup_widgets:
             w.setEnabled(not on)
-        app = QApplication.instance()
-        if on and not self._key_filter:
-            app.installEventFilter(self)
-            self._key_filter = True
-        elif not on and self._key_filter:
-            app.removeEventFilter(self)
-            self._key_filter = False
+        self._keys_wanted = on
+        if not on:
+            self._holds = {}
+        self._sync_key_filter(self.isVisible())
         if not on or self.project is None:
             return
         # scoring keys go through an event filter (press and release: "hold" behaviours, no auto-repeat)
@@ -60,6 +58,18 @@ class KeysMixin:
                 sc.setContext(Qt.WindowShortcut)
                 sc.activated.connect(fn)
                 self._shortcuts.append(sc)
+
+    def _sync_key_filter(self, visible: bool):
+        """The application-wide key filter (scoring keys, keys for the procedures) is installed only while tests
+        run *and* this page is shown: on another page (Review and score, notes…) the keys are left alone."""
+        app = QApplication.instance()
+        on = bool(getattr(self, "_keys_wanted", False)) and visible
+        if on and not self._key_filter:
+            app.installEventFilter(self)
+            self._key_filter = True
+        elif not on and self._key_filter:
+            app.removeEventFilter(self)
+            self._key_filter = False
 
     def start_key(self) -> bool:
         """Start key (keyboard / USB presenter): start the waiting test(s) or resume paused ones."""
@@ -104,32 +114,62 @@ class KeysMixin:
         return False
 
     def _scoring_target(self):
+        """The test scoring keys go to: the selected panel's (several tests), even when it is paused or waiting
+        (nothing is scored then); the first running test only when no panel is selected."""
         if self.mode == "observe":
             return self.obs
         if self.mode == "multi":
             e = self._selected_entry()
-            if e is None or e.state != "running":
+            if e is None:
                 e = next((x for x in self.group.entries if x.state == "running"), None)
             return e.session if e is not None else None
         return self.session
 
+    def _key_sessions(self) -> list:
+        """The sessions whose procedures see key presses / releases (every armed test of the current mode)."""
+        if self.mode == "observe":
+            return [self.obs] if self.obs is not None else []
+        if self.mode == "multi":
+            return [e.session for e in self.group.entries if e.session is not None]
+        return [self.session] if self.session is not None else []
+
+    def forward_key(self, key: str, down: bool = True, sessions=None):
+        """A key pressed or released: to the procedures ("key pressed" / "key released" events, key(...) in
+        expressions) of the armed tests — also while paused or waiting to start (core.live.LiveSession.key)."""
+        for s in (self._key_sessions() if sessions is None else sessions):
+            fn = getattr(s, "key", None)
+            if fn is not None:
+                try:
+                    fn(key, down)
+                except Exception as ex:  # a procedure error must not break the keyboard
+                    self._log(f"Key {key}: {ex}", self._entry_of(s))
+
     def score_key(self, key: str, down: bool = True) -> bool:
         """A scoring key was pressed (down) or released: point events, state toggles, hold behaviours (scored
-        while the key is down) and exclusive sets (starting one behaviour stops its partners)."""
+        while the key is down) and exclusive sets (starting one behaviour stops its partners).  The key also
+        goes to the procedures."""
         if self.project is None:
             return False
+        self.forward_key(key, down)
         b = next((b for b in self.project.behaviours if b.key and b.key.lower() == key.lower()), None)
         return b is not None and self._score(b, down)
 
     def _pad(self, name: str, down: bool):
         b = next((b for b in (self.project.behaviours if self.project else []) if b.name == name), None)
         if b is not None:
+            s = self._scoring_target()
+            if b.key and s is not None:
+                self.forward_key(b.key, down, [s])
             self._score(b, down)
         if self.obs is not None:
             self.obs_panel.show_session(self.obs, self.obs.duration_s)
 
     def _score(self, b, down: bool) -> bool:
-        s = self._scoring_target()
+        holds = self._holds
+        if not down and b.kind == "hold" and b.name in holds:
+            s = holds.pop(b.name)  # a hold ends in the test it started in (the selection may have changed)
+        else:
+            s = self._scoring_target()
         if s is None or s.state != "running":
             return False
         e = self._entry_of(s)
@@ -150,7 +190,6 @@ class KeysMixin:
                 return False
             score(b.name, "end")
         else:
-            s.key(b.key)
             if b.kind == "point":
                 score(b.name, "point")
             elif b.name in s.open_states:
@@ -159,7 +198,8 @@ class KeysMixin:
                 score(b.name, "end")
             elif all(score(o.name, "end") for o in wf.exclusive_partners(self.project.behaviours, b)
                      if o.name in s.open_states):
-                score(b.name, "start")
+                if score(b.name, "start") and b.kind == "hold":
+                    holds[b.name] = s
         self._push_undo(s, done)
         if s is self.session:
             self.vals["events"].setText(str(len(s.events)))
@@ -214,17 +254,46 @@ class KeysMixin:
             if p is not None:
                 p.undo_btn.setEnabled(self._can_undo(e.session))
 
+    @staticmethod
+    def _editing_text(w) -> bool:
+        """The focus is in a text editor (line / text edits, spin boxes, editable combo boxes): keys are typed."""
+        if isinstance(w, (QLineEdit, QPlainTextEdit, QTextEdit)):
+            return not w.isReadOnly()
+        return isinstance(w, QAbstractSpinBox) or (isinstance(w, QComboBox) and w.isEditable())
+
+    @staticmethod
+    def _key_name(e) -> str:
+        """The key's name as procedures use it: the typed character, else Qt's name (Space, PgDown, F5…)."""
+        text = e.text().strip()
+        if text and text.isprintable():
+            return text
+        if e.key() in (0, Qt.Key_unknown, Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta):
+            return ""
+        return QKeySequence(e.key()).toString()
+
     def eventFilter(self, obj, e):
         t = e.type()
         if self._key_filter and t in (QEvent.KeyPress, QEvent.KeyRelease) and isinstance(obj, QWidget) \
-                and obj.window() is self.window() and self.project is not None \
+                and self.isVisible() and obj.window() is self.window() and self.project is not None \
                 and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
             fw = QApplication.focusWidget()
-            editing = (isinstance(fw, QLineEdit) and not fw.isReadOnly()) or isinstance(fw, QAbstractSpinBox) \
-                or (isinstance(fw, QComboBox) and fw.isEditable())
-            text = e.text().strip()
-            b = next((b for b in self.project.behaviours if b.key and text and b.key.lower() == text.lower()),
-                     None) if not editing else None
+            if self._editing_text(fw) or self._editing_text(obj):
+                return super().eventFilter(obj, e)
+            # an unaccepted key event goes up to the parent widgets, through this filter again: handle it once
+            sig = (t, e.key(), e.timestamp(), e.isAutoRepeat())
+            last = self._last_key
+            try:
+                again = last is not None and last[0] == sig and obj.isAncestorOf(last[1])
+            except RuntimeError:  # the first receiver was deleted meanwhile
+                again = False
+            if again:
+                return False
+            self._last_key = (sig, obj)
+            name = self._key_name(e)
+            b = next((b for b in self.project.behaviours if b.key and name and b.key.lower() == name.lower()),
+                     None)
+            if not e.isAutoRepeat() and name:
+                self.forward_key(name, t == QEvent.KeyPress)
             if b is not None:
                 if not e.isAutoRepeat():
                     self._score(b, t == QEvent.KeyPress)

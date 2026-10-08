@@ -151,7 +151,7 @@ from the real size you enter — or draw your own:
 **Import… / Export…** (Apparatus group) copy apparatus maps between experiments: *Import…* reads the apparatus
 of another experiment (choose its `project.json`) or an apparatus file; *Export…* writes the current
 apparatus (zones, points, lines, groups, sequences, grids and calibration) to a `.json` file you can share.
-**Export map image…** saves the zone map as a picture — **PNG**, **SVG** (editable vector drawing) or **PDF**,
+**Map image…** (Apparatus group) saves the zone map as a picture — **PNG**, **SVG** (editable vector drawing) or **PDF**,
 chosen by the file type: the arena, the zones filled in their colours (hidden zones dashed), points and lines, with
 their names when *Show labels* is on, and the apparatus name and calibration in the corner; drawn over the
 background frame when a video frame is shown.

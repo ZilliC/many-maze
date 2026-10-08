@@ -406,6 +406,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         """Re-read the current test from the project (it may have been edited or tracked elsewhere)."""
         t = self.test
         self._load_tracks()
+        self._undo.clear()  # the undo steps were of the tracks before (re-tracked or edited elsewhere meanwhile)
         self._loading = True
         self.start_spin.setValue(t.start_s)
         self.dur_spin.setValue(t.duration_s)
@@ -632,6 +633,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.test.start_s = self.start_spin.value()
         self.test.duration_s = self.dur_spin.value()
         self.main.mark_dirty()
+        self._mark_stale("results", "plots")  # the measures are over the new test window
         self._update_info()
         self._refresh_frame()
 
