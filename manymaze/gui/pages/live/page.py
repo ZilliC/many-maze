@@ -14,14 +14,17 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QInputDialog, QMenu, QMessa
                                QStackedWidget, QTabWidget, QToolButton)
 
 from ....core import autosave
+from ....core import camsources
 from ....core.camera import CameraView
+from ....core.camhw import CameraHardware
 from ....core.live import LiveSession, ObservationSession
 from ....core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup
 from ....core.procedures import Outputs
 from ....core.tracking import ArenaTracker
 from ....core.video import MAX_CAMERAS
 from ...icons import icon
-from ...live_widgets import LAYOUT_LABELS, LAYOUTS, MonitorPanel, ObservationPanel, PanelSettingsDialog, TestPanel
+from ...live_widgets import (LAYOUT_LABELS, LAYOUTS, IndustrialCamerasDialog, MonitorPanel, ObservationPanel,
+                             PanelSettingsDialog, TestPanel)
 from ...touchscreen import TouchStimulusWindow
 from ...widgets import Worker, cv_to_qpixmap, fmt_time
 from ..base import Page
@@ -40,9 +43,11 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
     (setup, real-time monitor, procedures, results, log) on the right.  Commands live in the ribbon."""
 
     title = "Run tests"
+    CTI_KEY = "cameras/cti_files"  # GenTL producers of the GenICam backend (machine setting, not per project)
 
     def __init__(self, main):
         super().__init__(main)
+        camsources.set_cti_files(self._cti_files_setting())
         self._lock = threading.RLock()
         self._loading = False
         self.grabber: FrameGrabber | None = None
@@ -72,6 +77,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._view = CameraView()  # single-test camera options
         self._second = None
         self._merge_layout = "side"
+        self._hardware = CameraHardware()  # single-test camera hardware settings
         self.devices = None  # core.iodevices.DeviceManager while tests run
         self.mode = "single"
         # several tests at once
@@ -182,6 +188,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         m.addAction(icon("video_file"), "Video file (simulated camera)…", self.add_file_clicked)
         m.addSeparator()
         m.addAction(icon("refresh"), "Scan for cameras", self.scan_cameras)
+        m.addAction(icon("settings"), "Industrial cameras…", self.industrial_cameras)
         self.add_source_act.setMenu(m)
         self.add_panel_act = A("panel_add", "Add test panel", "Add a test (camera image × apparatus × animal) to "
                                "the session — switches to Several tests.", self.add_panel_clicked)
@@ -190,7 +197,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.capture_bg_act = A("image_capture", "Capture backgrounds", "Take the current camera image(s) as the "
                                 "empty-arena background. The arenas must be empty.", self.capture_backgrounds_clicked)
         self.cam_opts_act = A("settings", "Camera options", "Region of the image, digital zoom / pan, rotation, "
-                              "flip, merging two cameras.", self.camera_options_clicked)
+                              "flip, merging two cameras; camera settings (exposure, gain, white balance…).",
+                              self.camera_options_clicked)
         self.camera_act = A("video", "Camera image", "Turn the camera image(s) on or off (preview before "
                             "the test).", self.camera_toggled, checkable=True)
         self.next_test_act = A("forward", "Next test", "Go to the next test of the test schedule.", self.next_test)
@@ -332,21 +340,51 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._update_buttons()
 
     def add_camera_clicked(self):
-        i, ok = QInputDialog.getInt(self, "Add camera", "Camera number (0 = first camera):", 0, 0, MAX_CAMERAS - 1)
-        if not ok:
-            return
+        """Add a camera: one found by the last scan (industrial cameras included) or a camera number."""
+        found = [(self.camera.itemText(i), self.camera.itemData(i)) for i in range(self.camera.count())]
+        src = None
+        if any(camsources.is_native_source(s) for _, s in found):
+            other = "Another camera number…"
+            item, ok = QInputDialog.getItem(self, "Add camera", "Camera:", [lbl for lbl, _ in found] + [other], 0,
+                                            False)
+            if not ok:
+                return
+            src = next((s for lbl, s in found if lbl == item), None)
+        if src is None:
+            src, ok = QInputDialog.getInt(self, "Add camera", "Camera number (0 = first camera):", 0, 0,
+                                          MAX_CAMERAS - 1)
+            if not ok:
+                return
         if self.mode == "multi":
-            self.add_source(i)
+            self.add_source(src)
             return
         restart = self.grabber is not None
         self.stop_preview()
-        if self.camera.findData(i) < 0:
-            self.camera.addItem(f"Camera {i}", i)
-        self.camera.setCurrentIndex(self.camera.findData(i))
+        if self.camera.findData(src) < 0:
+            self.camera.addItem(f"Camera {src}" if isinstance(src, int) else camsources.native_label(src), src)
+        self.camera.setCurrentIndex(self.camera.findData(src))
         self.cam_radio.setChecked(True)
         self._update_single_title()
         if restart:
             self.start_preview()
+
+    def _cti_files_setting(self) -> list[str]:
+        settings = getattr(self.main, "settings", None)
+        v = settings.value(self.CTI_KEY, []) if settings is not None else []
+        return [v] if isinstance(v, str) and v else [str(x) for x in (v or []) if x]
+
+    def industrial_cameras(self) -> bool:
+        """GenICam / vendor SDK backends and the GenTL producer files; rescans the cameras when changed."""
+        dlg = IndustrialCamerasDialog(self._cti_files_setting(), self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        files = dlg.files()
+        settings = getattr(self.main, "settings", None)
+        if settings is not None:
+            settings.setValue(self.CTI_KEY, files)
+        camsources.set_cti_files(files)
+        self.scan_cameras()
+        return True
 
     def add_file_clicked(self):
         if self.mode == "multi":

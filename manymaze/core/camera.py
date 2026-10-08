@@ -1,6 +1,9 @@
 """Camera image options for live testing: region (crop), digital zoom / pan, rotation, flip, merging two
-cameras into one image, frame-rate pacing, reading a source in its own thread and per-camera persistence in
-``project.settings_extra``."""
+cameras into one image, camera hardware settings (core.camhw), frame-rate pacing, reading a source in its own
+thread and per-camera persistence in ``project.settings_extra``.
+
+A source is an OpenCV camera index (int), a native industrial camera ("pylon:<serial>" …, core.camsources) or a
+video file simulating a camera."""
 
 from __future__ import annotations
 
@@ -11,6 +14,8 @@ from dataclasses import asdict, dataclass, field
 import cv2
 import numpy as np
 
+from .camhw import CameraHardware, describe_report
+from .camsources import NativeCamera, is_native_source, native_label
 from .tracking import sample_background
 
 _ROT = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
@@ -165,10 +170,40 @@ class TransformedSource:
         self.release()
 
 
+def _is_file(s) -> bool:
+    return isinstance(s, str) and not s.isdigit() and not is_native_source(s)
+
+
+def _source_key(s) -> str:
+    if is_native_source(s):
+        return s
+    return f"file:{s}" if _is_file(s) else f"camera:{int(s)}"
+
+
+def hardware_target(src):
+    """The camera object of an opened source that has hardware settings (None for files / test fakes)."""
+    if isinstance(src, TransformedSource):
+        src = src.src
+    return src if src is not None and callable(getattr(src, "apply_hardware", None)) else None
+
+
+def apply_hardware(src, hw: CameraHardware | dict | None) -> dict:
+    """Apply hardware settings to an opened source; never raises (a failing camera reports "unsupported")."""
+    target = hardware_target(src)
+    hw = hw if isinstance(hw, CameraHardware) else CameraHardware.from_dict(hw)
+    if target is None or hw.is_empty:
+        return {}
+    try:
+        return target.apply_hardware(hw)
+    except Exception:
+        return {k: "unsupported" for k in hw.to_dict()}
+
+
 @dataclass
 class SourceSpec:
-    """A live image source: a camera index or a video file (simulating a camera), optionally merged with a second
-    camera / file, with its CameraView."""
+    """A live image source: an OpenCV camera index, a native camera id ("pylon:<serial>", core.camsources) or a
+    video file (simulating a camera), optionally merged with a second camera / file, with its CameraView and the
+    hardware settings of the (first) camera."""
 
     source: str | int = 0
     second: str | int | None = None
@@ -177,18 +212,23 @@ class SourceSpec:
     size: tuple | None = None  # requested camera resolution (w, h)
     fps: float | None = None  # requested camera frame rate
     name: str = ""
+    hardware: CameraHardware = field(default_factory=CameraHardware)
 
     @property
     def is_file(self) -> bool:
-        return isinstance(self.source, str) and not self.source.isdigit()
+        return _is_file(self.source)
+
+    @property
+    def is_native(self) -> bool:
+        return is_native_source(self.source)
 
     @property
     def key(self) -> str:
-        """Identifier used to persist the camera options (camera index or file path, plus the merged source)."""
-        k = f"camera:{int(self.source)}" if not self.is_file else f"file:{self.source}"
+        """Identifier used to persist the camera options (camera index, native camera id or file path, plus the
+        merged source)."""
+        k = _source_key(self.source)
         if self.second is not None and self.second != "":
-            s = self.second
-            k += f"+{'camera:' + str(int(s)) if not isinstance(s, str) or s.isdigit() else 'file:' + s}"
+            k += "+" + _source_key(self.second)
         return k
 
     @property
@@ -196,39 +236,51 @@ class SourceSpec:
         if self.name:
             return self.name
         from pathlib import Path
-        one = lambda s: (f"Camera {int(s)}" if not isinstance(s, str) or s.isdigit() else Path(s).name)
+        one = lambda s: (native_label(s) if is_native_source(s) else Path(s).name if _is_file(s) else
+                         f"Camera {int(s)}")
         lbl = one(self.source)
         if self.second is not None and self.second != "":
             lbl += (" | " if self.layout == "side" else " / ") + one(self.second)
         return lbl
 
     def to_dict(self) -> dict:
-        return {"source": self.source, "second": self.second, "layout": self.layout, "view": self.view.to_dict(),
-                "size": list(self.size) if self.size else None, "fps": self.fps, "name": self.name}
+        d = {"source": self.source, "second": self.second, "layout": self.layout, "view": self.view.to_dict(),
+             "size": list(self.size) if self.size else None, "fps": self.fps, "name": self.name}
+        if not self.hardware.is_empty:
+            d["hardware"] = self.hardware.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "SourceSpec":
         return cls(source=d.get("source", 0), second=d.get("second"), layout=d.get("layout", "side"),
                    view=CameraView.from_dict(d.get("view")), size=tuple(d["size"]) if d.get("size") else None,
-                   fps=d.get("fps"), name=d.get("name", ""))
+                   fps=d.get("fps"), name=d.get("name", ""), hardware=CameraHardware.from_dict(d.get("hardware")))
 
     def open(self, opener=None):
-        """Open the source (opener defaults to core.video.VideoSource) and wrap it in a TransformedSource."""
+        """Open the source (opener defaults to core.video.VideoSource; native cameras use
+        core.camsources.NativeCamera), apply the hardware settings and wrap it in a TransformedSource.  The
+        result of applying the settings is ``hardware_report`` of the returned object."""
         if opener is None:
             from .video import VideoSource as opener
         w, h = self.size or (None, None)
         conv = lambda s: int(s) if not isinstance(s, str) or s.isdigit() else s
-        src = opener(conv(self.source), w, h, self.fps or None)
+        open_one = lambda s: (NativeCamera if is_native_source(s) else opener)(conv(s), w, h, self.fps or None)
+        src = open_one(self.source)
         second = None
         if self.second is not None and self.second != "":
             try:
-                second = opener(conv(self.second), w, h, self.fps or None)
+                second = open_one(self.second)
             except Exception:
                 src.release()
                 raise
-        if second is None and self.view.is_identity:
-            return src
-        return TransformedSource(src, self.view, second, self.layout)
+        report = apply_hardware(src, self.hardware)
+        out = src if second is None and self.view.is_identity else TransformedSource(src, self.view, second,
+                                                                                       self.layout)
+        try:
+            out.hardware_report = report
+        except Exception:  # objects refusing new attributes (tests)
+            pass
+        return out
 
 
 class FramePacer:
@@ -278,6 +330,7 @@ class SourceReader:
         self.ended = False
         self.background: np.ndarray | None = None
         self.last_frame: np.ndarray | None = None
+        self.hardware_report: dict = {}  # result of applying spec.hardware when the camera opened
         self.src = None
         self._stop = False
         self._restart = False
@@ -319,6 +372,21 @@ class SourceReader:
             return src.last_raw, src.last_raw2
         return self.last_frame, None
 
+    def camera(self):
+        """The open camera with hardware settings (VideoSource / NativeCamera), or None (files, not open yet)."""
+        return hardware_target(self.src)
+
+    def set_hardware(self, hw: CameraHardware | dict) -> dict:
+        """Change hardware settings while the camera runs (any thread); returns the apply report."""
+        hw = hw if isinstance(hw, CameraHardware) else CameraHardware.from_dict(hw)
+        self.spec.hardware = self.spec.hardware.merged(hw.to_dict())
+        return apply_hardware(self.src, hw)
+
+    @property
+    def hardware_message(self) -> str:
+        """Settings the camera did not accept when it opened ("" when all were applied)."""
+        return describe_report({k: v for k, v in self.hardware_report.items() if v != "ok"})
+
     # ---- thread
     def _run(self):
         try:
@@ -329,6 +397,7 @@ class SourceReader:
             return
         try:
             self.src = src
+            self.hardware_report = dict(getattr(src, "hardware_report", None) or {})
             self.fps = float(src.fps or 25.0)
             self.size = (int(src.width), int(src.height))
             if not src.is_camera:
@@ -362,6 +431,11 @@ class SourceReader:
             ok, frame = src.read()
             if not ok:
                 if src.is_camera:
+                    cam = hardware_target(src)
+                    if cam is not None and getattr(cam, "triggered", False):
+                        failures = 0  # waiting for the external trigger
+                        time.sleep(0.001)
+                        continue
                     failures += 1
                     if failures > 100:
                         raise IOError("the camera stopped delivering frames")

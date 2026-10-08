@@ -13,6 +13,8 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetIte
 
 from ....core import autosave
 from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
+from ....core.camhw import CameraHardware
+from ....core.camsources import is_native_source, list_native_cameras
 from ....core.live import LiveSession, open_devices
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs
@@ -71,6 +73,17 @@ class FrameGrabber(SourceReader):
 
 
 
+def scan_all_cameras() -> tuple[list[tuple[str, object]], list[str]]:
+    """Cameras for the camera chooser: OpenCV indices (webcams, UVC cameras, capture cards) then the native
+    industrial cameras of the installed SDKs, as (label, source); and messages about the SDKs that are missing."""
+    cams = [(f"Camera {i}", i) for i in list_cameras()]
+    try:
+        native, messages = list_native_cameras()
+    except Exception as e:  # never let an SDK break the scan
+        native, messages = [], [f"Industrial cameras: {e}"]
+    return cams + [(c.label, c.source) for c in native], messages
+
+
 class SingleTestMixin:
     """One test: its source and preview, frame processing, test setup and run control."""
 
@@ -97,21 +110,25 @@ class SingleTestMixin:
         self.scan_btn.setEnabled(False)
         self.scan_btn.setText("Scanning…")
         self.main.status("Looking for cameras…")
-        w = Worker(lambda progress, stop: list_cameras(), self)
+        w = Worker(lambda progress, stop: scan_all_cameras(), self)
         w.signals.done.connect(self._cameras_found)
-        w.signals.failed.connect(lambda msg: self._cameras_found([]))
+        w.signals.failed.connect(lambda msg: self._cameras_found(([], [])))
         w.finished.connect(w.deleteLater)
         self._scan_worker = w
         w.start()
 
-    def _cameras_found(self, cams):
+    def _cameras_found(self, found):
+        """found: ([(label, source)], messages) from scan_all_cameras (or a list of camera indices)."""
         self._scan_worker = None
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText("Scan cameras")
+        cams, messages = found if isinstance(found, tuple) else ([(f"Camera {i}", i) for i in found], [])
+        tip = "Look for cameras connected to this computer"
+        self.scan_btn.setToolTip(tip + ("\n\n" + "\n".join(messages) if messages else ""))
         cur = self.camera.currentData()
         self.camera.clear()
-        for i in cams:
-            self.camera.addItem(f"Camera {i}", i)
+        for lbl, src in cams:
+            self.camera.addItem(lbl, src)
         if not cams:
             self.camera.addItem("Camera 0", 0)
             self.main.status("No camera found. You can simulate one with a video file.")
@@ -149,7 +166,8 @@ class SingleTestMixin:
         if self.sim_radio.isChecked():
             p = self.sim_path.text().strip()
             return p or None
-        return int(self.camera.currentData() or 0)
+        d = self.camera.currentData()
+        return d if is_native_source(d) else int(d or 0)
 
     @property
     def simulating(self) -> bool:
@@ -165,7 +183,8 @@ class SingleTestMixin:
         self._view = CameraView.from_dict(d.get("view"))
         self._second = d.get("second")
         self._merge_layout = d.get("layout", "side")
-        self.view_lbl.setText(describe_view(self._view, self._second, self._merge_layout))
+        self._hardware = CameraHardware.from_dict(d.get("hardware"))
+        self.view_lbl.setText(describe_view(self._view, self._second, self._merge_layout, self._hardware))
         self._update_single_title()
 
     def _merge_choices(self, exclude=None) -> list[tuple[str, object]]:
@@ -176,7 +195,8 @@ class SingleTestMixin:
         return [(lbl, s) for lbl, s in out if s != exclude]
 
     def camera_options(self) -> bool:
-        """Region / zoom / rotation / flip / merge options of the single-test source."""
+        """Region / zoom / rotation / flip / merge options and camera hardware settings of the single-test
+        source (hardware settings change live while the camera image is on)."""
         src = self._source()
         if src is None:
             QMessageBox.information(self, "Camera options", "Choose a camera or a video file first.")
@@ -184,12 +204,14 @@ class SingleTestMixin:
         raw, raw2 = self.grabber.raw_frames() if self.grabber is not None else (None, None)
         if raw is None:
             raw = self._last_frame if (self._view.is_identity and self._second is None) else None
-        if raw is None and isinstance(src, str):
+        if raw is None and SourceSpec(src).is_file:
             raw = peek_frame(src)
-        if raw2 is None and isinstance(self._second, str):
+        if raw2 is None and self._second is not None and SourceSpec(self._second).is_file:
             raw2 = peek_frame(self._second)
+        camera = self.grabber.camera() if self.grabber is not None and not self.simulating else None
         dlg = CameraOptionsDialog(raw, self._view, self._second, self._merge_layout, self._merge_choices(src),
-                                  raw2, self)
+                                  raw2, self, hardware=self._hardware, camera=camera, is_camera=not self.simulating,
+                                  genicam=is_native_source(src))
         if dlg.exec() != QDialog.Accepted:
             return False
         self._apply_single_view(dlg.result())
@@ -200,15 +222,23 @@ class SingleTestMixin:
         view = CameraView.from_dict(res.get("view"))
         second = res.get("second")
         layout = res.get("layout", "side")
+        hardware = CameraHardware.from_dict(res["hardware"]) if "hardware" in res else self._hardware
         settings = {}
         if not view.is_identity:
             settings["view"] = view.to_dict()
         if second is not None:
             settings.update(second=second, layout=layout)
+        if not hardware.is_empty:
+            settings["hardware"] = hardware.to_dict()
         set_camera_settings(self.project, key, settings)
         self.main.mark_dirty()
-        self._view, self._second, self._merge_layout = view, second, layout
-        self.view_lbl.setText(describe_view(view, second, layout))
+        image_changed = (view, second, layout) != (self._view, self._second, self._merge_layout)
+        self._view, self._second, self._merge_layout, self._hardware = view, second, layout, hardware
+        if self.grabber is not None:
+            self.grabber.spec.hardware = hardware  # already applied live by the dialog
+        self.view_lbl.setText(describe_view(view, second, layout, hardware))
+        if not image_changed:
+            return
         self._file_background = None
         self._background = None
         self.bg_status.setText("No background captured")
@@ -226,7 +256,8 @@ class SingleTestMixin:
         size = self.resolution.currentData() if not self.simulating else None
         fps = self.cam_fps.value() if not self.simulating else None
         self._source_is_file = self.simulating
-        spec = SourceSpec(src, self._second, self._merge_layout, self._view, size, fps or None)
+        spec = SourceSpec(src, self._second, self._merge_layout, self._view, size, fps or None,
+                          hardware=self._hardware if not self.simulating else CameraHardware())
         g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
         g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
         sig = g.signals
@@ -266,6 +297,9 @@ class SingleTestMixin:
         self._frame_size = (w, h)
         kind = "Video" if self.simulating else "Camera"
         self.main.status(f"{kind} opened: {w}×{h} at {fps:.1f} fps")
+        msg = self.grabber.hardware_message if self.grabber is not None else ""
+        if msg:
+            self._log(f"Camera settings: {msg}")
         app = self._apparatus
         if app is not None and app.frame_size and tuple(app.frame_size) != (w, h):
             self._log(f"Note: apparatus “{app.name}” was drawn on a {app.frame_size[0]}×{app.frame_size[1]} "
