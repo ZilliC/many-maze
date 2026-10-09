@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
+from ....core import workflow as wf
 from ....core.apparatus import POSITION_KEY, position_args
 from ....core.track import Track, swap_identities
 
@@ -375,7 +376,7 @@ class TrackEditMixin:
                 if tp.exists():
                     tp.unlink()
             if not self.tracks:
-                self.test.status = "pending"
+                wf.refresh_status(self.project, self.test)  # "scored" when it has scored events, else "pending"
                 self.main.mark_dirty()
                 self._update_info()
                 self._mark_stale("results", "plots")

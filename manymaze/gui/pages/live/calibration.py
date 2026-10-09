@@ -123,9 +123,24 @@ class LiveGeometryDialog(QDialog):
         name = self.zone.currentData()
         dx, dy = self.zone_dx.value(), self.zone_dy.value()
         if name and (dx or dy):
-            z = self.session.apparatus.zone(name)
+            z = self._moved_map(out["position"]).zone(name)
             out["zones"] = {name: z.shape.translated(dx, dy).to_dict()}
         return out
+
+    def _moved_map(self, position: dict):
+        """The test's map once the whole-map position of this dialog is applied: a zone moved in the same OK is
+        moved from where it is then (else a map moved at the same time would leave the zone behind)."""
+        s = self.session
+        base = getattr(s, "_base_apparatus", None)
+        if base is None:
+            return s.apparatus
+        pos = position_args(position)
+        ov = {**(s.zone_overrides or {}), **s.geometry, **getattr(s, "procedure_zone_overrides", {})}
+        if pos == {"dx": 0.0, "dy": 0.0, "angle": 0.0, "scale": 1.0}:
+            ov.pop(POSITION_KEY, None)
+        else:
+            ov[POSITION_KEY] = pos
+        return base.with_overrides(ov)
 
 
 class CalibrationMixin:
@@ -151,7 +166,9 @@ class CalibrationMixin:
         app = s.apparatus
         if px_per_cm is None and length_cm is None:
             dlg = LiveCalibrationDialog(app, s.name, self)
-            if dlg.exec() != QDialog.Accepted:
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
                 return None
             kw = dlg.values()
         elif length_cm is not None:
@@ -189,7 +206,9 @@ class CalibrationMixin:
             return None
         if position is None and zones is None:
             dlg = LiveGeometryDialog(s, self)
-            if dlg.exec() != QDialog.Accepted:
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
                 return None
             kw = dlg.values()
         else:

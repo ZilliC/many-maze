@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ...core import pose
 from ...core import workflow as wf
@@ -64,6 +64,9 @@ class ExperimentPage(Page):
         self._loading = False
         self._quiet_show = False
         self.element = "protocol"
+        self._key_names: list[str] = []  # name of each row of the keys table as last stored (renames follow it)
+        self._stage_names: list[str] = []  # stage of each line of the stages box as last stored
+        self._period_table = None  # the time-period table last worked in (see delete_time_period)
         self.stack = QStackedWidget()
         self.elements: dict[str, ElementPage] = {}
         lay = QVBoxLayout(self)
@@ -77,6 +80,9 @@ class ExperimentPage(Page):
         self._build_analysis()
         self._build_hardware()
         self._build_actions()
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._focus_changed)
 
     def _element_page(self, key: str, *args, **kw) -> ElementPage:
         pg = ElementPage(*args, **kw)
@@ -266,6 +272,8 @@ class ExperimentPage(Page):
         self.periods.setMaximumHeight(190)
         self.periods.edited.connect(self._store_periods)
         pg.add(self.periods)
+        self.periods_lbl = self._error_label()
+        pg.add(self.periods_lbl)
         pg.add(button_row(small_button("New time period", "add", slot=self._add_period),
                           small_button("Remove", "delete", slot=self.periods.remove_current)))
 
@@ -281,9 +289,19 @@ class ExperimentPage(Page):
         self.ev_periods.setMaximumHeight(190)
         self.ev_periods.edited.connect(self._store_event_periods)
         pg.add(self.ev_periods)
+        self.ev_periods_lbl = self._error_label()
+        pg.add(self.ev_periods_lbl)
         pg.add(button_row(small_button("New event period", "add", slot=self._add_event_period),
                           small_button("Remove", "delete", slot=self.ev_periods.remove_current)))
         pg.finish()
+
+    @staticmethod
+    def _error_label() -> QLabel:
+        lbl = QLabel()
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color:#dc2626;")
+        lbl.hide()
+        return lbl
 
     def _build_hardware(self):
         pg = self._element_page("hardware", "Hardware", "Devices used by procedures during live tests.", FORM_WIDTH)
@@ -429,8 +447,10 @@ class ExperimentPage(Page):
         self.duration.setValue(p.test_duration_s)
         self.start_mode.setCurrentIndex(max(0, self.start_mode.findData(p.start_mode)))
         self.stages.setPlainText("\n".join(p.stages))
+        self._stage_names = list(p.stages)
         row = max(self.beh.currentRow(), 0)
         self.beh.setRowCount(0)
+        self._key_names = []
         for b in p.behaviours:
             self._append_behaviour_row(b)
         if self.beh.rowCount():
@@ -442,6 +462,8 @@ class ExperimentPage(Page):
         self.periods.set_records({"label": lbl, "start": a, "end": b} for lbl, a, b in p.analysis.custom_periods)
         self.ev_periods.set_records({**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), "")}
                                     for d in p.analysis.event_periods)
+        self.periods_lbl.hide()
+        self.ev_periods_lbl.hide()
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
 
@@ -566,11 +588,19 @@ class ExperimentPage(Page):
         self._goto_element("stages")
         self._add_criterion()
 
+    def _focus_changed(self, _old, new):
+        for t in (self.periods, self.ev_periods):
+            if new is not None and (new is t or t.isAncestorOf(new)):
+                self._period_table = t
+
     def delete_time_period(self):
-        if self.ev_periods.hasFocus() or (self.ev_periods.currentRow() >= 0 and self.periods.currentRow() < 0):
-            self.ev_periods.remove_current()
-        else:
-            self.periods.remove_current()
+        """Delete the selected period of the table worked in last (its cell editor or a cell's list may have the
+        focus, or nothing has: the ribbon took it)."""
+        t = self._period_table
+        if t is None or t.currentRow() < 0:
+            t = self.ev_periods if self.ev_periods.currentRow() >= 0 and self.periods.currentRow() < 0 \
+                else self.periods
+        t.remove_current()
 
     def apply_template(self, key: str):
         """Use a test type's settings: protocol type and default test duration."""
@@ -645,6 +675,7 @@ class ExperimentPage(Page):
         p.protocol = self.protocol.currentData()
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
+        self._follow_stage_renames(p)
         stages = [s.strip() for s in self.stages.toPlainText().splitlines() if s.strip()]
         self.stages_lbl.setVisible(len(stages) > wf.MAX_STAGES)
         self.stages_lbl.setText(f"At most {wf.MAX_STAGES} stages — the lines after the {wf.MAX_STAGES}th are ignored.")
@@ -652,6 +683,21 @@ class ExperimentPage(Page):
         self.main.mark_dirty()
         self.main.update_title()
         self._update_summary()
+
+    def _follow_stage_renames(self, p):
+        """A line of the stages box edited in place renames its stage: the tests, criteria and completed stages
+        of the old name follow (p.rename_stage). Lines are matched by position while their number is unchanged; a
+        line emptied while being retyped keeps its stage until it has a name again."""
+        lines = [s.strip() for s in self.stages.toPlainText().split("\n")]
+        if len(lines) != len(self._stage_names):
+            self._stage_names = lines
+            return
+        for i, (prev, cur) in enumerate(zip(self._stage_names, lines)):
+            if not cur:
+                continue
+            if prev and cur != prev and lines.count(cur) == 1 and prev not in lines and cur not in p.stages:
+                p.rename_stage(prev, cur)
+            self._stage_names[i] = cur
 
     # ================================================================== keys (manually scored behaviours)
     def _append_behaviour_row(self, b: Behaviour):
@@ -661,6 +707,7 @@ class ExperimentPage(Page):
     def _add_behaviour_cells(self, b: Behaviour):
         r = self.beh.rowCount()
         self.beh.insertRow(r)
+        self._key_names.insert(r, b.name)
         self.beh.setItem(r, 0, QTableWidgetItem(b.name))
         k = QTableWidgetItem(b.key.upper() if len(b.key) == 1 else b.key)
         k.setTextAlignment(Qt.AlignCenter)
@@ -717,11 +764,21 @@ class ExperimentPage(Page):
         self.beh.setCurrentCell(self.beh.rowCount() - 1, 0)
         self._store_behaviours()
 
-    def _remove_behaviour(self):
+    def _remove_behaviour(self, confirm: bool = True):
         r = self.beh.currentRow()
-        if r >= 0:
-            self.beh.removeRow(r)
-            self._store_behaviours()
+        if r < 0:
+            return
+        b = self._row_behaviour(r)
+        n, n_tests = self.project.key_events(b.name) if b is not None and self.project is not None else (0, 0)
+        if n and confirm and QMessageBox.question(
+                self, "Delete key", f"The key “{b.name}” has {n} scored event{'s' if n != 1 else ''} in {n_tests} "
+                f"test{'s' if n_tests != 1 else ''}. Delete the key?\n\nThe events stay in the tests but are no longer "
+                "analysed (a key of the same name analyses them again).") != QMessageBox.Yes:
+            return
+        if r < len(self._key_names):
+            self._key_names.pop(r)
+        self.beh.removeRow(r)
+        self._store_behaviours()
 
     def _row_behaviour(self, r) -> Behaviour | None:
         name = self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else ""
@@ -736,6 +793,7 @@ class ExperimentPage(Page):
     def _store_behaviours(self, *_):
         if self._loading or self.project is None:
             return
+        self._follow_key_renames()
         out = [b for b in (self._row_behaviour(r) for r in range(self.beh.rowCount())) if b is not None]
         self.project.behaviours = out
         with loading(self):
@@ -747,6 +805,20 @@ class ExperimentPage(Page):
         self._show_key()
         self._update_summary()
         self.main.mark_dirty()
+
+    def _follow_key_renames(self):
+        """A renamed key keeps its data: scored events, marked time periods and criteria follow the new name
+        (p.rename_key). Rows are matched by position (the table's rows are the keys)."""
+        names = [self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else "" for r in range(self.beh.rowCount())]
+        if len(names) != len(self._key_names):
+            self._key_names = names
+            return
+        for r, (prev, cur) in enumerate(zip(self._key_names, names)):
+            if not cur:
+                continue
+            if prev and cur != prev and names.count(cur) == 1 and prev not in names:
+                self.project.rename_key(prev, cur)
+            self._key_names[r] = cur
 
     def _validate_behaviours(self) -> list[str]:
         errs = wf.validate_behaviours(self.project.behaviours) if self.project is not None else []
@@ -841,16 +913,27 @@ class ExperimentPage(Page):
     def _store_event_periods(self, *_):
         if self._loading or self.project is None:
             return
-        out = []
+        out, bad = [], []
         for r, d in enumerate(self.ev_periods.records()):
             if None in (d["offset_s"], d["duration_s"], d["occurrence"]):
+                bad.append(d["label"] or f"Event period {r + 1}")
                 continue
             target = d.pop("target")
             if d["anchor"] in _TARGET_KEY:
                 d[_TARGET_KEY[d["anchor"]]] = target
             out.append({**d, "label": d["label"] or f"Event period {r + 1}"})
         self.project.analysis.event_periods = out
+        self._show_rejected(self.ev_periods_lbl, bad, "the offset, duration and occurrence must be numbers")
         self.main.mark_dirty()
+
+    @staticmethod
+    def _show_rejected(lbl: QLabel, labels: list[str], why: str):
+        """Periods that cannot be used are not stored: say so (they are gone once the page is reloaded)."""
+        if labels:
+            names = ", ".join(f"“{x}”" for x in labels)
+            lbl.setText(f"Not used: {names} — {why}. Correct {'it' if len(labels) == 1 else 'them'}, or "
+                        f"{'it is' if len(labels) == 1 else 'they are'} left out.")
+        lbl.setVisible(bool(labels))
 
     def _add_period(self):
         ends = [p["end"] for p in self.periods.records()[-1:] if p["end"] is not None]
@@ -861,6 +944,9 @@ class ExperimentPage(Page):
     def _store_periods(self, *_):
         if self._loading or self.project is None:
             return
-        self.project.analysis.custom_periods = [[p["label"], p["start"], p["end"]] for p in self.periods.records()
-                                                if None not in (p["start"], p["end"]) and p["end"] > p["start"]]
+        recs = self.periods.records()
+        ok = [p for p in recs if None not in (p["start"], p["end"]) and p["end"] > p["start"]]
+        self.project.analysis.custom_periods = [[p["label"], p["start"], p["end"]] for p in ok]
+        self._show_rejected(self.periods_lbl, [p["label"] or f"Period {i + 1}" for i, p in enumerate(recs)
+                                               if p not in ok], "a period needs a start and an end after it")
         self.main.mark_dirty()

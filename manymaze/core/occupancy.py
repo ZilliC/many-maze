@@ -64,15 +64,30 @@ def body_axes(track: Track) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _entry_hysteresis(frac: np.ndarray, enter: float) -> np.ndarray:
-    """In-zone state from the fraction of the body inside: enters at >= enter, leaves below min(enter, 1-enter)."""
+    """In-zone state from the fraction of the body inside: enters at >= enter, leaves below min(enter, 1-enter)
+    (or at 0); frames without a fraction (NaN) keep the state.
+
+    Vectorised: a frame whose fraction gives the same next state whether the animal was in or out decides the
+    state; the others (between the leave and enter levels) hold the last decided state."""
+    frac = np.asarray(frac, float)
+    n = len(frac)
     leave = min(enter, 1.0 - enter)
-    out = np.zeros(len(frac), bool)
-    state = False
-    for i, f in enumerate(frac):
-        if np.isfinite(f):
-            state = f >= enter if not state else f >= leave and f > 0
-        out[i] = state
-    return out
+    fin = np.isfinite(frac)
+    with np.errstate(invalid="ignore"):
+        from_out = fin & (frac >= enter)  # next state when out
+        from_in = fin & (frac >= leave) & (frac > 0)  # next state when in
+    if np.any(fin & from_out & ~from_in):  # toggles with the state (only with enter <= 0): step through it
+        out = np.zeros(n, bool)
+        state = False
+        for i in range(n):
+            if fin[i]:
+                state = bool(from_in[i]) if state else bool(from_out[i])
+            out[i] = state
+        return out
+    decided = fin & (from_out == from_in)
+    idx = np.where(decided, np.arange(n), -1)
+    np.maximum.accumulate(idx, out=idx)
+    return np.where(idx >= 0, from_out[np.maximum(idx, 0)], False)
 
 
 def occupancy(track: Track, app: Apparatus, s: AnalysisSettings, part: str | None = None

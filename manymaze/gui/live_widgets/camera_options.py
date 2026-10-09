@@ -356,6 +356,7 @@ class CameraOptionsDialog(QDialog):
         self.resize(900, 560)
         self.raw = frame if frame is not None else np.full((480, 640, 3), 90, np.uint8)
         self.raw2 = second_frame
+        self._have_frame = frame is not None  # without one, a grey placeholder: no region can be chosen on it
         self.view = CameraView.from_dict(view.to_dict())
         self._loading = True
 
@@ -456,8 +457,13 @@ class CameraOptionsDialog(QDialog):
         v.addWidget(bb)
 
         self._load()
+        self._geometry = self._initial_geometry = self._base_geometry()
+        if not self._have_frame:
+            for w in (self.cx, self.cy, self.cw, self.ch, self.full_btn):
+                w.setEnabled(False)
+                w.setToolTip("Turn the camera image on (or choose a video file) to choose a region on it")
         for w in (self.rotate, self.flip, self.second, self.layout_combo):
-            w.currentIndexChanged.connect(self._changed)
+            w.currentIndexChanged.connect(self._geometry_changed)
         for w in (self.cx, self.cy, self.cw, self.ch):
             w.valueChanged.connect(self._changed)
         self.zoom.valueChanged.connect(self._changed)
@@ -474,6 +480,32 @@ class CameraOptionsDialog(QDialog):
             other = self.raw2 if self.raw2 is not None else np.full_like(self.raw, 60)
             img = merge_frames(img, other, self.layout_combo.currentData())
         return CameraView(rotate=self.rotate.currentData(), flip=self.flip.currentData()).apply(img)
+
+    def _base_geometry(self) -> tuple:
+        """What the region is chosen on: rotation, flip, merge (and its layout) and the size of that image."""
+        merged = self.second.currentData() is not None
+        return (self.rotate.currentData(), self.flip.currentData(), self.second.currentData(),
+                self.layout_combo.currentData() if merged else None, self._base().shape[:2])
+
+    def _region_reliable(self) -> bool:
+        """The region fields were chosen on the real image (not on the placeholder, nor on a merge with a camera
+        whose image is unknown)."""
+        return self._have_frame and (self.second.currentData() is None or self.raw2 is not None)
+
+    def _geometry_changed(self, *_):
+        """Rotation, flip or merge changed: the region of the previous image means nothing on the new one — back to
+        the whole image."""
+        if self._loading:
+            return
+        g = self._base_geometry()
+        if g != self._geometry:
+            self._geometry = g
+            h, w = g[-1]
+            self._loading = True
+            for sp, val in zip((self.cx, self.cy, self.cw, self.ch), (0, 0, w, h)):
+                sp.setValue(val)
+            self._loading = False
+        self._changed()
 
     def _load(self):
         v = self.view
@@ -492,6 +524,12 @@ class CameraOptionsDialog(QDialog):
         crop = [self.cx.value(), self.cy.value(), self.cw.value(), self.ch.value()]
         if crop == [0, 0, w, h] or crop[2] <= 1 or crop[3] <= 1:
             crop = None
+        if not self._region_reliable():
+            # never a region measured on a placeholder image: the saved one is kept while the image it was chosen
+            # on is unchanged (same rotation / flip / merge), else the whole image
+            same = (self.rotate.currentData(), self.flip.currentData()) == (self.view.rotate, self.view.flip) \
+                and self._geometry == self._initial_geometry
+            crop = list(self.view.crop) if same and self.view.crop else None
         return CameraView.from_dict({"crop": crop, "zoom": self.zoom.value(), "rotate": self.rotate.currentData(),
                                      "flip": self.flip.currentData(),
                                      "pan": [self.pan_x.value() / 100, self.pan_y.value() / 100]})
@@ -510,6 +548,13 @@ class CameraOptionsDialog(QDialog):
             self.hardware.restore()
         super().reject()
 
+    def done(self, r):
+        try:  # the region filter goes before the widgets do (no call on a deleted viewport at teardown)
+            self.src_view.viewport().removeEventFilter(self)
+        except RuntimeError:
+            pass
+        super().done(r)
+
     def _full(self):
         h, w = self._base().shape[:2]
         self._loading = True
@@ -524,6 +569,7 @@ class CameraOptionsDialog(QDialog):
         self.second.setCurrentIndex(0)
         self._load()
         self._loading = False
+        self._geometry = self._base_geometry()
         self._full()
 
     def _changed(self, *_):
@@ -543,7 +589,11 @@ class CameraOptionsDialog(QDialog):
     def eventFilter(self, obj, ev):
         from PySide6.QtCore import QEvent
 
-        if obj is self.src_view.viewport():
+        try:
+            mine = obj is self.src_view.viewport()
+        except RuntimeError:  # the dialog's widgets are being deleted
+            return False
+        if mine and self._have_frame:
             t = ev.type()
             if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 p = self.src_view.mapToScene(ev.position().toPoint())

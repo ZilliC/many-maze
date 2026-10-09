@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .catalog import EPS, EVENT_SPECS
+from .catalog import EPS, EVENT_SPECS, MAX_ENCODER_EVENTS
 
 
 def _rising(prev, cur, test) -> bool:
@@ -23,24 +23,36 @@ class _Detector:
         self.generic = self.spec.get("generic", True)
         self.args: dict = {}
         self.hits: list = []
+        self.th, self.path = th, path
+        self.done = False
         for p in self.spec["params"]:
             v = st.get(p["name"], p["default"])
             if p["type"] in ("number", "int"):
-                v = None if v in (None, "") else eng._num(th, v, path, what=p["label"])
+                v = None if v in (None, "") else eng._num(th, v, path, what=p["label"], default=None)
+                if v is None and isinstance(p["default"], (int, float)):
+                    v = p["default"]  # empty (or not a number): the default
+                    if p["req"]:
+                        eng._error(th, path, f"{self.spec.get('label', self.event)}: {p['label']} is empty or not "
+                                             f"a number — using {v:g}")
+                elif v is None and p["req"]:  # no default: the detector never fires
+                    eng._error(th, path, f"{self.spec.get('label', self.event)}: {p['label']} is empty or not a "
+                                         "number — the event is ignored")
+                    self.done = True
             elif p["type"] != "expr":
                 v = "" if v is None else str(v).strip()
             if p["type"] == "device" and v:
                 v = eng._devname(v)
             self.args[p["name"]] = v
         self.cond = st.get("cond")
-        self.th, self.path = th, path
-        self.done = False
         self.prev = None
         self.seq: list[str] = []
         a, e = self.args, self.event
         if e == "every":
+            # counted from when the detector starts (the test start; or when its procedure is enabled / the thread
+            # starts waiting), so a late start does not fire a burst of back-dated occurrences
             iv = a.get("interval") or 0
-            self.next_t = a["first"] if a.get("first") not in (None, "") else iv
+            base = th.clock if th is not None and math.isfinite(th.clock) else eng.t
+            self.next_t = base + (a["first"] if a.get("first") not in (None, "") else iv)
             if iv <= 0:
                 eng._error(th, path, "Every: the interval must be positive")
                 self.done = True
@@ -52,8 +64,8 @@ class _Detector:
             self.prev = eng._input_value(a.get("device"), a.get("channel"))
         elif e in ("condition_true", "condition_false"):
             self.prev = eng._truth(th, self.cond, path, quiet=True)
-        if e == "encoder_every":
-            self.prev = eng._input_value(a.get("device"), a.get("channel")) or 0
+        if e == "encoder_every":  # from the first reading (None: none yet)
+            self.prev = eng._input_value(a.get("device"), a.get("channel"))
         self._init_extra(eng, initial)
 
     def _init_extra(self, eng, initial):
@@ -178,11 +190,17 @@ class _Detector:
                 out.append((t, {"value": v}))
                 self.done = True
         elif e == "encoder_every":
-            v = eng._input_value(a.get("device"), a.get("channel")) or 0
+            v = eng._input_value(a.get("device"), a.get("channel"))
+            if v is None:
+                return out
+            if self.prev is None:  # the first reading: counted from here
+                self.prev = v
+                return out
             step = max(1, int(a["count"] or 1))
-            while abs(v - self.prev) >= step:
-                self.prev += step if v > self.prev else -step
-                out.append((t, {"value": v}))
+            k = int(abs(v - self.prev) // step)
+            if k:
+                self.prev += k * step if v > self.prev else -k * step
+                out.extend((t, {"value": v}) for _ in range(min(k, MAX_ENCODER_EVENTS)))
         elif e in ("condition_true", "condition_false"):
             v = eng._truth(self.th, self.cond, self.path)
             if _rising(self.prev, v, bool if e == "condition_true" else (lambda x: not x)):

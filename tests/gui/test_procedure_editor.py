@@ -98,7 +98,10 @@ def test_editor_builds_edits_nests_validates_and_round_trips():
     ed.duplicate_statement()
     ed.remove_statement()
     assert len(proc["statements"]) == 5
-    assert ed.issues == [] and "No problems" in ed.issue_list.item(0).text()
+    # a loop with only a comment in it: a warning, not an error
+    assert [m for _i, _p, m in ed.issues if not pr.is_warning(m)] == []
+    assert [m for _i, _p, m in ed.issues] == ["Repeat: warning: the loop has nothing to do (it only uses up time, "
+                                              "one check per frame)"]
 
     # validation errors are shown inline and in the list
     ed.tree.setCurrentItem(ed.tree.item_for((2,)))
@@ -110,7 +113,7 @@ def test_editor_builds_edits_nests_validates_and_round_trips():
     ed.issue_list.itemClicked.emit(ed.issue_list.item(0))
     assert ed._cur_path() == (2,)
     set_line(field(ed, "seconds"), "2")
-    assert ed.issues == []
+    assert [m for _i, _p, m in ed.issues if not pr.is_warning(m)] == []
 
     # simulated drag & drop: move the wait into the repeat through the tree, then rebuild from the tree
     tree = ed.tree

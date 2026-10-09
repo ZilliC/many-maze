@@ -10,7 +10,7 @@ from ..operant import parse_spec
 from .catalog import (ACTION_SPECS, CONSTANTS, EVENT_SPECS, KEEP_SCOPES, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT,
                       WHEN_MODES)
 from .expr import _INTERP, check_expr
-from .model import iter_statements, normalize_procedures, statement_fields, wait_alternatives, wait_mode
+from .model import iter_statements, normalize_procedures, path_text, statement_fields, wait_alternatives, wait_mode
 
 
 def _names(lst) -> list[str]:
@@ -95,6 +95,21 @@ def _bad_var_name(n) -> str | None:
     return None
 
 
+class ValidationWarning(str):
+    """A validation message that is a warning, not an error: the procedures run as written (e.g. "Run a program",
+    or a loop with nothing in it). It is a str (the message); :func:`is_warning` tells them apart."""
+
+
+def is_warning(message) -> bool:
+    return isinstance(message, ValidationWarning)
+
+
+# number parameters that may be negative (a value, a step, a level or a temperature); the others (times, counts,
+# rates, sizes …) must not be
+_NEGATIVE_OK = {"value", "by", "threshold", "target"}
+_NUMBER = re.compile(r"^\s*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\s*$")
+
+
 def _a(word: str) -> str:
     return "an" if word[:1] in "aeiou" else "a"
 
@@ -107,8 +122,9 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     errs = []
     if typ in ("number", "int"):
         errs = check_expr(v, names)
-        if not errs and isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0 \
-                and p["name"] not in ("value", "by", "threshold"):
+        lit = v if isinstance(v, (int, float)) and not isinstance(v, bool) else \
+            float(v) if isinstance(v, str) and _NUMBER.match(v) else None
+        if not errs and lit is not None and lit < 0 and p["name"] not in _NEGATIVE_OK:
             errs = ["must not be negative"]
     elif typ == "expr":
         errs = check_expr(v, names)
@@ -196,8 +212,16 @@ def _check_when_options(st) -> list[str]:
     return errs
 
 
-def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
+def _runs_something(stmts) -> bool:
+    """Whether a block has a statement that does something (not only comments, labels and disabled statements)."""
+    return any(isinstance(st, dict) and st.get("enabled", True) is not False
+               and st.get("type") not in ("comment", "label", "var", "when", None) for st in stmts or [])
+
+
+def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int, tuple, str]]:
     """Edit-time check. Returns [(procedure index, statement path, message)]; path () = the procedure itself.
+    Messages that are warnings (:func:`is_warning`: "Run a program" runs a command on this computer, a loop with
+    nothing in it) are included unless ``warnings`` is False; the others are errors.
 
     context: {"zones": [...], "devices": [names or io_devices configs], "areas": [...]} — optional; names are
     only checked against the lists that are given."""
@@ -311,6 +335,9 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                     e = _bad_var_name(st["var"])
                     if e:
                         err(e)
+                if warnings and not _runs_something(st.get("body")) and isinstance(st.get("body", []), list):
+                    issues.append((pi, p, ValidationWarning(f"{lab}: warning: the loop has nothing to do (it only "
+                                                            "uses up time, one check per frame)")))
                 block(pi, st.get("body", []), p + ("body",), False, True, visible, event)
             elif t in ("call", "label", "goto", "resolution"):
                 check(statement_fields(st))
@@ -345,6 +372,9 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                     if a in ("enable_procedure", "disable_procedure") and st.get("procedure") \
                             and st["procedure"] not in proc_names:
                         err2(f"unknown procedure '{st['procedure']}'")
+                    if a == "run_program" and warnings:
+                        issues.append((pi, p, ValidationWarning(f"{lab2}: warning: runs a program on this computer — "
+                                                                "only if it is allowed on this computer")))
                     if a == "run_subprocedure" and st.get("procedure") and st["procedure"] not in subs:
                         err2(f"'{st['procedure']}' is not a sub-procedure" if st["procedure"] in proc_names
                              else f"unknown procedure '{st['procedure']}'")
@@ -373,3 +403,15 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
         block(pi, proc.get("statements"), (), True, False)
     return issues
 
+
+def check_before_test(procedures, context=None) -> list[str]:
+    """The errors that should stop a live test from being armed (warnings left out), as readable lines
+    ("'Procedure', statement 2.1: message"); [] when the procedures can run. The procedures of a project are
+    checked against its zones, devices and areas with ``project_context(project)`` (disabled procedures too: another
+    procedure may enable them)."""
+    procs = normalize_procedures(procedures)
+    out = []
+    for pi, path, msg in validate(procs, context, warnings=False):
+        name = procs[pi].get("name") or f"Procedure {pi + 1}"
+        out.append(f"'{name}'" + (f", statement {path_text(path)}" if path else "") + f": {msg}")
+    return out

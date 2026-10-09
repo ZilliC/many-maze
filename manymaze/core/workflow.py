@@ -8,7 +8,7 @@ import random
 import string
 from dataclasses import asdict, dataclass
 
-from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test
+from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test, without_secrets
 
 MAX_STAGES = 50
 MAX_TRIALS = 99
@@ -722,7 +722,7 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
     procedures, I/O devices, training criteria, blind testing and animal ID options, the animal columns and the
-    experimenters (users);
+    experimenters (users); I/O device passwords and tokens are not copied (enter them again);
     with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
@@ -739,7 +739,7 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.behaviours = [Behaviour.from_dict(asdict(b)) for b in src.behaviours]
     dst.stages = list(src.stages)
     dst.procedures = _copy.deepcopy(src.procedures)
-    dst.io_devices = _copy.deepcopy(src.io_devices)
+    dst.io_devices = [without_secrets(d) for d in _copy.deepcopy(src.io_devices)]  # passwords stay behind
     dst.training_criteria = _copy.deepcopy(src.training_criteria)
     dst.blind = src.blind
     dst.animal_fields = list(src.animal_fields)

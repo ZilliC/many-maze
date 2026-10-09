@@ -173,23 +173,24 @@ def _rapc(d: TemplateData):
 def _t_maze(d: TemplateData):
     seq = d.seq(["Left arm", "Right arm"])
     d.res["First choice"] = seq[0][0].split()[0] if seq else "None"
-    d.res["Choice latency (s)"] = _r(seq[0][1] - d.k.t0 if seq else d.k.duration)
+    d.res["Choice latency (s)"] = _r(seq[0][1] - d.k.t0 if seq else d.never())
     d.res["Arm alternations"] = sum(1 for i in range(len(seq) - 1) if seq[i][0] != seq[i + 1][0])
 
 
 def _water_maze(d: TemplateData):
     res, app, s, k = d.res, d.app, d.s, d.k
-    t, dur, T, u = k.t, k.dur, k.duration, app.unit
+    t, dur, u = k.t, k.dur, app.unit
     plat = app.zone("Platform")
     pc = app.point("Platform centre")
     if plat is not None:
-        inp = d.memb.get("Platform", np.zeros(len(t), bool))
-        idx = np.flatnonzero(inp)
-        res["Escape latency (s)"] = _r(float(t[idx[0]] - k.t0) if len(idx) else T)
-        res["Found platform"] = "Yes" if len(idx) else "No"
-        stop = idx[0] if len(idx) else len(t)
-        res[f"Path length to platform ({u})"] = _r(k.step[:stop + 1].sum(), 2)
-        res["Platform crossings"] = d.zent("Platform") - (1 if d.initial and inp[0] and s.count_initial_entry else 0)
+        # the platform entries as the zone measures count them (minimum entry duration, initial entry rule)
+        stop = _found(d, "Platform")
+        res["Escape latency (s)"] = _r(float(t[stop] - k.t0) if stop is not None else d.never())
+        res["Found platform"] = "Yes" if stop is not None else "No"
+        res[f"Path length to platform ({u})"] = _r(k.step[:(stop if stop is not None else len(t)) + 1].sum(), 2)
+        # crossings: the entries, without one at the start of the test (the animal released on the platform)
+        res["Platform crossings"] = d.zent("Platform") - (1 if d.initial and stop == 0 and s.count_initial_entry
+                                                         else 0)
         others = [z.name for z in app.zones if z.name.startswith("Platform position")]
         if others:
             res["Mean crossings of other platform positions"] = _r(np.mean([d.zent(o) for o in others]), 2)
@@ -217,13 +218,18 @@ def _water_maze(d: TemplateData):
     res["Search strategy"] = classify_water_maze_strategy(res, u)
 
 
+def _found(d: TemplateData, zone: str) -> int | None:
+    """Frame (in the period) of the first entry into the zone as the zone measures count entries, or None."""
+    seq = d.seq([zone])
+    return int(np.searchsorted(d.k.t, seq[0][1] - 1e-9)) if seq else None
+
+
 def _whishaw(d: TemplateData, pc):
     """Whishaw's corridor: a band from the release point (first position or a "Release point" point) to the
     platform; reports how much of the swim to the platform stayed inside it."""
     res, app, k = d.res, d.app, d.k
-    inp = d.memb.get("Platform")
-    found = np.flatnonzero(inp) if inp is not None else np.zeros(0, int)
-    w = whishaw_corridor(k, app, d.s, pc.x, pc.y, found[0] if len(found) else len(k.t) - 1)
+    stop = _found(d, "Platform") if d.app.zone("Platform") is not None else None
+    w = whishaw_corridor(k, app, d.s, pc.x, pc.y, stop if stop is not None else len(k.t) - 1)
     if w is None:
         return
     res["Whishaw corridor time (s)"] = w["time"]
@@ -291,10 +297,10 @@ def _barnes_maze(d: TemplateData):
         first = names.index(esc_name)
         res["Primary latency (s)"] = _r(seq[first][1] - k.t0)
         res["Primary errors"] = first
-        stop = np.searchsorted(k.t, seq[first][1])
+        stop = np.searchsorted(k.t, seq[first][1] - 1e-9)
         res[f"Primary path length ({app.unit})"] = _r(k.step[:stop + 1].sum(), 2)
     else:
-        res["Primary latency (s)"] = _r(k.duration)
+        res["Primary latency (s)"] = _r(d.never())
         res["Primary errors"] = len(names)
         res[f"Primary path length ({app.unit})"] = _r(k.step.sum(), 2)
     res["Total errors"] = sum(1 for n in names if n != esc_name)

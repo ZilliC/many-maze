@@ -15,7 +15,8 @@ from .. import ioconfig
 from ..iodevices import DeviceManager
 from ..operant import Schedule
 from .actions import Actions, _Break, _Stop, _Timer, _Train
-from .catalog import CONSTANTS, EPS, MAX_CALL_DEPTH, SAFETY_TASKS, STEP_BUDGET
+from .catalog import (CONSTANTS, EPS, EVENT_SPECS, MAX_CALL_DEPTH, MAX_EVENT_CHAIN, MAX_EVENTS_PER_RUN,
+                      SAFETY_TASKS, STEP_BUDGET)
 from .detect import _CONDITION_EVENTS, EventWait, FrameWait, TimeWait, UntilWait, _Detector
 from .expr import Evaluator, ExprError, interpolate
 from .legacy import Outputs
@@ -197,15 +198,22 @@ class _Handler:
         self.once = bool(st.get("once"))
         self.threads: list = []
         self.count = 0
+        self.broken = False  # an internal error: the handler no longer runs (the others do)
 
 
 class _Thread:
-    def __init__(self, proc_i, handler, clock, locals_, label):
+    """A running block. ``owner`` is the procedure it belongs to (Stop / Disable procedure); ``proc_i`` is the
+    procedure whose statements it is running (a sub-procedure while inside a call: its maths and error
+    messages)."""
+
+    def __init__(self, proc_i, handler, clock, locals_, label, owner=None):
         self.proc_i, self.handler, self.clock, self.locals, self.label = proc_i, handler, clock, locals_, label
+        self.owner = proc_i if owner is None else owner
         self.alive = True
         self.wait = None
-        self.steps = 0
-        self.waits = 0
+        self.steps = 0  # statements run since the thread last yielded (the step budget)
+        self.ran = 0  # statements run in all
+        self.waits = 0  # waits that suspended the thread
         self.gen = None
         self.path = ()
         self.resume_clock = clock
@@ -234,6 +242,9 @@ class ProcedureEngine(Actions, LiveState):
     per-apparatus ones under "@animal" / "@apparatus" (see :func:`merge_kept_variables`), for the animal and
     apparatus of ``context["test"]``.
 
+    "Run a program" starts only the programs this computer allows (``program_policy``, default
+    :data:`programs.policy`: the per-user allow-list, and a confirmation callback the GUI may set).
+
     Before the test starts: call :meth:`waiting_update` on every frame while the test waits to start; the "test is
     waiting to start" handlers run (from the first call) and may Prevent / Allow the test start
     (:attr:`start_allowed`). At :meth:`start` they stop (pulse trains stop, shocks and sounds go off); the values of
@@ -244,7 +255,8 @@ class ProcedureEngine(Actions, LiveState):
 
     def __init__(self, procedures=None, devices=None, on_mark=None, on_end=None, on_log=None, variables=None,
                  context=None, *, on_pause=None, on_resume=None, on_stimulus=None, seed=None,
-                 outputs_off_at_end: bool = True, outputs_off_on_pause: bool = True, commit_kept: bool = True):
+                 outputs_off_at_end: bool = True, outputs_off_on_pause: bool = True, commit_kept: bool = True,
+                 program_policy=None):
         if isinstance(devices, Outputs):
             self.outputs, devices = devices, None
         else:
@@ -260,6 +272,8 @@ class ProcedureEngine(Actions, LiveState):
         self.outputs_off_on_pause = outputs_off_on_pause
         self.commit_kept = commit_kept
         self.clock = _dt.datetime.now  # date() and time_of_day()
+        # "Run a program": which programs may run on this computer (None: programs.policy, the per-user allow-list)
+        self.program_policy = program_policy
         self._lock = threading.RLock()
         self._pretest = False
         self._reset()
@@ -286,6 +300,7 @@ class ProcedureEngine(Actions, LiveState):
         self.proc_enabled = [bool(p.get("enabled", True)) for p in self.procedures]
         self._started_procs: set[int] = set()
         self._queue: deque = deque()
+        self._depth = 0  # how many events led to the one being dispatched (signal / variable loops)
         self._tasks: list = []
         self._task_seq = 0
         self._task_keys: dict = {}
@@ -323,6 +338,7 @@ class ProcedureEngine(Actions, LiveState):
         self.schedules: dict[str, Schedule] = {}
         self.stimuli: dict[str, dict] = {}
         self._audio_on: dict[tuple, float] = {}
+        self._audio_devs: set[str] = set()  # audio devices a sound was played on (stopped at the end)
         self._shock_keys: set[tuple] = set()
         self._pause_t: float | None = None
         self._ramps: dict = {}
@@ -356,7 +372,11 @@ class ProcedureEngine(Actions, LiveState):
                 if isinstance(st, dict) and st.get("type") == "when" and st.get("enabled", True) is not False \
                         and (st.get("event") == "test_waiting") == pretest:
                     th = _Thread(pi, None, t, {}, "when")
-                    det = _Detector(self, st, th, (i,), initial=True)
+                    try:
+                        det = _Detector(self, st, th, (i,), initial=True)
+                    except Exception as e:  # defensive: only this handler is left out
+                        self._error(th, (i,), f"When: internal error: {e!r}")
+                        continue
                     self.handlers.append(_Handler(pi, (i,), st, det, st.get("event", "?")))
         for pi in [] if pretest else pis:
             stmts = self.procedures[pi].get("statements") or []
@@ -371,8 +391,17 @@ class ProcedureEngine(Actions, LiveState):
                     self._resume(th)
 
     def _emit(self, name, args, t):
-        """Queue an occurrence of an event (dispatched to the handlers and waiting threads by _run)."""
-        self._queue.append(("event", name, args, t))
+        """Queue an occurrence of an event (dispatched to the handlers and waiting threads by _run). Its depth is
+        one more than the event being dispatched (a handler signalling another …): see _run."""
+        self._queue.append(("event", name, args, t, self._depth + 1))
+
+    def _listened(self, name, args) -> bool:
+        """Whether a handler or a waiting thread would see this occurrence of a generic event."""
+        if any(h.det.generic and not h.broken and self.proc_enabled[h.proc_i] and h.det.matches(name, args)
+               for h in self.handlers):
+            return True
+        return any(d.generic and d.matches(name, args) for th in self.threads
+                   if th.alive and isinstance(th.wait, EventWait) for d in th.wait.dets)
 
     # ------------------------------------------------------------------ public API
     def has_pretest(self) -> bool:
@@ -423,6 +452,7 @@ class ProcedureEngine(Actions, LiveState):
         for key in list(self._shock_keys):
             if self.outputs_state.get(key):
                 self._set_out(key[0], key[1], 0, t, "shock")
+        self._stop_audio_devices(t)
         for key in list(self._audio_on):
             self._audio_off(key, t)
         self._pretest = False
@@ -600,11 +630,18 @@ class ProcedureEngine(Actions, LiveState):
             for (dev, ch), v in list(self.outputs_state.items()):
                 if v:
                     self._safely(f"output {dev}/{ch}", self._set_out, dev, ch, 0, t, "digital")
+            self._stop_audio_devices(t)
             for key in list(self._audio_on):
                 self._safely("audio", self._audio_off, key, t)
             for name, v in list(self.switches.items()):
                 if v:
                     self._safely(f"switch {name}", self._set_switch, name, 0, t)
+
+    def _stop_audio_devices(self, t):
+        """The sounds stop on every audio device the procedures played on (looping and long sounds included)."""
+        for dev in sorted(self._audio_devs | {k[0] for k in self._audio_on}):
+            if self.devices.has(dev):
+                self._safely(f"audio {dev}", self.devices.audio, dev, "stop")
 
     def _safely(self, what, fn, *args):
         """A cleanup step at the end of the test: an error is reported and the next step still runs."""
@@ -777,6 +814,9 @@ class ProcedureEngine(Actions, LiveState):
         except ExprError as e:
             self._error(th, path, f"Variable {name}: {e}")
             self.vars[name] = 0
+        except Exception as e:  # defensive: the variable starts at 0, the procedures still start
+            self._error(th, path, f"Variable {name}: internal error: {e!r}")
+            self.vars[name] = 0
 
     def _kept_store(self, store, scope, create=False):
         """The kept values of a scope in a store (Project.variables or kept_variables): the store itself for the
@@ -814,7 +854,17 @@ class ProcedureEngine(Actions, LiveState):
             self._log_io(self.t, "procedure", name, "variable", float(value) if isinstance(value, float)
                          else int(value), "variable")
         if changed:
-            self._emit("variable_changed", {"var": name, "value": value}, self.t)
+            self._var_changed(name, value)
+
+    def _var_changed(self, name, value):
+        """Fire "variable changes" — only when a handler or a waiting thread listens for it (a loop setting a
+        variable thousands of times must not fill the event queue). Lists are passed as a copy: an indexed set
+        changes the variable's own list in place."""
+        args = {"var": name, "value": value}
+        if self._listened("variable_changed", args):
+            if isinstance(value, list):
+                args["value"] = copy.deepcopy(value)
+            self._emit("variable_changed", args, self.t)
 
     # ------------------------------------------------------------------ observation
     def _observe(self, t, dt, st):
@@ -1079,33 +1129,53 @@ class ProcedureEngine(Actions, LiveState):
         """Stateful detectors, once per frame; condition detectors also after every change within the frame."""
         found = False
         for h in self.handlers:
-            if not h.det.generic and self.proc_enabled[h.proc_i] \
+            if not h.det.generic and not h.broken and self.proc_enabled[h.proc_i] \
                     and (h.det.event in _CONDITION_EVENTS) == conditions:
-                for t_occ, args in h.det.poll(self, t):
-                    self._queue.append(("fire", h, args, t_occ))
+                for t_occ, args in self._poll(h.det, t):
+                    self._queue.append(("fire", h, args, t_occ, 1))
                     found = True
         for th in self.threads:
             w = th.wait
             if th.alive and isinstance(w, EventWait):
                 for d in w.dets:
                     if not d.generic and (d.event in _CONDITION_EVENTS) == conditions:
-                        hits = d.poll(self, t)
+                        hits = self._poll(d, t)
                         d.hits.extend(hits)
                         found = found or bool(hits)
         return found
 
+    def _poll(self, det, t) -> list:
+        """One detector's poll; an internal error stops only that detector (it is reported once)."""
+        try:
+            return det.poll(self, t)
+        except Exception as e:  # defensive: never stop the other handlers
+            det.done = True
+            self._error(det.th, det.path, f"{EVENT_SPECS.get(det.event, {}).get('label', det.event)}: "
+                                          f"internal error: {e!r}")
+            return []
+
     def _run(self, t, final=False):
+        """Dispatch the queued events and resume the threads that are ready, until nothing more happens. An event
+        caused by a chain of more than MAX_EVENT_CHAIN events (signals or variable changes triggering each other
+        in a loop) is dropped; more than MAX_EVENTS_PER_RUN events in one call clears the queue."""
         guard = 0
+        events = 0
         while True:
             progressed = False
             while self._queue:
-                guard += 1
-                if guard > 2000:
-                    self._error(None, (), "too many events in one frame (do signals or variable changes trigger "
-                                          "each other in a loop?)")
+                item = self._queue.popleft()
+                events += 1
+                if events > MAX_EVENTS_PER_RUN:
+                    self._error(None, (), f"more than {MAX_EVENTS_PER_RUN} events in one frame: the rest are "
+                                          "dropped (do signals or variable changes trigger each other?)")
                     self._queue.clear()
                     break
-                self._dispatch(self._queue.popleft())
+                if item[4] > MAX_EVENT_CHAIN:
+                    what = item[1] if item[0] == "event" else item[1].label
+                    self._error(None, (), f"event '{what}' dropped: signals or variable changes trigger each "
+                                          "other in a loop")
+                    continue
+                self._dispatch(item)
                 progressed = True
                 if self.ended and not final:
                     break
@@ -1128,16 +1198,30 @@ class ProcedureEngine(Actions, LiveState):
                 break
 
     def _dispatch(self, item):
-        kind, a, args, t_occ = item
-        if kind == "fire":
-            self._fire(a, t_occ, args)
-            return
-        name = a
+        kind, a, args, t_occ, depth = item
+        outer, self._depth = self._depth, depth
+        try:
+            if kind == "fire":
+                self._fire_safely(a, t_occ, args)
+                return
+            self._dispatch_event(a, args, t_occ)
+        finally:
+            self._depth = outer
+
+    def _fire_safely(self, h, t_occ, args):
+        """Run a handler; an internal error disables only that handler (reported once)."""
+        try:
+            self._fire(h, t_occ, args)
+        except Exception as e:  # defensive: never stop the other handlers
+            h.broken = True
+            self._error(h.det.th, h.path, f"When: internal error, the handler is disabled: {e!r}")
+
+    def _dispatch_event(self, name, args, t_occ):
         waiting = [(th, d) for th in self.threads if th.alive and isinstance(th.wait, EventWait)
                    for d in th.wait.dets if d.generic and d.matches(name, args)]
         for h in list(self.handlers):
-            if h.det.generic and self.proc_enabled[h.proc_i] and h.det.matches(name, args):
-                self._fire(h, t_occ, dict(args, event=name))
+            if h.det.generic and not h.broken and self.proc_enabled[h.proc_i] and h.det.matches(name, args):
+                self._fire_safely(h, t_occ, dict(args, event=name))
         for th, d in waiting:  # threads that started waiting during this dispatch do not see this occurrence
             if th.alive and isinstance(th.wait, EventWait) and any(x is d for x in th.wait.dets):
                 d.hits.append((t_occ, dict(args, event=name)))
@@ -1153,7 +1237,7 @@ class ProcedureEngine(Actions, LiveState):
         return {"event_time": t_occ, "event_value": v, "event_name": name, "timed_out": 0, "wait_event": 0}
 
     def _fire(self, h: _Handler, t_occ, args):
-        if not self.proc_enabled[h.proc_i]:
+        if not self.proc_enabled[h.proc_i] or h.broken:
             return
         h.threads = [x for x in h.threads if x.alive]
         if h.once and h.count:
@@ -1225,6 +1309,7 @@ class ProcedureEngine(Actions, LiveState):
             p = path + (i - 1,)
             th.path = p
             th.steps += 1
+            th.ran += 1
             if th.steps > STEP_BUDGET:
                 yield FrameWait(self._update_no)
                 th.clock = self.t
@@ -1313,9 +1398,21 @@ class ProcedureEngine(Actions, LiveState):
             i = int(i)
         if not isinstance(i, int) or not -len(arr) <= i < len(arr):
             raise ExprError(f"index {i!r} out of range (length {len(arr)})")
-        new = list(arr)
-        new[i] = copy.deepcopy(value)
-        self._setvar(th, name, new, p)
+        if isinstance(value, list):
+            value = copy.deepcopy(value)
+        elif not isinstance(value, (int, float, str, bool)) and value is not None:
+            raise ExprError("unsupported value")
+        name = str(name)
+        if (th is not None and name in th.locals) or self.vars.get(name) is not arr:
+            new = list(arr)  # a local (it may be an event's value, shared with other threads): a copy
+            new[i] = value
+            self._setvar(th, name, new, p)
+            return
+        # a variable's list is its own (_setvar stores a copy): only the element changes, no copy of the array
+        old = arr[i]
+        arr[i] = value
+        if old != value or type(old) is not type(value):
+            self._var_changed(name, arr)
 
     def _st_repeat(self, th, st, p):
         mode = repeat_mode(st)
@@ -1332,7 +1429,7 @@ class ProcedureEngine(Actions, LiveState):
                     self._setvar(th, var, i, p)
                 except ExprError as e:
                     self._error(th, p, f"Repeat: {e}")
-            before = th.waits
+            before, ran = th.waits, th.ran
             try:
                 yield from self._exec(th, st.get("body") or [], p + ("body",))
             except _Break:
@@ -1340,39 +1437,54 @@ class ProcedureEngine(Actions, LiveState):
             i += 1
             if mode == "until" and self._truth(th, st.get("until"), p):
                 break  # "repeat until": the body runs at least once
-            if mode == "forever" and th.waits == before:
-                yield FrameWait(self._update_no)  # a forever loop that did not wait polls once per frame
+            if th.waits != before:
+                continue
+            if th.ran == ran:
+                th.steps += 1  # an iteration with nothing in its body still counts against the step budget
+            if mode == "forever" or (mode != "count" and th.ran == ran) or th.steps > STEP_BUDGET:
+                # a forever loop that did not wait, and a while / until loop whose body ran nothing, poll once per
+                # frame; any loop yields to the next frame once the thread has used up its step budget
+                yield FrameWait(self._update_no)
                 th.clock = self.t
+                th.steps = 0
 
     def _st_wait(self, th, st, p):
+        """A wait. It counts as a wait (a forever loop then does not poll) only when it takes time: a wait of 0 s
+        or until a condition that is already true does not. The thread's clock never goes back: an event dated
+        before the wait started (e.g. a dwell time already reached) resumes it at the wait's start."""
         mode = wait_mode(st)
         to = st.get("timeout")
         tdue = th.clock + self._num(th, to, p, "timeout") if to not in (None, "", 0) else None
         th.locals["timed_out"] = th.locals["wait_event"] = 0
-        th.waits += 1
+        start = th.clock
         if mode == "seconds":
-            due = th.clock + max(0.0, self._num(th, st.get("seconds"), p, "Wait"))
+            secs = max(0.0, self._num(th, st.get("seconds"), p, "Wait"))
+            if secs > 0:
+                th.waits += 1
+            due = th.clock + secs
             yield TimeWait(due)
             th.clock = due
         elif mode == "until":
             if self._truth(th, st.get("until"), p):
                 return
+            th.waits += 1
             th.resume_clock = self.t
             yield UntilWait(st.get("until"), tdue, p)
-            th.clock = th.resume_clock
+            th.clock = max(th.resume_clock, start)
         else:
+            th.waits += 1
             det = _Detector(self, st, th, p)
             others = [_Detector(self, a, th, p) for a in wait_alternatives(st)]
             th.resume_clock = self.t
             yield EventWait(det, tdue, others)
-            th.clock = th.resume_clock
+            th.clock = max(th.resume_clock, start)
 
     def _st_stop(self, th, st, p):
         w = st.get("what", "handler")
         if w == "loop":
             raise _Break()
         if w == "procedure":
-            self._disable_proc(th.proc_i, keep=th)
+            self._disable_proc(th.owner, keep=th)
         elif w == "all":
             for pi in range(len(self.procedures)):
                 self._disable_proc(pi, keep=th)
@@ -1383,9 +1495,11 @@ class ProcedureEngine(Actions, LiveState):
         raise _Stop()
 
     def _disable_proc(self, pi, keep=None):
+        """A procedure stops: its handlers no longer run and its threads stop (also those inside a call of a
+        sub-procedure: a thread belongs to the procedure that started it)."""
         self.proc_enabled[pi] = False
         for x in self.threads:
-            if x.proc_i == pi and x is not keep and x.alive:
+            if x.owner == pi and x is not keep and x.alive:
                 self._kill(x)
 
     # ------------------------------------------------------------------ actions of the procedure structure
@@ -1404,7 +1518,7 @@ class ProcedureEngine(Actions, LiveState):
         pi = self._sub_index(procedure)
         if pi is None:
             raise ExprError(f"no sub-procedure called '{procedure}'")
-        new = _Thread(th.proc_i, None, self.t, {}, f"sub {procedure}")
+        new = _Thread(th.owner, None, self.t, {}, f"sub {procedure}")
         new.gen = self._thread_main(new, [{"type": "call", "procedure": procedure}], ())
         new.wait = TimeWait(self.t)
         self.threads.append(new)

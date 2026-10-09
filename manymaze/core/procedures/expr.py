@@ -75,6 +75,13 @@ def _choice(rng, a):
     return rng.choice(s)
 
 
+def _group_key(v):
+    """A hashable key grouping equal values of the same type (lists by their contents)."""
+    if isinstance(v, list):
+        return (list, tuple(_group_key(x) for x in v))
+    return (type(v), v)
+
+
 def _shuffle(rng, a, max_run=0):
     """A shuffled copy of a list; with max_run > 0, no value appears more than max_run times in a row (ANY-maze's
     "randomise array" with a maximum number of consecutive repeats)."""
@@ -83,13 +90,20 @@ def _shuffle(rng, a, max_run=0):
     if k <= 0 or len(s) < 2:
         rng.shuffle(s)
         return s
-    groups: list[list] = []  # [value, count]: values may be lists, so they are grouped by equality
+    groups: list[list] = []  # [value, count]: equal values (of the same type) in one group
+    index: dict = {}
     for v in s:
-        g = next((g for g in groups if g[0] == v and type(g[0]) is type(v)), None)
-        if g is None:
+        try:
+            key = _group_key(v)
+            j = index.get(key)
+        except TypeError:  # pragma: no cover - every value the expressions make is hashable as a key
+            key, j = None, None
+        if j is None:
+            if key is not None:
+                index[key] = len(groups)
             groups.append([v, 1])
         else:
-            g[1] += 1
+            groups[j][1] += 1
     most = max(g[1] for g in groups)
     if most > k * (len(s) - most + 1):
         raise ExprError(f"shuffle(): the list cannot be arranged with at most {k} repeats in a row")
@@ -100,24 +114,135 @@ def _shuffle(rng, a, max_run=0):
     raise ExprError(f"shuffle(): no arrangement with at most {k} repeats in a row was found")
 
 
+class _Weights:
+    """A Fenwick tree of the counts left of each group: weighted random picks and updates in O(log n)."""
+
+    def __init__(self, counts):
+        self.n = len(counts)
+        self.tree = [0] * (self.n + 1)
+        for i, c in enumerate(counts):
+            self.add(i, c)
+
+    def add(self, i, d):
+        i += 1
+        while i <= self.n:
+            self.tree[i] += d
+            i += i & -i
+
+    def find(self, r):
+        """The group holding the r-th (0-based) remaining item."""
+        pos, step = 0, 1 << self.n.bit_length()
+        while step:
+            nxt = pos + step
+            if nxt <= self.n and self.tree[nxt] <= r:
+                pos = nxt
+                r -= self.tree[nxt]
+            step >>= 1
+        return pos
+
+
 def _bounded_runs(rng, groups, n, k):
-    """One random arrangement of the grouped values with runs of at most k (None if this attempt got stuck)."""
+    """One random arrangement of the grouped values with runs of at most k (None if this attempt got stuck).
+    Each value is drawn with a probability proportional to how many of it are left; a value that would otherwise
+    have too few separators left must be placed now (only the most frequent one can be in that position)."""
+    import heapq
+
     left = [g[1] for g in groups]
+    w = _Weights(left)
+    heap = [(-c, j) for j, c in enumerate(left)]
+    heapq.heapify(heap)
     out, last, run = [], -1, 0
     for i in range(n):
         rest = n - i
-        allowed = [j for j in range(len(groups)) if left[j] and not (j == last and run >= k)]
-        if not allowed:
-            return None
-        # a value that would otherwise have too few separators left must be placed now
-        forced = [j for j in allowed if left[j] > k * (rest - left[j])]
-        pool = forced or allowed
-        j = rng.choices(pool, weights=[left[x] for x in pool])[0]
+        banned = last if run >= k else -1
+        while heap and -heap[0][0] != left[heap[0][1]]:  # stale entries
+            heapq.heappop(heap)
+        j = -1
+        if heap:
+            c, top = -heap[0][0], heap[0][1]
+            if top != banned and c > k * (rest - c):
+                j = top  # forced
+        if j < 0:
+            avail = rest - (left[banned] if banned >= 0 else 0)
+            if avail <= 0:
+                return None
+            if banned >= 0:
+                w.add(banned, -left[banned])
+            j = w.find(rng.randrange(avail))
+            if banned >= 0:
+                w.add(banned, left[banned])
         out.append(groups[j][0])
         left[j] -= 1
+        w.add(j, -1)
+        if left[j]:
+            heapq.heappush(heap, (-left[j], j))
         run = run + 1 if j == last else 1
         last = j
     return out
+
+
+def _text_size(v, limit=MAX_SEQ) -> int:
+    """An estimate (at least the real length) of len(str(v)), counted without building the text; stops counting
+    once it passes `limit` (a list holding the same inner list many times is counted in full, without copies)."""
+    total = 0
+    stack = [v]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, list):
+            total += 2 + 2 * max(0, len(x) - 1)
+            if total > limit:
+                return total
+            stack.extend(x)
+            continue
+        if isinstance(x, str):
+            total += len(x) * 2 + 2  # quotes, and escapes inside a list
+        elif isinstance(x, bool) or x is None:
+            total += 5
+        elif isinstance(x, int):
+            total += x.bit_length() * 30103 // 100000 + 2
+        else:
+            total += 26
+        if total > limit:
+            return total
+    return total
+
+
+def _size(v, limit=MAX_SEQ) -> int:
+    """The length of a text, or the number of elements of a list with its nested lists (each copy of a shared
+    inner list counts); stops counting once it passes `limit`."""
+    if isinstance(v, str):
+        return len(v)
+    if not isinstance(v, list):
+        return 1
+    total = 0
+    stack = [v]
+    while stack:
+        x = stack.pop()
+        total += len(x)
+        if total > limit:
+            return total
+        stack.extend(e for e in x if type(e) is list)
+    return total
+
+
+def _str(v) -> str:
+    if _text_size(v) > MAX_SEQ:
+        raise ExprError("result too long")
+    return str(v)
+
+
+_FORMAT_SPEC = re.compile(r"%(?:\([^)]*\))?[#0\- +]*(\*|\d+)?(?:\.(\*|\d+))?[hlL]?(.)", re.S)
+
+
+def _check_format(fmt: str, args):
+    """Text % values: the widths and precisions of the format and the size of the values it formats are checked
+    before the text is built."""
+    for m in _FORMAT_SPEC.finditer(fmt):
+        for w in m.group(1, 2):
+            if w and w != "*" and (len(w) > 6 or int(w) > MAX_SEQ):
+                raise ExprError("result too long")
+    if len(fmt) + _text_size(args) > MAX_SEQ:
+        raise ExprError("result too long")
 
 
 def _undefined(x) -> int:
@@ -171,7 +296,7 @@ FUNCTIONS: dict[str, tuple] = {
     "atand": (1, 1, ANYMAZE_FUNCTIONS["atan"], "arc tangent in degrees"),
     "atan2d": (2, 2, ANYMAZE_FUNCTIONS["atan2"], "atan2(y, x) in degrees"),
     "is_undefined": (1, 1, _undefined, "1 if the value is #N/A (NA), none or not a number"),
-    "int": (1, 1, int, ""), "float": (1, 1, float, ""), "bool": (1, 1, bool, ""), "str": (1, 1, str, ""),
+    "int": (1, 1, int, ""), "float": (1, 1, float, ""), "bool": (1, 1, bool, ""), "str": (1, 1, _str, ""),
     "sign": (1, 1, lambda x: (x > 0) - (x < 0), "-1, 0 or 1"),
     "clamp": (3, 3, lambda x, lo, hi: max(lo, min(hi, x)), "clamp(x, low, high)"),
     "len": (1, 1, len, "length of a list or text"), "sum": (1, 1, lambda a: sum(_seq(a)), "sum of a list"),
@@ -361,7 +486,7 @@ def check_expr(src, names=None) -> list[str]:
 
 
 def _limit(v):
-    if isinstance(v, (str, list)) and len(v) > MAX_SEQ:
+    if isinstance(v, str) and len(v) > MAX_SEQ or isinstance(v, list) and _size(v) > MAX_SEQ:
         raise ExprError("result too long")
     if isinstance(v, int) and not isinstance(v, bool) and v.bit_length() > 1024:
         raise ExprError("number too large")
@@ -381,7 +506,20 @@ class Evaluator:
         self.anymaze = anymaze
 
     def eval(self, src):
-        return self._ev(compile_expr(src))
+        """The value of an expression. Every failure is an ExprError (a procedure error, never a crash)."""
+        node = compile_expr(src)
+        try:
+            return self._ev(node)
+        except ExprError:
+            raise
+        except RecursionError:
+            raise ExprError("expression too deeply nested") from None
+        except MemoryError:
+            raise ExprError("result too large") from None
+        except (ValueError, TypeError, KeyError, IndexError, ArithmeticError, AttributeError) as e:
+            raise ExprError(str(e) or type(e).__name__) from None
+        except Exception as e:  # anything else from a function: still only an expression error
+            raise ExprError(f"{type(e).__name__}: {e}") from None
 
     def _ev(self, n):
         t = type(n)
@@ -453,7 +591,7 @@ class Evaluator:
             except IndexError:
                 raise ExprError(f"index {i} out of range (length {len(v)})") from None
         if t is ast.List or t is ast.Tuple:
-            return [self._ev(x) for x in n.elts]
+            return _limit([self._ev(x) for x in n.elts])
         raise ExprError(f"'{t.__name__}' is not allowed")
 
     def _binop(self, o, a, b):
@@ -465,8 +603,13 @@ class Evaluator:
                     raise ExprError("number too large")
             if o is ast.Mult:
                 for s_, n_ in ((a, b), (b, a)):
-                    if isinstance(s_, (str, list)) and isinstance(n_, int) and len(s_) * n_ > MAX_SEQ:
+                    if isinstance(s_, (str, list)) and isinstance(n_, int) and _size(s_) * n_ > MAX_SEQ:
                         raise ExprError("result too long")
+            if o is ast.Mod and isinstance(a, str):
+                _check_format(a, b)
+            if o is ast.Add and isinstance(a, (str, list)) and isinstance(b, type(a)) \
+                    and _size(a) + _size(b) > MAX_SEQ:
+                raise ExprError("result too long")
             if o is ast.Add and isinstance(a, list) and isinstance(b, list):
                 return a + b
             r = _BIN[o](a, b)
@@ -477,7 +620,7 @@ class Evaluator:
             raise ExprError("division by zero") from None
         except OverflowError:
             raise ExprError("numeric overflow") from None
-        except TypeError as e:
+        except (TypeError, ValueError) as e:
             raise ExprError(f"invalid operands: {e}") from None
 
     def _call(self, name, args):
@@ -505,7 +648,7 @@ def _fmt(v) -> str:
         return str(int(v))
     if isinstance(v, float):
         return f"{v:.6g}"
-    return str(v)
+    return _str(v)
 
 
 def interpolate(text: str, evaluate: Callable) -> str:

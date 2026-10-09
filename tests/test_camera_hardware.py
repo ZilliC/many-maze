@@ -15,7 +15,7 @@ from manymaze.core import video as video_mod
 from manymaze.core.camera import (CameraView, SourceReader, SourceSpec, TransformedSource, apply_hardware,
                                   camera_settings, hardware_target, set_camera_settings)
 from manymaze.core.camhw import (CONTROLS, OK, UNSUPPORTED, CameraHardware, GenICamControls, OpenCVControls,
-                                 describe_report, to_bgr)
+                                 UnsupportedPixelFormat, describe_report, to_bgr)
 from manymaze.core.project import Project
 
 
@@ -407,3 +407,132 @@ def test_controls_table_is_consistent():
     assert all(c.auto is None or c.auto.startswith("auto_") for c in CONTROLS)
     assert all(hasattr(CameraHardware(), c.name) and (c.auto is None or hasattr(CameraHardware(), c.auto))
                for c in CONTROLS)
+
+
+# ====================================================================== audit 2026-10-08: unsupported formats
+def test_to_bgr_unsupported_formats_say_so():
+    """Bit-packed and unknown formats raise UnsupportedPixelFormat naming the format (not a reshape error that
+    looks like a broken frame); RGB / BGR with more than 8 bits per channel are converted."""
+    packed = np.zeros(16 * 12 * 3 // 2, np.uint8)
+    for fmt in ("Mono12p", "Mono10Packed", "Mono12Packed", "BayerRG12p", "Mono10p", "Coord3D_C16", "YUV411_8"):
+        with pytest.raises(UnsupportedPixelFormat, match=fmt):
+            to_bgr(packed, fmt, 16, 12)
+    with pytest.raises(UnsupportedPixelFormat, match="Mono8"):  # wrong buffer size for the image
+        to_bgr(np.zeros(100, np.uint8), "Mono8", 16, 12)
+    rgb12 = np.zeros((12, 16, 3), np.uint16)
+    rgb12[:, :, 0] = 4000
+    assert is_red(to_bgr(rgb12, "RGB12")) and is_red(to_bgr(rgb12.reshape(-1), "RGB12", 16, 12))
+    assert not is_red(to_bgr(rgb12, "BGR12")) and to_bgr(rgb12, "BGR12")[0, 0, 0] == 250
+    assert is_red(to_bgr((rgb12.astype(np.uint32) << 4).astype(np.uint16), "RGB16"))
+
+
+def test_native_camera_unsupported_format_is_an_error_not_a_disconnect(backend):
+    prefix, devices = backend
+    cam = camsources.NativeCamera(f"{prefix}:SN1")
+    assert cam.read()[0]
+    devices[0].f["PixelFormat"] = "Mono12p"  # set behind our back (e.g. by the vendor's tool)
+    for _ in range(cam.bad_frames_tolerated):  # a few bad buffers are dropped frames ...
+        assert cam.read() == (False, None)
+    with pytest.raises(UnsupportedPixelFormat, match="Mono12p"):  # ... then the reason is reported
+        cam.read()
+    devices[0].f["PixelFormat"] = "Mono8"
+    assert cam.read()[0]
+    cam.release()
+
+
+def test_reader_fails_at_once_with_the_pixel_format_message():
+    """SourceReader does not try to reopen a camera whose format cannot be converted (it would only fail after
+    the reconnect timeout with "the camera stopped delivering frames")."""
+
+    class BadFormatCam:
+        is_camera, fps, width, height, frame_count = True, 25.0, 32, 24, 0
+        opened = 0
+
+        def __init__(self, *a):
+            type(self).opened += 1
+
+        def read(self):
+            raise UnsupportedPixelFormat("The camera's pixel format 'Mono12p' is not supported")
+
+        def seek(self, i):
+            pass
+
+        def release(self):
+            pass
+
+    failed = []
+
+    class Reader(SourceReader):
+        def on_failed(self, msg):
+            failed.append(msg)
+
+    r = Reader(SourceSpec(0), opener=lambda *a: BadFormatCam(*a))
+    r.start()
+    r.thread.join(5)
+    assert not r.thread.is_alive() and failed and "Mono12p" in failed[0] and BadFormatCam.opened == 1
+    assert not r.capture_log
+
+
+def test_camera_reconnecting_at_another_size_fails_clearly():
+    sizes = iter([(24, 32), (48, 64)])
+
+    class Cam:
+        is_camera, fps, frame_count = True, 25.0, 0
+
+        def __init__(self, *a):
+            self.h, self.w = next(sizes)
+            self.width, self.height = self.w, self.h
+            self.n = 5
+
+        def read(self):
+            if self.n <= 0:
+                return False, None
+            self.n -= 1
+            return True, np.zeros((self.h, self.w, 3), np.uint8)
+
+        def seek(self, i):
+            pass
+
+        def release(self):
+            pass
+
+    events = []
+
+    class Reader(SourceReader):
+        reconnect_delays = (0.01,)
+        stall_reads = 3
+
+        def on_capture_restored(self, gap):
+            events.append("restored")
+
+        def on_failed(self, msg):
+            events.append(msg)
+
+    r = Reader(SourceSpec(0), opener=lambda *a: Cam(*a))
+    r.start()
+    r.thread.join(5)
+    assert not r.thread.is_alive() and "restored" not in events
+    assert "64×48 instead of 32×24" in events[-1]
+
+
+def test_reader_stops_promptly_while_pacing_a_slow_file(tmp_path):
+    """Slow-motion playback of a file: stop() returns at once instead of waiting for the next frame to be due."""
+    from manymaze.core import synthetic as syn
+
+    vp = tmp_path / "v.avi"
+    syn.make_video(vp, syn.random_walk(10, (10, 10, 50, 50), seed=1), size=(64, 64), fps=25,
+                   arena=("rect", 10, 10, 40, 40))
+    frames = []
+
+    class Reader(SourceReader):
+        def on_frame(self, frame, ts):
+            frames.append(ts)
+
+    r = Reader(SourceSpec(str(vp)), speed=0.002)  # one frame every 20 s
+    r.start()
+    t0 = time.monotonic()
+    while len(frames) < 1 and time.monotonic() - t0 < 5:
+        time.sleep(0.01)
+    t0 = time.monotonic()
+    r.stop()
+    assert not r.thread.is_alive() and time.monotonic() - t0 < 1 and len(frames) == 1

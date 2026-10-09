@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .track import Track
+from .track import Track, read_text
 
 # role -> header patterns (lower case, regular expressions), most specific first
 ANIMAL_ROLES = {
@@ -113,8 +113,50 @@ def guess_mapping(header: list[str], roles: dict[str, list[str]]) -> dict[str, i
 _TIME_UNITS = {"ms": 0.001, "min": 60.0, "mins": 60.0, "h": 3600.0, "hr": 3600.0, "hrs": 3600.0}
 
 
-def parse_number(s: str) -> float:
-    """Numbers as ANY-maze writes them: "2.168m", "18.9s", "0:43", "1,5", "" -> nan."""
+# a number cell with an optional unit: digits with "." / "," separators (spaces removed)
+_NUMBER_CELL = re.compile(r"[-+]?[\d.,]*\d[\d.,]*([eE][-+]?\d+)?[a-zA-Z%°µ]*")
+
+
+def decimal_comma(values) -> bool | None:
+    """Whether a file (or column) writes decimals with a comma ("0,125", "1.234,5": True) or with a point and
+    perhaps commas between thousands ("0.125", "1,234,567": False), judged from all its number cells together.
+    None when nothing tells: only whole numbers, or only cells such as "1,234" (read as thousands)."""
+    comma = point = False
+    for v in values:
+        c = str(v).strip().replace(" ", "").replace("\u00a0", "")
+        if not c or not _NUMBER_CELL.fullmatch(c) or ":" in c:
+            continue
+        c = c.lstrip("+-")
+        c = re.sub(r"[eE][-+]?\d+$", "", re.sub(r"[a-zA-Z%°µ]+$", "", c))
+        has_c, has_p = "," in c, "." in c
+        if has_c and has_p:  # both: the last one is the decimal separator
+            if c.rfind(",") > c.rfind("."):
+                comma = True
+            else:
+                point = True
+        elif has_c:
+            parts = c.split(",")
+            if len(parts) > 2:
+                point = True  # 1,234,567: commas between thousands
+            elif len(parts[1]) != 3 or parts[0] in ("", "0") or len(parts[0]) > 3:
+                comma = True  # 1,5 / 0,125 / 1234,567 / ,5: no thousands grouping looks like this
+        elif has_p:
+            parts = c.split(".")
+            if len(parts) > 2:
+                comma = True  # 1.234.567: points between thousands
+            else:
+                point = True
+        if comma and point:
+            return None  # mixed: decide cell by cell
+    return True if comma else False if point else None
+
+
+def parse_number(s: str, decimal_comma: bool | None = None) -> float:
+    """Numbers as ANY-maze writes them: "2.168m", "18.9s", "0:43", "1,5", "" -> nan.
+
+    decimal_comma: the file's decimal separator (see :func:`decimal_comma`, decided from all its cells): True =
+    comma ("0,125" = 0.125, "1.234,5" = 1234.5), False = point ("1,234.5" = 1234.5, "1,234" = 1234), None = guess
+    from the cell alone ("1,234" = 1234, but "0,125" = 0.125 and "1,5" = 1.5)."""
     s = str(s).strip()
     if not s:
         return math.nan
@@ -126,9 +168,16 @@ def parse_number(s: str) -> float:
         return -v if s.startswith("-") else v
     if re.match(r"^\d{4}-\d{2}-\d{2}", s):  # a date/time cell is not a number
         return math.nan
-    compact = s.replace(" ", "")
-    if re.fullmatch(r"[-+]?\d{1,3}(,\d{3})+(\.\d+)?", compact):  # 1,234.5 — thousands separators
+    compact = s.replace(" ", "").replace("\u00a0", "")
+    if decimal_comma is True:
+        if "," in compact or re.fullmatch(r"[-+]?\d{1,3}(\.\d{3})+", compact):
+            compact = compact.replace(".", "")  # 1.234,5 / 1.234 — points between thousands
+    elif decimal_comma is False:
         compact = compact.replace(",", "")
+    elif re.fullmatch(r"[-+]?[1-9]\d{0,2}(,\d{3})+(\.\d+)?", compact):  # 1,234.5 — thousands separators
+        compact = compact.replace(",", "")
+    elif re.fullmatch(r"[-+]?\d{1,3}(\.\d{3})+,\d+", compact):  # 1.234,5 — points between thousands
+        compact = compact.replace(".", "")
     m = re.match(r"^[-+]?(\d+[.,]?\d*|[.,]\d+)([eE][-+]?\d+)?", compact)
     if not m:
         return math.nan
@@ -167,8 +216,18 @@ def import_animals(project, header, rows, mapping: dict, extra_fields: list[int]
 
 
 def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | None = None) -> list:
-    """Create tests (test schedule) from a table: animal, stage, trial, apparatus, video, duration."""
+    """Create tests (test schedule) from a table: test number, animal, stage, trial, apparatus, video, duration.
+    A test keeps its number from the table (ANY-maze's test number) unless the experiment already has a test of
+    that number."""
     new = []
+    dc = decimal_comma([_cell(r, mapping.get(k)) for r in rows for k in ("trial", "duration", "test")])
+    taken = {t.id for t in project.tests}
+
+    def number(r):
+        n = parse_number(_cell(r, mapping.get("test")), dc)
+        return int(n) if math.isfinite(n) and n >= 1 and n == int(n) else None
+
+    wanted = {n for n in map(number, rows) if n is not None and n not in taken}  # kept free for their rows
     for r in rows:
         aid = _cell(r, mapping.get("animal"))
         if not aid:
@@ -177,7 +236,7 @@ def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | N
         if not a.group and _cell(r, mapping.get("group")):
             a.group = _cell(r, mapping.get("group"))
         stage = project.add_stage(_cell(r, mapping.get("stage")))
-        trial = parse_number(_cell(r, mapping.get("trial")))
+        trial = parse_number(_cell(r, mapping.get("trial")), dc)
         video = _cell(r, mapping.get("video"))
         if video and video_dir is not None:
             if re.match(r"^[A-Za-z]:[\\/]", video) or "\\" in video:  # a Windows path from ANY-maze
@@ -187,7 +246,13 @@ def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | N
         app = _cell(r, mapping.get("apparatus"))
         app = app if app in [x.name for x in project.apparatus] else ""
         t = project.add_test(video, aid, app, stage=stage, trial=int(trial) if math.isfinite(trial) else 1)
-        dur = parse_number(_cell(r, mapping.get("duration")))
+        num = number(r)
+        if num is not None and num not in taken:
+            t.id = num
+        elif t.id in wanted:  # a row without a (free) number: after every number the table gives
+            t.id = max(taken | wanted) + 1
+        taken.add(t.id)
+        dur = parse_number(_cell(r, mapping.get("duration")), dc)
         if math.isfinite(dur) and dur > 0:
             t.duration_s = dur
         new.append(t)
@@ -200,13 +265,16 @@ def import_track(header, rows, mapping: dict, scale: float = 1.0, offset=(0.0, 0
 
     Positions are converted to video pixels as ``px = value * scale + offset`` (e.g. ANY-maze positions in metres
     relative to the apparatus: scale = pixels per metre). ``flip_y`` mirrors y (``height - y``) for software whose y
-    axis points up.
+    axis points up. The decimal separator (point or comma) is decided once for the whole table.
     """
+    used = [i for i in mapping.values() if i is not None]
+    dc = decimal_comma(_cell(r, i) for r in rows for i in used)
+
     def col(role):
         i = mapping.get(role)
         if i is None:
             return None
-        return np.array([parse_number(_cell(r, i)) for r in rows], float)
+        return np.array([parse_number(_cell(r, i), dc) for r in rows], float)
 
     t = col("t")
     if t is None:
@@ -238,12 +306,15 @@ def import_track(header, rows, mapping: dict, scale: float = 1.0, offset=(0.0, 0
 
 def dlc_bodyparts(path) -> list[str]:
     """Body parts of a DeepLabCut CSV in column order ([] if the file is not one)."""
-    with open(path, newline="") as f:
-        for i, row in enumerate(csv.reader(f)):
-            if row and row[0].strip().lower() == "bodyparts":
-                return list(dict.fromkeys(row[1:]))
-            if i > 5:
-                break
+    try:
+        head = read_text(path, limit=1 << 16)  # the header rows only (UTF-8, else the Windows code page)
+    except OSError:
+        return []
+    for i, row in enumerate(csv.reader(io.StringIO(head, newline=""))):
+        if row and row[0].strip().lower() == "bodyparts":
+            return list(dict.fromkeys(row[1:]))
+        if i > 5:
+            break
     return []
 
 

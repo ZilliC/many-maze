@@ -84,3 +84,36 @@ def drop_pauses(track: Track, pauses) -> tuple[Track, np.ndarray]:
     out = track.take(keep)
     out.t = to_test_time(out.t, iv)
     return out, breaks
+
+
+def to_recording_time(times, pauses, after_pause: bool = True) -> np.ndarray:
+    """Map test times back to recording (video) time (the inverse of to_test_time). A test time at which a pause
+    started maps to the end of the pause (after_pause, e.g. the start of a period) or to its start (the end of a
+    period)."""
+    v = np.asarray(times, float)
+    out = v.copy()
+    shift = 0.0
+    for a, b in merged_pauses(pauses):
+        if b <= a:
+            continue
+        ta = a - shift  # the pause start in test time
+        sel = v >= ta if after_pause else v > ta
+        out = np.where(sel, out + (b - a), out)
+        shift += b - a
+    return out
+
+
+def period_frames(track: Track, pauses, t_range: tuple | None = None) -> np.ndarray:
+    """Frames of a recording-time track that are part of the test - not inside a pause - and, with t_range (a
+    period in test time, as the results), whose test time lies in [t_range[0], t_range[1]). Selecting these frames
+    keeps the recording times (for the video) while matching the frames the measures of the period use."""
+    t = track.t
+    keep = np.ones(len(t), bool)
+    iv = merged_pauses(pauses)
+    for a, b in iv:
+        if b > a:
+            keep &= ~((t >= a) & (t < b))
+    if t_range is not None:
+        tt = to_test_time(t, iv)
+        keep &= (tt >= t_range[0]) & (tt < t_range[1])
+    return keep

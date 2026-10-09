@@ -17,7 +17,7 @@ from ...core.project import Animal
 from ...core.workflow import treatment_code, treatment_text
 from .. import ribbon, theme
 from ..icons import icon
-from ..widgets import color_icon, error_box
+from ..widgets import color_icon, error_box, run_and_wait
 from .animal_dialogs import AddSeveralDialog, CriteriaDialog, DoseDialog, RandomiseDialog, WeighDialog
 from .base import Page
 
@@ -571,9 +571,11 @@ class AnimalsPage(Page):
     def _add_several_dialog(self):
         if self.project is None:
             return
-        dlg = AddSeveralDialog(self._group_names(), self)
+        p = self.project
+        labels = {g: treatment_text(p, g) for g in self._group_names()} if p.blind else None  # codes only
+        dlg = AddSeveralDialog(self._group_names(), self, labels=labels)
         if dlg.exec() == QDialog.Accepted:
-            self._add_ids(dlg.ids(), dlg.group.currentText().strip())
+            self._add_ids(dlg.ids(), dlg.treatment())
 
     def selected_animals(self) -> list[Animal]:
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
@@ -720,11 +722,14 @@ class AnimalsPage(Page):
         self.main.status(msg)
 
     def evaluate_criteria(self) -> dict:
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            return wf.evaluate_criteria(self.project)
-        finally:
-            QApplication.restoreOverrideCursor()
+        """The training criteria's report, computed in the background (the results of every test may have to be
+        calculated) behind a progress dialog."""
+        p = self.project
+        res, err = run_and_wait(self, "Evaluating the training criteria",
+                                lambda progress, stop: wf.evaluate_criteria(p))
+        if err is not None:
+            raise RuntimeError(err)
+        return res
 
     def criteria_dialog(self):
         p = self.project
@@ -989,9 +994,29 @@ class AnimalsPage(Page):
         path, _ = QFileDialog.getSaveFileName(self, "Export animals", default, "CSV files (*.csv)")
         if not path:
             return
+        self.export_csv(path)
+
+    def export_csv(self, path: str):
+        """The animal list as CSV; while testing blind the treatments are written as their codes only."""
         try:
-            export.export_animals(self.project, path)
+            if self.project.blind:
+                self._export_blind(path)
+            else:
+                export.export_animals(self.project, path)
         except Exception as e:
             error_box(self, "Export animals", e)
             return
         self.main.status(f"Exported {len(self.project.animals)} animals to {path}")
+
+    def _export_blind(self, path: str):
+        import csv
+
+        from ...core.atomicfile import atomic_write
+
+        p = self.project
+        with atomic_write(path, newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["ID", "Treatment code", "Sex"] + list(p.animal_fields) + ["Notes"])
+            for a in p.animals:
+                w.writerow([a.id, treatment_text(p, a.group), a.sex] + [a.fields.get(f, "") for f in p.animal_fields]
+                           + [a.notes])

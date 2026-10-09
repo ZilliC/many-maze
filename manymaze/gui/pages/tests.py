@@ -77,16 +77,29 @@ class TestsModel(QAbstractTableModel):
         self.page = page
         self.ready: set[int] = set()
         self._dots: dict[str, QPixmap] = {}
+        self._tests: list = []  # the rows: the experiment's tests at the last reset (see tests)
+        self._video_ok: dict[str, bool] = {}  # video file exists, per path (checked once per reset)
 
     @property
     def tests(self):
-        p = self.page.project
-        return p.tests if p is not None else []
+        """The tests shown, as at the last reset: tests added or removed elsewhere (Run tests) appear when the page
+        is told (main.tests_changed), and rows never shift under the view's selection meanwhile."""
+        return self._tests
 
     def reset(self):
         self.beginResetModel()
-        self.ready = ready_tests(self.page.project)
+        p = self.page.project
+        self._tests = list(p.tests) if p is not None else []
+        self._video_ok.clear()
+        self.ready = ready_tests(p)
         self.endResetModel()
+
+    def video_exists(self, t) -> bool:
+        path = self.page.project.abs_path(t.video)
+        ok = self._video_ok.get(path)
+        if ok is None:
+            ok = self._video_ok[path] = Path(path).exists()
+        return ok
 
     def dot(self, color):
         if color not in self._dots:
@@ -165,7 +178,7 @@ class TestsModel(QAbstractTableModel):
                 if not t.video:
                     return "No video: tested live, scored by direct observation, or set the video file later"
                 full = p.abs_path(t.video)
-                return full if Path(full).exists() else f"{full}\n(file not found)"
+                return full if self.video_exists(t) else f"{full}\n(file not found)"
             if c == C_DUR:
                 return "Test duration in seconds. 0 = experiment default."
             if c == C_ANIMAL:
@@ -194,7 +207,7 @@ class TestsModel(QAbstractTableModel):
             if c == C_ANIMAL:
                 a = p.get_animal(t.animal_id)
                 return QBrush(QColor("#dc2626" if a and a.retired else LINK_FG))
-            if c == C_VIDEO and (not t.video or not Path(p.abs_path(t.video)).exists()):
+            if c == C_VIDEO and (not t.video or not self.video_exists(t)):
                 return QBrush(QColor("#94a3b8" if not t.video else "#dc2626"))
             if c == C_DUR and not t.duration_s:
                 return QBrush(QColor("#64748b"))
@@ -232,6 +245,8 @@ class TestsModel(QAbstractTableModel):
                 num = int(value) if c == C_TRIAL else float(value)
             except (TypeError, ValueError):
                 return False
+            if num == {C_TRIAL: t.trial, C_START: t.start_s, C_DUR: t.duration_s}[c]:
+                return False  # unchanged: not an edit
         if c == C_ANIMAL:
             aid = str(value).strip()
             if aid == t.animal_id:
@@ -249,6 +264,8 @@ class TestsModel(QAbstractTableModel):
         elif c == C_TRIAL:
             t.trial = num
         elif c == C_APP:
+            if str(value) == t.apparatus:
+                return False
             t.apparatus = str(value)
         elif c == C_START:
             t.start_s = num
@@ -258,6 +275,8 @@ class TestsModel(QAbstractTableModel):
             if wf.set_experimenter(p, [t], str(value)) == 0:
                 return False
         elif c == C_NOTES:
+            if str(value) == t.notes:
+                return False
             t.notes = str(value)
         else:
             return False
@@ -304,6 +323,9 @@ class TestsDelegate(QStyledItemDelegate):
             w.setEditable(c != C_APP)
             items = ([a.id for a in p.animals] if c == C_ANIMAL else list(p.stages) if c == C_STAGE
                      else [""] + list(p.experimenters) if c == C_USER else [a.name for a in p.apparatus])
+            cur = str(index.data(Qt.EditRole) or "")
+            if c == C_APP and cur not in items:  # e.g. a deleted or renamed apparatus: kept unless one is chosen
+                items.insert(0, cur)
             w.addItems(items)
             return w
         if c == C_TRIAL:
@@ -328,15 +350,19 @@ class TestsDelegate(QStyledItemDelegate):
                 editor.setEditText(str(v))
         elif isinstance(editor, (QSpinBox, QDoubleSpinBox)):
             editor.setValue(v or 0)
+            editor.setProperty("loaded", editor.value())  # as shown (a spin box rounds to its decimals)
         else:
             super().setEditorData(editor, index)
 
     def setModelData(self, editor, model, index):
         if isinstance(editor, QComboBox):
-            model.setData(index, editor.currentText(), Qt.EditRole)
+            text = editor.currentText()
+            if text != str(index.data(Qt.EditRole) or ""):  # opening and closing the list is not an edit
+                model.setData(index, text, Qt.EditRole)
         elif isinstance(editor, (QSpinBox, QDoubleSpinBox)):
             editor.interpretText()
-            model.setData(index, editor.value(), Qt.EditRole)
+            if editor.value() != editor.property("loaded"):  # unchanged: not rounded to the editor's decimals
+                model.setData(index, editor.value(), Qt.EditRole)
         else:
             super().setModelData(editor, model, index)
 
@@ -388,6 +414,8 @@ class TestsPage(Page):
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
+        if hasattr(main, "tests_changed"):  # tests added or removed elsewhere (Run tests): rows follow
+            main.tests_changed.connect(self._tests_changed)
 
         def act(text, ic, fn, tip="", large=True):
             return ribbon.action(self, text, ic, fn, tip, large=large)
@@ -512,6 +540,10 @@ class TestsPage(Page):
         self.main.mark_dirty()
         self._update_summary()
 
+    def _tests_changed(self):
+        if self.project is not None:
+            self.refresh()
+
     def _update_summary(self):
         p = self.project
         if p is None:
@@ -613,8 +645,49 @@ class TestsPage(Page):
         return [self.model.tests[r].id for r in rows if r < len(self.model.tests)]
 
     def selected_tests(self):
-        ids = self.selected_ids()
-        return [t for t in self.model.tests if t.id in ids]
+        """The selected tests still in the experiment (in row order of the model)."""
+        p = self.project
+        if p is None:
+            return []
+        current = {id(t) for t in p.tests}
+        rows = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
+        return [self.model.tests[r] for r in rows if r < len(self.model.tests) and id(self.model.tests[r]) in current]
+
+    def busy_tests(self, tests) -> str:
+        """Why some of `tests` cannot be deleted, cleared or re-performed now ("" = they can): tests run live on
+        Run tests, or scored in Review and score, would be written back onto a test that is gone or replaced."""
+        live = self.main.page("LivePage")
+        if live is not None and callable(getattr(live, "any_active", None)) and live.any_active():
+            ids = getattr(live, "active_test_ids", None)
+            ids = set(ids()) if callable(ids) else None
+            if ids is None or any(t.id in ids for t in tests):
+                return ("Tests are running on the Run tests page. Stop them (or wait until they end) before "
+                        "deleting, clearing or re-performing tests.")
+        tv = self.main.page("TestViewPage")
+        cur = getattr(tv, "test", None)
+        if cur is not None and any(t is cur for t in tests) and callable(getattr(tv, "scoring_in_progress", None)) \
+                and tv.scoring_in_progress():
+            return (f"Test {cur.id} is being scored on the Review and score page. Stop the observation (or end the "
+                    "behaviours being scored) first.")
+        return ""
+
+    def _refuse_busy(self, tests, title: str) -> bool:
+        why = self.busy_tests(tests)
+        if why:
+            QMessageBox.information(self, title, why)
+            self.main.status(why)
+        return bool(why)
+
+    @staticmethod
+    def describe_tests(tests, n_max: int = 8) -> str:
+        """“test 3 (M01, Day 1 trial 2)” or “tests 3 (…), 4 (…) and 2 more”, for confirmations."""
+        def one(t):
+            what = ", ".join(x for x in (t.animal_id, f"{t.stage + ' ' if t.stage else ''}trial {t.trial}") if x)
+            return f"{t.id} ({what})"
+
+        text = ", ".join(one(t) for t in tests[:n_max]) + (f" and {len(tests) - n_max} more" if len(tests) > n_max
+                                                            else "")
+        return ("test " if len(tests) == 1 else "tests ") + text
 
     def select_ids(self, ids):
         sm = self.table.selectionModel()
@@ -821,11 +894,11 @@ class TestsPage(Page):
     def delete_selected(self, confirm: bool = True):
         p = self.project
         tests = self.selected_tests()
-        if not tests:
+        if not tests or self._refuse_busy(tests, "Delete tests"):
             return
         if confirm and QMessageBox.question(
-                self, "Delete tests", f"Delete {len(tests)} test{'s' if len(tests) != 1 else ''} and "
-                "their tracks? Video files are not deleted.") != QMessageBox.Yes:
+                self, "Delete tests", f"Delete {self.describe_tests(tests)} and "
+                f"{'their' if len(tests) != 1 else 'its'} tracks? Video files are not deleted.") != QMessageBox.Yes:
             return
         for t in tests:
             wf.delete_test(p, t)
@@ -924,7 +997,7 @@ class TestsPage(Page):
     def reperform_selected(self) -> list:
         p = self.project
         tests = [t for t in self.selected_tests() if t.status != "superseded"]
-        if not tests:
+        if not tests or self._refuse_busy(tests, "Re-perform tests"):
             return []
         new = [wf.reperform_test(p, t) for t in tests]
         self.main.mark_dirty()
@@ -937,7 +1010,7 @@ class TestsPage(Page):
     def clear_selected_tracks(self, confirm: bool = True) -> int:
         p = self.project
         tests = [t for t in self.selected_tests() if p.has_track(t)]
-        if not tests:
+        if not tests or self._refuse_busy(tests, "Clear tracks"):
             return 0
         if confirm and QMessageBox.question(
                 self, "Clear tracks", f"Delete the tracks of {len(tests)} test{'s' if len(tests) != 1 else ''}? "

@@ -38,17 +38,38 @@ can start right away — **Protocol → Experiment → Test → Results**.
 water maze, Barnes maze, Y/T/radial maze, novel object recognition, light/dark box, three-chamber sociability,
 fear conditioning, forced swim / tail suspension, or custom). The experiment is saved as a folder
 `Name.mmaze/` containing `project.json`, `tracks/`, `recordings/` and `exports/`. Videos are referenced by
-relative path when they live inside the experiment folder, so the folder can be moved or shared.
+relative path when they live inside the experiment folder, so the folder can be moved or shared. Videos stored
+elsewhere are referenced by relative path *and* by their absolute path, so they are still found when the experiment
+folder moves on its own. When videos have moved too, `manymaze project DIR relink --folder FOLDER` (command line)
+finds each missing video by its file name under that folder and its subfolders (letter case ignored; when several
+files have the name, the one whose folders best match the old path; a tie is left alone and listed) and saves the
+experiment. `manymaze project DIR info` lists the tests whose video is missing. There is no relink button in the
+window yet.
+
+**Open in one place at a time**: while an experiment is open, its folder holds a small `.manymaze.lock` file naming
+the computer, user and program. Opening an experiment that another mANY-MAZE window, the command line or another
+computer has open asks whether to open it **read-only** (look, export and *Save as* a copy; saving is refused) or
+**open anyway** (only if it is not really open there any more: both would save over each other). A lock left by a
+program that is no longer running on this computer (e.g. after a crash) is ignored; one written by another
+computer cannot be checked, so you are asked. Live tests interrupted by a crash are recovered only when the program
+that ran them is no longer running. `manymaze project DIR track` and `relink` refuse to run on an experiment open
+elsewhere.
+
+**Save as** (File tab) saves a copy of the experiment file and its tracks in another folder and continues there
+(recordings and exports stay in the original folder). Choosing the experiment's own folder — however it is spelt —
+simply saves it; replacing another experiment swaps its tracks only once the copy is complete.
 
 **Based on another experiment**: choose an existing experiment under *Based on* and the new one gets its protocol —
 apparatus, stages, keys, test duration and start, animal tracking and analysis settings, procedures, I/O devices,
 training criteria, blind testing and animal ID options, animal columns and (optionally) the treatments. Animals,
-tests and results are not copied. Use it for a new cohort or a replication.
+tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again). Use it for a new
+cohort or a replication.
 
 **Protocol report** (*File ▸ Protocol report*) saves a printable HTML description of the protocol: the experiment
 options, stages, keys, a map of each apparatus with its zones, zone groups, points, lines and sequences (shape,
 area, entry rule, options), the animal tracking and analysis settings (changed values are marked), the procedures
-statement by statement, the I/O devices and the training criteria — for lab notebooks, methods sections and SOPs.
+statement by statement, the I/O devices (without passwords and tokens) and the training criteria — for lab
+notebooks, methods sections and SOPs.
 
 **Backups**: each time the experiment is saved, the previous experiment file is kept in `backups/` (at most one
 backup every 10 minutes, the 30 newest are kept). *File ▸ Restore a backup* lists them by date and time and goes
@@ -58,7 +79,7 @@ back to the chosen one (the current state is backed up first). Tracks are not pa
 recordings, exports and the video of every test — also videos stored outside the experiment folder, which are copied
 into `videos/external/` (the tests in the archive point to the copies). Use it to move an experiment to another
 computer or to keep it with a publication. **Open archive** unpacks an archive into a folder and opens it.
-Automatic backups are not archived.
+Automatic backups, the lock file and the I/O devices' passwords and tokens (`io-secrets.json`) are not archived.
 
 *File ▸ Create demo experiment* builds a complete open-field experiment from synthetic videos so you can try
 everything without a camera.
@@ -130,7 +151,7 @@ from the real size you enter — or draw your own:
 **Import… / Export…** (Apparatus group) copy apparatus maps between experiments: *Import…* reads the apparatus
 of another experiment (choose its `project.json`) or an apparatus file; *Export…* writes the current
 apparatus (zones, points, lines, groups, sequences, grids and calibration) to a `.json` file you can share.
-**Export map image…** saves the zone map as a picture — **PNG**, **SVG** (editable vector drawing) or **PDF**,
+**Map image…** (Apparatus group) saves the zone map as a picture — **PNG**, **SVG** (editable vector drawing) or **PDF**,
 chosen by the file type: the arena, the zones filled in their colours (hidden zones dashed), points and lines, with
 their names when *Show labels* is on, and the apparatus name and calibration in the corner; drawn over the
 background frame when a video frame is shown.
@@ -419,9 +440,10 @@ skipped). To end a stage for one animal without a criterion, use **End stage for
 
 Tick **Blind testing** on the Protocol tab: on the Experiment, Test schedule, Run tests and Review and score pages the treatments are
 replaced by stable random codes (e.g. *Group NJ55*) with a neutral colour, and groups cannot be renamed or
-re-coloured. Results, statistics and exports keep the real groups. Unticking the box (unblinding) asks for
-confirmation. The **Reveal treatment coding** button on the Experiment tab (and unticking the box) unblinds after a
-confirmation; Results and Statistics always show the real treatments.
+re-coloured. While blind, the *Treatment* (Group) column of the results, statistics, exports and HTML report also
+shows the code (the same as the *Treatment code* column), never the treatment's name, so results can be analysed
+blind too. Unticking the box (unblinding) asks for confirmation. The **Reveal treatment coding** button on the
+Experiment tab (and unticking the box) unblinds after a confirmation; the results then show the real treatments.
 
 ### Animal identification
 
@@ -608,7 +630,7 @@ which gets the status *scored*.
 
 ### Procedures
 
-Procedures (§8) run in every live test, including each test of a several-tests session; their variables are shared between tests and saved with the experiment. A *Pause the test* action pauses the test like the Pause button; resume it with *Resume* or a start key.
+Procedures (§8) run in every live test, including each test of a several-tests session. Each test starts its variables from their initial values; only the variables declared with *Keep between tests* carry over to the next test (saved with the experiment when the test is saved). A *Pause the test* action pauses the test like the Pause button; resume it with *Resume* or a start key.
 
 ## 8. Procedures and hardware I/O
 
@@ -641,8 +663,12 @@ The editor has three panes:
 
 Procedures are checked as you type: problems (unknown zones, devices or variables, syntax errors, statements in
 the wrong place, missing values…) are listed under the tree and highlighted in red on the statement; click a
-problem to jump to it. Problems that can only appear while a test runs (division by zero, an array index out of
-range…) are reported in the live-test log without stopping the test.
+problem to jump to it. Some are only warnings: the procedures run as written — *Run a program* (it runs a program
+on this computer, see below) and a loop with nothing in it (only comments, labels or disabled statements: it only
+uses up time). Problems that can only appear while a test runs (division by zero, an array index out of range, a
+When whose number was left empty…) are reported in the live-test log without stopping the test: the statement or
+When block that went wrong is skipped (or stops), the other procedures carry on. A When whose required number is
+empty uses the number's default (e.g. 30 s) and says so in the log.
 
 ### Statements
 
@@ -682,8 +708,13 @@ pulses on the Arduino are timed by the board itself (microsecond resolution), in
 the I/O log records their exact times. Pulse sequences from a file are timed on the computer's clock by the I/O
 service thread (about 1 ms jitter; on the Arduino each pulse's width is timed by the board). Fast analogue inputs
 (up to 1 kHz) are sent by the board in batches with its own clock, and each sample is logged at its own time
-rather than at the frame's. "Repeat N times", "Repeat while" and "Repeat until" loops run instantly; a
-"Repeat forever" loop whose block does not wait runs once per frame (a polling loop).
+rather than at the frame's. "Repeat N times", "Repeat while" and "Repeat until" loops run instantly (up to 5000
+statements or empty passes per frame, then they go on at the next frame); a "Repeat forever" loop whose block does
+not wait — or only waits 0 s or until something already true — runs once per frame (a polling loop), and so does a
+"Repeat while / until" loop with nothing in it. A wait never takes a block back in time: waiting for an event that
+already happened before the wait (e.g. *Time reached* for a time already past) resumes it at the wait's start.
+*Every N seconds* counts from when it starts: the test start, the moment its procedure is enabled, or the start of
+a wait for it (a procedure enabled at 5 s with *every 1 s* fires at 6, 7 … s, not five times at once).
 
 **Several procedures at once.** Every When block that is running is independent: a procedure can wait for 30 s
 while another one counts lever presses and a third one turns a light on whenever the animal enters a zone.
@@ -733,7 +764,7 @@ zone fires for every zone; the zone's name is then in `event_name`). Inside a Wh
 | Inputs | Analogue input rises above (`analog_above`) | Device *(optional)*, Input, Level |
 | Inputs | Analogue input falls below (`analog_below`) | Device *(optional)*, Input, Level |
 | Inputs | Encoder count reaches (`encoder_reaches`) | Device *(optional)*, Input, Counts |
-| Inputs | Every N encoder counts (`encoder_every`) — e.g. once per wheel revolution | Device *(optional)*, Input, Counts |
+| Inputs | Every N encoder counts (`encoder_every`) — e.g. once per wheel revolution; counted from the first reading of the test (at most 100 times in one frame) | Device *(optional)*, Input, Counts |
 | Inputs | Movement detector: movement starts (`movement_start`) | Device *(optional)*, Detector *(optional)* |
 | Inputs | Movement detector: movement ends (`movement_end`) | Device *(optional)*, Detector *(optional)* |
 | Sensors | Sensor rises above (`sensor_above`) | Device *(optional)*, Sensor, Level |
@@ -810,13 +841,13 @@ sounds and virtual switches are switched off when the test ends.
 | Outputs | Pulse output (`output_pulse`) | Device *(optional)*, Output, Duration (s) |
 | Outputs | Set output level (`output_set`) | Device *(optional)*, Output, Level (0–1) |
 | Outputs | Set analogue output (V) (`output_volts`) — as in ANY-maze; the channel's max_v option is the voltage of level 1 (default 5 V) | Device *(optional)*, Output, Level (V) |
-| Outputs | Switch all outputs off (`all_outputs_off`) | Device *(optional)* |
+| Outputs | Switch all outputs off (`all_outputs_off`) — light ramps stop too | Device *(optional)* |
 | Outputs | Pulse train (optogenetics) (`pulse_train`) | Device *(optional)*, Output, Frequency (Hz), Pulse width (ms), Duration (s) |
 | Outputs | Stop pulse train (`pulse_train_stop`) | Device *(optional)*, Output |
 | Outputs | Sync pulse (e-phys / imaging) (`sync_pulse`) | Device *(optional)*, Output, Width (ms) |
-| Operant | Dispense pellet(s) (`pellet`) | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)*, Pellet sensor *(optional)*, Detection time (s) *(optional)*, Retries *(optional)* |
+| Operant | Dispense pellet(s) (`pellet`) — 0 pellets (e.g. worked out by an expression) dispenses nothing | Device *(optional)*, Output, Pellets, Pulse (ms) *(optional)*, Gap between pellets (s) *(optional)*, Pellet sensor *(optional)*, Detection time (s) *(optional)*, Retries *(optional)* |
 | Operant | Present liquid dipper (`dipper`) | Device *(optional)*, Output, Duration (s) |
-| Operant | Deliver liquid drops (dripper) (`liquid_drop`) | Device *(optional)*, Output, Drops, Valve open (ms) *(optional)*, Gap between drops (s) *(optional)* |
+| Operant | Deliver liquid drops (dripper) (`liquid_drop`) — 0 drops delivers nothing | Device *(optional)*, Output, Drops, Valve open (ms) *(optional)*, Gap between drops (s) *(optional)* |
 | Operant | Present odour (`odour`) | Device *(optional)*, Olfactometer, Odour *(optional)*, Air flow (l/min) *(optional)* |
 | Operant | Stop odour (`odour_off`) | Device *(optional)*, Olfactometer |
 | Lights | Set light level (`light_level`) | Device *(optional)*, Output, Level (%) |
@@ -927,7 +958,11 @@ devices (see *Alerts*), to the given address / number or the device's own. *Gene
 warnings; *Generate an error* reports a procedure error and can end the test.
 
 **Programs and plug-ins.** *Run a program* starts a program with its arguments, without a shell, and does not
-wait for it. *Trigger a plug-in* calls a Python function registered with
+wait for it. Because an experiment file can come from anyone, a program only runs on a computer that allows it:
+the list of allowed programs is a setting of this computer (`allowed_programs.json` in mANY-MAZE's settings
+folder), never part of the experiment. A program that is not on the list is not run and the procedure reports
+an error (or, when mANY-MAZE asks for confirmation, it runs once you allow it, and is then remembered). The
+procedure checks list *Run a program* as a warning. *Trigger a plug-in* calls a Python function registered with
 `manymaze.core.procedures.plugins.register(name, fn)` (or installed through the `manymaze.procedure_plugins`
 entry point): `fn(argument, info)` receives the test time, the variables and the test, and its result can be
 stored in a variable.
@@ -987,7 +1022,7 @@ Functions:
 Expressions are evaluated by a restricted interpreter: they cannot call anything else, read files or access
 Python objects, and huge numbers or arrays are refused.
 
-Variables are shared by all procedures. Numeric variables declared with *Save as a test result* are saved with
+Variables are shared by all procedures (within a test). Numeric variables declared with *Save as a test result* are saved with
 the test (`Test.result_variables`) and analysed like any other measure ("Result variable" measures).
 Variables declared with *Keep between tests* are stored in the experiment (`Project.variables`; the values kept
 per animal / apparatus under `@animal` / `@apparatus`), only when the test is saved.
@@ -1034,14 +1069,14 @@ lb are refused rather than read as grams; weighing an animal never blocks the ot
 |---|---|
 | **Arduino** | Any Arduino running `firmware/manymaze_io` (see `firmware/README.md` for wiring and the protocol): debounced digital inputs (levers, nose pokes, beams, TTL), digital outputs (lights, pellet dispensers, doors, shocker triggers, laser TTL, sync pulses) with optional maximum on-time, PWM outputs, analogue inputs, quadrature rotary encoders (running wheels) and a heartbeat watchdog. Pulses and pulse trains are generated on the board. |
 | **Serial port (text commands)** | Any device driven by text lines: each output channel has an *On* and an *Off* command; each input channel the lines the device sends when it switches on / off. *Send serial command* sends any text. |
-| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files, once or repeated (*Play sound file* ▸ *Play* times, or *Play sound file repeatedly* until *Stop sounds*). |
+| **Audio output** | The computer's speakers: tones (any frequency; high sample rates for ultrasound if the sound card supports them), white noise and WAV files, once or repeated (*Play sound file* ▸ *Play* times, or *Play sound file repeatedly* until *Stop sounds*). Every sound stops when the test ends (and when the pre-test section ends at the start of the test). |
 | **USB-serial cable control lines** | Any USB-serial adapter as a small TTL interface (the role of ANY-maze's USB TTL cable): outputs on RTS and DTR, inputs from CTS, DSR, RI and CD (the channel's *Pin* is the line name). |
 | **Firmata board** | A board running StandardFirmata (57600 baud): digital inputs with pull-up, movement detectors, digital and PWM outputs, analogue inputs and sensors. |
 | **National Instruments DAQ** | NI devices through NI-DAQmx (`pip install nidaqmx` and NI's driver): digital lines (`port0/line0`), analogue inputs (`ai0`), analogue outputs (`ao0`, level × `max_v`), counters (`ctr0`). |
 | **LabJack** | LabJack T4 / T7 / T8 through LJM (`pip install labjack-ljm`): `FIO`/`EIO` digital lines, `AIN` analogue inputs, `DAC` outputs, quadrature encoders on two `DIO` lines. |
 | **Syringe pump(s)** | One or several pumps (daisy-chained by address where the protocol allows): New Era / WPI Aladdin and OEMs, Harvard Apparatus (Ultra and legacy command sets), KD Scientific, Chemyx, Cavro-type pumps, a custom text protocol, or *simulated*. Channels of kind *Syringe pump* with `syringe=` (131 predefined syringes from 14 makers — check the inner diameter against your syringe's data sheet) or `diameter_mm=`. Each pump reports `<pump>.running`, `.stalled`, `.target_reached`, `.infused_ml` and `.withdrawn_ml`. |
 | **Balance** | Serial balances (Mettler Toledo MT-SICS, Ohaus, Sartorius, A&D, Kern, or any balance that sends its weight continuously): **Animals ▸ Weigh** records each animal's weight with the date (*Weight (g)* column and weight history), and the *Weigh the animal* action does it during a test. |
-| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device. |
+| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device. The SMTP password and Twilio token are not stored in `project.json`: they go to `io-secrets.json` in the experiment folder (readable only by your user account), which archives, protocol reports and experiments based on this one leave out. |
 | **Simulated device** | For designing and testing procedures without hardware: outputs are shown, inputs are switched by hand (*Simulate*). |
 
 Channels have a name (used by procedures), a kind (digital input, movement detector, digital output, PWM output,
@@ -1216,7 +1251,8 @@ was at that temperature, contacts made and broken and licks at that temperature.
 ### Projects from older versions
 
 Rules created with earlier versions ("when *trigger*, after *delay*, do *action*") are converted automatically
-into equivalent procedures (one per rule) the first time the procedure editor opens.
+into equivalent procedures (one per rule) the first time the procedure editor opens. A zone rule without a zone
+never ran; it is converted disabled, with a comment (choose a zone and enable it to use it).
 
 ### For developers
 
@@ -1237,7 +1273,10 @@ engine.stop(t_end)
 test.io_events = engine.io_events; test.result_variables = engine.result_variables
 test.pauses = engine.pauses; test.events += engine.state_events   # point marks go through on_mark
 io_measures(test.io_events, duration, t_range=None, devices=project.io_devices)  # -> {measure: value}
-validate(project.procedures, context) # -> [(procedure index, statement path, message)]
+validate(project.procedures, context) # -> [(procedure index, statement path, message)]; is_warning(message)
+check_before_test(project.procedures, project_context(project))  # -> errors that should stop arming the test
+programs.unauthorised_programs(project.procedures)  # "Run a program" programs this computer has not allowed
+programs.policy.confirm = lambda path, arguments, context: ask_the_user(path)  # True: allow (remembered)
 ```
 
 ## 9. Results: data, plots and data transfer
@@ -1261,7 +1300,11 @@ maps, group heat maps, results and statistics.
   there are then no separate *path rotations*). As in ANY-maze, the distance travelled does not include where the
   animal went while hidden (no distance is counted from where it disappeared to where it reappears), path
   efficiency and tortuosity are blank when the animal was hidden, and the latency to the last mobile / immobile
-  episode is blank when there is no such episode.
+  episode is blank when there is no such episode. No turn or rotation is counted across a pause or from where the
+  animal was hidden to where it reappears; turns and rotations are found on the whole test, so the values of the
+  time bins add up to the whole test's (a rotation counts in the bin in which it is completed). An animal that was
+  never detected is neither immobile nor outside the arena. No zone exit, entry or grid crossing is counted across a
+  pause.
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
   (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
   twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
@@ -1386,7 +1429,10 @@ maps, group heat maps, results and statistics.
 | Several animals | mean inter-animal distance, time in contact |
 | Manual scoring | per behaviour: count, duration, duration %, latency, mean bout (state) or count, latency, rate (point) |
 
-The novel object and the social side can be set per test (test variables) or as experiment defaults.
+The novel object and the social side can be set per test (test variables) or as experiment defaults. Escape /
+choice / primary latencies, *found platform* and the path length to the platform count the entries the zone
+measures count (minimum entry duration, whether a start in the zone is an entry) and, when the animal never gets
+there, follow *When an event never occurs, its latency is*.
 
 #### More test-specific measures
 
@@ -1432,6 +1478,7 @@ unticked):
 | Video time at test start (s) | Where in the video the test starts (0 for recordings). |
 | Moveable zone positions | The positions of the moveable zones and points in this test (centre, in video pixels), and the apparatus position when it was moved. |
 | Period, Segment of test | With time periods: the period's label (e.g. *0-60 s*) and its number (1, 2, …; blank for the whole test). |
+| Analysis error | Only when a test could not be analysed (e.g. a damaged track file): the error. The other tests keep their results; HTML reports list such tests under *Problems*. |
 
 *Day of week*, *Time of day*, *User* and *Animal lighter / darker* can also be used to group results in Statistics.
 In the *one row per animal* export, *Treatment code* and *Animal notes* are kept when they are shown.
@@ -1456,7 +1503,7 @@ to the selected test:
 - **Split by period**: shows one small track plot per time period (time bins, custom periods or event-anchored
   periods), all on the same colour scale. If the experiment has no periods, the test is split into quarters.
 
-Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time periods) limits the track plot and heat map to that period.
+Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time periods) limits the track plot and heat map to that period. Periods are in test time, as the results: the frames recorded while the test was paused are left out of the plots and heat maps (the whole test too).
 
 **Animated playback**: the bar under the track plot replays the track — ▶ draws the path progressively with the
 animal's current position as an orange dot (markers appear when their time is reached), at **0.25× to 16×** real
@@ -1497,10 +1544,12 @@ Available parameters:
   efficiency, mobile / immobile, time mobile / immobile, immobile episodes.
 - **Freezing**: motion (% of the body), freezing, time freezing, freezing episodes.
 - **Direction**: movement direction, turn rate, absolute turn angle, head angle, angular velocity, cumulative
-  rotation.
+  rotation. As the results: the head angle is the direction from the centre to the head (else a tracked body
+  angle, else the direction of travel), and the absolute turn angle adds up the turns while the animal is mobile.
 - **Body**: head speed, body length, body area, elongation.
 - **Each zone and zone group**: in zone, head in zone, distance to zone, time in zone, entries.
-- **Each point**: distance, head distance, near, head-to-point angle.
+- **Each point**: distance, head distance, near (the head within the point's radius when the head is tracked, as
+  the results), head-to-point angle.
 - **Each line**: distance, crossings.
 - **Each scored behaviour**: active, or count for point behaviours.
 - **Each other animal**: distance.
@@ -1533,7 +1582,9 @@ Select a test in the results table and click **Export video…**. You can choose
 - playback speed (0.5× to 8×) and output size (100 %, 75 % or 50 %).
 
 The video is written in the background with a progress bar and can be cancelled. It is encoded as H.264 where
-available (VideoToolbox on Apple Silicon). Frames are streamed, so memory use does not depend on the video's length.
+available (VideoToolbox on Apple Silicon). It is written to `<name>.part.mp4` and renamed when complete, so a
+cancelled or failed export leaves any earlier file of that name as it was; the test's own video cannot be chosen as
+the output. Frames are streamed, so memory use does not depend on the video's length.
 From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", OverlayOptions(...))`.
 
 ### Data transfer (Data page)
@@ -1572,8 +1623,8 @@ the data from ANY-maze instead (ANY-maze ▸ **File ▸ Export**) and import it 
 | In ANY-maze | Import as | What you get |
 |---|---|---|
 | *Export zone maps* (individual or combined, CSV) | **Zone maps (apparatus zones)…** — select all the files | an apparatus per ANY-maze apparatus, with its zones traced from the pixels (border maps are filled; a moveable zone gets its first position). An existing apparatus of the same name keeps its other elements and calibration |
-| *Export experiment as XML* (with the default top-left coordinates) | **Experiment exported as XML…** | the animals (ID or *Animal N*, treatment, notes), every performed test with its stage, trial, date and time, notes, reason for ending, its track (centre, head, tail; frames without a position stay undetected) and its scaling as calibration; zones moved in a test become moveable-zone positions |
-| *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand) |
+| *Export experiment as XML* (with the default top-left coordinates) | **Experiment exported as XML…** | the animals (ID, or *Animal N* — *Animal N (2)* when an earlier import already made *Animal N*, so animals without an ID never merge), treatment, notes, every performed test with its stage, trial, date and time (day/month order read from all the file's dates: 13/02 means day first, 02/13 month first; day first when nothing tells), notes, reason for ending, its track (centre, head, tail; frames without a position stay undetected) and its scaling as calibration; zones moved in a test become moveable-zone positions |
+| *Export test data*, or spreadsheets (animals, schedule) — CSV, tab-separated, Excel, SYLK or dBase | **Animals and treatments… / Test schedule…**, or *Import track data* on the Test schedule page | through the column-matching import wizard (dBase field names are cut to 10 characters, so match those columns by hand). Decimal commas are recognised for the whole file at once: *0,125* is 0.125 in a file written with decimal commas, *1,234,567* is 1234567 in one written with thousands separators |
 
 Import the zone maps first: an apparatus that does not exist yet is otherwise created from the zones' bounding
 boxes and the apparatus' box (its arena), which is all the XML export contains about zone shapes. When the export
@@ -1653,7 +1704,9 @@ values can be shown or hidden.
   - You can also pick a test yourself. One-sample tests compare every group with a **Test value**, for example 50 %
     alternation or a discrimination index of 0.
   - **Post-hoc** offers Tukey, Bonferroni, Holm, Šidák, FDR, Dunnett (against the chosen **Control**), Games-Howell
-    or Dunn.
+    or Dunn. With repeated measures, Tukey, Games-Howell and Dunn are run as paired tests with a Bonferroni
+    correction, and Dunnett as paired tests of each condition against the control (Bonferroni over those
+    comparisons); the results name the test actually run.
   - Results include the effect sizes (Cohen's d, Hedges' g, rank-biserial r, eta², omega², epsilon², Kendall's W,
     partial eta²), the descriptive statistics (n, mean, SD, SEM, 95 % CI, median, range) and assumption checks
     (Shapiro-Wilk, D'Agostino-Pearson, Levene, Brown-Forsythe, Bartlett, Fligner-Killeen).

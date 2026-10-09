@@ -40,7 +40,11 @@ class ExportsMixin:
         tests and settings)."""
         if not self.rows:
             return
-        rows, cols = (self.selection_range() if selection else None) or (self.shown_rows(), self.shown_columns())
+        rng = self.selection_range(any_cells=True) if selection else None  # one cell / one row is a selection too
+        if selection and rng is None:
+            self.main.status("Select the cells to save first.")
+            return
+        rows, cols = rng or (self.shown_rows(), self.shown_columns())
         if path is None:
             default = self._default_path(suffix)
             path, _ = QFileDialog.getSaveFileName(self, "Save selected cells" if selection else "Save results",
@@ -274,7 +278,9 @@ class ExportsMixin:
             numeric = numeric_columns(self.rows, measures)
             dlg = ReportDialog(numeric, self._report_preselect(numeric), self,
                                chart_params=self.charts.checked_params()[:4])
-            if dlg.exec() != QDialog.Accepted:
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
                 return
             stats_measures = dlg.selected()
             include_plots = dlg.plots.isChecked()

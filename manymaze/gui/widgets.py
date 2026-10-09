@@ -389,6 +389,7 @@ class _WorkerSignals(QObject):
     progress = Signal(float)
     done = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()  # fn stopped early on request (raised InterruptedError after stop())
 
 
 class Worker(QThread):
@@ -410,25 +411,41 @@ class Worker(QThread):
         self._stop = True
 
     @classmethod
-    def stop_all(cls, ms: int = 30000):
-        """Ask every running worker to stop and wait for it (Qt aborts if a running QThread is destroyed)."""
+    def stop_all(cls, ms: int | None = 30000) -> list["Worker"]:
+        """Ask every running worker to stop and wait for it (Qt aborts if a running QThread is destroyed).
+
+        ``ms`` bounds the wait (None: wait until all have finished). Workers still running afterwards are detached
+        from their parent widget, so closing the window does not destroy them while they run; they stay referenced
+        here until they finish (``app.main`` waits for them after the event loop). Returns those workers."""
         for w in list(cls.running):
             w.stop()
         import time
 
         from PySide6.QtWidgets import QApplication
 
-        end = time.monotonic() + ms / 1000  # one overall bound, and the UI keeps painting while we wait
+        end = None if ms is None else time.monotonic() + ms / 1000  # one overall bound; the UI keeps painting
         for w in list(cls.running):
-            while w.isRunning() and time.monotonic() < end:
+            while w.isRunning() and (end is None or time.monotonic() < end):
                 w.wait(50)
                 if QApplication.instance() is not None:
                     QApplication.processEvents()
+        left = [w for w in list(cls.running) if w.isRunning()]
+        for w in left:
+            try:
+                w.setParent(None)
+            except RuntimeError:  # pragma: no cover - already deleted
+                pass
+        return left
 
     def run(self):
         try:
             res = self.fn(self.signals.progress.emit, lambda: self._stop)
             self.signals.done.emit(res)
+        except InterruptedError as e:
+            if self._stop:  # stopped on request (Cancel, or the window closing): not an error
+                self.signals.cancelled.emit()
+            else:  # pragma: no cover - surfaced to UI
+                self.signals.failed.emit(f"{type(e).__name__}: {e}")
         except Exception as e:  # pragma: no cover - surfaced to UI
             traceback.print_exc()
             self.signals.failed.emit(f"{type(e).__name__}: {e}")
@@ -436,10 +453,40 @@ class Worker(QThread):
             Worker.running.discard(self)
 
 
+class _ProgressDialog(QProgressDialog):
+    """The modal progress dialog of run_with_progress. Without a Cancel button it cannot be closed either (Escape,
+    the title bar's close button) while the work runs: the work goes on, and the experiment must not change under
+    it."""
+
+    def __init__(self, *a, cancellable: bool = True):
+        super().__init__(*a)
+        self.locked = not cancellable
+
+    def finish(self):
+        self.locked = False
+        self.close()
+
+    def reject(self):
+        if not self.locked:
+            super().reject()
+
+    def closeEvent(self, e):
+        if self.locked:
+            e.ignore()
+        else:
+            super().closeEvent(e)
+
+    def keyPressEvent(self, e):
+        if self.locked and e.key() == Qt.Key_Escape:
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+
 def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callable | None = None,
                       on_fail: Callable | None = None, cancellable: bool = True) -> Worker:
     """Run fn(progress, should_stop) in a background thread with a modal progress dialog."""
-    dlg = QProgressDialog(title, "Cancel" if cancellable else None, 0, 1000, parent)
+    dlg = _ProgressDialog(title, "Cancel" if cancellable else None, 0, 1000, parent, cancellable=cancellable)
     dlg.setWindowTitle(title)
     dlg.setWindowModality(Qt.WindowModal)
     dlg.setMinimumDuration(0)
@@ -451,12 +498,12 @@ def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callab
     dlg.canceled.connect(w.stop)
 
     def finished(res):
-        dlg.close()
+        dlg.finish()
         if on_done:
             on_done(res)
 
     def failed(msg):
-        dlg.close()
+        dlg.finish()
         if on_fail:
             on_fail(msg)
         else:
@@ -464,6 +511,8 @@ def run_with_progress(parent: QWidget, title: str, fn: Callable, on_done: Callab
 
     w.signals.done.connect(finished)
     w.signals.failed.connect(failed)
+    w.signals.cancelled.connect(dlg.finish)
+    w.dialog = dlg
     w.finished.connect(w.deleteLater)
     w.start()
     dlg.show()
@@ -482,8 +531,9 @@ def run_and_wait(parent: QWidget, title: str, fn: Callable) -> tuple[object, str
         out[key] = value
         loop.quit()
 
-    run_with_progress(parent, title, fn, on_done=lambda r: finish("result", r), on_fail=lambda m: finish("error", m),
-                      cancellable=False)
+    w = run_with_progress(parent, title, fn, on_done=lambda r: finish("result", r),
+                          on_fail=lambda m: finish("error", m), cancellable=False)
+    w.signals.cancelled.connect(lambda: finish("error", "Cancelled"))
     if not out:
         loop.exec()
     return out.get("result"), out.get("error")

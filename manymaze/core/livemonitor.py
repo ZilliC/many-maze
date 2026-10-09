@@ -4,7 +4,9 @@ points, of its zone sequences and of the I/O inputs, and live charts of any per-
 
 from __future__ import annotations
 
+import bisect
 import math
+import threading
 import time
 
 import numpy as np
@@ -143,41 +145,77 @@ def chart_parameters(apparatus: Apparatus | None, behaviours=None) -> list[tuple
 class LiveCharts:
     """Series of core.charts parameters over the track recorded so far by a live session.  Parameters of the
     moment (positions, distances, states …) are computed over the displayed window only; running totals (counts,
-    times, distance travelled) over the whole test, at most every `total_every_s` seconds (cached)."""
+    times, distance travelled) over the whole test, at most every `total_every_s` seconds (cached, recomputed in
+    a background thread while the previous result is shown).  Only the frames added since the last call are
+    copied under the session lock (an incremental copy of the track)."""
 
     def __init__(self, total_every_s: float = 1.0, behaviours=None):
         self.total_every_s = total_every_s
         self.behaviours = behaviours
         self._cache: dict[str, tuple[float, int, np.ndarray, np.ndarray]] = {}
+        self._session = None  # the session the copied columns belong to
+        self._cols: dict[str, list] = {}
+        self._busy: set[str] = set()  # cumulative parameters being recomputed in the background
+        self._lock = threading.Lock()
 
-    def series(self, session, name: str, window_s: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
-        """(t, values) of the chart parameter `name` (without the "chart:" prefix) over the last window_s s."""
+    def _sync(self, session) -> tuple[int, object, list]:
+        """Copy the frames recorded since the last call (under the session lock); (frames, apparatus, events)."""
         with session.lock:
             n = len(session.cols["t"])
             app = session.apparatus
-            cols = session._track.snapshot(n)
+            if session is not self._session or n < len(self._cols.get("t", ())):
+                with self._lock:
+                    self._session, self._cols, self._cache = session, {}, {}
+            have = len(self._cols.get("t", ()))
+            new = session._track.snapshot(n) if not have else \
+                {k: v[have:n] for k, v in session._track.cols.items()}
             events = [dict(e) for e in session.events]
+        new.pop("outline", None)
+        for k, v in new.items():
+            self._cols.setdefault(k, []).extend(v)
+        return n, app, events
+
+    def series(self, session, name: str, window_s: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
+        """(t, values) of the chart parameter `name` (without the "chart:" prefix) over the last window_s s."""
+        n, app, events = self._sync(session)
         if n < 2 or app is None:
             return np.zeros(0), np.zeros(0)
-        cols.pop("outline", None)
         defs = {p.name: p for p in charts.parameters(app, None, self.behaviours)}
         p = defs.get(name)
         if p is None:
             return np.zeros(0), np.zeros(0)
-        t = np.asarray(cols["t"], float)
-        t_end = t[-1]
+        cols = self._cols
+        ts = cols["t"]
+        t_end = ts[n - 1]
         if charts.is_cumulative(p):
-            hit = self._cache.get(name)
-            if hit is not None and hit[1] <= n and time.monotonic() - hit[0] < self.total_every_s:
-                tt, vv = hit[2], hit[3]
-            else:
+            with self._lock:
+                hit = self._cache.get(name)
+            stale = hit is None or hit[1] > n or time.monotonic() - hit[0] >= self.total_every_s
+            if hit is None:  # the first time: computed now
                 tt, vv = self._compute(cols, slice(0, n), session, app, name, events)
-                self._cache[name] = (time.monotonic(), n, tt, vv)
+                with self._lock:
+                    self._cache[name] = (time.monotonic(), n, tt, vv)
+            else:
+                if stale and name not in self._busy:
+                    self._busy.add(name)
+                    frozen = {k: v[:n] for k, v in cols.items()}  # (appended to while it computes)
+                    threading.Thread(target=self._recompute, args=(frozen, n, session, app, name, events),
+                                     name="live-chart", daemon=True).start()
+                tt, vv = hit[2], hit[3]
         else:
-            i0 = int(np.searchsorted(t, t_end - window_s - 2.0))  # a little more: smoothing windows
+            i0 = bisect.bisect_left(ts, t_end - window_s - 2.0, 0, n)  # a little more: smoothing windows
             tt, vv = self._compute(cols, slice(i0, n), session, app, name, events)
         keep = tt >= tt[-1] - window_s if len(tt) else np.zeros(0, bool)
         return tt[keep], vv[keep]
+
+    def _recompute(self, cols, n, session, app, name, events):
+        try:
+            tt, vv = self._compute(cols, slice(0, n), session, app, name, events)
+            with self._lock:
+                if session is self._session:
+                    self._cache[name] = (time.monotonic(), n, tt, vv)
+        finally:
+            self._busy.discard(name)
 
     @staticmethod
     def _compute(cols, sl, session, app, name, events):

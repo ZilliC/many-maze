@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
 
 from ....core import autosave, diskspace
@@ -218,7 +218,9 @@ class SingleTestMixin:
             return False
         raw, raw2 = self.grabber.raw_frames() if self.grabber is not None else (None, None)
         if raw is None:
-            raw = self._last_frame if (self._view.is_identity and self._second is None) else None
+            # the last image only when it is of this source, untransformed (never another camera's / file's)
+            raw = self._last_frame if (self._view.is_identity and self._second is None
+                                       and self._frame_key == self._single_key()) else None
         if raw is None and SourceSpec(src).is_file:
             raw = peek_frame(src)
         if raw2 is None and self._second is not None and SourceSpec(self._second).is_file:
@@ -227,7 +229,9 @@ class SingleTestMixin:
         dlg = CameraOptionsDialog(raw, self._view, self._second, self._merge_layout, self._merge_choices(src),
                                   raw2, self, hardware=self._hardware, camera=camera, is_camera=not self.simulating,
                                   genicam=is_native_source(src))
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
             return False
         self._apply_single_view(dlg.result())
         return True
@@ -283,6 +287,8 @@ class SingleTestMixin:
             # queued signals of a grabber already stopped (or replaced) are ignored
             signal.connect(lambda *a, slot=slot, g=g: slot(*a) if g is self.grabber else None)
         self.grabber = g
+        self._source_opened = False
+        self._frame_key = spec.key  # the source _last_frame comes from
         g.start()
         self._update_buttons()
         if self.session is None:
@@ -294,6 +300,8 @@ class SingleTestMixin:
         if g is None:
             return
         self.grabber = None
+        self._source_opened = False
+        self._cancel_pending_arm()
         g.stop()
         self._update_buttons()
         if self.session is None:
@@ -303,7 +311,7 @@ class SingleTestMixin:
         if self.grabber is None:
             self.start_preview()
         else:
-            if self.session is not None:
+            if self.session is not None or self._pending_arm is not None:
                 QMessageBox.information(self, "Run tests", "Stop the test before stopping the camera.")
                 return
             self.stop_preview()
@@ -311,6 +319,10 @@ class SingleTestMixin:
     def _on_opened(self, w, h, fps):
         self._fps = fps
         self._frame_size = (w, h)
+        self._source_opened = True
+        g = self.grabber
+        if g is not None and self._source_is_file and self._file_background is None and g.background is not None:
+            self._on_file_background(g.background)  # (its own signal follows: the session needs it now)
         kind = "Video" if self.simulating else "Camera"
         self.main.status(f"{kind} opened: {w}×{h} at {fps:.1f} fps")
         msg = self.grabber.hardware_message if self.grabber is not None else ""
@@ -320,6 +332,13 @@ class SingleTestMixin:
         if app is not None and app.frame_size and tuple(app.frame_size) != (w, h):
             self._log(f"Note: apparatus “{app.name}” was drawn on a {app.frame_size[0]}×{app.frame_size[1]} "
                       f"image but the source is {w}×{h}.")
+        if self._pending_arm is not None:  # armed before the source was open: the session gets its real fps / size
+            test, self._pending_arm = self._pending_arm, None
+            start = self._pending_start
+            self._pending_start = False
+            if self._arm_session(test) and start and self.session is not None and self.session.state == "waiting":
+                self.session.request_start()
+                self._log("Start requested.")
 
     def _on_file_background(self, bg):
         self._file_background = bg
@@ -329,6 +348,7 @@ class SingleTestMixin:
 
     def _on_grab_failed(self, msg):
         self._log(f"Error: {msg}")
+        self._cancel_pending_arm()
         if self.session is not None:
             self.stop_test(save=len(self.session.cols["t"]) > 0, quiet=True, reason=END_SOURCE_FAILED)
         self.stop_preview()
@@ -673,8 +693,10 @@ class SingleTestMixin:
         self.arm()
 
     def arm(self) -> bool:
+        """Arm the test.  Without the camera image on, the source is opened first and the test is armed when it
+        is open (_on_opened): its session needs the real frame rate, image size and (video file) background."""
         p = self.project
-        if p is None or self.session is not None:
+        if p is None or self.session is not None or self._pending_arm is not None:
             return False
         test, new = self._prepare_test()
         if test is None:
@@ -687,6 +709,26 @@ class SingleTestMixin:
         if self.grabber is None and not self.start_preview():
             self._discard_new_test()
             return False
+        if self.grabber is not None and not self._source_opened:
+            self._pending_arm = test
+            self._log(f"Test {test.id}: opening the {'video' if self.simulating else 'camera'} — the test is "
+                      f"armed as soon as it is open.")
+            self._update_buttons()
+            return True
+        return self._arm_session(test)
+
+    def _cancel_pending_arm(self):
+        """The source of a test being armed failed or was stopped: the test is not armed."""
+        if self._pending_arm is None:
+            return
+        self._pending_arm = None
+        self._pending_start = False
+        self._discard_new_test()
+        self._log("Test not armed.")
+        self._update_buttons()
+
+    def _arm_session(self, test) -> bool:
+        p = self.project
         outputs = Outputs(self.serial.currentText().strip() or None)
         self._outputs = outputs
         for line in outputs.log:
@@ -733,6 +775,9 @@ class SingleTestMixin:
             return True
         if self.session is None and not self.arm():
             return False
+        if self._pending_arm is not None:
+            self._pending_start = True  # started as soon as the source is open
+            return True
         s = self.session
         if s is not None and s.state == "waiting":
             s.request_start()
@@ -761,6 +806,7 @@ class SingleTestMixin:
     def _stop_clicked(self):
         s = self.session
         if s is None:
+            self._cancel_pending_arm()
             return
         if s.state not in ("running", "paused"):
             self.stop_test(save=False)
@@ -775,6 +821,7 @@ class SingleTestMixin:
 
     def stop_test(self, save: bool = True, quiet: bool = False, reason: str = END_USER):
         if self.session is None:
+            self._cancel_pending_arm()
             return
         with self._lock:
             self.session.finish(reason)
@@ -824,10 +871,29 @@ class SingleTestMixin:
         if not finish_live_test(self.project, test, session, record_path, save, new_test):
             return False
         self.main.mark_dirty()
-        if self.main.save():
-            session.remove_autosave()
+        self._save_soon(session)
         self.last_test_id = test.id
         return True
+
+    def _save_soon(self, session):
+        """Save the experiment with a finished test (its crash-recovery file goes once saved).  While other tests
+        run, the save is made once for every test finished meanwhile, from the event loop (no stall of the tick
+        that stores several tests)."""
+        pending = self._unsaved_sessions
+        pending.append(session)
+        if not self.any_active():
+            self._flush_save()
+        elif len(pending) == 1:
+            QTimer.singleShot(0, self._flush_save)
+
+    def _flush_save(self):
+        pending = self._unsaved_sessions
+        if not pending:
+            return
+        self._unsaved_sessions = []
+        if self.main.save():
+            for s in pending:
+                s.remove_autosave()
 
     def _discard_new_test(self):
         if self._new_test and self.test is not None and self.test in self.project.tests:
@@ -835,11 +901,25 @@ class SingleTestMixin:
         self.test = None
 
     def _show_results(self, test, switch: bool = True):
+        """The results of a finished test in the report.  While other tests run they are calculated in a
+        background thread (the other tests' panels keep updating)."""
+        project = self.project
+        if self.any_active():
+            w = Worker(lambda progress, stop: project.analyse_test(test), self)
+            w.signals.done.connect(lambda rows: self.project is project and self._fill_results(test, rows, switch))
+            w.signals.failed.connect(lambda msg: self.project is project and (
+                self._log(f"Analysis failed: {msg}"), self._fill_results(test, [], switch)))
+            w.finished.connect(w.deleteLater)
+            w.start()
+            return
         try:
-            rows = self.project.analyse_test(test)
+            rows = project.analyse_test(test)
         except Exception as e:
             self._log(f"Analysis failed: {e}")
             rows = []
+        self._fill_results(test, rows, switch)
+
+    def _fill_results(self, test, rows: list, switch: bool):
         self.last_results = rows
         self.results_title.setText(f"Test {test.id} · animal {test.animal_id} · {test.stage or ''} trial "
                                    f"{test.trial}")
