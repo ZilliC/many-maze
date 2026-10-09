@@ -170,7 +170,7 @@ class ApparatusPage(Page):
         return [
             ("Apparatus", [(self.tpl_act, "large"), (self.new_act, "small"), (self.dup_act, "small"),
                            (self.ren_act, "small"), (self.del_act, "small"), (self.import_act, "small"),
-                           (self.export_act, "small"), (self.map_img_act, "small")]),
+                           (self.export_act, "small")]),
             ("Apparatus map", [(t["select"], "large"), (t["polygon"], "large"), (t["rect"], "small"),
                                (t["ellipse"], "small"), (t["line"], "small"), (self.select_all_act, "small"),
                                (self.delete_sel_act, "small"), (self.snap_act, "small")]),
@@ -178,7 +178,7 @@ class ApparatusPage(Page):
                         (self.group_act, "small"), (self.seq_act, "small")]),
             ("Calibration", [(t["calibrate"], "small"), (self.clear_cal_act, "small")]),
             ("Background", [(self.bg_act, "small"), (self.testvid_act, "small")]),
-            ("View", [(self.fit_act, "small"), (self.labels_act, "small")]),
+            ("View", [(self.fit_act, "small"), (self.labels_act, "small"), (self.map_img_act, "small")]),
         ]
 
     # ============================================================== explorer

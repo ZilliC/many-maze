@@ -262,9 +262,10 @@ def test_px_per_cm_box_keeps_the_ruler_without_an_edit(win):
     assert a.px_per_cm == 20.0 and a.calibration_line is None
 
 
-def test_map_image_fits_the_apparatus_ribbon_group(win):
+def test_map_image_is_in_the_view_ribbon_group(win):
     ap = win.goto("ApparatusPage")
     assert ap.map_img_act.text() == "Map image…"
+    assert (ap.map_img_act, "small") in dict(ap.ribbon_groups())["View"]  # the Apparatus group is full
 
 
 # ------------------------------------------------------------------ camera options
