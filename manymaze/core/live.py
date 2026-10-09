@@ -868,9 +868,10 @@ class LiveSession(_Scoring):
             if self.recorder is None:
                 raise RuntimeError("the video is not being recorded")
             part, video_t = self._recording_position()
-            self.video_labels.append({"t": round(t, 3), "video_t": round(video_t, 3), "text": text,
-                                      "file": Path(part).name if part else "",
-                                      "recording_t": round(self._rec_frames / self.fps, 3)})
+            lab = {"t": round(t, 3), "video_t": round(video_t, 3), "text": text, "file": Path(part).name if part else ""}
+            if self.split_minutes > 0:  # video_t is within the part; the time in the whole playlist too
+                lab["recording_t"] = round(self._rec_frames / self.fps, 3)
+            self.video_labels.append(lab)
             if dur > 0:
                 self._video_label = (text, t + dur)
             msg = f"label “{text}”"
@@ -933,6 +934,8 @@ class LiveSession(_Scoring):
                                       daemon=True)
                 self._closers.append(th)
                 th.start()
+        if self.state == "finished":  # the end of the test: whoever ended it gets the complete file, as before
+            self.wait_recordings()
 
     def _close_recording(self, rec):
         close = getattr(rec, "close", None)
@@ -1442,8 +1445,6 @@ class LiveSession(_Scoring):
                     pass
             if self._autosaver is not None and self.cols["t"]:
                 self._autosaver.request(force=True)  # the final state, until the test is saved or discarded
-        if not self.lock._is_owned():  # called from outside a frame: returns once the recording is closed
-            self.wait_recordings()
 
     # ------------------------------------------------------------------ crash recovery
     def autosave_snapshot(self) -> dict:
