@@ -299,3 +299,9 @@ below are the ones done so far (to merge with the plan's list).
       units, graph Y axis range, named values; Count, Sum, Mean, Max, Min, ResultForTrial, ResultForLastTrial and
       ResultForPeriod as `count_trials` … `result_for_period`); Protocol ▸ Calculations, *Calculation results* on
       the Data page, exports, Statistics graphs, protocol report and protocol copy (`core/calculations.py`)
+- [x] Input/output only mode (phase 1): Protocol ▸ Mode *Input/output only*; Run tests runs a test without a camera
+      (`live.IOSession`: procedures and I/O devices on the computer's clock, start modes, pre-test, pause,
+      continuation, crash recovery), saved without a track and analysed from the I/O log (also per time period)
+      *(tested with the virtual devices only, untested on hardware)*
+- [ ] Several input/output only tests at once (operant chambers side by side): *Several tests* still needs a camera
+      per panel

@@ -15,7 +15,7 @@ from ....core import autosave, diskspace
 from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
 from ....core.camhw import CameraHardware
 from ....core.camsources import is_native_source, list_native_cameras
-from ....core.live import LiveSession, draw_display_texts
+from ....core.live import IOSession, LiveSession, draw_display_texts
 from ....core.livemonitor import beam_angle
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs, test_context
@@ -401,6 +401,32 @@ class SingleTestMixin:
         return self._background if self._background is not None else (
             self._file_background if self._source_is_file else None)
 
+    @staticmethod
+    def _session_info(s) -> dict:
+        """What the panel, the log and the end of the test need from a running session (under its lock)."""
+        state = s.state
+        return {"session": s, "state": state, "elapsed": s.elapsed if state != "waiting" else 0.0,
+                "duration": s.duration_s, "events": len(s.events), "fired": list(s.engine.fired),
+                "outputs": list(s.outputs.log) if s.outputs is not None else [], "proc_log": list(s.log),
+                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance,
+                "unit": s.stats.unit}
+
+    @property
+    def io_only(self) -> bool:
+        """The protocol runs its tests with the I/O devices only (ANY-maze's Input/output only mode): no camera."""
+        p = self.project
+        return p is not None and p.settings_extra.get("mode") == "io_only"
+
+    def _io_refresh(self):
+        """An I/O-only test has no camera frames: its clock drives the panel, the log and the end of the test."""
+        s = self.session
+        if s is None or not s.io_only or self.mode != "single":
+            return
+        with s.lock:
+            info = self._session_info(s)
+        info.update(detected=False, zones=[], io_only=True, popups=s.take_popups())
+        self._on_frame(None, info)
+
     def process_frame(self, frame: np.ndarray, ts: float):
         """Track one frame (called from the grabber thread). Returns (display frame, info dict)."""
         with self._lock:
@@ -410,16 +436,9 @@ class SingleTestMixin:
             trail = None
             if s is not None:
                 dets = s.process(frame, ts)
-                state = s.state
                 d = dets[0] if dets else None
                 trail = s.trail(TRAIL_LEN) if self._show_trail else None
-                elapsed = s.elapsed if state != "waiting" else 0.0
-                info = {"session": s, "state": state, "elapsed": elapsed, "duration": s.duration_s,
-                        "events": len(s.events), "fired": list(s.engine.fired),
-                        "outputs": list(s.outputs.log) if s.outputs is not None else [],
-                        "proc_log": list(s.log), "phase": s.start_phase, "waiting_end": s.waiting_end}
-                info["distance"] = s.stats.distance
-                info["unit"] = s.stats.unit
+                info = self._session_info(s)
             else:
                 if self._preview_tracker is None:
                     self._preview_tracker = self._make_preview_tracker(frame, app)
@@ -473,7 +492,7 @@ class SingleTestMixin:
             self._btn_state = btn_state
             self._update_buttons()
         self.vals["zone"].setText(", ".join(info["zones"]) if info["zones"] else
-                                  ("—" if info["detected"] else "not detected"))
+                                  ("—" if info["detected"] or info.get("io_only") else "not detected"))
         # a preview frame, or a stale one of the previous test, may arrive just after arming
         for pop in info.get("popups") or ():
             self._show_popup(pop)
@@ -627,6 +646,18 @@ class SingleTestMixin:
         """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
         an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
         p = self.project
+        if self.io_only:  # no camera: the I/O devices and the procedures on the computer's clock
+            mode = self._session_mode()
+            if mode in ("on_detection", "experimenter_leaves"):
+                self._log("I/O only: the test starts as soon as it is armed (no camera to detect the animal).",
+                          entry)
+                mode = "immediate"
+            return IOSession(app, duration_s=self.duration.value(), start_mode=mode,
+                             procedures=copy.deepcopy(p.procedures), outputs=outputs, analysis=p.analysis_for(test),
+                             devices=devices, variables=p.variables, name=name, zone_overrides=test.zone_overrides,
+                             on_stimulus=on_stimulus, outputs_off_on_pause=self.pause_off.isChecked(),
+                             test_info=test_context(p, test), control_input=self.control_input.text().strip(),
+                             **self._autosave_args(test))
         settings = self._detection_settings(test)
         if settings.background == "frame" and bg is None:
             settings.background = "adaptive"
@@ -700,7 +731,7 @@ class SingleTestMixin:
             return False
         if not self.procedures_ready():
             return False
-        test, new = self._prepare_test()
+        test, new = self._prepare_test(need_apparatus=not self.io_only)
         if test is None:
             return False
         self.test = test
@@ -708,6 +739,8 @@ class SingleTestMixin:
         if not confirm_animal_id(self, test):
             self._discard_new_test()
             return False
+        if self.io_only:
+            return self._arm_session(test)
         if self.grabber is None and not self.start_preview():
             self._discard_new_test()
             return False
@@ -750,6 +783,8 @@ class SingleTestMixin:
             self._fired_seen = 0
             self._outputs_seen, self._proc_log_seen = len(outputs.log), 0
             self.session = session
+        if session.io_only:
+            session.start_clock()
         self._schedule = self._new_schedule() if self.start_mode.currentData() == "scheduled" else None
         if self.grabber is not None:
             self.grabber.loop = False
@@ -827,7 +862,7 @@ class SingleTestMixin:
             return
         with self._lock:
             self.session.finish(reason)
-        self._finalise(save=save and len(self.session.cols["t"]) > 0, quiet=quiet)
+        self._finalise(save=save and self.session.has_data, quiet=quiet)
 
     def _finalise(self, save: bool = True, quiet: bool = False):
         with self._lock:

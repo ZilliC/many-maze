@@ -32,7 +32,7 @@ from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
 from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, analyse_segmented,
-                       behaviour_measures, time_periods)
+                       behaviour_measures, io_only_measures, io_only_periods, time_periods)
 from .session import END_ZONE
 from .templates import apply_overrides
 from .track import Track
@@ -827,23 +827,64 @@ class Project:
                     result_variables=test.result_variables if i == 0 else None, calculations=steps or None)
 
     def _scored_duration(self, test: Test) -> float:
-        """Length of a test scored by hand only (no track): its duration, else the protocol's, else its last
-        event."""
+        """Length of a test without a track (scored by hand, or I/O only): its duration, else the protocol's, else
+        its last event."""
         dur = test.duration_s or self.test_duration_s
         if not dur or dur <= 0:
-            dur = max((e["t_end"] if e.get("t_end") is not None else e["t"] for e in test.events), default=0.0)
+            dur = max([e["t_end"] if e.get("t_end") is not None else e["t"] for e in test.events] +
+                      [float(e.get("t", 0) or 0) for e in test.io_events], default=0.0)
         return dur
 
-    def _scored_period(self, test: Test, spec) -> dict | None:
-        """result_for_period() of a test scored by hand only: its key measures for a part of the test (a time
-        period's name: the time bins and custom periods)."""
+    @staticmethod
+    def _io_only(test: Test) -> bool:
+        """A test without a track analysed from its I/O log (ANY-maze's I/O only mode), not only scored keys."""
+        return bool(test.io_events or test.result_variables)
+
+    def _untracked_periods(self, test: Test) -> list[tuple[str, float, float]]:
+        dur, s = self._scored_duration(test), self.analysis_for(test)
+        if not self._io_only(test):
+            return time_periods(dur, s)
+        return io_only_periods(dur, s, test.events, test.io_events, self.get_apparatus(test.apparatus), test.pauses)
+
+    def _untracked_measures(self, test: Test, t_range=None) -> dict | None:
+        """Measures of a test without a track, whole or for a period (None: the test ended before it)."""
         dur = self._scored_duration(test)
+        if t_range is not None and t_range[0] >= dur:
+            return None
+        if not self._io_only(test):  # TakeNote: the scored keys
+            a, b = (0.0, dur) if t_range is None else (t_range[0], min(t_range[1], dur))
+            return behaviour_measures(test.events, self.behaviours, a, b)
+        return io_only_measures(dur, self.analysis_for(test), test.io_events, self.io_devices or None, test.events,
+                                self.behaviours, test.result_variables, t_range, test.pauses)
+
+    def _scored_period(self, test: Test, spec) -> dict | None:
+        """result_for_period() of a test without a track: its measures for a part of the test (a time period's
+        name: the test's time periods)."""
         if isinstance(spec, str):
-            spec = {label: (a, b) for label, a, b in time_periods(dur, self.analysis_for(test))}.get(spec)
+            spec = {label: (a, b) for label, a, b in self._untracked_periods(test)}.get(spec)
             if spec is None:
                 return None
-        a, b = spec
-        return behaviour_measures(test.events, self.behaviours, a, min(b, dur)) if a < dur else None
+        return self._untracked_measures(test, tuple(spec))
+
+    def _untracked_rows(self, test: Test, segmented: bool, steps=None) -> list[dict]:
+        """Results of a test without a track: keys scored by hand (TakeNote; whole test) or the I/O log (I/O only
+        mode; with its time periods when segmented)."""
+        parts = [("Whole test", None)]
+        if segmented and self._io_only(test):
+            parts += [(label, (a, b)) for label, a, b in self._untracked_periods(test)]
+        rows = []
+        for k, (label, rng) in enumerate(parts):
+            res = self._untracked_measures(test, rng)
+            if res is None:
+                continue
+            row = self.test_info(test)
+            row["Period"] = label
+            row["Segment of test"] = "" if rng is None else k  # ANY-maze "segment of test": 1, 2, …
+            row.update(res)
+            if steps:
+                row.update(evaluate_test(steps, row, lambda spec: self._scored_period(test, spec)))
+            rows.append(row)
+        return rows
 
     def _analyse_test(self, test: Test, segmented: bool, steps=None) -> list[dict]:
         tracks = self.load_tracks(test)
@@ -852,16 +893,10 @@ class Project:
         rows = []
         behaviours = self.behaviours
         ids = [test.animal_id] + list(test.extra_animals)
-        if not tracks and test.events and behaviours:
-            # manual scoring only (TakeNote / observation, or a video scored without tracking)
-            dur = self._scored_duration(test)
-            row = self.test_info(test)
-            row["Period"] = "Whole test"
-            row["Segment of test"] = ""
-            row.update(behaviour_measures(test.events, behaviours, 0.0, dur))
-            if steps:
-                row.update(evaluate_test(steps, row, lambda spec: self._scored_period(test, spec)))
-            return [row]
+        if not tracks and (test.events and behaviours or self._io_only(test)):
+            # manual scoring only (TakeNote / observation, or a video scored without tracking), or a test run with
+            # the I/O devices only
+            return self._untracked_rows(test, segmented, steps)
         for i, tr in enumerate(tracks):
             kw = self._analysis_kw(test, tracks, i, steps)
             if segmented:
@@ -934,7 +969,7 @@ class Project:
             if test is not None:
                 tracks = self.load_tracks(test)
                 if not tracks:
-                    cache[key] = self._scored_period(test, spec) if test.events and self.behaviours else None
+                    cache[key] = self._scored_period(test, spec) if self.has_results(test) else None
                 else:
                     ids = [test.animal_id] + list(test.extra_animals)
                     i = ids.index(row.get("Animal")) if row.get("Animal") in ids else 0
@@ -945,8 +980,8 @@ class Project:
         return cache[key]
 
     def has_results(self, test: Test) -> bool:
-        """The test has data to analyse: a track, or manually scored events."""
-        return self.has_track(test) or bool(test.events and self.behaviours)
+        """The test has data to analyse: a track, manually scored events, or an I/O log (I/O only mode)."""
+        return self.has_track(test) or bool(test.events and self.behaviours) or self._io_only(test)
 
     def results(self, tests: list[Test] | None = None, segmented: bool = False,
                 progress: Callable[[float], None] | None = None) -> list[dict]:

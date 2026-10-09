@@ -141,12 +141,14 @@ class Autosaver:
 
 
 class RecoveredSession(Session):
-    """A live session rebuilt from its side file (enough for :func:`session.save_live_test`): the track, events,
-    pauses, I/O log (with the fast samples of their own side file), zones moved by the procedures, zone labels,
-    scheduled tests, weights, kept variables, video labels, the recording log and its files."""
+    """A live session rebuilt from its side file (enough for :func:`session.save_live_test`): the track (none for an
+    I/O-only test), events, pauses, I/O log (with the fast samples of their own side file), zones moved by the
+    procedures, zone labels, scheduled tests, weights, kept variables, video labels, the recording log and its
+    files."""
 
     def __init__(self, d: dict):
         self.d = d
+        self.io_only = bool(d.get("io_only"))  # an I/O-only test (live.IOSession): no track, its own clock
         self.apparatus = None
         self.fps = float(d.get("fps") or 25.0)
         self.duration_s = float(d.get("duration_s") or 0.0)
@@ -183,8 +185,16 @@ class RecoveredSession(Session):
 
     @property
     def elapsed(self) -> float:
+        if self.io_only:
+            return float(self.d.get("elapsed") or 0.0)
         t = self._track.cols["t"]
         return float(t[-1]) if t else 0.0
+
+    @property
+    def has_data(self) -> bool:
+        if self.io_only:
+            return self.elapsed > 0 or bool(self.d.get("io_events") or self.d.get("events"))
+        return bool(len(self._track))
 
     @property
     def io_events(self) -> list:
@@ -200,6 +210,8 @@ class RecoveredSession(Session):
         return dict(self.d.get("result_variables") or {})
 
     def track(self):
+        if self.io_only:
+            return None
         tr = self._track.build(self.fps)
         tr.meta["source"] = "live"
         tr.meta["recovered"] = True
@@ -231,7 +243,7 @@ def recover(project) -> list:
         if owner_running(d, f):
             continue
         s = RecoveredSession(d)
-        if not len(s._track):
+        if not s.has_data:
             f.unlink(missing_ok=True)
             _remove_samples(s)
             continue

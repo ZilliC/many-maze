@@ -270,13 +270,17 @@ class MonitorPanel(QWidget):
         else:
             self.title.setText(title or session.name or "Live test")
             st = getattr(session, "stats", None)
-            if st is None:
+            if st is None or getattr(session, "io_only", False):
                 self.vals["distance"].setText("—")
                 self.vals["speed"].setText("—")
                 self.vals["state"].setText(f"{len(session.events)} events")
-                self.vals["zone"].setText("no camera")
+                self.vals["zone"].setText("no camera (I/O only)" if st is not None else "no camera")
                 self.zones.setRowCount(0)
                 self.chart.set_data([], [])
+                if st is not None:  # I/O only: the inputs table still follows the test
+                    with session.lock:
+                        now = session.elapsed
+                    self._refresh_extra(None, [], [], _input_rows(session, now), now, "")
             else:
                 app = getattr(session, "apparatus", None)
                 if app is not self._params_for:

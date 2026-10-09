@@ -86,6 +86,8 @@ everything without a camera.
 
 ### Protocol tab
 
+* **Mode** – *Video tracking*; *TakeNote*, behaviours scored by hand only (§6); or *Input/output only*, tests run
+  with the I/O devices and procedures without a camera, e.g. operant chambers (§7, *Input/output only tests*).
 * **Test duration** – analysed length of each test (0 = until the end of the video).
 * **Test starts** – at each test's *start time* (set per test), automatically **when the animal is first
   detected** in the apparatus, or **when the experimenter's hand has left the image**: the tracked object much
@@ -465,6 +467,9 @@ everything can be tried without hardware. Choose a mode with the buttons at the 
 | **Several tests at once** | several apparatus in one camera image and/or several cameras, run together |
 | **Observation only (no camera)** | scoring behaviour by direct observation (a clock and scoring keys) |
 
+With a protocol in **Input/output only** mode, *One test* runs without a camera (see *Input/output only tests*
+below).
+
 ### Starting and ending a test
 
 Set these in **Setup ▸ Start and end** (they apply to every mode):
@@ -629,6 +634,21 @@ With no camera, press **Start observation** and score with the behaviour keys or
 events; *state* behaviours toggle; *hold* behaviours last while the key or button is held; behaviours of an
 exclusive set stop each other). Pause / resume stops the clock. **Stop and save** stores the events in the test,
 which gets the status *scored*.
+
+### Input/output only tests
+
+For experiments that need no video, e.g. operant chambers where only levers, nose pokes, lights and pellet
+dispensers matter, set **Protocol ▸ Mode** to **Input/output only** (ANY-maze's *Input/output only mode*). *Run
+tests ▸ One test* then opens no camera: **Arm / Start test** starts the procedures and the I/O devices on the
+computer's clock (every 10 ms) for the chosen animal, stage and trial. The start options apply (immediately, on a
+start key or remote, at a clock time; *When the animal is detected* starts at once, there being no camera), and so
+do the *test is waiting to start* procedures, pausing (the test clock stops), the test duration (0 = until stopped),
+*End the test* actions with continuation, the scoring keys, the touch screen and crash recovery. The *Monitor* tab
+shows the inputs and the I/O device states instead of the animal. When the test ends it is saved without a track
+(status *scored*, its duration the time its clock ran) and its results come from the I/O log: the input, output,
+encoder and analogue measures of *I/O results*, the scored keys and the procedures' result variables, also per
+time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark or an
+input). One I/O-only test runs at a time; *Several tests* needs cameras.
 
 ### Procedures
 
