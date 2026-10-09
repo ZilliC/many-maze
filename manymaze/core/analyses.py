@@ -143,6 +143,14 @@ def group_colors(project, factor: str | None) -> dict:
     return {}
 
 
+def _y_range(project, measure: str, fig, values):
+    """The graph Y axis range of a calculation (Calculation.y_min / y_max) on its graphs, as ANY-maze: kept only
+    while every plotted result is inside it."""
+    from .calculations import apply_y_range, y_range
+
+    apply_y_range(fig, y_range(getattr(project, "calculations", None) or [], measure), values)
+
+
 def _finite(v) -> bool:
     return is_number(v) and math.isfinite(float(v))
 
@@ -201,6 +209,7 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
         fig = plots.group_plot(gv, measure, group_colors(project, factor), kind=plot,
                                posthoc=None if one else res.get("posthoc"), p_value=None if one else res.get("p"),
                                error=error, points=points, ref_value=res.get("mu") if one else None)
+        _y_range(project, measure, fig, [v for vs in gv.values() for v in vs])
     else:
         fig = plots.message_figure(f"No values of “{measure}”")
     # headline
@@ -293,6 +302,7 @@ def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None =
         fig = plots.factor_plot(rows, measure, [x] + ([by] if by else []), kind=plot, error=error, points=points,
                                 colors=group_colors(project, by),
                                 orders={f: level_order(project, rows, f) for f in (x, by) if f}, size=(5.4, 3.6))
+    _y_range(project, measure, fig, [r.get(measure) for r in rows])
     if by is None:
         if design != "mixed":
             hint = (f"<b>{escape(measure)}</b> across {escape(label(x))}.<br>Optionally select a 2nd independent "
@@ -420,6 +430,7 @@ def grouped(project, rows: list[dict], measure: str, factors: list[str], plot: s
     fig = plots.factor_plot(rows, measure, factors, kind=plot, error=error, points=points,
                             colors=group_colors(project, factors[1] if len(factors) > 1 else factors[0]),
                             orders=orders, size=(6.4, 3.8))
+    _y_range(project, measure, fig, [r.get(measure) for r in rows])
     table = Table("Descriptive statistics", [label(f) for f in factors] + DESC_HEADERS,
                   [[d[f] for f in factors] + _desc_row(d) for d in res])
     lines = [f"{measure} by {' > '.join(factors)}"]

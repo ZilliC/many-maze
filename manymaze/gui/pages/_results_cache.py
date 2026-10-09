@@ -71,6 +71,7 @@ def fingerprint(project) -> tuple:
     return (str(project.path), tests, project.test_duration_s, _dump(project.analysis.to_dict()),
             _dump([a.to_dict() for a in project.apparatus]), _dump([asdict(a) for a in project.animals]),
             _dump([asdict(b) for b in project.behaviours]), _dump(project.io_devices), tuple(project.animal_fields),
+            _dump([c.to_dict() for c in project.calculations]),
             tuple(g.name for g in project.groups), project.blind, _dump(project.settings_extra.get("blind_codes")))
 
 

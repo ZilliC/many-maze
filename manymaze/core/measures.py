@@ -341,11 +341,13 @@ def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, eve
             duration: float | None = None, other_tracks: list[Track] | None = None,
             zone_overrides: dict | None = None, io_events: list | None = None,
             result_variables: dict | None = None, pauses: list | None = None,
-            io_devices: list | None = None) -> "OrderedDict[str, object]":
+            io_devices: list | None = None, calculations: list | None = None) -> "OrderedDict[str, object]":
     """Compute all applicable measures for one animal's track.
 
     zone_overrides: per-test positions of moveable zones (Test.zone_overrides); io_events: Test.io_events
-    (I/O measures; io_devices: Project.io_devices); result_variables: Test.result_variables; pauses: Test.pauses.
+    (I/O measures; io_devices: Project.io_devices); result_variables: Test.result_variables; pauses: Test.pauses;
+    calculations: Project.calculations (or calculations.plan() steps), added after the measures (see
+    calculations.evaluate_test: those that need other tests are NaN here and worked out by Project.results).
 
     Times are *test time*: paused intervals are removed and everything after a pause moves back by its length
     (track, scored events, I/O events and other animals' tracks alike); t_range is in test time. Per-frame states
@@ -355,10 +357,51 @@ def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, eve
     """
     s = s or AnalysisSettings()
     P = _prepare(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration)
-    return _results(P, t_range, behaviours, result_variables, io_devices)
+    return _results(P, t_range, behaviours, result_variables, io_devices, calculations)
 
 
-def _results(P: _Prepared, t_range, behaviours=None, result_variables=None, io_devices=None):
+def _results(P: _Prepared, t_range, behaviours=None, result_variables=None, io_devices=None, calculations=None):
+    """The measures of the whole test (t_range None) or of a period, then the calculations; filtered last
+    (AnalysisSettings.measure_filter keeps the calculations, which may use any measure)."""
+    res = _measures(P, t_range, behaviours, result_variables, io_devices)
+    if calculations:
+        from .calculations import evaluate_test
+
+        def period(spec):
+            return _calc_period(P, spec, behaviours, result_variables, io_devices)
+
+        res.update(evaluate_test(calculations, res, period))
+    if P.s.measure_filter:
+        keep = set(P.s.measure_filter) | {"Test duration (s)", "Warnings"}
+        if calculations:
+            from .calculations import plan
+
+            keep |= {st.calc.column for st in plan(calculations)}
+        res = OrderedDict((key, v) for key, v in res.items() if key in keep)
+    return res
+
+
+def _calc_period(P: _Prepared, spec, behaviours, result_variables, io_devices) -> dict | None:
+    """The measures of part of the test for a calculation's result_for_period(): spec (from_s, to_s) in test time
+    or the name of a time period (time bins, custom and event-anchored periods); None if the test ended before the
+    period starts or no period has that name. Cached on the prepared test."""
+    if isinstance(spec, str):
+        def bounds():
+            tr = P.clean
+            dur = tr.t[-1] + tr.dt if len(tr) else 0
+            return {label: (a, b) for label, a, b in all_periods(tr, P.app, P.s, dur, P.events, P.io_events)}
+
+        spec = P.cached("calc_periods", bounds).get(spec)
+        if spec is None:
+            return None
+    a, b = float(spec[0]), float(spec[1])
+    t = P.track.t
+    if not len(t) or a >= float(t[-1]) + P.track.dt:
+        return None  # ANY-maze: undefined when the test ended before the period
+    return P.cached(("calc_period", a, b), lambda: _measures(P, (a, b), behaviours, result_variables, io_devices))
+
+
+def _measures(P: _Prepared, t_range, behaviours=None, result_variables=None, io_devices=None):
     n = len(P.track)
     if t_range is None:
         if n == 0:
@@ -1606,9 +1649,6 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
                            "thigmotaxis, contact, ...) are in pixels")
     if warnings:
         res["Warnings"] = "; ".join(warnings)
-    if s.measure_filter:
-        keep = set(s.measure_filter) | {"Test duration (s)", "Warnings"}
-        res = OrderedDict((key, v) for key, v in res.items() if key in keep)
     return res
 
 
@@ -1957,7 +1997,7 @@ def analyse_segmented(track: Track, app: Apparatus, s: AnalysisSettings, **kw) -
     P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
                  kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"))
     rest = dict(behaviours=kw.get("behaviours"), result_variables=kw.get("result_variables"),
-                io_devices=kw.get("io_devices"))
+                io_devices=kw.get("io_devices"), calculations=kw.get("calculations"))
     out = [("Whole test", _results(P, None, **rest))]
     tr = P.clean
     dur = tr.t[-1] + tr.dt if len(tr) else 0
@@ -1965,6 +2005,14 @@ def analyse_segmented(track: Track, app: Apparatus, s: AnalysisSettings, **kw) -
     for label, a, b in all_periods(tr, P.app, s, dur, P.events, P.io_events):
         out.append((label, _results(P, (a, b), **rest)))
     return out
+
+
+def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, **kw) -> dict | None:
+    """The measures of part of a test as a calculation's result_for_period() sees them: spec (from_s, to_s) in test
+    time or the name of a time period; None if the test ended before it (keywords as analyse())."""
+    P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
+                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"))
+    return _calc_period(P, spec, kw.get("behaviours"), kw.get("result_variables"), kw.get("io_devices"))
 
 
 def all_periods(track: Track, app: Apparatus, s: AnalysisSettings, duration: float | None = None, events=None,

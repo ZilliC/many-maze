@@ -29,8 +29,10 @@ import numpy as np
 
 from .apparatus import Apparatus, from_known
 from .atomicfile import write_text_atomic
+from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
-from .measures import AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures
+from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, analyse_segmented,
+                       behaviour_measures, time_periods)
 from .session import END_ZONE
 from .templates import apply_overrides
 from .track import Track
@@ -178,6 +180,7 @@ class Project:
     io_devices: list = field(default_factory=list)  # I/O device configurations (see iodevices.py)
     variables: dict = field(default_factory=dict)  # procedure variables kept between tests
     training_criteria: list = field(default_factory=list)  # per-stage criteria (see project workflow)
+    calculations: list[Calculation] = field(default_factory=list)  # results from other results (calculations.py)
     blind: bool = False  # hide group / treatment while testing and scoring
     experimenters: list = field(default_factory=list)  # user names offered as the current user / test experimenter
     settings_extra: dict = field(default_factory=dict)  # misc. UI / workflow settings
@@ -381,6 +384,7 @@ class Project:
             "io_devices": [without_secrets(d) for d in self.io_devices],
             "variables": self.variables,
             "training_criteria": self.training_criteria,
+            "calculations": [c.to_dict() for c in self.calculations],
             "blind": self.blind,
             "experimenters": self.experimenters,
             "settings_extra": self.settings_extra,
@@ -430,6 +434,7 @@ class Project:
             io_devices=d.get("io_devices", []),
             variables=d.get("variables", {}),
             training_criteria=d.get("training_criteria", []),
+            calculations=calculations_from(d.get("calculations")),
             blind=d.get("blind", False),
             experimenters=[str(u) for u in d.get("experimenters", []) if str(u).strip()],
             settings_extra=d.get("settings_extra", {}),
@@ -796,8 +801,51 @@ class Project:
                 pass
         return out
 
-    def analyse_test(self, test: Test, segmented: bool = False) -> list[dict]:
-        """Rows of results for a test: one per animal (and per time period if segmented)."""
+    def analyse_test(self, test: Test, segmented: bool = False, deferred: bool = True) -> list[dict]:
+        """Rows of results for a test: one per animal (and per time period if segmented). Calculations that use the
+        other trials are worked out with the results of the animal's other tests (analysed for this); with
+        deferred=False they are left NaN, for finish_calculations() on the rows of several tests."""
+        steps = self.calculation_steps()
+        rows = self._analyse_test(test, segmented, steps)
+        if deferred:
+            self._deferred_calculations(rows, segmented, steps)
+        return rows
+
+    def finish_calculations(self, rows: list[dict], segmented: bool = False) -> list[dict]:
+        """Work out, in place, the calculations of rows from analyse_test(..., deferred=False) that need the rest
+        of the experiment (other trials, information columns). Returns the rows."""
+        self._deferred_calculations(rows, segmented, self.calculation_steps())
+        return rows
+
+    def _analysis_kw(self, test: Test, tracks: list[Track], i: int, steps=None) -> dict:
+        """analyse() keywords for animal i of a test (scored events, keys and result variables: the first animal)."""
+        others = [o for j, o in enumerate(tracks) if j != i]
+        return dict(events=test.events if i == 0 else [], behaviours=self.behaviours if i == 0 else None,
+                    other_tracks=others or None, zone_overrides=test.zone_overrides or None,
+                    io_events=test.io_events or None, pauses=test.pauses or None,
+                    io_devices=self.io_devices or None,
+                    result_variables=test.result_variables if i == 0 else None, calculations=steps or None)
+
+    def _scored_duration(self, test: Test) -> float:
+        """Length of a test scored by hand only (no track): its duration, else the protocol's, else its last
+        event."""
+        dur = test.duration_s or self.test_duration_s
+        if not dur or dur <= 0:
+            dur = max((e["t_end"] if e.get("t_end") is not None else e["t"] for e in test.events), default=0.0)
+        return dur
+
+    def _scored_period(self, test: Test, spec) -> dict | None:
+        """result_for_period() of a test scored by hand only: its key measures for a part of the test (a time
+        period's name: the time bins and custom periods)."""
+        dur = self._scored_duration(test)
+        if isinstance(spec, str):
+            spec = {label: (a, b) for label, a, b in time_periods(dur, self.analysis_for(test))}.get(spec)
+            if spec is None:
+                return None
+        a, b = spec
+        return behaviour_measures(test.events, self.behaviours, a, min(b, dur)) if a < dur else None
+
+    def _analyse_test(self, test: Test, segmented: bool, steps=None) -> list[dict]:
         tracks = self.load_tracks(test)
         app = self.get_apparatus(test.apparatus)
         s = self.analysis_for(test)
@@ -806,21 +854,16 @@ class Project:
         ids = [test.animal_id] + list(test.extra_animals)
         if not tracks and test.events and behaviours:
             # manual scoring only (TakeNote / observation, or a video scored without tracking)
-            dur = test.duration_s or self.test_duration_s
-            if not dur or dur <= 0:
-                dur = max((e["t_end"] if e.get("t_end") is not None else e["t"] for e in test.events), default=0.0)
+            dur = self._scored_duration(test)
             row = self.test_info(test)
             row["Period"] = "Whole test"
             row["Segment of test"] = ""
             row.update(behaviour_measures(test.events, behaviours, 0.0, dur))
+            if steps:
+                row.update(evaluate_test(steps, row, lambda spec: self._scored_period(test, spec)))
             return [row]
         for i, tr in enumerate(tracks):
-            others = [o for j, o in enumerate(tracks) if j != i]
-            kw = dict(events=test.events if i == 0 else [], behaviours=behaviours if i == 0 else None,
-                      other_tracks=others or None, zone_overrides=test.zone_overrides or None,
-                      io_events=test.io_events or None, pauses=test.pauses or None,
-                      io_devices=self.io_devices or None,
-                      result_variables=test.result_variables if i == 0 else None)
+            kw = self._analysis_kw(test, tracks, i, steps)
             if segmented:
                 parts = analyse_segmented(tr, app, s, **kw)
             else:
@@ -841,6 +884,66 @@ class Project:
                 rows.append(row)
         return rows
 
+    def calculation_steps(self) -> list:
+        """The calculations in the order they are worked out (calculations.plan), deferred to the whole experiment
+        when they use the other trials or the information columns; calculations named like an information column
+        are left out (their results would replace it)."""
+        if not self.calculations:
+            return []
+        info = set(INFO_COLUMNS) | set(self.animal_fields) | {ERROR_COLUMN}
+        return plan([c for c in self.calculations if c.column and c.column not in info | {"Warnings"}], info)
+
+    def _deferred_calculations(self, rows: list[dict], segmented: bool, steps) -> None:
+        """Work out the deferred calculations of result rows in place: with the information columns and, for the
+        trial functions, the results of each animal's trials (the same time period; the animals' other tests are
+        analysed when they are not among the rows)."""
+        todo = [s for s in steps if s.deferred and s.ok]
+        if not todo or not rows:
+            return
+        every = list(rows)
+        if any(parse(s.calc.formula).functions - {"result_for_period"} for s in todo):
+            have = {r.get("Test") for r in rows}
+            animals = {str(r.get("Animal")) for r in rows}
+            for t in self.tests:
+                if t.id in have or t.status in INACTIVE_STATUSES or not self.has_results(t) or \
+                        not animals & {str(a) for a in [t.animal_id, *t.extra_animals]}:
+                    continue
+                try:
+                    every.extend(self._analyse_test(t, segmented, steps))
+                except Exception as e:  # an unreadable track: that trial has no results
+                    log.warning("analysis of test %s failed: %s", t.id, e)
+        every = [r for r in every if ERROR_COLUMN not in r]
+        groups: dict[tuple, list] = {}
+        for r in every:
+            groups.setdefault((str(r.get("Animal")), r.get("Period")), []).append(
+                (r.get("Stage", ""), r.get("Trial", 1), r))
+        trials = {k: Trials(v, self.stages) for k, v in groups.items()}
+        cache: dict = {}
+        for s in todo:
+            for r in every:
+                r[s.calc.column] = evaluate_calc(s.calc, r, lambda spec, r=r: self._calc_period(r, spec, cache),
+                                                 trials.get((str(r.get("Animal")), r.get("Period"))))
+
+    def _calc_period(self, row: dict, spec, cache: dict) -> dict | None:
+        """result_for_period() of a results row in the deferred calculations: its test analysed for part of the
+        test (cached per test, animal and period)."""
+        key = (row.get("Test"), str(row.get("Animal")), spec)
+        if key not in cache:
+            cache[key] = None
+            test = self.get_test(row.get("Test"))
+            if test is not None:
+                tracks = self.load_tracks(test)
+                if not tracks:
+                    cache[key] = self._scored_period(test, spec) if test.events and self.behaviours else None
+                else:
+                    ids = [test.animal_id] + list(test.extra_animals)
+                    i = ids.index(row.get("Animal")) if row.get("Animal") in ids else 0
+                    if i < len(tracks):
+                        cache[key] = analyse_period(tracks[i], self.get_apparatus(test.apparatus),
+                                                    self.analysis_for(test), spec,
+                                                    **self._analysis_kw(test, tracks, i))
+        return cache[key]
+
     def has_results(self, test: Test) -> bool:
         """The test has data to analyse: a track, or manually scored events."""
         return self.has_track(test) or bool(test.events and self.behaviours)
@@ -849,15 +952,17 @@ class Project:
                 progress: Callable[[float], None] | None = None) -> list[dict]:
         tests = [t for t in (tests if tests is not None else self.tests) if t.status not in INACTIVE_STATUSES]
         rows = []
+        steps = self.calculation_steps()
         for i, t in enumerate(tests):
             if self.has_results(t):
                 try:
-                    rows.extend(self.analyse_test(t, segmented))
+                    rows.extend(self._analyse_test(t, segmented, steps))
                 except Exception as e:  # one unreadable track must not lose the results of every other test
                     log.warning("analysis of test %s failed: %s", t.id, e)
                     rows.append(self.error_row(t, e))
             if progress:
                 progress((i + 1) / max(1, len(tests)))
+        self._deferred_calculations(rows, segmented, steps)
         return rows
 
 
