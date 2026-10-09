@@ -18,7 +18,9 @@ Protocols (``SCALE_PROTOCOLS``) — the command asked for an immediate reading, 
 * ``continuous`` — the balance sends weights by itself (continuous or print-key output): the first number of each
   line with its unit; ``?``, ``US`` or ``S D`` mark unstable weights.
 
-Units g, kg, mg, ct, oz and lb are converted to grams (no unit: the configuration's ``unit``, default g).
+Units g, kg, mg, ct, oz, ozt (troy ounce), dwt (pennyweight), gn (grain) and lb are converted to grams (no unit:
+the configuration's ``unit``, default g); any other unit (e.g. tl, whose size differs between regions, or pcs) is an
+error rather than a number taken for grams.
 pyserial is optional (only needed with real balances). The protocols follow the manufacturers' interface manuals
 and are tested here with simulated replies only.
 """
@@ -43,11 +45,12 @@ SCALE_PROTOCOLS = {
 _COMMANDS = {"mt_sics": ("SI", "SI"), "ohaus": ("IP", "IP"), "sartorius": ("\x1bP", "\x1bP"), "and": ("Q", "Q"),
              "kern": ("s", "w"), "continuous": (None, None)}
 _EOL = {"kern": ""}
-GRAMS = {"g": 1.0, "kg": 1000.0, "mg": 0.001, "ct": 0.2, "oz": 28.349523125, "lb": 453.59237, "lbs": 453.59237}
+GRAMS = {"g": 1.0, "kg": 1000.0, "mg": 0.001, "ct": 0.2, "oz": 28.349523125, "lb": 453.59237, "lbs": 453.59237,
+         "ozt": 31.1034768, "dwt": 1.55517384, "gn": 0.06479891}
 WEIGHT_FIELD = "Weight (g)"
 
 _NUM = r"[-+]?\s*\d+(?:\.\d*)?|[-+]?\s*\.\d+"
-_UNIT = r"(?:(kg|mg|g|ct|oz|lbs|lb)\b)?"  # optional unit (group)
+_UNIT = r"(?:([A-Za-z]+)\b)?"  # optional unit (group): any word, checked by to_grams
 
 
 class ScaleError(RuntimeError):
@@ -138,14 +141,23 @@ class ScaleDevice(_LineDevice):
         self.poll_s = float(cfg.get("poll_s", 0.5) or 0)
         self._next_poll = 0.0
         self.last: tuple[float, bool] | None = None
+        self._seq = 0  # replies parsed so far (by read() or by the device manager's polls)
+        self._result: tuple[float, bool] | ScaleError | None = None  # the last reply: a weight or an error
 
     def _cmd(self, stable: bool) -> str | None:
         return _COMMANDS[self.protocol][0 if stable else 1]
 
     def _take(self, line: str) -> tuple[float, bool] | None:
-        r = parse_weight(line, self.protocol, self.unit)
+        try:
+            r = parse_weight(line, self.protocol, self.unit)
+        except ScaleError as e:
+            self._seq += 1
+            self._result = e
+            raise
         if r is not None:
             self.last = r
+            self._seq += 1
+            self._result = r
             self._changed("weight", round(r[0], 6))
             self._changed("weight.stable", 1 if r[1] else 0)
         return r
@@ -163,7 +175,10 @@ class ScaleDevice(_LineDevice):
 
     def read(self, timeout: float = 3.0, stable: bool = True) -> tuple[float, bool]:
         """Wait for a weight: (grams, stable). With ``stable`` the balance is asked again until the weight settles.
-        Raises :class:`ScaleTimeout` (none in time) or :class:`ScaleError`."""
+        Raises :class:`ScaleTimeout` (none in time) or :class:`ScaleError`.
+
+        The port is only held for each command and each read, never for the whole wait: the device manager's polls
+        (which may take a reply first; it counts the same) and the other devices go on meanwhile."""
         if not self.connected:
             raise ScaleError(self.errors[-1] if self.errors else f"{self.name}: the scale is not connected")
         deadline = time.monotonic() + float(timeout)
@@ -172,23 +187,29 @@ class ScaleDevice(_LineDevice):
         with self._io_lock:
             self.read_lines()  # discard old replies
             self._buf = b""
-            next_q = 0.0
-            last = None
-            while True:
-                now = time.monotonic()
-                if cmd and now >= next_q:
-                    self.write_line(cmd)
-                    next_q = now + again
+            seen = self._seq
+        next_q = 0.0
+        last = None
+        while True:
+            now = time.monotonic()
+            if cmd and now >= next_q:
+                self.write_line(cmd)
+                next_q = now + again
+            with self._io_lock:
                 for line in self.read_lines():
-                    r = self._take(line)
-                    if r is None:
-                        continue
-                    last = r
-                    if r[1] or not stable:
-                        return r
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.02)
+                    self._take(line)  # a ScaleError (overload, error reply) ends the wait
+                seq, res = self._seq, self._result
+            if seq != seen:
+                seen = seq
+                if isinstance(res, ScaleError):
+                    raise res
+                if res is not None:
+                    last = res
+                    if res[1] or not stable:
+                        return res
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
         extra = f" (last reading {last[0]:g} g, not stable)" if last else ""
         raise ScaleTimeout(f"{self.name}: no {'stable ' if stable else ''}weight within {timeout:g} s{extra}")
 

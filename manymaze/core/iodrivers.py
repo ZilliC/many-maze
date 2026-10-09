@@ -48,6 +48,8 @@ class SerialLinesDevice(Device):
         self._next = 0.0
 
     def open(self):
+        if self.transport is None and self._injected is not None:
+            self.transport = self._injected
         if self.transport is None:
             port = self.cfg.get("port")
             if not port:
@@ -74,6 +76,8 @@ class SerialLinesDevice(Device):
         self._read(force=True)
 
     def close(self):
+        if self.transport is not None and self.connected:
+            self.all_off()  # every line at its off level before the port closes
         if self.transport is not None:
             try:
                 self.transport.close()
@@ -82,17 +86,20 @@ class SerialLinesDevice(Device):
         self.transport = None
         self.connected = False
 
-    def set_output(self, channel, value, max_s=None):
-        self.outputs[channel] = 1 if value else 0
+    def set_output(self, channel, value, max_s=None) -> bool:
+        """False (and the cached state unchanged) when the line could not be set."""
         c = self.channels.get(channel, {})
         line = str(c.get("pin", "")).upper()
         if self.transport is None or line not in OUT_LINES:
-            return
+            return False
         level = bool(value) ^ bool(c.get("invert"))
         try:
             setattr(self.transport, line.lower(), level)
-        except Exception as e:  # pragma: no cover - hardware dependent
+        except Exception as e:  # hardware dependent
             self._error(f"{self.name}: could not set {line}: {e}")
+            return False
+        self.outputs[channel] = 1 if value else 0
+        return True
 
     def _read(self, force=False):
         if self.transport is None:
@@ -135,20 +142,37 @@ class FirmataDevice(Device):
         self.sent: list[bytes] = []
         self._lock = threading.RLock()
 
-    def _write(self, data):
+    def _write(self, data) -> bool:
+        """False when not sent (not connected, or the write failed: the port is then closed and the device
+        manager opens it again)."""
         data = bytes(data)
         with self._lock:
             self.sent.append(data)
             if len(self.sent) > 5000:
                 del self.sent[:1000]
-            if self.transport is None:
-                return
+            if self.transport is None or not self.connected:
+                return False
             try:
                 self.transport.write(data)
-            except Exception as e:  # pragma: no cover - hardware dependent
+                return True
+            except Exception as e:  # hardware dependent
                 self._error(f"{self.name}: write failed: {e}")
+                self._drop()
+                return False
+
+    def _drop(self):
+        with self._lock:
+            if self.transport is not None:
+                try:
+                    self.transport.close()
+                except Exception:  # pragma: no cover
+                    pass
+            self.transport = None
+            self.connected = False
 
     def open(self, handshake_s: float = 3.0):
+        if self.transport is None and self._injected is not None:
+            self.transport = self._injected
         if self.transport is None:
             port = self.cfg.get("port")
             if not port:
@@ -163,9 +187,10 @@ class FirmataDevice(Device):
                 self._error(f"{self.name}: could not open {port}: {e}")
                 return
         self.connected = True
+        self.firmware = ""
         deadline = time.monotonic() + handshake_s
         retry = 0.0
-        while time.monotonic() < deadline and not self.firmware:
+        while time.monotonic() < deadline and not self.firmware and self.connected:
             if time.monotonic() >= retry:  # the board resets when the port opens
                 self._write([START_SYSEX, REPORT_FIRMWARE, END_SYSEX])
                 retry = time.monotonic() + 1.0
@@ -174,7 +199,46 @@ class FirmataDevice(Device):
                 time.sleep(0.05)
         if not self.firmware:
             self._error(f"{self.name}: no reply from Firmata on {self.cfg.get('port', '?')}")
-        self.configure()
+        if self.connected:
+            self.configure()
+
+    def _off_level(self, c) -> int:
+        """The pin level (digital) or PWM value of an output that is off: inverted (active-low) outputs are off
+        when HIGH."""
+        if c.get("kind") == "pwm":
+            return 255 if c.get("invert") else 0
+        return 1 if c.get("invert") else 0
+
+    def _write_pwm(self, pin: int, v: int) -> bool:
+        if pin < 16:
+            return self._write([ANALOG_MESSAGE | pin, v & 0x7F, (v >> 7) & 0x7F])
+        return self._write([START_SYSEX, EXTENDED_ANALOG, pin, v & 0x7F, (v >> 7) & 0x7F, END_SYSEX])
+
+    def _write_port(self, port: int, mask: int) -> bool:
+        return self._write([DIGITAL_MESSAGE | (port & 0x0F), mask & 0x7F, (mask >> 7) & 0x7F])
+
+    def _outputs_off(self) -> bool:
+        """Every output at its off level (inverted outputs HIGH), whatever the cached state."""
+        ok, ports = True, {}
+        for n, c in self.channels.items():
+            if c.get("kind") not in ("output", "pwm") or c.get("pin") is None or c.get("derived"):
+                continue
+            pin = int(c["pin"])
+            if c.get("kind") == "pwm":
+                ok = self._write_pwm(pin, self._off_level(c)) and ok
+            else:
+                port, bit = pin // 8, pin % 8
+                ports[port] = ports.get(port, 0) | (self._off_level(c) << bit)
+        for port, mask in sorted(ports.items()):
+            if self._write_port(port, mask):
+                self._ports[port] = mask
+            else:
+                ok = False
+        if ok:
+            for n, c in self.channels.items():
+                if c.get("kind") in ("output", "pwm"):
+                    self.outputs[n] = 0
+        return ok
 
     def configure(self):
         periods = [int(c.get("period_ms", 19)) for c in self.channels.values()
@@ -205,39 +269,42 @@ class FirmataDevice(Device):
                 self._error(f"{self.name}: Firmata does not support {k} channels ('{n}')")
         for port in sorted(ports):
             self._write([REPORT_DIGITAL | (port & 0x0F), 1])
+        # the outputs start at their off level: an active-low (inverted) output is driven HIGH at once, and the
+        # port masks written later keep the other outputs of the port off
+        self._ports = {}
+        self._outputs_off()
 
     def close(self):
         with self._lock:
-            if self.transport is not None:
-                try:
-                    self.transport.close()
-                except Exception:  # pragma: no cover
-                    pass
-            self.transport = None
-            self.connected = False
+            if self.transport is not None and self.connected:
+                self._outputs_off()  # every output off before the port closes
+            self._drop()
 
-    def set_output(self, channel, value, max_s=None):
-        self.outputs[channel] = value
+    def set_output(self, channel, value, max_s=None) -> bool:
+        """False (and the cached state unchanged) when the command could not be sent."""
         c = self.channels.get(channel)
         if not c or c.get("pin") is None:
             self._error(f"{self.name}: unknown output channel '{channel}'")
-            return
+            return False
         pin = int(c["pin"])
-        if c.get("kind") == "pwm":
-            v = int(round(max(0.0, min(1.0, float(value))) * 255))
-            if c.get("invert"):
-                v = 255 - v
-            if pin < 16:
-                self._write([ANALOG_MESSAGE | pin, v & 0x7F, (v >> 7) & 0x7F])
-            else:
-                self._write([START_SYSEX, EXTENDED_ANALOG, pin, v & 0x7F, (v >> 7) & 0x7F, END_SYSEX])
-            return
-        on = bool(value) ^ bool(c.get("invert"))
-        port, bit = pin // 8, pin % 8
-        mask = self._ports.get(port, 0)
-        mask = mask | (1 << bit) if on else mask & ~(1 << bit)
-        self._ports[port] = mask
-        self._write([DIGITAL_MESSAGE | (port & 0x0F), mask & 0x7F, (mask >> 7) & 0x7F])
+        with self._lock:
+            if c.get("kind") == "pwm":
+                v = int(round(max(0.0, min(1.0, float(value))) * 255))
+                if c.get("invert"):
+                    v = 255 - v
+                if not self._write_pwm(pin, v):
+                    return False
+                self.outputs[channel] = value
+                return True
+            on = bool(value) ^ bool(c.get("invert"))
+            port, bit = pin // 8, pin % 8
+            mask = self._ports.get(port, 0)
+            mask = mask | (1 << bit) if on else mask & ~(1 << bit)
+            if not self._write_port(port, mask):
+                return False
+            self._ports[port] = mask
+            self.outputs[channel] = value
+            return True
 
     def _read(self):
         if self.transport is None:
@@ -295,12 +362,11 @@ class FirmataDevice(Device):
             if c.get("kind") in ("analog", "sensor") and c.get("pin") is not None and int(c["pin"]) == apin:
                 self._analog_in(n, value * float(c.get("scale", 1.0)))
 
-    def all_off(self):
+    def all_off(self) -> bool:
         for th in self.thermostats.values():
             th.target = th.setpoint = None
-        for ch in list(self.outputs):
-            if self.kind(ch) in ("output", "pwm"):
-                self.set_output(ch, 0)
+        with self._lock:
+            return self._outputs_off()
 
 
 # ============================================================================== National Instruments
@@ -355,6 +421,8 @@ class NIDAQDevice(Device):
                 self.set_output(n, 0)
 
     def close(self):
+        if self.connected:
+            self.all_off()  # every output written off before the tasks close
         for t in self._tasks.values():
             try:
                 t.close()
@@ -363,18 +431,21 @@ class NIDAQDevice(Device):
         self._tasks = {}
         self.connected = False
 
-    def set_output(self, channel, value, max_s=None):
-        self.outputs[channel] = value
+    def set_output(self, channel, value, max_s=None) -> bool:
+        """False (and the cached state unchanged) when the value could not be written."""
         t, c = self._tasks.get(channel), self.channels.get(channel, {})
         if t is None:
-            return
+            return False
         try:
             if c.get("kind") == "pwm":
                 t.write(max(0.0, min(1.0, float(value))) * float(c.get("max_v", 5.0)))
             else:
                 t.write(bool(value) ^ bool(c.get("invert")))
-        except Exception as e:  # pragma: no cover - hardware dependent
+        except Exception as e:  # hardware dependent
             self._error(f"{self.name}: {channel}: {e}")
+            return False
+        self.outputs[channel] = value
+        return True
 
     def _read(self):
         now = time.monotonic()
@@ -448,6 +519,8 @@ class LabJackDevice(Device):
 
     def close(self):
         if self.handle is not None and self.ljm is not None:
+            if self.connected:
+                self.all_off()  # every output written off before the handle closes
             try:
                 self.ljm.close(self.handle)
             except Exception:  # pragma: no cover
@@ -455,19 +528,22 @@ class LabJackDevice(Device):
         self.handle = None
         self.connected = False
 
-    def set_output(self, channel, value, max_s=None):
-        self.outputs[channel] = value
+    def set_output(self, channel, value, max_s=None) -> bool:
+        """False (and the cached state unchanged) when the value could not be written."""
         c = self.channels.get(channel, {})
         if self.handle is None or c.get("pin") is None:
-            return
+            return False
         try:
             if c.get("kind") == "pwm":
                 self.ljm.eWriteName(self.handle, str(c["pin"]),
                                     max(0.0, min(1.0, float(value))) * float(c.get("max_v", 5.0)))
             else:
                 self.ljm.eWriteName(self.handle, str(c["pin"]), int(bool(value) ^ bool(c.get("invert"))))
-        except Exception as e:  # pragma: no cover - hardware dependent
+        except Exception as e:  # hardware dependent
             self._error(f"{self.name}: {channel}: {e}")
+            return False
+        self.outputs[channel] = value
+        return True
 
     def _read(self):
         if self.handle is None:
