@@ -375,7 +375,6 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
     c = log.conf(key)
     seg = _steps(ev, t0, t1)
     vals = [v for _, _, v in seg]
-    tot = sum(b - a for a, b, _ in seg)
     first, last = (vals[0], vals[-1]) if vals else (math.nan, math.nan)
     g = f"Sensor {lab}"
     res[f"{g}: initial value"] = _r(first)

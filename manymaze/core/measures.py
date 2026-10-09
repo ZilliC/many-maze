@@ -638,7 +638,7 @@ def _arena_position(res, p: _Period):
 
 
 def _zones(res, p: _Period):
-    P, s, k, K, app, t, dur, T, u = p.P, p.P.s, p.k, p.P.k, p.P.app, p.t, p.dur, p.T, p.P.app.unit
+    P, k, K, app, t, dur, T, u = p.P, p.k, p.P.k, p.P.app, p.t, p.dur, p.T, p.P.app.unit
     has_motion = np.isfinite(k.motion_pct).any()
     grid_cells = {c for g in app.grids for c in g.zones}
     zone_names = [z.name for z in app.zones if z.name in p.memb and z.name not in grid_cells]
@@ -649,7 +649,6 @@ def _zones(res, p: _Period):
         first_zone = zone_names[min(firsts)[1]] if firsts else None
         res["First zone entered"] = first_zone or "None"
         _zone_lists(res, p, zone_names)
-    total = float(k.step.sum())
     for zn in p.memb:
         fm = P.visits_mask(zn, P.memb[zn])  # whole test, short visits removed
         vm = fm[p.sl]  # time in the zone: every visit, including the initial one and one carried into the period

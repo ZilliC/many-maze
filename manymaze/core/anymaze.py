@@ -216,7 +216,6 @@ def _results(test) -> dict[str, np.ndarray]:
     rows = [r for r in test.iter() if _norm(r.tag) in ("r", "result")]
     n = len(rows)
     cols = {k: np.full(n, np.nan) for k in ("t", "x", "y", "hx", "hy", "tx", "ty")}
-    zones_in: list[list[str]] = []
     for i, r in enumerate(rows):
         cols["t"][i] = _num(_get(r, "tm", "time"))
         kids = {_norm(c.tag): c for c in r}
