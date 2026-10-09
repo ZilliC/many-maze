@@ -652,12 +652,14 @@ class Actions:
 
     def _pump(self, th, p, device, channel, op, **kw):
         dev, ok = self._channel_dev(th, p, device, channel, ("pump",), "pump")
+        self._pump_failed = False  # the pump exists and refused the command (not sent, error reply…)
         if ok:
             try:
                 ok = bool(self.devices.pump(dev, channel, op, **kw))
             except Exception as e:  # pragma: no cover - hardware dependent
                 self._error(th, p, f"pump: {e}")
                 ok = False
+            self._pump_failed = not ok
             for err in self.devices.device(dev).errors:
                 self._error(th, p, err)
         return dev
@@ -666,6 +668,9 @@ class Actions:
         if rate <= 0:
             raise ExprError("the rate must be positive")
         dev = self._pump(th, p, device, channel, op, rate_ml_min=float(rate), volume_ml=float(volume or 0))
+        if self._pump_failed:  # not running: not logged as pumping
+            self._error(th, p, f"pump {dev}/{channel}: the {op} command could not be sent")
+            return
         self._log_io(self.t, dev, channel, "output", 1, "pump", direction=op, rate=float(rate),
                      volume=float(volume or 0), **self._pump_counters(dev, channel))
         self._pumps_on[(dev, channel)] = op

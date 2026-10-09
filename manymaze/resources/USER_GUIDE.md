@@ -1032,7 +1032,38 @@ per animal / apparatus under `@animal` / `@apparatus`), only when the test is sa
 **Experiment ▸ Hardware ▸ I/O devices…** configures the hardware (`Project.io_devices`). When several tests run at
 once, each test panel chooses its own **I/O device** (box); arming is refused if two tests would share a box. Boards
 with outputs have a **watchdog** (2000 ms by default; *Off* = 0) that switches every output off if the computer stops
-sending heartbeats, e.g. after a crash.
+sending heartbeats, e.g. after a crash. Heartbeats are only sent while the running tests keep ticking: if the program
+hangs for more than 10 s they stop and the watchdog fires.
+
+Safety of outputs:
+
+- **Maximum on-time.** A shock's safety cut-off (or any output switched on with a maximum duration) is enforced by
+  the board itself on Arduinos (`W pin 1 max_ms`, `P pin level max_ms` from firmware 1.2), and by the computer for
+  every other device (LabJack, NI-DAQ, Firmata, USB-serial lines, text-serial devices, Arduino PWM levels) from a
+  background timer, independently of the camera. Give a channel the option `role: shocker` (or `max_on_s`) and no
+  action can leave it on longer than 60 s (or `max_on_s`), whatever the procedures ask.
+- **Without frames.** When the camera stops delivering frames (unplugged, reconnecting), the test's procedures keep
+  running on the computer's clock after 0.5 s: shock cut-offs, pulse and sound ends, timers and input events still
+  happen.
+- **Failed commands.** A command that cannot be sent (device unplugged) is reported, and the output is not shown off
+  when it may still be on; *all off* and closing a device write "off" to every output, whatever was sent before.
+  Firmata outputs with *invert* start at their off level. Lost devices are reopened every 5 s; an Arduino that
+  restarts during a test is noticed (firmware 1.2) and configured again.
+- **Serial bandwidth.** The analogue inputs of an Arduino or Firmata board must fit in its serial link: above 70 % of
+  it a warning is shown, above 95 % the Arduino's analogue inputs are not configured (see `firmware/README.md`; one
+  1 kHz channel per board).
+
+Long tests: fast analogue samples (board-timed, e.g. 1 kHz) are kept in a compact store and, with crash recovery, in
+a side file appended in chunks (`<test>.autosave.json.samples`); the live I/O log and monitor see about 10 samples
+per second per channel, and the saved test gets every sample. The crash-recovery file is written less often as it
+grows (never more than about a tenth of the time), and a recovered test keeps zones moved by the procedures, zone
+labels, scheduled tests, weights, kept variables, video labels and the recording log. One test failing on an
+unexpected error ends only that test ("Ended by an error"), not the others of its camera.
+
+Syringe pumps: a pump that is running is stopped before it gets new parameters; the Harvard legacy driver asks the
+pump's direction when it opens; New Era pumps can use their **safe mode** (`safe_mode_s`, unverified on hardware):
+they stop by themselves when the computer goes silent. Balances: units other than g, kg, mg, ct, oz, ozt, dwt, gn and
+lb are refused rather than read as grams; weighing an animal never blocks the other devices.
 
 | Type | Use |
 |---|---|
