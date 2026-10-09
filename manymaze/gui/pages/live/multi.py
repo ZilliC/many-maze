@@ -536,8 +536,8 @@ class MultiTestMixin:
             m["new_test"] = pend is None
         if interactive:
             if not confirm_animal_id(self, test):
-                if m.get("new_test") and test in p.tests:
-                    p.tests.remove(test)
+                if m.get("new_test"):
+                    self._remove_test(test)
                 return False
         elif confirm_id_enabled(p):  # nobody to scan the animal at a scheduled start: noted, not asked
             note = f"{e.label}: scheduled start — the ID of animal {test.animal_id} was not checked."
@@ -578,8 +578,8 @@ class MultiTestMixin:
             devices = self._session_devices(m.get("io_plan") or "*")
         except Exception as ex:
             self._log(f"{e.label}: not armed. I/O devices: {ex}", e)
-            if m.get("new_test") and test in p.tests:
-                p.tests.remove(test)
+            if m.get("new_test"):
+                self._remove_test(test)
             m["test_id"] = None
             return False
         panel = self._panels.get(e.id)
@@ -604,8 +604,8 @@ class MultiTestMixin:
                 continue
             m.pop("start_now", None)
             test = p.get_test(m.get("test_id")) if p is not None and m.get("test_id") is not None else None
-            if test is not None and m.get("new_test") and test in p.tests:
-                p.tests.remove(test)
+            if test is not None and m.get("new_test"):
+                self._remove_test(test)
             m["test_id"] = None
             self._log(f"{e.label}: not armed.", e)
 
@@ -664,6 +664,10 @@ class MultiTestMixin:
         ents = [e for e in (entries or self.group.entries) if e.source_key is not None
                 and e.state in ("idle", "finished")]
         if not ents:
+            return 0
+        if not self.procedures_ready(interactive):  # checked (and programs allowed) once for all the tests
+            for e in ents:
+                self._log(f"{e.label}: not armed (procedures).", e)
             return 0
         busy = {x.source_key for x in self.group.entries if x not in ents and x.state in ("running", "paused")}
         n = sum(1 for e in ents if self.arm_row(e, interactive))

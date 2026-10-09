@@ -698,6 +698,8 @@ class SingleTestMixin:
         p = self.project
         if p is None or self.session is not None or self._pending_arm is not None:
             return False
+        if not self.procedures_ready():
+            return False
         test, new = self._prepare_test()
         if test is None:
             return False
@@ -869,6 +871,8 @@ class SingleTestMixin:
         for t, msg in session.warnings:
             self._log(f"{prefix}{fmt_time(t)}  warning: {msg}", entry)
         if not finish_live_test(self.project, test, session, record_path, save, new_test):
+            if new_test and test is not None:  # the test created for it was removed: the Test schedule follows
+                self.main.notify_tests_changed()
             return False
         self.main.mark_dirty()
         self._save_soon(session)
@@ -896,8 +900,8 @@ class SingleTestMixin:
                 s.remove_autosave()
 
     def _discard_new_test(self):
-        if self._new_test and self.test is not None and self.test in self.project.tests:
-            self.project.tests.remove(self.test)
+        if self._new_test and self.test is not None:
+            self._remove_test(self.test)
         self.test = None
 
     def _show_results(self, test, switch: bool = True):

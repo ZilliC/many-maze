@@ -152,6 +152,7 @@ class WelcomePage(QWidget):
                               ("archive", "Archive experiment", lambda: main.archive_experiment()),
                               ("open_archive", "Open archive", lambda: main.open_archive()),
                               ("folder", "Show in folder", main.reveal_folder),
+                              ("programs", "Allowed programs", lambda: main.allowed_programs_dialog()),
                               ("help", "User guide", main._open_guide), ("info", "About", main.about)):
             b = QPushButton(text)
             b.setFlat(True)
@@ -483,6 +484,7 @@ class MainWindow(QMainWindow):
         act(fm, "Restore a backup…", lambda: self.restore_backup())
         act(fm, "Archive experiment…", lambda: self.archive_experiment())
         act(fm, "Open archive…", lambda: self.open_archive())
+        act(fm, "Allowed programs…", lambda: self.allowed_programs_dialog())
         fm.addSeparator()
         act(fm, "Quit", self.close, QKeySequence.Quit)
         gm = mb.addMenu("&Go")
@@ -521,6 +523,53 @@ class MainWindow(QMainWindow):
                           "water maze, Barnes maze, Y/T/radial mazes, novel object, light/dark, three-chamber, "
                           "fear conditioning and more.</p><p>Built with Python, OpenCV, NumPy, SciPy, matplotlib "
                           "and Qt (PySide6). Runs natively on Apple Silicon.</p>")
+
+    def allowed_programs_dialog(self, modal: bool = True) -> QDialog:
+        """File › Allowed programs: the programs the procedures' "Run a program" action may start on this computer
+        (a per-user setting, never stored in the experiment); remove the ones no longer trusted.  Programs are
+        added when a test is armed and the user allows them."""
+        from ..core.procedures import programs
+
+        programs.policy.reload()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Allowed programs")
+        dlg.resize(560, 340)
+        lay = QVBoxLayout(dlg)
+        info = QLabel("The procedures' “Run a program” action may start these programs on this computer. Programs "
+                      "are added when you arm a test and allow them.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        lst = QListWidget()
+        lst.setSelectionMode(QListWidget.ExtendedSelection)
+        lay.addWidget(lst)
+        dlg.program_list = lst
+
+        def fill():
+            lst.clear()
+            for path in sorted(programs.policy.allowed()):
+                lst.addItem(path)
+            remove.setEnabled(lst.count() > 0)
+
+        def remove_selected():
+            for it in lst.selectedItems():
+                programs.policy.disallow(it.text())
+            fill()
+
+        row = QHBoxLayout()
+        remove = QPushButton("Remove")
+        remove.clicked.connect(remove_selected)
+        row.addWidget(remove)
+        row.addStretch()
+        box = QDialogButtonBox(QDialogButtonBox.Close)
+        box.rejected.connect(dlg.reject)
+        row.addWidget(box)
+        lay.addLayout(row)
+        dlg.remove_selected = remove_selected
+        fill()
+        if modal:
+            dlg.exec()
+            dlg.deleteLater()
+        return dlg
 
     def _fill_recent(self):
         self.recent_menu.clear()

@@ -19,7 +19,7 @@ from ....core.camera import CameraView
 from ....core.camhw import CameraHardware
 from ....core.live import LiveSession, ObservationSession
 from ....core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup
-from ....core.procedures import Outputs
+from ....core.procedures import Outputs, check_before_test, programs, project_context
 from ....core.tracking import ArenaTracker
 from ....core.video import MAX_CAMERAS
 from ...icons import icon
@@ -662,6 +662,75 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 or (self.obs is not None and self.obs.state != "finished")
                 or any(e.state in ("waiting", "running", "paused") or e.meta.get("arm_pending")
                        for e in self.group.entries))
+
+    def active_test_ids(self) -> set[int]:
+        """The IDs of the tests armed (or being armed), running or paused, or finished and not stored yet — in
+        every mode: the Test schedule does not delete, clear or re-perform them."""
+        ids = set()
+        if self.test is not None and (self.session is not None or self._pending_arm is not None):
+            ids.add(self.test.id)
+        if self.obs is not None and self.obs.state != "finished" and self.obs_test is not None:
+            ids.add(self.obs_test.id)
+        for e in self.group.entries:
+            tid = e.meta.get("test_id")
+            if tid is None:
+                continue
+            if e.state in ("waiting", "running", "paused") or e.meta.get("arm_pending") or (
+                    e.session is not None and e.state == "finished" and not e.saved):
+                ids.add(tid)
+        return ids
+
+    def _remove_test(self, test) -> bool:
+        """Remove a test created for a live test that was not run (or discarded) from the experiment; the Test
+        schedule's rows follow.  Returns True when it was removed."""
+        p = self.project
+        if p is None or test is None or test not in p.tests:
+            return False
+        p.tests.remove(test)
+        self.main.notify_tests_changed()
+        return True
+
+    def procedures_ready(self, interactive: bool = True) -> bool:
+        """Before a test is armed: the experiment's procedures can run (no validation errors against its zones,
+        devices and areas) and the programs their "Run a program" actions start are allowed on this computer —
+        asked once here, never from the frame thread.  `interactive` False (scheduled starts): nobody is asked,
+        the problems are logged and shown in a non-modal notice.  Returns False when the test must not be armed."""
+        p = self.project
+        if p is None or not p.procedures:
+            return True
+        errors = check_before_test(p.procedures, project_context(p))
+        if errors:
+            shown = errors[:12] + ([f"… and {len(errors) - 12} more"] if len(errors) > 12 else [])
+            msg = ("The test was not armed: the experiment's procedures have problems (Experiment › Procedures):"
+                   "\n\n" + "\n".join(f"• {e}" for e in shown))
+            for e in errors:
+                self._log(f"Procedures: {e}")
+            if interactive:
+                QMessageBox.critical(self, "Run tests", msg)
+            else:
+                self._notice("Run tests", msg)
+            return False
+        progs = programs.unauthorised_programs(p.procedures)
+        if not progs:
+            return True
+        listing = "\n".join(f"• {x}" for x in progs)
+        if not interactive:
+            msg = ("The test was not armed: its procedures run programs that are not allowed on this computer:\n\n"
+                   f"{listing}\n\nArm a test by hand to allow them (or File › Allowed programs…).")
+            self._log(msg.replace("\n\n", " ").replace("\n", " "))
+            self._notice("Run tests", msg)
+            return False
+        r = QMessageBox.question(
+            self, "Run tests", "This experiment's procedures run these programs on this computer:\n\n"
+            f"{listing}\n\nAllow them? Only allow programs you trust: a project file can come from anyone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r != QMessageBox.Yes:
+            self._log("Test not armed: the procedures' programs were not allowed.")
+            return False
+        for x in progs:
+            programs.policy.allow(x)
+        self._log("Allowed to run on this computer: " + ", ".join(progs))
+        return True
 
     # ================================================================== modes
     def set_mode(self, mode: str) -> bool:
