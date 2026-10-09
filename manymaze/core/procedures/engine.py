@@ -1024,7 +1024,9 @@ class ProcedureEngine(Actions, LiveState):
         if typ:
             e["type"] = typ
         e.update(extra)
-        self.io_events.append(e)
+        sink = getattr(self, "io_sink", None)  # live tests: fast samples stored compactly (core.iolog.LiveIOLog)
+        if sink is None or not sink(self.io_events, e):
+            self.io_events.append(e)
 
     def _external(self, t, name, args):
         self._emit(name, args, t)

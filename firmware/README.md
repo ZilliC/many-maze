@@ -31,15 +31,36 @@ pyserial is needed on the computer: `pip install pyserial`.
 
 Shockers: use a commercial constant-current shocker with a TTL *enable* input; the box only sends the
 trigger. Every shock action has a safety cut-off (default 2 s, hard limit 60 s) enforced both by
-mANY-MAZE and by the board (`W pin 1 max_ms`). All outputs go off when a test ends or is paused, when
+mANY-MAZE and by the board (`W pin 1 max_ms`, `P pin level max_ms` for a PWM-controlled shocker). Give the
+shocker channel the role *shocker* (or a `max_on_s`): then no action at all can leave it on longer than 60 s
+(or `max_on_s`), and pulse trains on it are capped too. All outputs go off when a test ends or is paused, when
 mANY-MAZE disconnects normally (it sends `R` before closing the port) and when the heartbeat watchdog fires.
 The board cannot notice that the serial port was closed: if mANY-MAZE crashes or the USB cable is pulled,
 only the watchdog switches the outputs off. mANY-MAZE turns the watchdog on (2000 ms) for every board that has
 outputs unless *Watchdog* is set otherwise in the device settings, and sends the heartbeat from a background
-thread, so pausing a test or a stalled camera does not trip it.
+thread, so pausing a test or a stalled camera does not trip it — but only while the tests keep running: if the
+program hangs, the heartbeats stop after 10 s and the watchdog switches the outputs off.
+
+Resets: from firmware 1.2 the board prints its banner (`MANYMAZE_IO 1.2 <board>`) when it starts. A board that
+restarts during a test (power glitch, USB re-enumeration, a brown-out caused by a load on its supply) has lost
+its configuration and switched its outputs off; mANY-MAZE sees the banner arrive unasked, logs it (the outputs
+are shown off in the test's I/O log, as after a watchdog) and configures the board again. A board whose USB
+connection is lost is reopened every 5 s until it answers again.
+
+Serial bandwidth: at 115200 baud the link carries about 11.5 kB/s. A 1 kHz analogue input (sent in batches of
+10 samples) uses about 60 % of it, a 50 ms one with a deadband about 4 %, an encoder at most 9 %. When the board
+has to wait for the port, pulse edges, maximum on-time cut-offs and the watchdog are delayed, so mANY-MAZE adds
+up what the configured inputs may need: above 70 % of the link it warns, above 95 % it does not configure the
+analogue inputs at all (sample them less often). In practice: one 1 kHz channel per board, or several at
+≥ 5 ms. Firmata boards (57600 baud) send 3 bytes per analogue pin and sampling interval.
 
 Optogenetics: connect the laser/LED driver's TTL modulation input to an output pin. Pulse trains are timed
 on the board with microsecond resolution (e.g. 20 Hz, 5 ms pulses), independently of the video frame rate.
+Trains whose period is longer than 60 s (and single pulses longer than that) are timed in milliseconds
+(firmware 1.2; older firmware ended pulses longer than about 35 minutes at once).
+
+Filtered analogue channels need every sample, not just the changes: mANY-MAZE asks firmware 1.2 for every
+sample (`deadband` -1); with older firmware the filter only sees changed values.
 
 ## Protocol
 
@@ -49,15 +70,15 @@ Computer → board:
 
 | Command | Meaning |
 |---|---|
-| `?` | identify: replies `MANYMAZE_IO <version> <board>` |
+| `?` | identify: replies `MANYMAZE_IO <version> <board>` (also printed by the board when it starts) |
 | `Z` | clear the whole configuration (all outputs off) |
 | `I pin pullup debounce_ms` | configure a digital input (pullup 1/0); its state is reported at once and on every change |
 | `O pin invert` | configure a digital/PWM output (off) |
-| `W pin 0\|1 [max_ms]` | switch an output; with `max_ms` it switches itself off after that time |
-| `P pin 0..255` | PWM level |
-| `T pin period_ms width_ms count` | pulse train (count 0 = until stopped); decimals allowed, e.g. `T 9 50 5 200` = 20 Hz, 5 ms, 10 s |
+| `W pin 0\|1 [max_ms]` | switch an output; with `max_ms` (≥ 1) it switches itself off after that time; any earlier maximum is forgotten |
+| `P pin 0..255 [max_ms]` | PWM level; with `max_ms` the level goes to 0 after that time (1.2) |
+| `T pin period_ms width_ms count` | pulse train (count 0 = until stopped); decimals allowed, e.g. `T 9 50 5 200` = 20 Hz, 5 ms, 10 s; periods over 60 000 ms are timed in milliseconds (1.2) |
 | `X pin` | stop a pulse train, output off |
-| `A n period_ms deadband [batch]` | report analogue input A*n* every period when it changed by more than deadband; with `batch` > 1 every sample is sent, `batch` samples per `S` line (mANY-MAZE uses this below 10 ms, e.g. `A 1 1 0 10` = 1 kHz) |
+| `A n period_ms deadband [batch]` | report analogue input A*n* every period when it changed by more than deadband (deadband -1: every sample, 1.2); with `batch` > 1 every sample is sent, `batch` samples per `S` line (mANY-MAZE uses this below 10 ms, e.g. `A 1 1 0 10` = 1 kHz) |
 | `L dout sck period_ms` | HX711 load cell (period ≥ 100 ms) |
 | `U pin period_ms` | DHT22 temperature / humidity sensor (period ≥ 2000 ms) |
 | `E pinA pinB` | quadrature encoder (count reset to 0) |
@@ -77,7 +98,11 @@ Board → computer:
 | `U pin temperature×10 humidity×10 ms` | DHT22 reading (e.g. `U 7 215 553` = 21.5 °C, 55.3 %) |
 | `E pinA count ms` | encoder count (signed, at most every 20 ms) |
 | `WATCHDOG` | the watchdog switched all outputs off |
-| `ERR text` | the last command was invalid |
+| `ERR text` | the last command was invalid (`ERR line too long`: a line of more than 71 characters, ignored whole; `ERR U: no reply from the DHT22`: three readings in a row failed) |
+| `MANYMAZE_IO <version> <board>` | unasked: the board has just started (reset) and must be configured again |
+
+DHT22 and HX711 readings keep the interrupts on (the HX711 only masks them for each 1-µs clock pulse), so that no
+serial byte or encoder edge is lost while a sensor is read.
 
 `ms` is the board's `millis()` clock, useful to align with electrophysiology recordings; mANY-MAZE keeps it in
 the I/O log of the test (`board_ms` of each input event).

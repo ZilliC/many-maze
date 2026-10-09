@@ -13,7 +13,7 @@ import numpy as np
 
 from .camera import SourceReader, SourceSpec
 from .live import draw_display_texts
-from .session import END_SOURCE, END_SOURCE_FAILED, Session
+from .session import END_ERROR, END_SOURCE, END_SOURCE_FAILED, Session
 from .livemonitor import beam_angle
 from .tracking import draw_tracking
 
@@ -259,12 +259,34 @@ class LiveGroup:
 
     # ------------------------------------------------------------------ frames
     def process(self, key: str, frame: np.ndarray, ts: float):
-        """Track one frame of source `key` in every session bound to it."""
+        """Track one frame of source `key` in every session bound to it. An unexpected error in one session ends
+        that test only (END_ERROR); the other tests of the camera go on."""
         for e in self.entries_for(key):
             s = e.session
             if s is None:
                 continue
-            self._last_dets[e.id] = s.process(frame, ts)
+            try:
+                self._last_dets[e.id] = s.process(frame, ts)
+            except Exception as ex:
+                self._session_failed(e, ex)
+
+    def _session_failed(self, e: LiveEntry, ex: Exception):
+        s = e.session
+        msg = f"{e.label}: the test stopped on an error: {type(ex).__name__}: {ex}"
+        self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", msg))
+        if s is None or s.state == "finished":
+            return
+        try:
+            e.aborted = s.state == "waiting" or not len(getattr(s, "cols", {}).get("t", ()))
+            s.finish(END_ERROR)
+        except Exception as ex2:  # finishing failed too: at least its outputs off
+            self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{e.label}: could not end the test: {ex2}"))
+            off = getattr(getattr(s, "devices", None), "all_off", None)
+            if off is not None:
+                try:
+                    off()
+                except Exception:
+                    pass
 
     def render(self, key: str, frame: np.ndarray) -> np.ndarray:
         """A copy of the frame with every session's animal and its last ``trail_len`` positions drawn on it (the

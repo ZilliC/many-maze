@@ -4,9 +4,13 @@
 // 1 kHz, sent in batches), quadrature rotary encoders, HX711 load cells (weight), DHT22 temperature / humidity
 // sensors and a heartbeat watchdog. Line protocol at 115200 baud: see README.md.
 //
+// 1.2: the banner is printed at start-up (the computer notices a reset and configures the board again), long
+// pulses and trains (period over 60 s) are timed in milliseconds, "P pin level max_ms", deadband -1 (every
+// sample), over-long lines are refused, DHT22 / HX711 reads no longer mask the interrupts for milliseconds.
+//
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#define FW_VERSION "1.1"
+#define FW_VERSION "1.2"
 #ifndef BOARD_NAME
 #define BOARD_NAME "arduino"
 #endif
@@ -17,12 +21,15 @@ const uint16_t ENC_REPORT_MS = 20;
 
 struct DIn { int8_t pin; uint8_t pullup; uint16_t debounce; uint8_t stable, last; unsigned long changed; };
 struct DOut { int8_t pin; uint8_t invert, pwm; uint8_t on; uint8_t timed; unsigned long offAt; };
-struct AIn { int8_t pin; uint16_t period, deadband; int last; unsigned long next;
+// deadband < 0: every sample is reported (filtered channels need them all)
+struct AIn { int8_t pin; uint16_t period; int16_t deadband; int last; unsigned long next;
              uint8_t batch, n; unsigned long first; int vals[MAX_BATCH]; };
 struct HX { int8_t dout, sck; uint16_t period; unsigned long next; };
-struct DHT { int8_t pin; uint16_t period; unsigned long next; };
+struct DHT { int8_t pin; uint16_t period; unsigned long next; uint8_t fails; };
 struct Enc { int8_t pa, pb; volatile long count; volatile uint8_t state; long reported; unsigned long next; uint8_t irq; };
-struct Train { int8_t pin; uint8_t active, level; unsigned long period, width, count, done, start; };
+// ms = 1: period / width / start in milliseconds (long pulses), else in microseconds (wrap-safe up to ~35 min)
+struct Train { int8_t pin; uint8_t active, level, ms; unsigned long period, width, count, done, start; };
+const double TRAIN_MS_ABOVE = 60000.0;  // periods longer than this (ms) are timed in milliseconds
 
 DIn ins[MAX_IN];
 DOut outs[MAX_OUT];
@@ -35,6 +42,7 @@ uint8_t nIn = 0, nOut = 0, nAn = 0, nEnc = 0, nHx = 0, nDht = 0;
 
 char buf[72];
 uint8_t blen = 0;
+bool overflow = false;  // the line being received is longer than buf: refused when it ends
 unsigned long lastRx = 0, wdMs = 0;
 bool wdFired = false;
 
@@ -72,8 +80,14 @@ void writeOut(DOut *o, uint8_t on) {
 void writePwm(DOut *o, int v) {
   v = constrain(v, 0, 255);
   o->on = v > 0;
+  if (!o->on) o->timed = 0;
   o->pwm = 1;
   analogWrite(o->pin, o->invert ? 255 - v : v);
+}
+
+void printId() {
+  Serial.print(F("MANYMAZE_IO " FW_VERSION " "));
+  Serial.println(F(BOARD_NAME));
 }
 
 void stopTrain(int pin) {
@@ -123,22 +137,25 @@ void reportBatch(AIn &a) {
   a.n = 0;
 }
 
+// one HX711 clock pulse; returns DOUT read while SCK is high. Interrupts are off only during the pulse: SCK high
+// for more than 60 us would power the HX711 down, but the serial port, encoders and timers keep running between bits
+uint8_t hxPulse(HX &h) {
+  noInterrupts();
+  digitalWrite(h.sck, HIGH);
+  delayMicroseconds(1);
+  uint8_t b = digitalRead(h.dout);
+  digitalWrite(h.sck, LOW);
+  interrupts();
+  delayMicroseconds(1);
+  return b;
+}
+
 // HX711 load-cell amplifier (channel A, gain 128): 24-bit signed reading, or false if not ready
 bool readHX(HX &h, long &value) {
   if (digitalRead(h.dout)) return false;
   unsigned long v = 0;
-  noInterrupts();
-  for (uint8_t i = 0; i < 24; i++) {
-    digitalWrite(h.sck, HIGH);
-    delayMicroseconds(1);
-    v = (v << 1) | digitalRead(h.dout);
-    digitalWrite(h.sck, LOW);
-    delayMicroseconds(1);
-  }
-  digitalWrite(h.sck, HIGH);  // 25th pulse: channel A, gain 128 next time
-  delayMicroseconds(1);
-  digitalWrite(h.sck, LOW);
-  interrupts();
+  for (uint8_t i = 0; i < 24; i++) v = (v << 1) | hxPulse(h);
+  hxPulse(h);  // 25th pulse: channel A, gain 128 next time
   if (v & 0x800000UL) v |= 0xFF000000UL;
   value = (long)v;
   return true;
@@ -152,14 +169,15 @@ long levelLength(int8_t pin, uint8_t level, unsigned long timeout_us) {
   return (long)(micros() - start);
 }
 
-// DHT22 / AM2302: temperature and humidity in tenths, or false on a timeout / checksum error
+// DHT22 / AM2302: temperature and humidity in tenths, or false on a timeout / checksum error. Read with the
+// interrupts on (the serial port must not lose bytes, nor the encoders edges, during the ~5 ms of a reading): an
+// interrupt that stretches a bit may corrupt a reading now and then, which the checksum catches (see loop()).
 bool readDHT(DHT &d, int &t10, int &h10) {
   uint8_t data[5] = {0, 0, 0, 0, 0};
   pinMode(d.pin, OUTPUT);  // start signal: at least 1 ms low
   digitalWrite(d.pin, LOW);
-  delay(2);
+  delayMicroseconds(1200);
   pinMode(d.pin, INPUT_PULLUP);
-  noInterrupts();
   // the line floats high 20-40 us, then the sensor answers ~80 us low and ~80 us high
   bool ok = levelLength(d.pin, HIGH, 200) >= 0 && levelLength(d.pin, LOW, 200) >= 0 &&
             levelLength(d.pin, HIGH, 200) >= 0;
@@ -169,7 +187,6 @@ bool readDHT(DHT &d, int &t10, int &h10) {
     if (high < 0) ok = false;
     else data[i / 8] = (data[i / 8] << 1) | (high > 40 ? 1 : 0);
   }
-  interrupts();
   if (!ok || ((data[0] + data[1] + data[2] + data[3]) & 0xFF) != data[4]) return false;
   h10 = ((int)data[0] << 8) | data[1];
   t10 = (((int)(data[2] & 0x7F)) << 8) | data[3];
@@ -216,8 +233,7 @@ void command(char *line) {
   long a3 = argc > 3 ? atol(argv[3]) : 0;
   switch (c) {
     case '?':
-      Serial.print(F("MANYMAZE_IO " FW_VERSION " "));
-      Serial.println(F(BOARD_NAME));
+      printId();
       break;
     case '.':
       break;  // heartbeat
@@ -258,6 +274,7 @@ void command(char *line) {
       if (!o || argc < 3) { err("W: pin not configured as an output"); break; }
       stopTrain(o->pin);
       o->pwm = 0;
+      o->timed = 0;  // a previous maximum on-time never applies to this command
       writeOut(o, a2 ? 1 : 0);
       if (a2 && argc > 3 && a3 > 0) {
         o->timed = 1;
@@ -265,11 +282,16 @@ void command(char *line) {
       }
       break;
     }
-    case 'P': {  // P pin 0..255
+    case 'P': {  // P pin 0..255 [max_ms]
       DOut *o = findOut(a1);
       if (!o || argc < 3) { err("P: pin not configured as an output"); break; }
       stopTrain(o->pin);
+      o->timed = 0;
       writePwm(o, a2);
+      if (a2 > 0 && argc > 3 && a3 > 0) {
+        o->timed = 1;
+        o->offAt = millis() + (unsigned long)a3;
+      }
       break;
     }
     case 'T': {  // T pin period_ms width_ms count   (count 0 = until X)
@@ -281,16 +303,28 @@ void command(char *line) {
         if (!trains[i].active) { slot = i; break; }
       if (slot < 0) { err("T: too many pulse trains"); break; }
       Train &t = trains[slot];
+      double per = atof(argv[2]), wid = atof(argv[3]);
+      if (per < wid) per = wid;
       t.pin = a1;
-      t.period = (unsigned long)(atof(argv[2]) * 1000.0);
-      t.width = (unsigned long)(atof(argv[3]) * 1000.0);
-      if (t.width < 50) t.width = 50;
-      if (t.period < t.width) t.period = t.width;
+      t.ms = per > TRAIN_MS_ABOVE;  // microseconds would overflow the wrap-safe comparison past ~35 min
+      if (t.ms) {
+        t.period = (unsigned long)(per + 0.5);
+        t.width = (unsigned long)(wid + 0.5);
+        if (t.width < 1) t.width = 1;
+        if (t.period < t.width) t.period = t.width;
+        t.start = millis();
+      } else {
+        t.period = (unsigned long)(per * 1000.0);
+        t.width = (unsigned long)(wid * 1000.0);
+        if (t.width < 50) t.width = 50;
+        if (t.period < t.width) t.period = t.width;
+        t.start = micros();
+      }
       t.count = atol(argv[4]);
       t.done = 0;
       t.level = 0;
-      t.start = micros();
       o->pwm = 0;
+      o->timed = 0;
       t.active = 1;
       break;
     }
@@ -300,12 +334,12 @@ void command(char *line) {
       if (o) writeOut(o, 0);
       break;
     }
-    case 'A': {  // A channel period_ms deadband [batch]
+    case 'A': {  // A channel period_ms deadband [batch]   (deadband -1: every sample)
       if (argc < 2 || nAn >= MAX_AN) { err("A: bad arguments or too many analogue inputs"); break; }
       AIn &a = ans[nAn++];
       a.pin = a1;
       a.period = argc > 2 && a2 > 0 ? a2 : 50;
-      a.deadband = argc > 3 ? a3 : 2;
+      a.deadband = argc > 3 ? (a3 < 0 ? -1 : (int16_t)constrain(a3, 0, 1023)) : 2;
       a.batch = argc > 4 ? constrain(atol(argv[4]), 1, MAX_BATCH) : 1;
       a.n = 0;
       a.last = analogRead(a.pin);
@@ -329,6 +363,7 @@ void command(char *line) {
       if (argc < 2 || nDht >= MAX_DHT) { err("U: bad arguments or too many DHT sensors"); break; }
       DHT &d = dhts[nDht++];
       d.pin = a1;
+      d.fails = 0;
       d.period = argc > 2 && a2 >= 2000 ? a2 : 2000;
       pinMode(d.pin, INPUT_PULLUP);
       d.next = millis() + 1000;  // the sensor needs ~1 s after power-up
@@ -371,14 +406,23 @@ void command(char *line) {
 void setup() {
   Serial.begin(115200);
   lastRx = millis();
+  // the banner at start-up: a board that restarts during a test (power or USB glitch) has lost its configuration
+  // and its outputs; mANY-MAZE sees the banner arrive unasked and configures it again
+  printId();
 }
 
 void loop() {
-  // serial commands
+  // serial commands; a line longer than the buffer is refused whole (never executed truncated)
   while (Serial.available()) {
     char ch = Serial.read();
     if (ch == '\n' || ch == '\r') {
-      if (blen) {
+      if (overflow) {
+        overflow = false;
+        blen = 0;
+        lastRx = millis();
+        wdFired = false;
+        err("line too long");
+      } else if (blen) {
         buf[blen] = 0;
         lastRx = millis();
         wdFired = false;
@@ -387,29 +431,35 @@ void loop() {
       }
     } else if (blen < sizeof(buf) - 1) {
       buf[blen++] = ch;
+    } else {
+      overflow = true;
     }
   }
   unsigned long now = millis();
   unsigned long us = micros();
-  // pulse trains (microsecond timing, wrap-safe)
+  // pulse trains (microsecond timing, or millisecond timing for long periods; wrap-safe)
   for (uint8_t i = 0; i < MAX_TRAIN; i++) {
     Train &t = trains[i];
     if (!t.active) continue;
     DOut *o = findOut(t.pin);
     if (!o) { t.active = 0; continue; }
+    unsigned long clk = t.ms ? now : us;
     unsigned long onT = t.start + t.done * t.period;
     if (!t.level) {
       if (t.count && t.done >= t.count) { t.active = 0; continue; }
-      if ((long)(us - onT) >= 0) { writeOut(o, 1); t.level = 1; }
-    } else if ((long)(us - (onT + t.width)) >= 0) {
+      if ((long)(clk - onT) >= 0) { writeOut(o, 1); t.level = 1; }
+    } else if ((long)(clk - (onT + t.width)) >= 0) {
       writeOut(o, 0);
       t.level = 0;
       t.done++;
     }
   }
-  // outputs with a maximum on-time (e.g. shock safety cut-off)
+  // outputs with a maximum on-time (e.g. shock safety cut-off), digital or PWM
   for (uint8_t i = 0; i < nOut; i++)
-    if (outs[i].timed && outs[i].on && (long)(now - outs[i].offAt) >= 0) writeOut(&outs[i], 0);
+    if (outs[i].timed && outs[i].on && (long)(now - outs[i].offAt) >= 0) {
+      if (outs[i].pwm) writePwm(&outs[i], 0);
+      else writeOut(&outs[i], 0);
+    }
   // debounced digital inputs
   for (uint8_t i = 0; i < nIn; i++) {
     DIn &d = ins[i];
@@ -429,7 +479,7 @@ void loop() {
       a.vals[a.n++] = v;
       a.last = v;
       if (a.n >= a.batch) reportBatch(a);
-    } else if (abs(v - a.last) > (int)a.deadband) {
+    } else if (a.deadband < 0 || abs(v - a.last) > a.deadband) {
       a.last = v;
       reportAn(a);
     }
@@ -456,6 +506,7 @@ void loop() {
     d.next = now + d.period;
     int t10, h10;
     if (readDHT(d, t10, h10)) {
+      d.fails = 0;
       Serial.print(F("U "));
       Serial.print(d.pin);
       Serial.print(' ');
@@ -464,7 +515,8 @@ void loop() {
       Serial.print(h10);
       Serial.print(' ');
       Serial.println(now);
-    } else {
+    } else if (++d.fails >= 3) {  // a corrupted reading now and then is normal: reported after three in a row
+      d.fails = 0;
       err("U: no reply from the DHT22");
     }
   }

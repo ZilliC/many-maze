@@ -18,6 +18,7 @@ END_PROCEDURE = "Ended by procedure"
 END_SOURCE = "End of the video"
 END_SOURCE_FAILED = "Camera or video failed"
 END_RECOVERED = "Interrupted (recovered after a crash)"
+END_ERROR = "Ended by an error"  # an unexpected error in the test's own processing (the other tests go on)
 END_ZONE = "Animal reached the end zone"
 
 
@@ -73,6 +74,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     """Store a finished session in its test: track (camera sessions), recording, events, pauses, I/O events and
     procedure result variables.  Returns False if there was nothing to save.  The session's crash-recovery file
     is left to the caller, to remove once the project is saved."""
+    wait = getattr(session, "wait_recordings", None)
+    if wait is not None:  # the recording is closed in the background: its file must be complete
+        wait()
     tr = session.track()
     if tr is not None:
         if not len(tr):
@@ -108,7 +112,8 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         test.variables = {**test.variables, "zone_labels": dict(labels)}
     for s in getattr(eng, "scheduled_tests", None) or []:  # "schedule another test for this animal"
         _schedule_test(project, test, s)
-    test.io_events = list(test.io_events) + session.io_events
+    full = getattr(session, "all_io_events", None)  # live sessions: every fast analogue sample too
+    test.io_events = list(test.io_events) + (full() if full is not None else session.io_events)
     rv = session.result_variables
     if rv:
         test.result_variables = {**test.result_variables, **rv}

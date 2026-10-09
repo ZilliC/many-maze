@@ -86,9 +86,14 @@ def sequence_rows(apparatus: Apparatus | None, visits: list, now: float) -> list
 
 
 # ====================================================================== inputs
-def input_rows(io_events: list, now: float) -> list[tuple[str, str, int, float, float | None]]:
+def input_rows(io_events, now: float) -> list[tuple[str, str, int, float, float | None]]:
     """Live statistics of the I/O inputs from a session's I/O log: (input, current value, activations, time on s,
-    latency to the first activation or None).  Analogue / encoder inputs only report their current value."""
+    latency to the first activation or None).  Analogue / encoder inputs only report their current value.
+
+    io_events may also be running statistics (a live session's ``input_stats``, core.iolog.InputStats): then
+    nothing is rescanned (the monitor of a long test should use ``session.input_rows(now)``)."""
+    if hasattr(io_events, "rows"):
+        return io_events.rows(now)
     series: dict[tuple[str, str], list] = {}
     kinds: dict[tuple[str, str], str] = {}
     for e in io_events:
