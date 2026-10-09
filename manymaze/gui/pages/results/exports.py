@@ -248,7 +248,10 @@ class ExportsMixin:
         if printer is None:
             printer = QPrinter(QPrinter.HighResolution)
             printer.setPageOrientation(QPageLayout.Landscape)
-            if QPrintDialog(printer, self).exec() != QDialog.Accepted:
+            dlg = QPrintDialog(printer, self)
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (the printer it set up is ours)
+            if not accepted:
                 return
         doc = QTextDocument()
         doc.setHtml(self.table_html())

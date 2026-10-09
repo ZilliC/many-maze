@@ -23,8 +23,8 @@ class ObservationMixin:
         if test is None:
             return False
         if not confirm_animal_id(self, test):
-            if new and test in self.project.tests:
-                self.project.tests.remove(test)
+            if new:
+                self._remove_test(test)
             return False
         self.obs_test, self._obs_new = test, new
         self.obs = ObservationSession(self.duration.value(), start_mode="manual",

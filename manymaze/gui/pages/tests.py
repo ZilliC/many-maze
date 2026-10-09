@@ -660,9 +660,16 @@ class TestsPage(Page):
         if live is not None and callable(getattr(live, "any_active", None)) and live.any_active():
             ids = getattr(live, "active_test_ids", None)
             ids = set(ids()) if callable(ids) else None
-            if ids is None or any(t.id in ids for t in tests):
+            if ids is None:
                 return ("Tests are running on the Run tests page. Stop them (or wait until they end) before "
                         "deleting, clearing or re-performing tests.")
+            busy = sorted({t.id for t in tests if t.id in ids})
+            if len(busy) == 1:
+                return (f"Test {busy[0]} is armed or running on the Run tests page. Stop it (or wait until it "
+                        "ends) before deleting, clearing or re-performing it.")
+            if busy:
+                return (f"Tests {', '.join(str(i) for i in busy)} are armed or running on the Run tests page. Stop "
+                        "them (or wait until they end) before deleting, clearing or re-performing them.")
         tv = self.main.page("TestViewPage")
         cur = getattr(tv, "test", None)
         if cur is not None and any(t is cur for t in tests) and callable(getattr(tv, "scoring_in_progress", None)) \

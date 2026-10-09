@@ -550,7 +550,11 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
     # ------------------------------------------------------------------ filters
     def _fill_filter_combos(self):
         p = self.project
-        groups = [g.name for g in p.groups] if p else []
+        # testing blind: the rows' Group column holds the treatment codes (Project.info_columns), never the names
+        if p is not None and p.blind:
+            groups = list(dict.fromkeys(c for c in (p.treatment_code(g.name) for g in p.groups) if c))
+        else:
+            groups = [g.name for g in p.groups] if p else []
         stages = list(p.stages) if p else []
         periods = []
         for r in self.rows:

@@ -431,9 +431,10 @@ def test_schedule_delete_names_the_tests_and_refuses_busy_tests(win, monkeypatch
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append(a[2]) or QMessageBox.Ok)
     live = win.page("LivePage")
     monkeypatch.setattr(live, "any_active", lambda: True)
+    monkeypatch.setattr(live, "active_test_ids", lambda: {t.id})
     page.delete_selected()
     page.reperform_selected()
-    assert t in p.tests and len(told) == 2 and "Run tests" in told[0]
+    assert t in p.tests and len(told) == 2 and "Run tests" in told[0] and f"Test {t.id}" in told[0]
     monkeypatch.setattr(live, "any_active", lambda: False)
     tv = win.page("TestViewPage")
     monkeypatch.setattr(tv, "test", t, raising=False)

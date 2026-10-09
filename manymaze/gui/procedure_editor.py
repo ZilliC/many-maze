@@ -27,6 +27,11 @@ from .statement_tree import StatementTree
 from .widgets import loading, value_text
 
 ROLE = Qt.UserRole
+ERROR_COLOUR = "#dc2626"  # validation errors: the procedures cannot run as written
+WARNING_COLOUR = "#b45309"  # warnings (amber): the procedures run, but have a look
+OK_COLOUR = "#15803d"
+ERROR_BG = (254, 226, 226)
+WARNING_BG = (254, 243, 199)
 ADD_TYPES = ["when", "wait", "if", "repeat", "set", "do", "stop", "comment", "var", "call", "label", "goto",
              "resolution"]
 WAIT_MODES = {"seconds": "Fixed time", "until": "Until a condition", "event": "For an event"}
@@ -467,24 +472,35 @@ class ProcedureEditor(QWidget):
     # ------------------------------------------------------------------ validation
     def validate(self):
         """Check the procedures (against the project's zones, devices and areas) and show the problems."""
-        self.issues = pr.validate(self.procs, self.context())
+        self.issues = pr.validate(self.procs, self.context(), warnings=True)
         self.issue_list.clear()
-        icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
-        for pi, path, msg in self.issues:
+        err_icon = self.style().standardIcon(QStyle.SP_MessageBoxCritical)
+        warn_icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+        errors = [x for x in self.issues if not pr.is_warning(x[2])]
+        warnings = [x for x in self.issues if pr.is_warning(x[2])]
+        if not errors:  # warnings alone do not stop the procedures running
+            n = len(warnings)
+            ok = QListWidgetItem("✓ No problems found" + (f" ({n} warning{'s' if n > 1 else ''})" if n else ""))
+            ok.setForeground(QBrush(QColor(OK_COLOUR)))
+            self.issue_list.addItem(ok)
+        for pi, path, msg in errors + warnings:  # errors first
+            warn = pr.is_warning(msg)
             name = self.procs[pi].get("name", "?") if 0 <= pi < len(self.procs) else "?"
             where = f"{name} › {pr.path_text(path)}" if path else name
-            it = QListWidgetItem(icon, f"{where}: {msg}")
+            text = str(msg)
+            if warn and "warning:" not in text.lower():
+                text = f"Warning: {text}"
+            it = QListWidgetItem(warn_icon if warn else err_icon, f"{where}: {text}")
+            it.setForeground(QBrush(QColor(WARNING_COLOUR if warn else ERROR_COLOUR)))
             it.setData(ROLE, (pi, path))
+            it.setData(ROLE + 1, "warning" if warn else "error")
             self.issue_list.addItem(it)
-        if not self.issues:
-            ok = QListWidgetItem("✓ No problems found")
-            ok.setForeground(QBrush(QColor("#15803d")))
-            self.issue_list.addItem(ok)
         self._mark_issues()
         for i in range(self.proc_list.count()):
-            bad = any(pi == i for pi, _p, _m in self.issues)
+            kinds = {pr.is_warning(m) for pi, _p, m in self.issues if pi == i}
             it = self.proc_list.item(i)
-            it.setForeground(QBrush(QColor("#dc2626")) if bad else QBrush())
+            colour = ERROR_COLOUR if False in kinds else WARNING_COLOUR if kinds else None
+            it.setForeground(QBrush(QColor(colour)) if colour else QBrush())
 
     def _mark_issues(self):
         pi = self._cur_proc_index()
@@ -492,16 +508,24 @@ class ProcedureEditor(QWidget):
         for i, path, msg in self.issues:
             if i == pi and path:
                 by_path.setdefault(tuple(path), []).append(msg)
-        icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+        err_icon = self.style().standardIcon(QStyle.SP_MessageBoxCritical)
+        warn_icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
         for it in self.tree.all_items():
             msgs = by_path.get(self.tree.path(it) or ())
-            it.setIcon(0, icon if msgs else QIcon())
+            only_warnings = bool(msgs) and all(pr.is_warning(m) for m in msgs)
+            it.setIcon(0, (warn_icon if only_warnings else err_icon) if msgs else QIcon())
             it.setToolTip(0, "\n".join(msgs) if msgs else "")
-            it.setBackground(0, QBrush(QColor(254, 226, 226)) if msgs else QBrush())
+            it.setBackground(0, QBrush(QColor(*(WARNING_BG if only_warnings else ERROR_BG))) if msgs else QBrush())
         if self._issue_lbl is not None:
-            msgs = by_path.get(self._cur_path() or (), [])
-            self._issue_lbl.setText("\n".join("⚠ " + m for m in msgs))
-            self._issue_lbl.setVisible(bool(msgs))
+            self._set_issue_label(by_path.get(self._cur_path() or (), []))
+
+    def _set_issue_label(self, msgs):
+        """The problems of the current statement under its fields: errors in red, warnings alone in amber."""
+        lbl = self._issue_lbl
+        lbl.setText("\n".join("⚠ " + m for m in msgs))
+        only_warnings = bool(msgs) and all(pr.is_warning(m) for m in msgs)
+        lbl.setStyleSheet(f"color:{WARNING_COLOUR if only_warnings else ERROR_COLOUR}")
+        lbl.setVisible(bool(msgs))
 
     def _issue_clicked(self, it: QListWidgetItem):
         d = it.data(ROLE)
@@ -566,9 +590,8 @@ class ProcedureEditor(QWidget):
                                else None)
             self.form.addRow("", en)
             msgs = [m for pi, pth, m in self.issues if pi == self._cur_proc_index() and tuple(pth) == path]
-            self._issue_lbl = _wrapped("\n".join("⚠ " + m for m in msgs))
-            self._issue_lbl.setStyleSheet("color:#dc2626")
-            self._issue_lbl.setVisible(bool(msgs))
+            self._issue_lbl = _wrapped("")
+            self._set_issue_label(msgs)
             self.form.addRow(self._issue_lbl)
         self.form_box.setEnabled(not self._read_only)
 
