@@ -367,6 +367,26 @@ def test_xml_and_raw_exports(demo, tmp_path):
     assert files[0].suffix == ".tsv" and open(files[0]).read().count("Speed (cm/s)") == 1
 
 
+def test_xml_open_pause_and_raw_time_precision(demo, tmp_path):
+    t = demo.tests[0]
+    old = t.pauses
+    t.pauses = [[1.0, None], [2.0]]  # pauses with no end yet
+    try:
+        text = export_xml(demo, tmp_path / "p.xml").read_text()
+    finally:
+        t.pauses = old
+    assert '<pause start="1" end=""/>' in text and '<pause start="2" end=""/>' in text
+
+    def fail(_f):
+        raise RuntimeError("stop")
+    with pytest.raises(RuntimeError):
+        export_xml(demo, tmp_path / "f.xml", progress=fail)
+    assert not (tmp_path / "f.xml.part").exists() and not (tmp_path / "f.xml").exists()
+    # raw data: Time with fixed decimals (.6g would keep only 0.1 s past 10000 s)
+    with open(export_raw_data(demo, tmp_path / "raw")[0]) as f:
+        rows = list(csv.reader(ln for ln in f if not ln.startswith("#")))
+    assert all(len(r[0].split(".")[1]) == 5 for r in rows[1:])
+
 def test_tables_and_report(demo, tmp_path):
     rows = demo.results()
     cols = ["Test", "Animal", "Total distance (cm)"]

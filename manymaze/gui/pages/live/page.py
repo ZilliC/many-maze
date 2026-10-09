@@ -19,7 +19,7 @@ from ....core.camera import CameraView
 from ....core.camhw import CameraHardware
 from ....core.live import LiveSession, ObservationSession
 from ....core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS, ClockSchedule, LiveGroup
-from ....core.procedures import Outputs
+from ....core.procedures import Outputs, check_before_test, programs, project_context
 from ....core.tracking import ArenaTracker
 from ....core.video import MAX_CAMERAS
 from ...icons import icon
@@ -55,12 +55,17 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.session: LiveSession | None = None
         self.test = None
         self._new_test = False
+        self._pending_arm = None  # the test armed while its source opens (made a session by _on_opened)
+        self._pending_start = False
+        self._unsaved_sessions: list = []  # finished tests stored, the experiment not saved yet (_save_soon)
+        self._source_opened = False
         self._record_path: str | None = None
         self._apparatus = None
         self._preview_tracker: ArenaTracker | None = None
         self._background: np.ndarray | None = None
         self._file_background: np.ndarray | None = None
         self._last_frame: np.ndarray | None = None
+        self._frame_key = None  # SourceSpec key of the source of _last_frame
         self._frame_size: tuple[int, int] | None = None
         self._fps = 25.0
         self._outputs_seen = self._proc_log_seen = 0
@@ -71,6 +76,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._shown_state = None
         self._bg_mode_value = "frame"  # plain copies of widget state read from the grabber thread
         self._show_trail = True
+        self._show_beam = True  # the animal's orientation drawn as a "flashlight beam"
         self._source_is_file = False
         self._outputs: Outputs | None = None
         self._schedule: ClockSchedule | None = None  # single-test scheduled start
@@ -89,7 +95,10 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.obs: ObservationSession | None = None
         self.obs_test = None
         self._obs_new = False
-        self._key_filter = False
+        self._key_filter = False  # the application-wide key filter is installed (tests run, page shown)
+        self._keys_wanted = False  # tests run: scoring keys / keys for the procedures wanted
+        self._last_key = None
+        self._holds: dict = {}  # "hold" behaviour → the session its key press started it in
         self._undo: list[tuple] = []  # (session, [(kind, event, behaviour), ...]) per scoring key press
         self._touch = None  # touch-screen stimulus window (gui.touchscreen) and the settings it was built with
         self._touch_cfg: dict | None = None
@@ -205,6 +214,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.calibrate_act = A("ruler", "Adjust calibration", "Change the scale (pixels per cm) of the running test "
                                "(the selected panel's with several tests); it is saved with the test and used for "
                                "its results.", self.adjust_calibration)
+        self.geometry_act = A("area", "Adjust apparatus", "Move, rotate or scale the apparatus map — or move one "
+                              "zone — of the running test (the selected panel's with several tests); it is saved "
+                              "with the test and used for its results.", self.adjust_geometry)
         # View
         self.layout_act = A("layout_grid", "Apparatus\nlayout", "How the test panels are arranged.")
         m = QMenu(self)
@@ -222,9 +234,11 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.indicators_act = A("highlighter", "Tracking\nindicators", "What is drawn on the camera images.")
         m = QMenu(self)
         self.trail_act = m.addAction("Animal's track (trail)")
+        self.beam_act = m.addAction("Animal's orientation (flashlight beam)")
         self.zones_act = m.addAction("Highlight the zone the animal is in")
         self.labels_act = m.addAction("Zone names")
-        for a, k in ((self.trail_act, "trail"), (self.zones_act, "zones"), (self.labels_act, "labels")):
+        for a, k in ((self.trail_act, "trail"), (self.beam_act, "beam"), (self.zones_act, "zones"),
+                     (self.labels_act, "labels")):
             a.setCheckable(True)
             a.triggered.connect(lambda on, k=k: self._set_pref(k, on))
         self.indicators_act.setMenu(m)
@@ -263,7 +277,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 ("Session", [(self.add_source_act, "large"), (self.add_panel_act, "small"),
                              (self.remove_panel_act, "small"), (self.capture_bg_act, "small"),
                              (self.camera_act, "small"), (self.cam_opts_act, "small"), (self.next_test_act, "small"),
-                             (self.calibrate_act, "small")]),
+                             (self.calibrate_act, "small"), (self.geometry_act, "small")]),
                 ("View", [(self.layout_act, "large"), (self.fit_act, "large"), (self.indicators_act, "large"),
                           (self.hide_report_act, "small"), (self.hide_app_act, "small"),
                           (self.panel_settings_act, "small")]),
@@ -376,7 +390,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
     def industrial_cameras(self) -> bool:
         """GenICam / vendor SDK backends and the GenTL producer files; rescans the cameras when changed."""
         dlg = IndustrialCamerasDialog(self._cti_files_setting(), self)
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
             return False
         files = dlg.files()
         settings = getattr(self.main, "settings", None)
@@ -443,7 +459,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
 
     def panel_settings(self) -> bool:
         dlg = PanelSettingsDialog(self.prefs.get("panel") or {}, self)
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
             return False
         self._set_pref("panel", dlg.result_settings())
         return True
@@ -453,8 +471,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
 
     def _apply_view_prefs(self):
         d = self.prefs
-        for a, k in ((self.fit_act, "fit"), (self.trail_act, "trail"), (self.zones_act, "zones"),
-                     (self.labels_act, "labels"), (self.hide_report_act, "hide_report"),
+        for a, k in ((self.fit_act, "fit"), (self.trail_act, "trail"), (self.beam_act, "beam"),
+                     (self.zones_act, "zones"), (self.labels_act, "labels"), (self.hide_report_act, "hide_report"),
                      (self.hide_app_act, "hide_apparatus")):
             a.setChecked(bool(d.get(k)))
         lay = d.get("layout") if d.get("layout") in LAYOUTS else "2x2"
@@ -462,6 +480,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.mosaic.set_layout_key(lay)
         self._show_trail = bool(d.get("trail", True))
         self.group.trail_len = TRAIL_LEN if self._show_trail else 0
+        self._show_beam = bool(d.get("beam", True))
+        self.group.beam = self._show_beam
         self.tabs.setVisible(not d.get("hide_report"))
         for p in self._all_panels():
             self._apply_prefs_to_panel(p)
@@ -481,6 +501,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.group.close()
         self.group = LiveGroup()
         self.group.trail_len = TRAIL_LEN if self._show_trail else 0
+        self.group.beam = self._show_beam
         self._panels = {}  # the panels of the previous experiment go with its session
         self._group_bgs = {}
         self.obs_stop(save=False)
@@ -497,7 +518,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.monitor.clear()
         if project is not None:
             self.duration.setValue(project.test_duration_s)
-            self.start_mode.setCurrentIndex(1 if project.start_mode == "on_detection" else 0)
+            self.start_mode.setCurrentIndex(max(0, self.start_mode.findData(project.start_mode))
+                                            if project.start_mode != "manual" else 0)
             self._load_live_settings()
             self._restore_group_layout()
             self._recover_interrupted(project)
@@ -525,7 +547,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         if p is None:
             return
         self._loading = True
-        armed = self.session is not None or self.obs is not None
+        armed = self.session is not None or self.obs is not None or self._pending_arm is not None
         if not armed:
             cur = self.test_combo.currentData()
             self.test_combo.clear()
@@ -577,8 +599,12 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._update_keys_label()
         self._update_single_title()
         self._update_buttons()
+        cur = getattr(self.main, "current_page", None)
+        if cur is None or cur() is self:  # (set_project also calls on_show while another page is shown)
+            self._sync_key_filter(True)
 
     def on_hide(self):
+        self._sync_key_filter(False)  # scoring keys only while this page is shown
         if self.any_active():
             self.main.status("Tests are still running in the background — return to “Run tests” to follow or "
                              "stop them.", 10000)
@@ -597,6 +623,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self._touch = TouchStimulusWindow.from_project(self.project)
             self._touch_cfg = copy.deepcopy(cfg)
             self._touch.show_on_screen()
+        elif not self._touch.isVisible():  # closed with Esc during an earlier test: shown again for this one
+            self._touch.show_on_screen()
         return self._touch
 
     def _close_touch(self):
@@ -613,12 +641,14 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.obs_stop(save=True)
         self.group.stop_all(save=True)
         self._save_finished_entries()
+        self._flush_save()
 
     def shutdown(self):
         self._close_touch()
         self.stop_and_save_all()
         self.group.close()
         self._save_finished_entries()
+        self._flush_save()
         self.stop_preview()
         self._close_devices()
         self._enable_shortcuts(False)  # the application-wide key filter goes with the page
@@ -628,8 +658,79 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self._scan_worker.wait(3000)
 
     def any_active(self) -> bool:
-        return (self.session is not None or (self.obs is not None and self.obs.state != "finished")
-                or any(e.state in ("waiting", "running", "paused") for e in self.group.entries))
+        return (self.session is not None or self._pending_arm is not None
+                or (self.obs is not None and self.obs.state != "finished")
+                or any(e.state in ("waiting", "running", "paused") or e.meta.get("arm_pending")
+                       for e in self.group.entries))
+
+    def active_test_ids(self) -> set[int]:
+        """The IDs of the tests armed (or being armed), running or paused, or finished and not stored yet — in
+        every mode: the Test schedule does not delete, clear or re-perform them."""
+        ids = set()
+        if self.test is not None and (self.session is not None or self._pending_arm is not None):
+            ids.add(self.test.id)
+        if self.obs is not None and self.obs.state != "finished" and self.obs_test is not None:
+            ids.add(self.obs_test.id)
+        for e in self.group.entries:
+            tid = e.meta.get("test_id")
+            if tid is None:
+                continue
+            if e.state in ("waiting", "running", "paused") or e.meta.get("arm_pending") or (
+                    e.session is not None and e.state == "finished" and not e.saved):
+                ids.add(tid)
+        return ids
+
+    def _remove_test(self, test) -> bool:
+        """Remove a test created for a live test that was not run (or discarded) from the experiment; the Test
+        schedule's rows follow.  Returns True when it was removed."""
+        p = self.project
+        if p is None or test is None or test not in p.tests:
+            return False
+        p.tests.remove(test)
+        self.main.notify_tests_changed()
+        return True
+
+    def procedures_ready(self, interactive: bool = True) -> bool:
+        """Before a test is armed: the experiment's procedures can run (no validation errors against its zones,
+        devices and areas) and the programs their "Run a program" actions start are allowed on this computer —
+        asked once here, never from the frame thread.  `interactive` False (scheduled starts): nobody is asked,
+        the problems are logged and shown in a non-modal notice.  Returns False when the test must not be armed."""
+        p = self.project
+        if p is None or not p.procedures:
+            return True
+        errors = check_before_test(p.procedures, project_context(p))
+        if errors:
+            shown = errors[:12] + ([f"… and {len(errors) - 12} more"] if len(errors) > 12 else [])
+            msg = ("The test was not armed: the experiment's procedures have problems (Experiment › Procedures):"
+                   "\n\n" + "\n".join(f"• {e}" for e in shown))
+            for e in errors:
+                self._log(f"Procedures: {e}")
+            if interactive:
+                QMessageBox.critical(self, "Run tests", msg)
+            else:
+                self._notice("Run tests", msg)
+            return False
+        progs = programs.unauthorised_programs(p.procedures)
+        if not progs:
+            return True
+        listing = "\n".join(f"• {x}" for x in progs)
+        if not interactive:
+            msg = ("The test was not armed: its procedures run programs that are not allowed on this computer:\n\n"
+                   f"{listing}\n\nArm a test by hand to allow them (or File › Allowed programs…).")
+            self._log(msg.replace("\n\n", " ").replace("\n", " "))
+            self._notice("Run tests", msg)
+            return False
+        r = QMessageBox.question(
+            self, "Run tests", "This experiment's procedures run these programs on this computer:\n\n"
+            f"{listing}\n\nAllow them? Only allow programs you trust: a project file can come from anyone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if r != QMessageBox.Yes:
+            self._log("Test not armed: the procedures' programs were not allowed.")
+            return False
+        for x in progs:
+            programs.policy.allow(x)
+        self._log("Allowed to run on this computer: " + ", ".join(progs))
+        return True
 
     # ================================================================== modes
     def set_mode(self, mode: str) -> bool:
@@ -673,6 +774,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         try:
             self.start_keys.setText(", ".join(d.get("start_keys", DEFAULT_START_KEYS)))
             self.stop_keys.setText(", ".join(d.get("stop_keys", DEFAULT_STOP_KEYS)))
+            self.control_input.setText(str(d.get("control_input", "")))
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
             self.split_min.setValue(float(d.get("split_minutes", 0.0)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
@@ -689,7 +791,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         new = {"start_keys": parse_keys(self.start_keys.text()), "stop_keys": parse_keys(self.stop_keys.text()),
                "record_overlay": self.record_overlay.isChecked(), "lost_warning_s": self.lost_warn.value(),
                "split_minutes": self.split_min.value(), "schedule_at": self.sched_time.time().toString("HH:mm"),
-               "schedule_daily": self.sched_daily.isChecked()}
+               "schedule_daily": self.sched_daily.isChecked(), "control_input": self.control_input.text().strip()}
         d = self._live_settings()
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
             new["pause_outputs_off"] = self.pause_off.isChecked()
@@ -728,6 +830,11 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 rows, zones = s.stats.rows(), (s.stats.current_zones() if s.stats.detected else [])
             self.single_panel.set_zone_rows(rows, zones)
         if self.group.entries:
+            self._complete_pending_arms()  # tests armed while their source was opening
+            for e in self.group.entries:  # the procedures' pop-up messages (multi-test mode)
+                take = getattr(e.session, "take_popups", None)
+                for pop in (take() if take is not None else ()):
+                    self._show_popup(pop, e)
             self.group.tick(now)
             self._save_finished_entries()
             if self.mode == "multi":
@@ -797,16 +904,19 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
 
     def _update_buttons(self):
         s = self.session
-        armed = s is not None
+        armed = s is not None or self._pending_arm is not None  # (pending: armed once its source is open)
         has = self.project is not None
         mode = self.mode
-        st = s.state if armed else None
+        st = s.state if s is not None else None
         # the single test panel's toolbar
-        self.arm_btn.setEnabled(has and (not armed or st == "waiting"))
-        self.arm_btn.setText("Start now" if st == "waiting" else "Arm / Start test")
-        self.arm_btn.setToolTip("Start the test now" if st == "waiting" else
+        waiting_end = s is not None and s.waiting_end  # a procedure ended the test allowing continuation
+        self.arm_btn.setEnabled(has and (not armed or st == "waiting" or waiting_end))
+        self.arm_btn.setText("Continue test" if waiting_end else "Start now" if st == "waiting" else
+                             "Arm / Start test")
+        self.arm_btn.setToolTip("Waiting for test end: continue the test (within 10 s)" if waiting_end else
+                                "Start the test now" if st == "waiting" else
                                 "Arm the test: it starts when its start condition is met (▾ to start it now)")
-        self.pause_btn.setEnabled(st in ("running", "paused"))
+        self.pause_btn.setEnabled(st in ("running", "paused") and not waiting_end)
         self.pause_btn.setText("Resume" if st == "paused" else "Pause")
         self.pause_btn.setIcon(icon("resume" if st == "paused" else "pause"))
         self.pause_btn.setToolTip(self.pause_btn.text())
@@ -856,4 +966,5 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.camera_act.setEnabled(has and cams and single_free)
         self.next_test_act.setEnabled(has and mode != "multi" and not armed and (o is None or o.state == "finished"))
         self.calibrate_act.setEnabled(has and mode != "observe" and self._calibration_target()[0] is not None)
+        self.geometry_act.setEnabled(self.calibrate_act.isEnabled())
         self.obs_panel.show_session(self.obs, self.obs.duration_s if self.obs else 0.0)

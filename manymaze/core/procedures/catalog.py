@@ -32,6 +32,8 @@ def _ev(name, group, label, params=(), generic=True, help=""):
     EVENT_SPECS[name] = {"group": group, "label": label, "params": list(params), "generic": generic, "help": help}
 
 
+_ev("test_waiting", "Test", "Test is waiting to start", help="runs before the test starts (from when it is armed); "
+    "use Prevent / Allow test start to hold the start until something is ready")
 _ev("test_start", "Test", "Test starts")
 _ev("test_end", "Test", "Test ends")
 _ev("time_reached", "Test", "Time reached", [P("time", "number", 60, "Time (s)", True)], False,
@@ -118,6 +120,69 @@ _ev("event_marked", "Logic", "Event marked", [P("name", "name", "", "Event", hel
 _ev("reinforcer_earned", "Logic", "Reinforcer earned", [P("schedule", "schedule", "", "Schedule", True)])
 _ev("touch", "Touch screen", "Touch in area", [P("area", "area", "", "Area", help="empty = any area")])
 _ev("touch_outside", "Touch screen", "Touch outside all areas")
+# --- test timing (event wizard)
+_ev("test_continuation", "Test", "Test continued",
+    help="“End the test” with “allow continuation” fired and the experimenter continued the test within 10 s")
+_ev("time_before_end", "Test", "Time until the test ends", [P("seconds", "number", 10, "Time before the end (s)", True)],
+    False, "once, this long before the end of the test duration")
+_ev("random_interval", "Test", "At random intervals", [P("min", "number", 5, "Shortest interval (s)", True),
+                                                        P("max", "number", 15, "Longest interval (s)", True)], False,
+    "each interval is drawn uniformly between the shortest and the longest")
+_ev("time_of_day", "Test", "Time of day reached", [P("clock", "clock", "12:00", "Time of day (HH:MM[:SS])", True)],
+    False, "once, when the computer's clock passes this time during the test")
+# --- zones, orientation, investigation
+_POINT = P("target", "point", "", "Zone or point", True)
+_ev("investigation_start", "Zones", "Investigation of a zone starts", [_ZONE_ANY],
+    help="the head is in the zone, or within its investigation distance while facing it")
+_ev("investigation_end", "Zones", "Investigation of a zone stops", [_ZONE_ANY])
+_ev("oriented_towards", "Zones", "Animal turns towards a zone or point",
+    [_POINT, P("angle", "number", 45, "Within (°)", True)], False,
+    "the body's orientation comes within this angle of the direction to the zone centre / point")
+_ev("oriented_away", "Zones", "Animal turns away from a zone or point",
+    [_POINT, P("angle", "number", 45, "Within (°)", True)], False,
+    "the animal stops facing the zone / point (the angle grows beyond the given one)")
+_ev("hidden_partial_exit", "Zones", "Partial exit from a hidden zone", [_ZONE_ANY],
+    help="the animal was seen near a hidden zone between two times it was hidden in it (e.g. peeking out of a "
+         "nest); event_value = how long it was out")
+_ev("zone_not_entered", "Zones", "Animal fails to enter a zone for a time",
+    [_ZONE, P("seconds", "number", 30, "Time (s)", True)], False,
+    "since the start of the test or since it last left the zone; once per absence")
+# --- animal
+_ev("position_changed", "Animal", "Position changes",
+    [P("part", "choice:centre|head|tail", "centre", "Body part"),
+     P("distance", "number", 0, "By at least (px)", help="0 = any change")], False)
+_ev("rearing_start", "Animal", "Rearing starts", help="detected from the animal's shape, as the rearing measures")
+_ev("rearing_end", "Animal", "Rearing stops")
+# --- rotary encoders
+_ENC = P("channel", "input", "", "Encoder", req=True)
+_ev("encoder_cw", "Inputs", "Encoder starts turning clockwise", [_DEV, _ENC], False, "clockwise = counts going up")
+_ev("encoder_ccw", "Inputs", "Encoder starts turning anticlockwise", [_DEV, _ENC], False)
+_ev("encoder_reversed", "Inputs", "Encoder changes direction", [_DEV, _ENC], False)
+_ev("encoder_rpm_above", "Inputs", "Encoder speed rises above", [_DEV, _ENC, P("rpm", "number", 60, "RPM", True)],
+    False, "revolutions per minute over the last second (the channel's counts_per_rev option, default 1024)")
+_ev("encoder_rpm_below", "Inputs", "Encoder speed falls below", [_DEV, _ENC, P("rpm", "number", 10, "RPM", True)],
+    False)
+# --- speakers and analogue outputs
+_ev("speaker_start", "Audio", "Speaker starts", [P("device", "audio", "", "Audio device", help="empty = any")])
+_ev("speaker_stop", "Audio", "Speaker stops", [P("device", "audio", "", "Audio device", help="empty = any")])
+_ev("sound_file_end", "Audio", "Sound file finished", [P("device", "audio", "", "Audio device", help="empty = any")],
+    help="a sound file played to its end (not stopped)")
+_ev("analog_output_changed", "Outputs", "Analogue output changes",
+    [_DEV, P("channel", "output", "", "Output", help="empty = any")],
+    help="the level of a PWM / analogue output changes; event_value = the new level")
+# --- conditions over time (event wizard)
+_ev("condition_held", "Logic", "Condition true for a time",
+    [P("cond", "expr", "", "Condition", True), P("seconds", "number", 5, "For (s)", True)], False,
+    "once each time the condition stays true this long")
+_ev("value_changes_by", "Logic", "Value changes within a time",
+    [P("expr", "expr", "", "Value", True), P("amount", "number", 10, "By at least", True),
+     P("seconds", "number", 5, "Within (s)", True)], False,
+    "the value rises or falls by at least this much within the time")
+# --- recording and the computer
+_ev("disk_space_low", "System", "Disk space low", help="the recording disk has less free space than the "
+                                                       "warning level (1 GB by default)")
+_ev("disk_full", "System", "Disk full", help="the recording stopped: no space left on the disk")
+_ev("recording_error", "System", "Recording error", help="the video recording failed and stopped")
 
 ACTION_SPECS: dict[str, dict] = {}
 
@@ -132,6 +197,8 @@ _ac("output_off", "Outputs", "Switch output off", _OUTS)
 _ac("output_toggle", "Outputs", "Toggle output", _OUTS)
 _ac("output_pulse", "Outputs", "Pulse output", _OUTS + [P("duration", "number", 0.5, "Duration (s)", True)])
 _ac("output_set", "Outputs", "Set output level", _OUTS + [P("value", "number", 0.5, "Level (0–1)", True)])
+_ac("output_volts", "Outputs", "Set analogue output (V)", _OUTS + [P("volts", "number", 2.5, "Level (V)", True)],
+    "as in ANY-maze; the channel's max_v option is the voltage of level 1 (default 5 V)")
 _ac("all_outputs_off", "Outputs", "Switch all outputs off", [P("device", "device", "", "Device", help="empty = all")])
 _ac("pulse_train", "Outputs", "Pulse train (optogenetics)",
     _OUTS + [P("frequency", "number", 20, "Frequency (Hz)", True),
@@ -238,9 +305,20 @@ _ac("mark", "Test", "Mark event", [P("name", "text", "Mark", "Event", True)])
 _ac("mark_start", "Test", "Start state event", [P("name", "text", "", "Event", True)])
 _ac("mark_end", "Test", "End state event", [P("name", "text", "", "Event", True)])
 _ac("log", "Test", "Write to log", [P("text", "text", "", "Message", True)])
-_ac("end_test", "Test", "End the test")
+_ac("end_test", "Test", "End the test",
+    [P("reason", "text", "", "Reason", help="stored as the reason for the test end; empty = ended by procedure"),
+     P("allow_continuation", "bool", False, "Allow the test to be continued")],
+    "with “allow continuation” the test is “waiting for test end”: tracking goes on and for 10 s the "
+    "experimenter can continue it (Start button, start key or test control input; fires “Test continued”); "
+    "otherwise it ends, its data cut back to this moment")
 _ac("pause_test", "Test", "Pause the test")
 _ac("resume_test", "Test", "Resume the test")
+_ac("prevent_test_start", "Test", "Prevent test start",
+    help="in a “test is waiting to start” handler: the test does not start (not even when asked to) until Allow test "
+         "start")
+_ac("allow_test_start", "Test", "Allow test start")
+_ac("run_subprocedure", "Test", "Run sub-procedure", [P("procedure", "procedure", "", "Sub-procedure", True)],
+    "starts it alongside this handler (the Call statement runs it in place and waits for it)")
 _ac("enable_procedure", "Test", "Enable procedure", [P("procedure", "procedure", "", "Procedure", True)])
 _ac("disable_procedure", "Test", "Disable procedure", [P("procedure", "procedure", "", "Procedure", True)])
 _ac("show_stimulus", "Touch screen", "Show stimulus",
@@ -249,20 +327,93 @@ _ac("show_stimulus", "Touch screen", "Show stimulus",
      P("color", "text", "#ffffff", "Colour")])
 _ac("hide_stimulus", "Touch screen", "Hide stimulus", [P("area", "area", "", "Area", True)])
 _ac("clear_screen", "Touch screen", "Clear screen")
+# --- test control
+_ac("schedule_test", "Test", "Schedule another test for this animal",
+    [P("stage", "text", "", "Stage", help="empty = this test's stage"),
+     P("apparatus", "text", "", "Apparatus", help="empty = this test's apparatus"),
+     P("delay", "number", 0, "After (minutes)", help="when it is due, from now")],
+    "the test is added to the experiment when this test is saved")
+_ac("warning", "Test", "Generate a warning", [P("text", "text", "", "Message", True)],
+    "shown in the test's warnings and log")
+_ac("error", "Test", "Generate an error", [P("text", "text", "", "Message", True),
+                                           P("stop", "bool", False, "End the test")],
+    "reported as a procedure error")
+# --- zones
+_ac("set_zone_label", "Zones", "Set zone label", [_ZONE, P("label", "text", "", "Label", True)],
+    "e.g. which object is novel; saved with the test (zone_labels)")
+_ac("remove_zone_label", "Zones", "Remove zone label", [_ZONE])
+_ac("move_zone", "Zones", "Set moveable zone location",
+    [P("zone", "point", "", "Zone or point", True), P("x", "number", 0, "Centre x (px)", True),
+     P("y", "number", 0, "Centre y (px)", True)],
+    "moves the zone (or point) for the rest of the test; saved as the test's zone position")
+# --- video recording
+_ac("video_start", "Video", "Start video recording", help="starts again after a stop (a new file)")
+_ac("video_stop", "Video", "Stop video recording")
+_ac("video_pause", "Video", "Pause video recording")
+_ac("video_unpause", "Video", "Resume video recording")
+_ac("video_label", "Video", "Label the video recording",
+    [P("text", "text", "", "Label", True),
+     P("duration", "number", 0, "Also show it on the video for (s)", help="0 = a marker only")],
+    "a marker at this moment of the video (saved with the test, with its time in the video file); optionally "
+    "also burned into the recorded frames")
+# --- display and messages
+_ac("popup", "Communication", "Show a pop-up message", [P("text", "text", "", "Message", True),
+                                                         P("title", "text", "Procedure", "Title")])
+_ac("display_text", "Communication", "Output text on the display",
+    [P("name", "name", "text", "Text name", True, "one text per name; output again to change it"),
+     P("text", "text", "", "Text", True), P("x", "number", 10, "x (px)"), P("y", "number", 30, "y (px)"),
+     P("color", "text", "#ffff00", "Colour")])
+_ac("display_remove", "Communication", "Remove text from the display", [P("name", "name", "text", "Text name", True)])
+_ac("display_clear", "Communication", "Clear the text on the display")
+_ac("send_email", "Communication", "Send an e-mail",
+    [P("text", "text", "", "Message", True), P("subject", "text", "mANY-MAZE", "Subject"),
+     P("to", "text", "", "To", help="empty = the alert device's e-mail addresses")],
+    "through the alert (e-mail / SMS) devices")
+_ac("send_sms", "Communication", "Send an SMS",
+    [P("text", "text", "", "Message", True), P("to", "text", "", "To", help="empty = the alert device's numbers")],
+    "through the alert (e-mail / SMS) devices")
+_ac("run_program", "Communication", "Run a program",
+    [P("program", "file", "", "Program", True), P("arguments", "text", "", "Arguments", help="split like a shell")],
+    "started in the background (no shell); the test does not wait for it")
+_ac("plugin", "Communication", "Trigger a plug-in",
+    [P("plugin", "plugin", "", "Plug-in", True), P("argument", "text", "", "Argument"),
+     P("var", "var", "", "Store the result in")], "plug-ins: see manymaze.core.procedures.plugins")
+# --- output and speaker settings
+_ac("set_output_frequency", "Outputs", "Set output frequency",
+    _OUTS + [P("frequency", "number", 10, "Frequency (Hz)", help="0 = steady (no pulses)")],
+    "used when the output is switched on; a running output changes at once")
+_ac("set_output_duty", "Outputs", "Set output duty cycle", _OUTS + [P("duty_cycle", "number", 50, "Duty cycle (%)",
+                                                                        True)],
+    "of the pulses when a frequency is set")
+_ac("set_output_duration", "Outputs", "Set output on-duration",
+    _OUTS + [P("duration", "number", 1, "Duration (s)", help="0 = until switched off")],
+    "switching the output on then switches it off after this time")
+_ac("set_volume", "Audio", "Set speaker volume", [_AUD, P("volume", "number", 1.0, "Volume (0–1)", True)],
+    "scales the volume of the sounds played afterwards")
 
 STATEMENT_TYPES = {
     "when": "When", "wait": "Wait", "if": "If", "repeat": "Repeat", "set": "Set", "do": "Do", "stop": "Stop",
-    "comment": "Comment", "var": "Variable",
+    "comment": "Comment", "var": "Variable", "call": "Call sub-procedure", "label": "Label", "goto": "Go to",
+    "resolution": "Set timer resolution",
 }
 CONTAINERS = ("when", "if", "repeat")
 STOP_WHAT = {"handler": "Exit this handler", "loop": "Exit the loop", "procedure": "Stop this procedure",
-             "all": "Stop all procedures", "test": "End the test"}
+             "all": "Stop all procedures", "test": "End the test", "return": "Return from the sub-procedure"}
 WHEN_MODES = {"ignore": "Ignore while running", "restart": "Restart", "parallel": "Run in parallel"}
-LOCAL_NAMES = ("event_time", "event_value", "event_name", "timed_out")
+LOCAL_NAMES = ("event_time", "event_value", "event_name", "timed_out", "wait_event")
+# how a variable declared "keep" is kept between tests: one value for the experiment (old projects: true), one per
+# animal or one per apparatus
+KEEP_SCOPES = {"experiment": "For the whole experiment", "animal": "Per animal", "apparatus": "Per apparatus"}
 CONSTANTS = {"true": True, "false": False, "True": True, "False": False, "pi": math.pi, "e": math.e,
-             "inf": math.inf, "nan": math.nan, "none": None, "None": None}
+             "inf": math.inf, "nan": math.nan, "none": None, "None": None,
+             "NA": math.nan}  # NA: ANY-maze's #N/A (undefined), see is_undefined()
 SHOCK_MAX_S = 60.0  # hard cap on any continuous shock
+CONTINUATION_S = 10.0  # "End the test" allowing continuation: how long the experimenter has to continue the test
 STALL_S = 0.25  # a software pulse train later than this (frames stalled) is delayed instead of bursting
 SAFETY_TASKS = ("shock", "audio")  # scheduled tasks that keep running in real time while the test is paused
 STEP_BUDGET = 5000  # statements a thread may run per frame before yielding
+MAX_CALL_DEPTH = 32  # sub-procedures calling sub-procedures
+MAX_EVENT_CHAIN = 100  # events causing events (signals, variable changes): a longer chain is a loop
+MAX_EVENTS_PER_RUN = 20000  # events dispatched in one frame (or key / touch) at most
+MAX_ENCODER_EVENTS = 100  # "every N encoder counts" events in one frame at most (the rest are dropped)
 EPS = 1e-6

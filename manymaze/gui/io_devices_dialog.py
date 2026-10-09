@@ -14,12 +14,29 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 
 from ..core import ioconfig
 from ..core import iodevices as iod
-from .widgets import loading, value_text
+from .widgets import loading, run_and_wait, value_text
 
-# channel table columns: (channel field, header); "options" holds the driver options as key=value text
+# channel table columns: (channel field, header); "options" holds the driver options as key=value text; "role" and
+# "max_on_s" are the outputs' safety options (a shocker's outputs switch off after 60 s at most, see
+# iodevices.Device.max_on_s)
 CH_COLS = [("name", "Name"), ("kind", "Kind"), ("pin", "Pin"), ("pin_b", "Pin B"), ("invert", "Invert"),
-           ("on", "On text"), ("off", "Off text"), ("options", "Options")]
-_CH_KEYS = {"name", "kind", "pin", "pin_b", "invert", "on", "off"}
+           ("on", "On text"), ("off", "Off text"), ("options", "Options"), ("role", "Role"),
+           ("max_on_s", "Max on (s)")]
+_CH_KEYS = {"name", "kind", "pin", "pin_b", "invert", "on", "off", "role", "max_on_s"}
+CH_ROLES = {"": "—", "shocker": "Shocker", "speaker": "Speaker", "light": "Light"}
+OPTIONS_COL = [k for k, _l in CH_COLS].index("options")
+
+
+def open_device_manager(parent, configs, title: str = "Connecting the I/O devices") -> tuple:
+    """A DeviceManager of `configs`, opened in a Worker (a board can take seconds to answer). Returns (manager or
+    None, problems to show the user: failures, device errors, or configured devices of which none opened)."""
+    m, err = run_and_wait(parent, title, lambda progress, stop: iod.DeviceManager(configs))
+    if m is None:
+        return None, [err or "The I/O devices could not be opened."]
+    problems = list(m.errors)
+    if m.devices and not any(d.connected for d in m.devices.values()):
+        problems.append("None of the configured I/O devices could be opened.")
+    return m, problems
 
 
 # labels of the device fields without a widget of their own (shown as text fields)
@@ -73,6 +90,7 @@ class IODevicesDialog(QDialog):
         self.project = project
         self.configs = copy.deepcopy(list(project.io_devices or []))
         self.manager: iod.DeviceManager | None = None  # while connected
+        self._output_errors: list[str] = []  # outputs that could not be set while connected
         self._loading = False
         self._status_keys: list = []
         self._build()
@@ -139,6 +157,13 @@ class IODevicesDialog(QDialog):
         self.f_watchdog.setSpecialValueText("Off")
         self.f_watchdog.setToolTip("All outputs switch off if the computer stops talking to the board for this long "
                                    "(default 2000 ms when the board has outputs; Off = 0)")
+        self.f_safe = QSpinBox()  # syringe pumps (New Era): the pumps' safe mode
+        self.f_safe.setRange(0, 255)
+        self.f_safe.setSuffix(" s")
+        self.f_safe.setSpecialValueText("Off")
+        self.f_safe.setToolTip("New Era pumps: safe mode — a pump stops by itself when it hears nothing valid from "
+                               "the computer for this long (1-255 s; Off = 0). Untested on a real pump: check it "
+                               "before relying on it.")
         self.f_backend = QComboBox()
         for b in ioconfig.AUDIO_BACKENDS:
             self.f_backend.addItem(b, b)
@@ -148,6 +173,7 @@ class IODevicesDialog(QDialog):
         f.addRow("Serial port", prow)
         f.addRow("Baud rate", self.f_baud)
         f.addRow("Watchdog", self.f_watchdog)
+        f.addRow("Safe mode", self.f_safe)
         f.addRow("Audio player", self.f_backend)
         # form rows of the device fields (core DEVICE_FIELDS)
         self._rows = {"port": prow, "baud": self.f_baud, "watchdog_ms": self.f_watchdog, "backend": self.f_backend}
@@ -175,6 +201,7 @@ class IODevicesDialog(QDialog):
         self.f_port.currentTextChanged.connect(lambda *_: self._save_device())
         self.f_baud.currentTextChanged.connect(lambda *_: self._save_device())
         self.f_watchdog.valueChanged.connect(self._watchdog_changed)
+        self.f_safe.valueChanged.connect(self._safe_mode_changed)
         self.f_enabled.toggled.connect(lambda *_: self._save_device())
         rv.addWidget(self.dev_box)
 
@@ -185,16 +212,18 @@ class IODevicesDialog(QDialog):
         self.ch_table.verticalHeader().hide()
         hh = self.ch_table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(len(CH_COLS) - 1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(OPTIONS_COL, QHeaderView.Stretch)
         self.ch_table.itemChanged.connect(lambda *_: self._save_channels())
         self.ch_table.setToolTip(
             "Options (key=value, comma separated): pullup, debounce_ms, counts_per_rev, cm_per_rev, scale, offset, "
             "period_ms (1 = 1 kHz), deadband, filter (lowpass, highpass, bandpass, average) with cutoff_hz / low_hz "
             "/ high_hz / order / window; sensors: sensor (weight, light, temperature, humidity), interface (analog, "
-            "hx711, dht22), units, alert_min, alert_max; role (shocker, speaker or light); intensity (the output "
+            "hx711, dht22), units, alert_min, alert_max; intensity (the output "
             "that sets a shocker's or laser's intensity) with calibration or max_ma; thermostat: sensor, heat, cool, "
             "kp, ki, kd, band, max_temp, set_cmd; olfactometer: odours=name:valve|name:valve, blank, flow, max_flow; "
-            "pumps: address, syringe or diameter_mm; dripper: drop_ul")
+            "pumps: address, syringe or diameter_mm; dripper: drop_ul.\n"
+            "Role: Shocker — the output switches off after 60 s at most, whatever the procedures ask. Max on (s): "
+            "the longest the output may stay on (empty: no limit, or 60 s for a shocker).")
         cv.addWidget(self.ch_table)
         cb = QHBoxLayout()
         b1 = QPushButton("Add channel")
@@ -292,6 +321,7 @@ class IODevicesDialog(QDialog):
             self.f_port.setCurrentText(c.get("port", ""))
             self.f_baud.setCurrentText(str(c.get("baud", 115200)))
             self.f_watchdog.setValue(ioconfig.watchdog_ms(c))
+            self.f_safe.setValue(int(c.get("safe_mode_s") or 0))
             self.f_backend.setCurrentIndex(max(0, self.f_backend.findData(c.get("backend", "auto"))))
             self.f_enabled.setChecked(c.get("enabled", True))
             t = c.get("type", "virtual")
@@ -319,7 +349,11 @@ class IODevicesDialog(QDialog):
             lbl = self._form.labelForField(w)
             if lbl is not None:
                 lbl.setVisible(show)
-        shown = {"name", "kind", "options", *ioconfig.CHANNEL_FIELDS.get(t, ())}
+        self.f_safe.setVisible(t == "syringe_pump")
+        lbl = self._form.labelForField(self.f_safe)
+        if lbl is not None:
+            lbl.setVisible(t == "syringe_pump")
+        shown = {"name", "kind", "options", "role", "max_on_s", *ioconfig.CHANNEL_FIELDS.get(t, ())}
         for col, (key, _label) in enumerate(CH_COLS):
             self.ch_table.setColumnHidden(col, key not in shown)
         self.ch_box.setVisible(t not in ("audio", "notify"))
@@ -358,6 +392,8 @@ class IODevicesDialog(QDialog):
                 if isinstance(fields[k], int) and v.lstrip("-").isdigit():
                     v = int(v)
             c[k] = v
+        if c["type"] != "syringe_pump":
+            c.pop("safe_mode_s", None)
         if retype:  # a new type: its own defaults for the fields it did not have
             for k, v in ioconfig.DEVICE_FIELDS.get(c["type"], {}).items():
                 if v is not None and k not in c:
@@ -374,6 +410,16 @@ class IODevicesDialog(QDialog):
         if not self._loading and c is not None:
             c["watchdog_ms"] = v
 
+    def _safe_mode_changed(self, v):
+        """New Era pumps' safe mode (seconds; 0 = off: not stored)."""
+        c = self._cur()
+        if self._loading or c is None or c.get("type") != "syringe_pump":
+            return
+        if v:
+            c["safe_mode_s"] = int(v)
+        else:
+            c.pop("safe_mode_s", None)
+
     # ------------------------------------------------------------------ channels
     def _fill_channels(self, c):
         self.ch_table.setRowCount(0)
@@ -389,12 +435,22 @@ class IODevicesDialog(QDialog):
                 kind.addItem(label, k)
         kind.setCurrentIndex(max(0, kind.findData(ch.get("kind", "input"))))
         kind.currentIndexChanged.connect(lambda *_: self._save_channels())
+        role = QComboBox()
+        for k, label in CH_ROLES.items():
+            role.addItem(label, k)
+        r0 = str(ch.get("role", "") or "").lower()
+        if r0 and role.findData(r0) < 0:
+            role.addItem(r0, r0)  # a role this list does not know: kept
+        role.setCurrentIndex(max(0, role.findData(r0)))
+        role.currentIndexChanged.connect(lambda *_: self._save_channels())
         inv = QTableWidgetItem()
         inv.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
         inv.setCheckState(Qt.Checked if ch.get("invert") else Qt.Unchecked)
         for col, (key, _label) in enumerate(CH_COLS):
             if key == "kind":
                 self.ch_table.setCellWidget(r, col, kind)
+            elif key == "role":
+                self.ch_table.setCellWidget(r, col, role)
             elif key == "invert":
                 self.ch_table.setItem(r, col, inv)
             else:
@@ -442,6 +498,15 @@ class IODevicesDialog(QDialog):
             for key in ("on", "off"):
                 if txt(r, key):
                     ch[key] = txt(r, key)
+            role = t.cellWidget(r, col["role"])
+            if role is not None and role.currentData():
+                ch["role"] = role.currentData()
+            try:
+                cap = float(txt(r, "max_on_s") or 0)
+            except ValueError:
+                cap = 0.0
+            if cap > 0:
+                ch["max_on_s"] = int(cap) if cap.is_integer() else cap
             # driver options; the columns win over options named like them
             ch.update({k: v for k, v in _parse_options(txt(r, "options")).items() if k not in _CH_KEYS})
             out.append(ch)
@@ -475,20 +540,27 @@ class IODevicesDialog(QDialog):
         else:
             self.connect_devices()
 
-    def connect_devices(self):
+    def connect_devices(self) -> bool:
         self._save_channels()
-        if self.manager is not None:
-            self.manager.close()
-        self.manager = iod.DeviceManager(self.configs)
+        self.disconnect_devices()
+        m, problems = open_device_manager(self, self.configs)
+        if m is None:
+            QMessageBox.warning(self, "I/O devices", "\n".join(problems))
+            return False
+        self.manager = m
         self.connect_btn.setText("Disconnect")
         self._refresh_status(force=True)
         self.timer.start()
+        if problems:
+            QMessageBox.warning(self, "I/O devices", "\n".join(problems[-10:]))
+        return True
 
     def disconnect_devices(self):
         self.timer.stop()
         if self.manager is not None:
             self.manager.close()
         self.manager = None
+        self._output_errors = []
         self.connect_btn.setText("Connect")
         self.status.setRowCount(0)
         self.conn_lbl.setText("Not connected")
@@ -526,9 +598,23 @@ class IODevicesDialog(QDialog):
             if it.text() != text:
                 it.setText(text)
                 it.setForeground(QBrush(QColor("#15803d" if v else "#6b7280")))
-        errs = m.errors
+        errs = m.errors + self._output_errors
         self.conn_lbl.setText("; ".join(errs[-3:]) if errs else f"Connected: {len(m.devices)} device(s)")
         self.conn_lbl.setStyleSheet("color:#dc2626" if errs else "color:#15803d")
+
+    def _set_output(self, m, device, channel, value) -> bool:
+        """Set an output of the connected manager `m`, unless it was disconnected meanwhile; failures are shown."""
+        if m is None or m is not self.manager:
+            return False
+        try:
+            ok = m.set_output(device, channel, value) is not False
+        except Exception as e:
+            ok, msg = False, f"{device} · {channel}: {e}"
+        else:
+            msg = f"{device} · {channel}: the output could not be set"
+        if not ok and msg not in self._output_errors:
+            self._output_errors.append(msg)
+        return ok
 
     def toggle_channel(self, device, channel, kind):
         m = self.manager
@@ -536,14 +622,14 @@ class IODevicesDialog(QDialog):
             return
         dev = m.devices.get(device)
         if kind in ioconfig.OUTPUT_KINDS:
-            m.set_output(device, channel, 0 if dev.outputs.get(channel) else 1)
+            self._set_output(m, device, channel, 0 if dev.outputs.get(channel) else 1)
         else:
             m.set_input(device, channel, 0 if dev.inputs.get(channel) else 1)
         self._poll()
 
     def test_selected(self):
-        if self.manager is None:
-            self.connect_devices()
+        if self.manager is None and not self.connect_devices():
+            return
         m = self.manager
         r = self.status.currentRow()
         c = self._cur()
@@ -562,8 +648,10 @@ class IODevicesDialog(QDialog):
         if k not in ioconfig.OUTPUT_KINDS:
             self.conn_lbl.setText(f"{ch} is an input: press the lever / break the beam to see it change")
             return
-        m.set_output(d, ch, 1)
-        QTimer.singleShot(500, lambda: (m.set_output(d, ch, 0), self._refresh_status()))
+        if self._set_output(m, d, ch, 1):
+            # switched off by the same manager only: it may have been disconnected (closed) within the 500 ms
+            QTimer.singleShot(500, lambda: m is self.manager and (self._set_output(m, d, ch, 0),
+                                                                  self._refresh_status()))
         self._refresh_status()
 
     # ------------------------------------------------------------------ close
@@ -575,11 +663,39 @@ class IODevicesDialog(QDialog):
         if dup:
             QMessageBox.warning(self, "I/O devices", f"Device names must be unique: {', '.join(sorted(dup))}")
             return
+        if not self.check_bandwidth():
+            return
         if self.configs != list(self.project.io_devices or []):
             self.project.io_devices[:] = copy.deepcopy(self.configs)
             self.changed.emit()
         self.disconnect_devices()
         super().accept()
+
+    def bandwidth_problems(self) -> tuple[list[str], bool]:
+        """The devices whose inputs could saturate their serial link (iodevices.bandwidth_check): ([messages],
+        refused — a configuration the board would not run as asked)."""
+        msgs, refused = [], False
+        for c in self.configs:
+            if c.get("enabled", True) is False:
+                continue
+            m, refuse = iod.bandwidth_check(c)
+            msgs += [f"{c.get('name', '?')}: {x}" for x in m]
+            refused = refused or refuse
+        return msgs, refused
+
+    def check_bandwidth(self) -> bool:
+        """Before the configuration is accepted: a refusal is shown and the dialog stays open (sample the inputs
+        less often); a warning asks whether to keep the configuration."""
+        msgs, refused = self.bandwidth_problems()
+        if not msgs:
+            return True
+        text = "\n\n".join(msgs)
+        if refused:
+            QMessageBox.warning(self, "I/O devices", f"{text}\n\nChange the inputs' period_ms (or the baud rate) "
+                                "before keeping this configuration.")
+            return False
+        return QMessageBox.question(self, "I/O devices", f"{text}\n\nKeep this configuration?",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
 
     def reject(self):
         self.disconnect_devices()
@@ -647,9 +763,18 @@ class CalibrationDialog(QDialog):
         self.table.setCellWidget(r, 1, val)
         self.table.setCellWidget(r, 2, b)
 
-    def set_level(self, level: float):
-        if self.manager is not None:
-            self.manager.set_output(self.device, self.ch["intensity"], level)
+    def set_level(self, level: float, quiet: bool = False) -> bool:
+        if self.manager is None:
+            return False
+        try:
+            ok = self.manager.set_output(self.device, self.ch["intensity"], level) is not False
+        except Exception as e:
+            ok, msg = False, str(e)
+        else:
+            msg = "the output could not be set"
+        if not ok and not quiet:
+            QMessageBox.warning(self, "Calibrate", f"{self.device} · {self.ch['intensity']}: {msg}")
+        return ok
 
     def points(self) -> list[tuple[float, float]]:
         out = {}
@@ -664,5 +789,5 @@ class CalibrationDialog(QDialog):
 
     def done(self, r):
         if self.manager is not None:
-            self.set_level(0)
+            self.set_level(0, quiet=True)
         super().done(r)

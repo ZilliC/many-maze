@@ -168,6 +168,19 @@ def sample_background(src, n: int = 21) -> np.ndarray | None:
     return median_background(frames) if frames else None
 
 
+def _frame_window(settings: DetectionSettings, fps: float, count: int) -> tuple[int, int]:
+    """Frames [start, end) of the analysis window. A frame count of 0 (unknown to OpenCV, e.g. some streams) ends
+    the window after its duration; with neither, end is 0 (unknown)."""
+    start = int(round(settings.start_time_s * fps))
+    if count > 0 and start >= count:
+        raise ValueError(f"The analysis starts at {settings.start_time_s:g} s, after the end of the video "
+                         f"({count / (fps or 25.0):.1f} s): set an earlier start time")
+    if not settings.duration_s:
+        return start, count
+    end = start + int(round(settings.duration_s * fps))
+    return start, (min(count, end) if count > 0 else end)
+
+
 def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarray:
     with VideoSource(video_path) as v:
         if settings.background == "frame":
@@ -175,9 +188,7 @@ def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarr
             if f is None:
                 raise IOError("Could not read background frame")
             return to_gray(f)
-        start = int(settings.start_time_s * v.fps)
-        end = int((settings.start_time_s + settings.duration_s) * v.fps) if settings.duration_s else v.frame_count
-        end = min(end, v.frame_count) if v.frame_count else end
+        start, end = _frame_window(settings, v.fps, v.frame_count)  # raises if the window is past the end
         n = max(3, settings.background_samples)
         idx = np.unique(np.linspace(start, max(start, end - 1), n).astype(int))
         frames = []
@@ -196,7 +207,17 @@ def _odd(k: int) -> int:
 
 
 class ArenaTracker:
-    """Tracks the animal(s) within one arena mask of a frame."""
+    """Tracks the animal(s) within one arena mask of a frame.
+
+    Only the part of the frame around the arena is processed (its bounding box widened by the reach of the blur,
+    thin-structure eraser and morphology, so the result is the same as processing the whole frame), and the
+    blurred / erased background of that region is cached, so many small arenas in one large frame (multi-well
+    plates) cost little more than one."""
+
+    # an identity not seen for this many frames is forgotten (its last-known position no longer guides assignment)
+    identity_memory_frames = 250
+    # a pose-only recovery (blob lost, pose model confident) may continue for at most this many consecutive frames
+    pose_only_max_frames = 75
 
     def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None = None, pose=None):
         self.s = settings
@@ -208,20 +229,38 @@ class ArenaTracker:
                 self.pose = pose_estimator(settings)
             except Exception as e:
                 self.pose_error = str(e)
-        self._last_box: list[tuple | None] = [None] * max(1, settings.n_animals)
-        self._last_area: list[float] = [math.nan] * max(1, settings.n_animals)
+        n = max(1, settings.n_animals)
+        self._last_box: list[tuple | None] = [None] * n
+        self._last_area: list[float] = [math.nan] * n
+        self._pose_only = [0] * n  # consecutive frames each animal was kept by the pose model alone
         self.background: np.ndarray | None = None
         self._bg_float: np.ndarray | None = None
-        self.prev_gray: np.ndarray | None = None
+        self._bg_owned = False  # the background arrays are private copies (the adaptive model writes into them)
+        self._bg_version = 0
+        self._bgp_key = None  # cache of the blurred / erased background of the processed region
+        self._bgp: np.ndarray | None = None
+        self._bootstrapped = False  # the background is the first frame seen (no empty-arena image was given)
+        self.prev_gray: np.ndarray | None = None  # previous frame of the processed region (motion)
+        self._prev_box = None
         self.prev: list[Detection] = []
-        self._flip_votes = [0] * max(1, settings.n_animals)
-        self._history: list[list[tuple[float, float]]] = [[] for _ in range(max(1, settings.n_animals))]
+        # identity memory: last-known position, area and age (frames since seen) of every animal
+        self._mem_pos: list[tuple[float, float] | None] = [None] * n
+        self._mem_area: list[float] = [math.nan] * n
+        self._mem_age: list[int] = [0] * n
+        self._flip_votes = [0] * n
+        self._history: list[list[tuple[float, float]]] = [[] for _ in range(n)]
         self._single_area: float | None = None
         self.contrast_votes = [0, 0]  # frames in which the animal was lighter / darker than the background
         if settings.method == "colour":
             hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
         for c in settings.identity_colour_list():
             hex_to_hsv(c)
+        self.set_mask(arena_mask)
+
+    def set_mask(self, arena_mask: np.ndarray | None):
+        """The arena (pixels outside are ignored), e.g. after the apparatus moved during a live test."""
+        settings = self.s
+        self.mask = arena_mask
         if arena_mask is not None:
             ys, xs = np.nonzero(arena_mask)
             m = settings.arena_margin_px
@@ -235,43 +274,125 @@ class ArenaTracker:
                 self.mask = cv2.dilate(arena_mask, k)
         else:
             self.roi = None
+        self._region_key = None
+        self._region_box = None
+        self._mask_c = self.mask  # the mask of the processed region (see _region)
 
     def set_background(self, bg_gray: np.ndarray):
         self.background = bg_gray
         self._bg_float = bg_gray.astype(np.float32)
+        self._bg_owned = False
+        self._bootstrapped = False
+        self._bg_version += 1
+
+    def set_motion_reference(self, frame: np.ndarray):
+        """The frame just before the next one processed (when analysing every Nth frame): motion is then measured
+        over one frame interval, as when every frame is analysed, rather than over N."""
+        gray = to_gray(frame)
+        box = self._region(gray.shape)
+        self.prev_gray = (gray if box is None else gray[box[1]:box[3], box[0]:box[2]]).copy()
+        self._prev_box = box
+
+    # ------------------------------------------------------------------ region of the frame processed
+    def _pad(self) -> int:
+        """How far outside the arena a pixel can still influence detection inside it (blur, thin-structure eraser,
+        opening and closing)."""
+        s = self.s
+        r = _odd(s.blur) // 2 if s.blur and s.blur > 1 else 0
+        if s.erase_thin_px and int(s.erase_thin_px) > 0:
+            r += 4 * (_odd(int(s.erase_thin_px) + 2) // 2)
+        for k in (s.morph_open, s.morph_close):
+            if k and k > 1:
+                r += 2 * (_odd(k) // 2)
+        return r + 2
+
+    def _region(self, shape_hw) -> tuple[int, int, int, int] | None:
+        """(x0, y0, x1, y1) of the frame processed for this arena — its box widened by :meth:`_pad`, so that
+        detection inside the arena is exactly that of the whole frame — or None for the whole frame."""
+        H, W = shape_hw[:2]
+        if self.mask is None or self.roi is None or self.mask.shape[:2] != (H, W):
+            self._mask_c = self.mask
+            return None
+        pad = self._pad()
+        key = (H, W, pad)
+        if self._region_key != key:
+            x0, y0, x1, y1 = self.roi
+            box = (max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad))
+            self._region_box = None if box == (0, 0, W, H) else tuple(int(v) for v in box)
+            b = self._region_box
+            self._mask_c = self.mask if b is None else self.mask[b[1]:b[3], b[0]:b[2]]
+            self._region_key = key
+        return self._region_box
+
+    def _processed_background(self, box) -> np.ndarray:
+        """The background of the processed region blurred and with thin structures erased like the frame (cached
+        until the background changes)."""
+        s = self.s
+        key = (box, self._bg_version, s.blur, s.erase_thin_px)
+        if self._bgp_key != key:
+            bg = self.background if box is None else self.background[box[1]:box[3], box[0]:box[2]]
+            if s.blur and s.blur > 1:
+                bg = cv2.GaussianBlur(bg, (_odd(s.blur), _odd(s.blur)), 0)
+            self._bgp = self._erase_thin(bg)
+            self._bgp_key = key
+        return self._bgp
+
+    def _own_background(self):
+        """Copy a background shared with the caller before writing into it."""
+        if not self._bg_owned:
+            self.background = self.background.copy()
+            self._bg_owned = True
+
+    def _bootstrap(self, gray_full: np.ndarray):
+        """Background tracking without a background: the first frame becomes the model (the "ghost" of an animal
+        already present is absorbed once the animal moves away, see :meth:`_absorb_ghosts`)."""
+        if self.s.method == "background" and self.background is None:
+            self.set_background(gray_full.copy())
+            self._bg_owned = True
+            self._bootstrapped = True
 
     # ------------------------------------------------------------------
     def foreground(self, gray: np.ndarray, frame: np.ndarray | None = None) -> np.ndarray:
+        """Foreground mask (255 = animal) of a whole frame."""
+        self._bootstrap(gray)
+        box = self._region(gray.shape)
+        if box is None:
+            return self._foreground(gray, frame, None)[0]
+        x0, y0, x1, y1 = box
+        fg = np.zeros(gray.shape[:2], np.uint8)
+        fg[y0:y1, x0:x1] = self._foreground(gray[y0:y1, x0:x1], None if frame is None else frame[y0:y1, x0:x1],
+                                            box)[0]
+        return fg
+
+    def _foreground(self, gray: np.ndarray, frame: np.ndarray | None, box) -> tuple[np.ndarray, np.ndarray | None]:
+        """(foreground mask, blurred / erased image) of the processed region (gray and frame already cropped)."""
         s = self.s
         if s.method == "colour":
             if frame is None or frame.ndim != 3:
-                return np.zeros(gray.shape[:2], np.uint8)  # no colour in a greyscale frame
+                return np.zeros(gray.shape[:2], np.uint8), None  # no colour in a greyscale frame
             f = frame
             if s.blur and s.blur > 1:
                 f = cv2.GaussianBlur(f, (_odd(s.blur), _odd(s.blur)), 0)
-            fg = np.zeros(gray.shape[:2], np.uint8)
-            x0, y0, x1, y1 = self.roi if self.roi is not None else (0, 0, gray.shape[1], gray.shape[0])
-            fg[y0:y1, x0:x1] = colour_mask(f[y0:y1, x0:x1], s.target_colour, s.colour_tolerance, s.min_saturation)
-            return self._clean(fg)
+            if box is None and self.roi is not None:  # the whole frame is processed: colour only the arena's box
+                fg = np.zeros(gray.shape[:2], np.uint8)
+                x0, y0, x1, y1 = self.roi
+                fg[y0:y1, x0:x1] = colour_mask(f[y0:y1, x0:x1], s.target_colour, s.colour_tolerance,
+                                               s.min_saturation)
+            else:
+                fg = colour_mask(f, s.target_colour, s.colour_tolerance, s.min_saturation)
+            return self._clean(fg), None
         g = gray
         if s.blur and s.blur > 1:
             g = cv2.GaussianBlur(g, (_odd(s.blur), _odd(s.blur)), 0)
         g = self._erase_thin(g)
         if s.method == "threshold" or self.background is None:
-            if s.method == "background" and self.background is None:
-                # bootstrap adaptive background from first frame
-                self.set_background(g.copy())
-            if s.method == "threshold":
-                thr = s.threshold if s.threshold > 0 else self._otsu(g)
-                if s.contrast == "light":
-                    fg = (g > thr).astype(np.uint8) * 255
-                else:
-                    fg = (g < thr).astype(np.uint8) * 255
-                return self._clean(fg)
-        bg = self.background
-        if s.blur and s.blur > 1:
-            bg = cv2.GaussianBlur(bg, (_odd(s.blur), _odd(s.blur)), 0)
-        bg = self._erase_thin(bg)
+            thr = s.threshold if s.threshold > 0 else self._otsu(g)
+            if s.contrast == "light":
+                fg = (g > thr).astype(np.uint8) * 255
+            else:
+                fg = (g < thr).astype(np.uint8) * 255
+            return self._clean(fg), g
+        bg = self._processed_background(box)
         g16 = g.astype(np.int16)
         b16 = bg.astype(np.int16)
         if s.contrast == "dark":
@@ -284,7 +405,7 @@ class ArenaTracker:
         fg = self._clean((diff > thr).astype(np.uint8) * 255)
         if s.contrast not in ("dark", "light"):
             self._vote_contrast(g, bg, fg)
-        return fg
+        return fg, g
 
     def _vote_contrast(self, g: np.ndarray, bg: np.ndarray, fg: np.ndarray):
         """With contrast "auto": count the frames in which the detected pixels are lighter / darker than the
@@ -321,7 +442,8 @@ class ArenaTracker:
         return cv2.morphologyEx(cv2.morphologyEx(g, cv2.MORPH_CLOSE, k), cv2.MORPH_OPEN, k)
 
     def _otsu(self, img: np.ndarray) -> float:
-        vals = img[self.mask > 0] if self.mask is not None else img.ravel()
+        mask = self._mask_c
+        vals = img[mask > 0] if mask is not None else img.ravel()
         if vals.size == 0:
             return 25
         t, _ = cv2.threshold(vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -329,8 +451,8 @@ class ArenaTracker:
 
     def _clean(self, fg: np.ndarray) -> np.ndarray:
         s = self.s
-        if self.mask is not None:
-            fg = cv2.bitwise_and(fg, self.mask)
+        if self._mask_c is not None:
+            fg = cv2.bitwise_and(fg, self._mask_c)
         if s.morph_open and s.morph_open > 1:
             k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_odd(s.morph_open),) * 2)
             fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k)
@@ -340,12 +462,22 @@ class ArenaTracker:
         return fg
 
     # ------------------------------------------------------------------
-    def process(self, frame: np.ndarray) -> tuple[list[Detection], np.ndarray]:
-        """Detect animals in a frame. Returns (detections, foreground mask)."""
-        gray = to_gray(frame)
-        fg = self.foreground(gray, frame)
+    def process(self, frame: np.ndarray, full_mask: bool = True) -> tuple[list[Detection], np.ndarray]:
+        """Detect animals in a frame. Returns (detections, foreground mask of the whole frame — or, with full_mask
+        False, of the region processed only, which saves a frame-sized copy per arena when it is not used)."""
+        if self.s.method == "background" and self.background is None:
+            self._bootstrap(to_gray(frame))
+        shape = frame.shape[:2]
+        box = self._region(shape)
+        if box is None:
+            gray, crop, off = to_gray(frame), frame, (0, 0)
+        else:
+            x0, y0, x1, y1 = box
+            crop, off = frame[y0:y1, x0:x1], (x0, y0)
+            gray = to_gray(crop)  # only the region is converted
+        fg, g = self._foreground(gray, crop, box)
         n = max(1, self.s.n_animals)
-        contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE, offset=off)
         blobs = []
         for c in contours:
             a = cv2.contourArea(c)
@@ -354,12 +486,16 @@ class ArenaTracker:
             if self.s.max_area_px and a > self.s.max_area_px:
                 continue
             blobs.append((a, c))
+        if blobs and g is not None and self.s.method == "background" and \
+                (self.s.background == "adaptive" or self._bootstrapped):
+            blobs = self._absorb_ghosts(blobs, gray, g, fg, box)
         blobs.sort(key=lambda b: -b[0])
         if n == 1:
             blobs = blobs[:1]
         else:
-            blobs = self._split_merged(blobs, n, fg)
-        dets = [self._describe(c, a, fg.shape) for a, c in blobs[:n]]
+            self._learn_single_area(blobs, n)
+            blobs = self._split_merged(blobs, n)
+        dets = [self._describe(c, a, shape) for a, c in blobs[:n]]
         if n == 1 and dets and self._single_area is None:
             self._single_area = dets[0].area
         colours = self.s.identity_colour_list()
@@ -369,46 +505,129 @@ class ArenaTracker:
             dets = self._assign(dets, n)
         posed = self._apply_pose(frame, dets) if self.pose is not None and frame.ndim == 3 else set()
         self._head_tail_consistency(dets, skip=posed)
-        self._motion(gray, dets)
-        if self.s.background == "adaptive" and self._bg_float is not None:
-            # update background only where no animal is present
-            upd = cv2.dilate(fg, np.ones((15, 15), np.uint8)) == 0
-            cv2.accumulateWeighted(gray.astype(np.float32), self._bg_float, self.s.adaptive_rate,
-                                   mask=upd.astype(np.uint8))
-            self.background = self._bg_float.astype(np.uint8)
-        self.prev_gray = gray
+        self._motion(gray, dets, box)
+        if self.s.background == "adaptive" and self._bg_float is not None and self.s.method == "background":
+            # update the background only where no animal is present (and only the processed region: it is the only
+            # part of the model this arena ever uses)
+            self._own_background()
+            upd = (cv2.dilate(fg, np.ones((15, 15), np.uint8)) == 0).astype(np.uint8)
+            if box is None:
+                cv2.accumulateWeighted(gray.astype(np.float32), self._bg_float, self.s.adaptive_rate, mask=upd)
+                self.background = self._bg_float.astype(np.uint8)
+            else:
+                x0, y0, x1, y1 = box
+                sub = np.ascontiguousarray(self._bg_float[y0:y1, x0:x1])
+                cv2.accumulateWeighted(gray.astype(np.float32), sub, self.s.adaptive_rate, mask=upd)
+                self._bg_float[y0:y1, x0:x1] = sub
+                self.background[y0:y1, x0:x1] = sub.astype(np.uint8)
+            self._bg_version += 1
+        self.prev_gray = gray.copy() if box is not None else gray
+        self._prev_box = box
         self.prev = dets
+        self._remember(dets)
+        if box is not None and full_mask:
+            full = np.zeros(shape, np.uint8)
+            full[box[1]:box[3], box[0]:box[2]] = fg
+            fg = full
         return dets, fg
 
     # ------------------------------------------------------------------
-    def _split_merged(self, blobs, n, fg):
-        """If fewer blobs than animals, split the largest blob(s) with k-means."""
+    def _absorb_ghosts(self, blobs, gray, g, fg, box):
+        """Remove "ghosts" from a background learnt from the live image (adaptive, or the first frame taken as the
+        background): where the animal sat when the model was taken, the empty floor now differs from the model and
+        is detected as a blob the size of the animal that would never fade, since the model is only updated where
+        no animal is detected.
+
+        A ghost is told from an animal by its edges: along the blob's outline the model has the sharp edge of the
+        animal it contains while the image shows flat floor; for a real animal it is the other way round.  Static
+        blobs whose outline is at least twice as sharp in the model as in the image are copied into the model and
+        dropped.  gray / g / fg are the processed region (raw, blurred, foreground; fg is cleared in place)."""
+        bg = self._processed_background(box)
+        ox, oy = (0, 0) if box is None else (box[0], box[1])
+        H, W = gray.shape[:2]
+        keep = []
+        absorbed = False
+        for a, c in blobs:
+            x, y, w, h = cv2.boundingRect(c)
+            x, y = x - ox, y - oy
+            p = 9
+            px0, py0, px1, py1 = max(0, x - p), max(0, y - p), min(W, x + w + p), min(H, y + h + p)
+            local = c - [ox + px0, oy + py0]
+            band = np.zeros((py1 - py0, px1 - px0), np.uint8)
+            cv2.drawContours(band, [local], -1, 255, 3)
+
+            def edge(img):
+                patch = img[py0:py1, px0:px1].astype(np.float32)
+                gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
+                return cv2.mean(cv2.magnitude(gx, gy), mask=band)[0]
+
+            e_img, e_bg = edge(g), edge(bg)
+            ghost = e_bg > 8.0 and e_img < 0.5 * e_bg
+            inside = np.zeros_like(band)
+            cv2.drawContours(inside, [local], -1, 255, -1)
+            if ghost and self.prev_gray is not None and self._prev_box == box:  # and nothing moves in it
+                moved = cv2.absdiff(gray[py0:py1, px0:px1], self.prev_gray[py0:py1, px0:px1]) > self.s.motion_threshold
+                ghost = np.count_nonzero(moved & (inside > 0)) <= 0.02 * max(1, np.count_nonzero(inside))
+            if not ghost:
+                keep.append((a, c))
+                continue
+            # copy the image into the model over the blob and the margin the adaptive update leaves out
+            self._own_background()
+            region = cv2.dilate(inside, np.ones((15, 15), np.uint8)) > 0
+            sl = (slice(oy + py0, oy + py1), slice(ox + px0, ox + px1))
+            src = gray[py0:py1, px0:px1]
+            self.background[sl][region] = src[region]
+            self._bg_float[sl][region] = src[region]
+            cv2.drawContours(fg[py0:py1, px0:px1], [local], -1, 0, -1)
+            absorbed = True
+        if absorbed:
+            self._bg_version += 1
+        return keep
+
+    def _learn_single_area(self, blobs, n: int):
+        """With several animals: the area of one animal, learnt from the frames in which every animal is a blob of
+        its own (running mean of their median area)."""
+        if len(blobs) < n:
+            return
+        a = float(np.median([b[0] for b in blobs[:n]]))
+        self._single_area = a if self._single_area is None else 0.9 * self._single_area + 0.1 * a
+
+    def _split_merged(self, blobs, n, fg=None):
+        """If fewer blobs than animals, split the largest blob(s) with k-means.  Once the area of one animal is
+        known only blobs clearly larger (1.5×) are split: an animal hidden (in a shelter, under a lid) does not cut
+        the visible one in two."""
         if not blobs:
             return blobs
         areas = [a for a, _ in blobs]
         if len(blobs) >= n:
             return blobs[:n]
+        learnt = self._single_area is not None
         single = self._single_area or (np.median(areas) if len(areas) > 1 else areas[0] / n)
         out = list(blobs)
         while len(out) < n:
             out.sort(key=lambda b: -b[0])
             a, c = out[0]
-            k = int(min(n - len(out) + 1, max(2, round(a / max(single, 1)))))
+            ratio = a / max(single, 1)
+            if learnt and ratio < 1.5:
+                break
+            k = int(min(n - len(out) + 1, max(2, round(ratio))))
             if k < 2:
                 break
-            m = np.zeros(fg.shape, np.uint8)
-            cv2.drawContours(m, [c], -1, 255, -1)
-            pts = np.column_stack(np.nonzero(m)[::-1]).astype(np.float32)
+            x0, y0, w, h = cv2.boundingRect(c)
+            m = np.zeros((h, w), np.uint8)
+            cv2.drawContours(m, [c - [x0, y0]], -1, 255, -1)
+            pts = (np.column_stack(np.nonzero(m)[::-1]) + [x0, y0]).astype(np.float32)
             if len(pts) < k * 5:
                 break
             crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
             _, labels, _ = cv2.kmeans(pts, k, None, crit, 3, cv2.KMEANS_PP_CENTERS)
             new = []
             for j in range(k):
-                sub = np.zeros(fg.shape, np.uint8)
+                sub = np.zeros((h, w), np.uint8)
                 p = pts[labels.ravel() == j].astype(int)
-                sub[p[:, 1], p[:, 0]] = 255
-                cs, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                sub[p[:, 1] - y0, p[:, 0] - x0] = 255
+                cs, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE, offset=(x0, y0))
                 if cs:
                     cc = max(cs, key=cv2.contourArea)
                     new.append((float(len(p)), cc))
@@ -466,25 +685,55 @@ class ArenaTracker:
         d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
         return d
 
+    def _remember(self, dets: list[Detection]):
+        """Update the identity memory: last-known position / area of every animal seen, age of the others."""
+        for i in range(len(self._mem_pos)):
+            d = dets[i] if i < len(dets) else None
+            if d is not None and d.detected and math.isfinite(d.x) and math.isfinite(d.y):
+                self._mem_pos[i], self._mem_age[i] = (d.x, d.y), 0
+                if math.isfinite(d.area):
+                    self._mem_area[i] = d.area
+            elif self._mem_pos[i] is not None:
+                self._mem_age[i] += 1
+                if self._mem_age[i] > self.identity_memory_frames:
+                    self._mem_pos[i] = None
+
+    def _gate_px(self, i: int) -> float:
+        """How far (px) from its last-known position animal i may be found: four body lengths, plus one per frame
+        it has not been seen."""
+        a = self._single_area or self._mem_area[i]
+        body = max(10.0, math.sqrt(a)) if a and math.isfinite(a) else 10.0
+        return body * (4 + self._mem_age[i])
+
+    def _memory_cost(self, n: int, dets: list[Detection]) -> np.ndarray:
+        """Assignment cost of animal i to detection j: the distance from the animal's last-known position (kept
+        while it is unseen, see :meth:`_remember`); 1e5 (no preference) without a position or beyond the gate."""
+        cost = np.full((n, len(dets)), 1e5)
+        for i in range(n):
+            p = self._mem_pos[i]
+            if p is None:
+                continue
+            gate = self._gate_px(i)
+            for j, d in enumerate(dets):
+                dist = math.hypot(p[0] - d.x, p[1] - d.y)
+                # beyond the gate: no better than an animal without memory (the tiny term still orders them)
+                cost[i, j] = dist if dist <= gate else 1e5 + 1e-3 * dist
+        return cost
+
     def _assign(self, dets: list[Detection], n: int) -> list[Detection]:
-        """Keep identities stable across frames (Hungarian assignment on distance)."""
+        """Keep identities stable across frames: Hungarian assignment on the distance to each animal's last-known
+        position, remembered while the animal is not detected (e.g. one empty frame, a hidden animal) so that
+        animals are not swapped when they reappear."""
         out = [Detection() for _ in range(n)]
         if n == 1:
             if dets:
                 out[0] = dets[0]
             return out
-        prev_ok = [i for i, p in enumerate(self.prev) if p.detected] if self.prev else []
-        if not prev_ok:
+        if all(p is None for p in self._mem_pos[:n]):
             for i, d in enumerate(dets[:n]):
                 out[i] = d
             return out
-        cost = np.full((n, len(dets)), 1e6)
-        for i, p in enumerate(self.prev):
-            for j, d in enumerate(dets):
-                if p.detected:
-                    cost[i, j] = math.hypot(p.x - d.x, p.y - d.y)
-                else:
-                    cost[i, j] = 1e5
+        cost = self._memory_cost(n, dets)
         rows, cols = linear_sum_assignment(cost)
         used = set()
         for r, c in zip(rows, cols):
@@ -515,11 +764,11 @@ class ArenaTracker:
         if not dets or score.max() <= 0:
             return self._assign(dets, n)
         cost = -score
-        if self.prev:  # tie-break blobs without a visible mark by distance to the previous position
-            for i, p in enumerate(self.prev[:n]):
+        for i in range(n):  # tie-break blobs without a visible mark by distance to the last-known position
+            p = self._mem_pos[i]
+            if p is not None:
                 for j, d in enumerate(dets):
-                    if p.detected:
-                        cost[i, j] += 1e-6 * math.hypot(p.x - d.x, p.y - d.y)
+                    cost[i, j] += 1e-6 * math.hypot(p[0] - d.x, p[1] - d.y)
         rows, cols = linear_sum_assignment(cost)
         out = [Detection() for _ in range(n)]
         for r, c in zip(rows, cols):
@@ -530,7 +779,8 @@ class ArenaTracker:
         """Refine head / centre / tail base with the pose model. Returns indices whose head/tail came from it.
 
         The crop is the blob's bounding box; if the blob was lost (poor contrast) the last box is re-used and a
-        confident pose detection keeps the animal tracked."""
+        confident pose detection keeps the animal tracked — for at most pose_only_max_frames frames in a row, so
+        that a model confidently "seeing" an animal in an empty box cannot keep a lost animal forever."""
         idx, boxes = [], []
         H, W = frame.shape[:2]
         for i, d in enumerate(dets):
@@ -538,7 +788,10 @@ class ArenaTracker:
                 x, y, w, h = cv2.boundingRect(d.contour)
                 box = (x, y, x + w, y + h)
                 self._last_box[i], self._last_area[i] = box, d.area
+                self._pose_only[i] = 0
             else:
+                if self._pose_only[i] >= self.pose_only_max_frames:
+                    self._last_box[i] = None  # lost: found again only by its blob
                 box = self._last_box[i]
             if box is not None:
                 idx.append(i)
@@ -556,6 +809,7 @@ class ArenaTracker:
             if not d.detected:
                 if not ok(centre):
                     continue
+                self._pose_only[i] += 1
                 d.detected, d.area = True, self._last_area[i]
                 d.x, d.y = centre[0], centre[1]
                 x0, y0, x1, y1 = self._last_box[i]
@@ -602,24 +856,29 @@ class ArenaTracker:
                 d.hx, d.hy, d.tx, d.ty = d.tx, d.ty, d.hx, d.hy
                 d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
 
-    def _motion(self, gray: np.ndarray, dets: list[Detection]):
-        if self.prev_gray is None:
+    def _motion(self, gray: np.ndarray, dets: list[Detection], box=None):
+        """Pixel change since the previous frame (gray is the processed region, box its place in the frame).  The
+        previous frame is the one before this one even when only every Nth frame is analysed
+        (:meth:`set_motion_reference`), so motion — and freezing — do not depend on the analysis frame step."""
+        if self.prev_gray is None or self._prev_box != box or self.prev_gray.shape != gray.shape:
             for d in dets:
                 d.motion = 0.0 if d.detected else math.nan
             return
         diff = cv2.absdiff(gray, self.prev_gray)
         changed = (diff > self.s.motion_threshold).astype(np.uint8)
-        if self.mask is not None:
-            changed &= (self.mask > 0).astype(np.uint8)
+        if self._mask_c is not None:
+            changed &= (self._mask_c > 0).astype(np.uint8)
         if self.s.n_animals == 1:
             total = float(changed.sum())
             for d in dets:
                 d.motion = total
             return
+        ox, oy = (0, 0) if box is None else (box[0], box[1])
         for d in dets:
             if not d.detected or d.contour is None:
                 continue
             x, y, w, h = cv2.boundingRect(d.contour)
+            x, y = x - ox, y - oy
             pad = int(0.3 * max(w, h))
             y0, y1 = max(0, y - pad), min(gray.shape[0], y + h + pad)
             x0, x1 = max(0, x - pad), min(gray.shape[1], x + w + pad)
@@ -687,9 +946,18 @@ def track_video(video_path: str, jobs: list[ArenaJob],
     if not jobs:
         return []
     s0 = jobs[0].settings
-    pose = None
-    if any(j.settings.body_parts == "pose" for j in jobs):
-        pose = pose_estimator(next(j.settings for j in jobs if j.settings.body_parts == "pose"), threads=decode_threads)
+    # one estimator per distinct (model, device): jobs may use different pose models
+    poses: dict[tuple, object] = {}
+    for j in jobs:
+        if j.settings.body_parts == "pose":
+            key = (j.settings.pose_model, j.settings.pose_device)
+            if key not in poses:
+                poses[key] = pose_estimator(j.settings, threads=decode_threads)
+
+    def pose_of(settings: DetectionSettings):
+        return poses.get((settings.pose_model, settings.pose_device)) if settings.body_parts == "pose" else None
+
+    pose = next(iter(poses.values()), None)
     with VideoSource(video_path) as v:
         W, H = v.width, v.height
         trackers = []
@@ -698,7 +966,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             mask = job.mask
             if mask is None and job.apparatus is not None:
                 mask = job.apparatus.arena_or_bounds().mask((H, W))
-            tr = ArenaTracker(job.settings, mask, pose=pose if job.settings.body_parts == "pose" else None)
+            tr = ArenaTracker(job.settings, mask, pose=pose_of(job.settings))
             if job.settings.method == "background" and job.settings.background != "adaptive":
                 if background is not None:
                     tr.set_background(background)
@@ -710,9 +978,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     tr.set_background(bg_cache[key])
             trackers.append(tr)
         fps = v.fps
-        start = int(round(s0.start_time_s * fps))
-        end = v.frame_count if not s0.duration_s else min(v.frame_count, start + int(round(s0.duration_s * fps)))
-        if end <= 0:
+        start, end = _frame_window(s0, fps, v.frame_count)
+        if end <= 0:  # neither a frame count nor a duration: read to the end of the video
             end = 10**12
         step = max(1, int(s0.frame_step))
         builders = [[TrackBuilder() for _ in range(max(1, j.settings.n_animals))] for j in jobs]
@@ -725,11 +992,14 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         for i, frame in reader:
             if i >= end:
                 break
+            if step > 1 and (i - start) % step == step - 1:
+                for tr in trackers:  # the frame before the next analysed one: motion over one frame interval
+                    tr.set_motion_reference(frame)
             if (i - start) % step == 0:
                 t = (i - start) / fps
                 all_dets = []
                 for tr, bl in zip(trackers, builders):
-                    dets, _ = tr.process(frame)
+                    dets, _ = tr.process(frame, full_mask=False)
                     for b, d in zip(bl, dets):
                         b.add(t, d)
                     all_dets.append(dets)
@@ -751,9 +1021,10 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             if trk.animal_contrast():
                 tr.meta["animal_contrast"] = trk.animal_contrast()
             tr.meta["decoder"] = reader.backend
-            if job.settings.body_parts == "pose" and pose is not None:
+            est = pose_of(job.settings)
+            if est is not None:
                 tr.meta["pose_model"] = job.settings.pose_model
-                tr.meta["pose_device"] = pose.provider
+                tr.meta["pose_device"] = est.provider
             tracks.append(postprocess(tr, job.settings))
         out.append(tracks)
     return out
@@ -765,6 +1036,8 @@ TRAIL_BGR = (214, 120, 37)  # live images: blue trail, green centre, orange head
 CENTRE_BGR = (60, 200, 60)
 HEAD_BGR = (31, 138, 255)
 OUTLINE_BGR = (230, 230, 60)  # whole-body outline (cyan)
+BEAM_BGR = (80, 230, 255)  # orientation "flashlight beam" (light yellow)
+BEAM_HALF_ANGLE = 20.0  # degrees either side of the head direction
 
 
 def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
@@ -775,9 +1048,46 @@ def hex_to_bgr(h: str | None) -> tuple[int, int, int]:
         return (255, 255, 255)
 
 
-def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True) -> np.ndarray:
+def heading_of(d: Detection) -> float:
+    """The direction the animal faces (degrees, 0 = +x, clockwise as y points down): tail → head, else the body
+    orientation; NaN when unknown."""
+    if math.isfinite(d.hx) and math.isfinite(d.tx) and (d.hx, d.hy) != (d.tx, d.ty):
+        return math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
+    return d.angle if math.isfinite(d.angle) else math.nan
+
+
+def draw_beam(img: np.ndarray, d: Detection, alpha: float = 0.35, half_angle: float = BEAM_HALF_ANGLE) -> bool:
+    """The animal's orientation as a translucent "flashlight beam" wedge from its head, in place (ANY-maze's shaded
+    orientation area): half_angle degrees either side of the direction it faces.  Returns False when the
+    orientation is unknown."""
+    ang = heading_of(d)
+    if not math.isfinite(ang) or not math.isfinite(d.x):
+        return False
+    ox, oy = (d.hx, d.hy) if math.isfinite(d.hx) else (d.x, d.y)
+    body = math.hypot(d.hx - d.tx, d.hy - d.ty) if math.isfinite(d.hx) and math.isfinite(d.tx) else math.nan
+    if not math.isfinite(body) or body < 2:
+        body = math.sqrt(d.area) if d.area and math.isfinite(d.area) else 20.0
+    length = max(3.0 * body, 0.06 * img.shape[1])
+    pts = [(ox, oy)] + [(ox + length * math.cos(math.radians(a)), oy + length * math.sin(math.radians(a)))
+                        for a in np.linspace(ang - half_angle, ang + half_angle, 9)]
+    poly = np.round(np.array(pts)).astype(np.int32)
+    h, w = img.shape[:2]
+    x0, y0 = np.clip(poly.min(axis=0), 0, [w, h])
+    x1, y1 = np.clip(poly.max(axis=0) + 1, 0, [w, h])
+    if x1 <= x0 or y1 <= y0:
+        return True
+    roi = img[y0:y1, x0:x1]
+    layer = roi.copy()
+    cv2.fillPoly(layer, [poly - [x0, y0]], BEAM_BGR, cv2.LINE_AA)
+    img[y0:y1, x0:x1] = cv2.addWeighted(layer, alpha, roi, 1.0 - alpha, 0)
+    return True
+
+
+def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy: bool = True,
+                  beam: bool | float = False) -> np.ndarray:
     """The animal's position (green centre, orange head, cyan body outline) and trail drawn on a BGR copy of the frame (live camera
-    images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom)."""
+    images: the GUI draws the apparatus on top of the image, so it stays sharp at any zoom).  beam: the animal's
+    orientation as a "flashlight beam" from its head (:func:`draw_beam`); a number is the beam's half angle."""
     img = frame
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -791,6 +1101,8 @@ def draw_tracking(frame: np.ndarray, dets: Sequence[Detection], trail=None, copy
     for d in dets or []:
         if not d.detected or not math.isfinite(d.x):
             continue
+        if beam:
+            draw_beam(img, d, half_angle=BEAM_HALF_ANGLE if beam is True else float(beam))
         if d.outline is not None and len(d.outline) > 2:
             cv2.polylines(img, [d.outline.reshape(-1, 1, 2)], True, OUTLINE_BGR, s, cv2.LINE_AA)
         cv2.circle(img, (int(d.x), int(d.y)), 2 + 2 * s, CENTRE_BGR, -1, cv2.LINE_AA)

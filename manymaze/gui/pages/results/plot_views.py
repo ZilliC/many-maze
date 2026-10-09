@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDoubleSpinBox,
 
 from ....core import charts, plots
 from ....core.measures import kinematics
+from ....core.pauses import period_frames
 from ....core.videoexport import export_video
 from ...figures import FIG_FILTER, figure_to_clipboard
 from ...widgets import PlotCanvas, cv_to_qpixmap, error_box
@@ -227,7 +228,9 @@ class PlotViewsMixin:
             options = self.video_opts.options()  # the options shown on the Video export view
         if options is None:
             dlg = VideoExportDialog(self)
-            if dlg.exec() != QDialog.Accepted:
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
                 return
             options = dlg.options()
         if path is None:
@@ -294,11 +297,14 @@ class PlotViewsMixin:
         period = r.get("Period", "Whole test")
         t_range = None
         if period and period != "Whole test":
-            rng = self._period_range(test, tr, period)
-            if rng is not None:
-                tr = tr.slice_time(*rng)
-                t_range = rng
+            t_range = self._period_range(test, tr, period)
+            if t_range is not None:
                 title += f" · {period}"
+        # periods are in test time (as the results): select the frames by their test time, leaving out the paused
+        # ones (the whole test too); the track keeps its recording times for the video
+        keep = period_frames(tr, test.pauses, t_range)
+        if not keep.all():
+            tr = tr.take(keep)
         self._detail = {"test": test, "track": tr, "full": full, "app": app, "t_range": t_range,
                         "events": test.events if ai == 0 else [], "others": [o for j, o in enumerate(tracks) if j != ai]}
         self.detail_lbl.setText(title)
@@ -429,7 +435,7 @@ class PlotViewsMixin:
                                                        zip(np.linspace(0, dur, 5)[:-1], np.linspace(0, dur, 5)[1:])]
                     fm = plots.behaviour_markers(full, app, s, d["events"], beh) if o["markers"] else None
                     fig = plots.segmented_track_plot(full, app, periods, frame=frame, color_by=o["color_by"],
-                                                     part=o["part"], markers=fm, settings=s)
+                                                     part=o["part"], markers=fm, settings=s, pauses=test.pauses)
                 else:
                     fig = plots.track_plot(tr, app, frame=frame, size=(4.2, 4), color_by=o["color_by"],
                                            part=o["part"], markers=markers, colorbar=o["color_by"] != "none",

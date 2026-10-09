@@ -4,6 +4,7 @@ and group graphs (matplotlib)."""
 from __future__ import annotations
 
 import io
+import logging
 import math
 
 import matplotlib
@@ -19,9 +20,12 @@ from scipy.ndimage import gaussian_filter  # noqa: E402
 
 from . import charts  # noqa: E402
 from .apparatus import Apparatus  # noqa: E402
+from .pauses import period_frames, to_recording_time  # noqa: E402
 from .project import Behaviour  # noqa: E402
 from .stats import descriptive, error_value, stars  # noqa: E402
 from .track import Track  # noqa: E402
+
+log = logging.getLogger(__name__)
 
 COLOR_BY = {"none": "Single colour", "time": "Time", "speed": "Speed"}
 HEATMAP_NORMS = {"auto": "Automatic (each map)", "percent": "% of time", "relative": "Relative (max = 1)"}
@@ -59,7 +63,8 @@ def _limits(ax, app: Apparatus | None, track: Track | None, frame=None):
         return
     try:
         x0, y0, x1, y1 = app.arena_or_bounds().bounds()
-    except Exception:
+    except Exception as e:
+        log.debug("no arena bounds, using the track's extent: %s", e)
         x0, y0 = np.nanmin(track.x), np.nanmin(track.y)
         x1, y1 = np.nanmax(track.x), np.nanmax(track.y)
     pad = 0.05 * max(x1 - x0, y1 - y0, 1)
@@ -71,7 +76,8 @@ def _limits(ax, app: Apparatus | None, track: Track | None, frame=None):
 def _bounds(app: Apparatus | None, track: Track | None = None):
     try:
         return app.arena_or_bounds().bounds()
-    except Exception:
+    except Exception as e:
+        log.debug("no arena bounds, using the track's extent: %s", e)
         if track is None or not np.isfinite(track.x).any():
             return (0.0, 0.0, 1.0, 1.0)
         return (float(np.nanmin(track.x)), float(np.nanmin(track.y)), float(np.nanmax(track.x)),
@@ -202,7 +208,8 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
     if values is None and color_by and color_by != "none" and len(x) > 1:
         try:
             values, value_label = _series_for(track, app, color_by, settings)
-        except Exception:
+        except Exception as e:
+            log.warning("colouring the track by %r failed: %s", color_by, e)
             values = None
     if values is not None and len(x) > 1:
         from matplotlib.collections import LineCollection
@@ -263,8 +270,9 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
 
 def segmented_track_plot(track: Track, app: Apparatus | None, periods: list[tuple[str, float, float]], frame=None,
                          color_by: str = "time", part: str = "centre", markers: list | None = None,
-                         settings=None, ncols: int = 0, size=None, title: str = "") -> Figure:
-    """Small multiples: one track plot per time period, on a shared colour scale."""
+                         settings=None, ncols: int = 0, size=None, title: str = "", pauses=None) -> Figure:
+    """Small multiples: one track plot per time period, on a shared colour scale. The periods are in test time
+    (as the results; pauses: Test.pauses), the track and markers in recording time: paused frames are left out."""
     periods = list(periods) or [("Whole test", float(track.t[0]) if len(track) else 0.0, math.inf)]
     n = len(periods)
     ncols = ncols or min(n, 4)
@@ -277,15 +285,18 @@ def segmented_track_plot(track: Track, app: Apparatus | None, periods: list[tupl
             values, label = _series_for(track, app, color_by, settings)
             fin = np.asarray(values, float)[np.isfinite(values)]
             norm = Normalize(float(fin.min()), float(fin.max())) if len(fin) else None
-        except Exception:
+        except Exception as e:
+            log.warning("colouring the track by %r failed: %s", color_by, e)
             values = None
     mappable = None
     axes = []
     for i, (lab, a, b) in enumerate(periods):
         ax = fig.add_subplot(nrows, ncols, i + 1)
         axes.append(ax)
-        m = (track.t >= a) & (track.t < b)
-        sub = track.slice_time(a, b)
+        m = period_frames(track, pauses, (a, b))
+        sub = track.take(m)
+        a, b = (float(to_recording_time([a], pauses, True)[0]), float(to_recording_time([b], pauses, False)[0])) \
+            if pauses else (a, b)
         mk = [dict(mm, t=max(mm["t"], a), t_end=None if mm.get("t_end") is None else min(mm["t_end"], b))
               for mm in markers or [] if mm["t"] < b and (mm.get("t_end") if mm.get("t_end") is not None
                                                            else mm["t"]) >= a]
@@ -335,9 +346,12 @@ def occupancy(tracks: list[Track], app: Apparatus | None, bins: int = 60, sigma:
     x = np.concatenate(xs) if xs else np.zeros(0)
     y = np.concatenate(ys) if ys else np.zeros(0)
     w = np.concatenate(ws) if ws else np.zeros(0)
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(w)
+    x, y, w = x[ok], y[ok], w[ok]
     try:
         x0, y0, x1, y1 = app.arena_or_bounds().bounds()
-    except Exception:
+    except Exception as e:
+        log.debug("no arena bounds, using the track's extent: %s", e)
         x0, y0, x1, y1 = (x.min(), y.min(), x.max(), y.max()) if len(x) else (0, 0, 1, 1)
     span = max(x1 - x0, y1 - y0, 1e-6)
     nx = max(2, int(round(bins * (x1 - x0) / span)))
@@ -446,6 +460,7 @@ def group_heatmap(project, tests_by_group: dict[str, list], heat_of: str | None 
             for tr in project.load_tracks(t)[:1]:
                 mask = charts.state_mask(tr, app, heat_of, project.analysis_for(t), t.events,
                                          project.behaviours) if heat_of else None
+                rng = None
                 if period:
                     try:
                         rng = next(((a, b) for lab, a, b in project.test_periods(t, tr) if lab == period), None)
@@ -453,9 +468,12 @@ def group_heatmap(project, tests_by_group: dict[str, list], heat_of: str | None 
                         rng = None
                     if rng is None:
                         continue
-                    keep = (tr.t >= rng[0]) & (tr.t < rng[1])
+                # the frames of the test (none while it was paused) in the period, which is in test time (as the
+                # results); the track keeps its recording times
+                keep = period_frames(tr, t.pauses, rng)
+                if not keep.all():
                     mask = None if mask is None else mask[keep]
-                    tr = tr.slice_time(*rng)
+                    tr = tr.take(keep)
                 ms.append(mask)
                 trs.append(align_track(tr, app, (t.variables or {}).get("heatmap_transform", "none"), ref))
             k += 1
@@ -752,6 +770,87 @@ def message_figure(text: str, size=(4.2, 3.6), fig: Figure | None = None) -> Fig
     return fig
 
 
+# ---------------------------------------------------------------- the zone map
+def zone_map_figure(app: Apparatus, background=None, labels: bool = True, fill: bool = True,
+                    size: tuple | None = None, fig: Figure | None = None) -> Figure:
+    """The apparatus map as a figure: arena outline, zones (filled translucent in their colours), points and
+    lines with their names, the calibration in the corner; drawn over `background` (a BGR / grey video frame)
+    when given.  Image coordinates (y down), equal axes, no frame."""
+    if size is None:
+        try:
+            x0, y0, x1, y1 = app.arena_or_bounds().bounds()
+            w, h = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+        except ValueError:
+            w, h = 4.0, 3.0
+        if background is not None:
+            h, w = background.shape[:2]
+        size = (6.0, max(2.0, min(12.0, 6.0 * h / w)))
+    fig = fig or Figure(figsize=size, dpi=100)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if background is not None:
+        img = background[..., ::-1] if background.ndim == 3 else background
+        ax.imshow(img, cmap="gray" if img.ndim == 2 else None, interpolation="bilinear")
+    try:
+        arena = app.arena_or_bounds()
+        ax.add_patch(MplPolygon(arena.polygon(), closed=True, fill=False, ec="#334155", lw=1.6))
+    except ValueError:
+        arena = None
+    for z in app.zones:
+        poly = z.shape.polygon()
+        if fill:
+            ax.add_patch(MplPolygon(poly, closed=True, fc=z.color, ec="none", alpha=0.18))
+        ax.add_patch(MplPolygon(poly, closed=True, fill=False, ec=z.color, lw=1.2,
+                                ls="--" if z.hidden else "-"))
+        if labels:
+            cx, cy = z.shape.centroid()
+            ax.text(cx, cy, z.name, fontsize=7, ha="center", va="center", color=z.color,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7))
+    for ln in app.lines:
+        ax.plot([ln.x1, ln.x2], [ln.y1, ln.y2], "-", color=ln.color, lw=1.4)
+        if labels:
+            ax.text((ln.x1 + ln.x2) / 2, (ln.y1 + ln.y2) / 2, ln.name, fontsize=6, color=ln.color,
+                    ha="left", va="bottom")
+    for p in app.points:
+        ax.plot(p.x, p.y, "o", color=p.color, ms=5, mec="white", mew=0.6)
+        if labels:
+            ax.text(p.x, p.y, f"  {p.name}", fontsize=6, color=p.color, ha="left", va="center")
+    if background is not None:
+        h, w = background.shape[:2]
+        ax.set_xlim(0, w)
+        ax.set_ylim(h, 0)
+    else:
+        ax.autoscale_view()
+        if arena is not None:
+            x0, y0, x1, y1 = arena.bounds()
+            pad = 0.04 * max(x1 - x0, y1 - y0, 1)
+            pts = np.vstack([arena.polygon()] + [z.shape.polygon() for z in app.zones])
+            x0, y0 = pts.min(axis=0)
+            x1, y1 = pts.max(axis=0)
+            ax.set_xlim(x0 - pad, x1 + pad)
+            ax.set_ylim(y1 + pad, y0 - pad)
+    cal = f"{app.px_per_cm:.3g} px/cm" if app.px_per_cm else "not calibrated"
+    ax.text(0.01, 0.01, f"{app.name} · {cal}", transform=ax.transAxes, fontsize=6, color="#475569",
+            ha="left", va="bottom")
+    return fig
+
+
+def save_zone_map(app: Apparatus, path, background=None, labels: bool = True, fill: bool = True,
+                  dpi: int = 200) -> str:
+    """Save the zone map (:func:`zone_map_figure`) as an image; the format follows the extension (.png, .svg,
+    .pdf, .jpg …; none = .png).  Returns the path written."""
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.suffix:
+        p = p.with_suffix(".png")
+    fig = zone_map_figure(app, background, labels, fill)
+    fig.savefig(str(p), dpi=dpi, format=p.suffix[1:].lower().replace("jpg", "jpeg"),
+                facecolor="white", transparent=False)
+    return str(p)
+
+
 # ---------------------------------------------------------------- charts over time
 def chart_figure(track: Track, app: Apparatus, names: list[str], settings=None, events=None,
                  behaviours: list[Behaviour] | None = None,
@@ -834,8 +933,8 @@ def chart_figure(track: Track, app: Apparatus, names: list[str], settings=None, 
         fig.suptitle(title, fontsize=9)
     try:
         fig.subplots_adjust(left=0.2, right=0.97, top=0.9 if (band_data or title) else 0.96, bottom=0.09)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("subplots_adjust failed: %s", e)
     return fig
 
 

@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 import cv2
 import numpy as np
 
-from .camhw import CameraHardware, describe_report
+from .camhw import CameraHardware, UnsupportedPixelFormat, describe_report
 from .camsources import NativeCamera, is_native_source, native_label
 from .tracking import sample_background
 
@@ -286,18 +286,42 @@ class SourceSpec:
 class FramePacer:
     """Timestamps frames and paces video files at their frame rate × speed (cameras are paced by the device).
 
-    ``clock`` is injectable for tests."""
+    Changing ``speed`` keeps the playback position: the frames still to come are paced at the new speed from now
+    on (not as if the whole file had been played at it).  Waits are slept in short slices so that ``stop`` (a
+    callable, True to stop waiting) and a speed change read from ``speed_source`` (a callable) take effect at once.
+    ``clock`` and ``sleep`` are injectable for tests."""
 
-    def __init__(self, fps: float, is_camera: bool, speed: float = 1.0, clock=time.monotonic, sleep=time.sleep):
+    slice_s = 0.05  # longest single sleep
+
+    def __init__(self, fps: float, is_camera: bool, speed: float = 1.0, clock=time.monotonic, sleep=time.sleep,
+                 stop=None, speed_source=None):
         self.fps = fps or 25.0
         self.is_camera = is_camera
-        self.speed = speed
+        self._speed = speed
         self.clock, self.sleep = clock, sleep
+        self.stop, self.speed_source = stop, speed_source
         self.reset()
 
     def reset(self):
         self.t_start = self.clock()
         self.index = 0
+
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    @speed.setter
+    def speed(self, value: float):
+        old, self._speed = self._speed, value
+        if value == old or self.is_camera:
+            return
+        # rebase: the current playback position is reached now at the new speed
+        now = self.clock()
+        pos = self.index / self.fps
+        if old and old > 0:
+            pos = min(pos, max(0.0, (now - self.t_start) * old))
+        if value and value > 0:
+            self.t_start = now - pos / value
 
     def next(self) -> float:
         """Timestamp (s) of the frame just read; waits until it is due for files."""
@@ -307,8 +331,20 @@ class FramePacer:
             ts = self.index / self.fps
             if self.speed > 0:
                 delay = self.t_start + ts / max(self.speed, 1e-3) - self.clock()
-                if delay > 0:
-                    self.sleep(delay)
+                while delay > 0:
+                    if self.stop is not None and self.stop():
+                        break
+                    if self.speed_source is not None:
+                        sp = self.speed_source()
+                        if sp != self.speed:
+                            self.speed = sp
+                            if not sp or sp <= 0:
+                                break
+                            delay = self.t_start + ts / max(self.speed, 1e-3) - self.clock()
+                            continue
+                    chunk = min(delay, self.slice_s)
+                    self.sleep(chunk)
+                    delay -= chunk
         self.index += 1
         return ts
 
@@ -320,7 +356,16 @@ class SourceReader:
     then every frame is timestamped (:class:`FramePacer`) and handed to :meth:`on_frame`.  At the end of a video
     file reading starts again while :meth:`keep_looping` is True; otherwise :meth:`on_ended` is called and the
     reader waits for :meth:`restart`.  Subclasses implement the hooks, which run in the reader thread; an
-    exception in one stops the reader through :meth:`on_failed`."""
+    exception in one stops the reader through :meth:`on_failed`.
+
+    A camera that stops delivering frames (unplugged, driver hiccup) is reopened automatically: after
+    :meth:`on_capture_lost` the source is released and opened again with a growing delay (``reconnect_delays``)
+    until frames arrive (:meth:`on_capture_restored` with the length of the gap) or ``reconnect_timeout_s`` has
+    passed, and only then does the reader fail.  Each drop-out is kept in ``capture_log``."""
+
+    reconnect_delays = (0.5, 1.0, 2.0, 4.0, 8.0)  # s before each reopening attempt (the last one repeats)
+    reconnect_timeout_s = 120.0
+    stall_reads = 100  # consecutive failed reads (~10 ms apart) before the capture counts as lost
 
     def __init__(self, spec: SourceSpec, opener=None, speed: float = 1.0, name: str = "live-source"):
         self.spec, self.opener, self.speed = spec, opener, speed
@@ -332,6 +377,7 @@ class SourceReader:
         self.last_frame: np.ndarray | None = None
         self.hardware_report: dict = {}  # result of applying spec.hardware when the camera opened
         self.src = None
+        self.capture_log: list[dict] = []  # {"lost": wall time, "gap_s": length or None, "reason", "attempts"}
         self._stop = False
         self._restart = False
         self.thread = threading.Thread(target=self._run, name=name, daemon=True)
@@ -351,6 +397,12 @@ class SourceReader:
 
     def on_failed(self, msg: str):
         pass
+
+    def on_capture_lost(self, msg: str):
+        """The camera stopped delivering frames; it is being reopened."""
+
+    def on_capture_restored(self, gap_s: float):
+        """Frames arrive again, gap_s seconds after the capture was lost."""
 
     # ---- control (any thread)
     def start(self):
@@ -414,11 +466,45 @@ class SourceReader:
             self.error = f"{type(e).__name__}: {e}"
             self.on_failed(self.error)
         finally:
-            src.release()
+            for s in {id(src): src, id(self.src): self.src}.values():  # the reopened camera too
+                if s is not None:
+                    try:
+                        s.release()
+                    except Exception:
+                        pass
+
+    def _reopen(self, old, attempt: int, deadline: float):
+        """Release a camera that stopped delivering frames and open it again (after a delay growing with
+        `attempt`); None when the reader is stopped or the deadline passes first."""
+        try:
+            old.release()
+        except Exception:
+            pass
+        self.src = None
+        while not self._stop and time.monotonic() < deadline:
+            wake = time.monotonic() + self.reconnect_delays[min(attempt, len(self.reconnect_delays) - 1)]
+            while not self._stop and time.monotonic() < min(wake, deadline):
+                time.sleep(0.01)
+            if self._stop or time.monotonic() >= deadline:
+                break
+            attempt += 1
+            self.capture_log[-1]["attempts"] = attempt
+            try:
+                src = self.spec.open(self.opener)
+            except Exception as e:
+                self.capture_log[-1]["reason"] = f"{type(e).__name__}: {e}"
+                continue
+            self.src = src
+            return src
+        return None
 
     def _loop(self, src):
-        pacer = FramePacer(self.fps, src.is_camera, self.speed)
+        pacer = FramePacer(self.fps, src.is_camera, self.speed, stop=lambda: self._stop,
+                           speed_source=lambda: self.speed)
         failures = 0
+        lost_at: float | None = None  # monotonic time the capture was lost (being reopened)
+        attempt = 0
+        shape: tuple | None = None  # frame size before the capture was lost
         while not self._stop:
             if self._restart:
                 self._restart = False
@@ -428,17 +514,38 @@ class SourceReader:
             if self.ended:
                 time.sleep(0.02)
                 continue
-            ok, frame = src.read()
+            try:
+                ok, frame = src.read()
+            except Exception as e:  # a camera driver error: reopened below like a stalled camera
+                if not src.is_camera or isinstance(e, UnsupportedPixelFormat):
+                    raise  # reopening cannot help: the reader fails with this message
+                ok, frame, failures = False, None, self.stall_reads
+                reason = f"{type(e).__name__}: {e}"
+            else:
+                reason = "the camera stopped delivering frames"
             if not ok:
                 if src.is_camera:
                     cam = hardware_target(src)
-                    if cam is not None and getattr(cam, "triggered", False):
+                    if cam is not None and getattr(cam, "triggered", False) and lost_at is None:
                         failures = 0  # waiting for the external trigger
                         time.sleep(0.001)
                         continue
                     failures += 1
-                    if failures > 100:
-                        raise IOError("the camera stopped delivering frames")
+                    if failures > self.stall_reads:
+                        now = time.monotonic()
+                        if lost_at is None:
+                            lost_at = now
+                            self.capture_log.append({"lost": time.time(), "gap_s": None, "reason": reason,
+                                                     "attempts": 0})
+                            self.on_capture_lost(reason)
+                        new = self._reopen(src, attempt, lost_at + self.reconnect_timeout_s)
+                        if new is None:
+                            if self._stop:
+                                return
+                            raise IOError(f"{reason}; reopening it failed for {self.reconnect_timeout_s:g} s")
+                        src, failures = new, 0
+                        attempt = self.capture_log[-1]["attempts"]
+                        continue
                     time.sleep(0.01)
                     continue
                 if self.keep_looping():
@@ -449,8 +556,22 @@ class SourceReader:
                 self.on_ended()
                 continue
             failures = 0
+            if lost_at is not None:
+                if shape is not None and frame.shape[:2] != shape:
+                    # the arena masks, background and calibration were made for the old image size
+                    raise IOError(f"The camera came back at {frame.shape[1]}×{frame.shape[0]} instead of "
+                                  f"{shape[1]}×{shape[0]} after reconnecting: the apparatus no longer fits the "
+                                  "image. Set the camera's image size again and restart.")
+                gap = time.monotonic() - lost_at
+                lost_at, attempt = None, 0
+                self.capture_log[-1]["gap_s"] = round(gap, 3)
+                self.size = (int(frame.shape[1]), int(frame.shape[0]))
+                self.on_capture_restored(gap)
+            shape = frame.shape[:2]
             pacer.speed = self.speed
             ts = pacer.next()
+            if self._stop:
+                break
             self.last_frame = frame
             self.on_frame(frame, ts)
 

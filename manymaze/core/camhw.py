@@ -450,24 +450,60 @@ _BAYER = {"BAYERRG": cv2.COLOR_BayerBG2BGR, "BAYERBG": cv2.COLOR_BayerRG2BGR,  #
           "BAYERGR": cv2.COLOR_BayerGB2BGR, "BAYERGB": cv2.COLOR_BayerGR2BGR}  # second row: RGGB is its "BG"
 
 
+class UnsupportedPixelFormat(ValueError):
+    """The camera delivers a pixel format that cannot be converted: choosing another format is the only remedy
+    (reopening the camera — what a stalled camera gets — cannot help)."""
+
+
+SUPPORTED_PIXEL_FORMATS = ("Mono8", "Mono10", "Mono12", "Mono14", "Mono16", "BayerRG8", "BayerBG8", "BayerGR8",
+                           "BayerGB8", "BayerRG10/12/16 (and BG, GR, GB)", "RGB8", "BGR8", "RGB10/12/16",
+                           "BGR10/12/16", "RGBa8", "BGRa8", "YUV422_8 (YUYV / UYVY)")
+
+
+def _unsupported(pixel_format, why: str = "") -> UnsupportedPixelFormat:
+    return UnsupportedPixelFormat(
+        f"The camera's pixel format {pixel_format!r} is not supported{(' (' + why + ')') if why else ''}. Choose "
+        f"Mono8, a Bayer 8-bit, RGB8 or BGR8 format in the camera options (supported: "
+        f"{', '.join(SUPPORTED_PIXEL_FORMATS)}).")
+
+
 def to_bgr(data: np.ndarray, pixel_format: str = "Mono8", width: int | None = None,
            height: int | None = None) -> np.ndarray:
     """A camera buffer (GenICam PixelFormat name) as an 8-bit BGR image like OpenCV cameras deliver.
 
-    Handles Mono8/10/12/16, Bayer RG/BG/GR/GB 8/10/12/16, RGB8, BGR8, RGBa8 / BGRa8 and YUV 4:2:2 (YUYV / UYVY);
-    10–16-bit data (one value per uint16) is scaled to 8 bits.  Packed 10/12-bit formats are not supported."""
-    fmt = str(pixel_format or "Mono8").replace("Packed", "").replace("_", "").upper()
+    Handles Mono8/10/12/14/16, Bayer RG/BG/GR/GB 8/10/12/16, RGB / BGR 8/10/12/16, RGBa8 / BGRa8 and YUV 4:2:2
+    (YUYV / UYVY); 10–16-bit data (one value per uint16) is scaled to 8 bits.  Bit-packed 10/12-bit formats
+    (Mono12p, Mono10Packed, BayerRG12p …) and other formats raise :class:`UnsupportedPixelFormat` with a message
+    saying so, as does a buffer whose size does not match the format and image size."""
+    raw = str(pixel_format or "Mono8")
+    fmt = raw.replace("_", "").upper()
+    packed8 = fmt.replace("PACKED", "")
+    if ("PACKED" in fmt and not packed8.endswith("8") and not packed8.startswith(("YUV", "YCBCR"))) or \
+            (fmt.endswith("P") and fmt[-2:-1].isdigit()):
+        raise _unsupported(raw, "bit-packed pixels")
+    fmt = packed8
     a = np.asarray(data)
     if fmt.startswith("YUV422") or fmt.startswith("YCBCR422") or fmt in ("YUYV", "UYVY"):
         uyvy = fmt in ("UYVY", "YUV422") or fmt.endswith("UYVY") or fmt.endswith("CBYCRY")
         if width and height:
+            if a.size != height * width * 2:
+                raise _unsupported(raw, f"{a.size} bytes for a {width}×{height} image")
             a = a.reshape(height, width, 2)
         return cv2.cvtColor(np.ascontiguousarray(a.astype(np.uint8)),
                             cv2.COLOR_YUV2BGR_UYVY if uyvy else cv2.COLOR_YUV2BGR_YUYV)
-    channels = 3 if fmt.startswith(("RGB8", "BGR8")) and "A" not in fmt[3:] else \
-        4 if fmt.startswith(("RGBA", "BGRA")) else 1
+    if not fmt.startswith(("MONO", "BAYER", "RGB", "BGR")):
+        raise _unsupported(raw)
     bits = next((b for b in (16, 14, 12, 10) if fmt.endswith(str(b))), 8)
+    if not fmt.endswith(("8", "10", "12", "14", "16")):
+        raise _unsupported(raw)
+    if fmt.startswith("BAYER") and _BAYER.get(fmt[:7]) is None:
+        raise _unsupported(raw)
+    channels = 4 if fmt.startswith(("RGBA", "BGRA")) else 3 if fmt.startswith(("RGB", "BGR")) else 1
+    if channels == 4 and bits != 8:
+        raise _unsupported(raw)
     if width and height:
+        if a.size != height * width * channels:
+            raise _unsupported(raw, f"{a.size} values for a {width}×{height} image")
         a = a.reshape((height, width) if channels == 1 else (height, width, channels))
     elif a.ndim == 3 and a.shape[2] == 1:
         a = a[:, :, 0]

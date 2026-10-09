@@ -12,7 +12,9 @@ from typing import Callable
 import numpy as np
 
 from .camera import SourceReader, SourceSpec
-from .session import END_SOURCE, END_SOURCE_FAILED, Session
+from .live import draw_display_texts
+from .session import END_ERROR, END_SOURCE, END_SOURCE_FAILED, Session
+from .livemonitor import beam_angle
 from .tracking import draw_tracking
 
 DEFAULT_START_KEYS = ["Space", "PageDown", "F5"]
@@ -111,6 +113,12 @@ class SourceRunner(SourceReader):
     def on_failed(self, msg: str):
         self.group.source_failed(self.key, msg)
 
+    def on_capture_lost(self, msg: str):
+        self.group.capture_lost(self.key, msg)
+
+    def on_capture_restored(self, gap_s: float):
+        self.group.capture_restored(self.key, gap_s)
+
 
 class LiveGroup:
     """Coordinates live sessions fed by one or more sources.
@@ -122,6 +130,7 @@ class LiveGroup:
     def __init__(self, start_keys=None, stop_keys=None, clock: Callable[[], _dt.datetime] = _dt.datetime.now):
         self.sources: dict[str, SourceSpec] = {}
         self.runners: dict[str, SourceRunner] = {}
+        self._stopping: dict[str, SourceRunner] = {}  # stopped runners whose thread had not ended yet
         self.entries: tuple[LiveEntry, ...] = ()  # copy-on-write: runner threads iterate it without the lock
         self.schedules: list[ClockSchedule] = []
         self.start_keys = list(DEFAULT_START_KEYS if start_keys is None else start_keys)
@@ -133,6 +142,7 @@ class LiveGroup:
         self._next_id = 1
         self._last_dets: dict[int, list] = {}
         self.trail_len = 250  # positions drawn behind each animal on the display images (0 = none)
+        self.beam = True  # draw each animal's orientation as a "flashlight beam"
 
     # ------------------------------------------------------------------ setup
     def add_source(self, spec: SourceSpec, key: str | None = None) -> str:
@@ -187,6 +197,14 @@ class LiveGroup:
             r = self.runners.get(key)
             if r is not None and r.thread.is_alive():
                 continue
+            old = self._stopping.get(key)
+            if old is not None:
+                old.stop()  # wait for it again: never two threads reading the same camera
+                if old.thread.is_alive():
+                    self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}",
+                                          f"{key}: the previous capture has not stopped yet; not restarted"))
+                    continue
+                del self._stopping[key]
             r = SourceRunner(self, key, self.sources[key], opener, speed)
             self.runners[key] = r
             r.start()
@@ -196,6 +214,8 @@ class LiveGroup:
             r = self.runners.pop(key, None)
             if r is not None:
                 r.stop()
+                if r.thread.is_alive():  # the join timed out: kept until its thread really ends
+                    self._stopping[key] = r
 
     def restart_source(self, key: str):
         r = self.runners.get(key)
@@ -214,6 +234,19 @@ class LiveGroup:
                 e.aborted = s.state == "waiting" or not len(s.cols["t"])  # sources feed camera sessions
                 s.finish(END_SOURCE_FAILED)
 
+    def capture_lost(self, key: str, msg: str):
+        """A camera stopped delivering frames and is being reopened: its tests mark the gap."""
+        self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{key}: video capture lost ({msg}), reconnecting…"))
+        for e in self.entries_for(key):
+            if e.session is not None and hasattr(e.session, "capture_lost"):
+                e.session.capture_lost(msg)
+
+    def capture_restored(self, key: str, gap_s: float):
+        self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{key}: video capture restored after {gap_s:.1f} s"))
+        for e in self.entries_for(key):
+            if e.session is not None and hasattr(e.session, "capture_restored"):
+                e.session.capture_restored(gap_s)
+
     def source_ended(self, key: str):
         """End of a video file: running tests finish (and are saved), waiting tests are abandoned."""
         for e in self.entries_for(key):
@@ -226,12 +259,34 @@ class LiveGroup:
 
     # ------------------------------------------------------------------ frames
     def process(self, key: str, frame: np.ndarray, ts: float):
-        """Track one frame of source `key` in every session bound to it."""
+        """Track one frame of source `key` in every session bound to it. An unexpected error in one session ends
+        that test only (END_ERROR); the other tests of the camera go on."""
         for e in self.entries_for(key):
             s = e.session
             if s is None:
                 continue
-            self._last_dets[e.id] = s.process(frame, ts)
+            try:
+                self._last_dets[e.id] = s.process(frame, ts)
+            except Exception as ex:
+                self._session_failed(e, ex)
+
+    def _session_failed(self, e: LiveEntry, ex: Exception):
+        s = e.session
+        msg = f"{e.label}: the test stopped on an error: {type(ex).__name__}: {ex}"
+        self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", msg))
+        if s is None or s.state == "finished":
+            return
+        try:
+            e.aborted = s.state == "waiting" or not len(getattr(s, "cols", {}).get("t", ()))
+            s.finish(END_ERROR)
+        except Exception as ex2:  # finishing failed too: at least its outputs off
+            self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{e.label}: could not end the test: {ex2}"))
+            off = getattr(getattr(s, "devices", None), "all_off", None)
+            if off is not None:
+                try:
+                    off()
+                except Exception:
+                    pass
 
     def render(self, key: str, frame: np.ndarray) -> np.ndarray:
         """A copy of the frame with every session's animal and its last ``trail_len`` positions drawn on it (the
@@ -241,16 +296,21 @@ class LiveGroup:
             s = e.session
             if s is not None:
                 draw_tracking(img, self._last_dets.get(e.id, []), s.trail(self.trail_len) if self.trail_len else None,
-                              copy=False)
+                              copy=False, beam=self.beam and beam_angle(s))
+                texts = getattr(s, "display_texts", None)
+                if texts:  # the procedures' "output text on the display"
+                    img = draw_display_texts(img, texts)
         return img
 
     # ------------------------------------------------------------------ control
     def start(self, entry: LiveEntry):
-        """Start now (waiting) or resume (paused)."""
+        """Start now (waiting), resume (paused) or continue a test waiting for its end."""
         s = entry.session
         if s is None:
             return
-        if s.state == "waiting":
+        if getattr(s, "waiting_end", False):
+            s.continue_test()
+        elif s.state == "waiting":
             s.request_start()
         elif s.state == "paused":
             s.resume()
@@ -290,7 +350,8 @@ class LiveGroup:
     def key(self, key: str) -> str | None:
         """Handle a key press (keyboard or USB presenter / remote). Returns "start", "stop" or None."""
         k = key.strip().lower()
-        if k in (x.lower() for x in self.start_keys) and any(e.state in ("waiting", "paused") for e in self.entries):
+        if k in (x.lower() for x in self.start_keys) and any(
+                e.state in ("waiting", "paused") or getattr(e.session, "waiting_end", False) for e in self.entries):
             self.start_all()
             return "start"
         if k in (x.lower() for x in self.stop_keys) and any(e.state in ("running", "paused") for e in self.entries):

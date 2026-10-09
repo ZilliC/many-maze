@@ -586,7 +586,7 @@ def load_model_info(path) -> dict:
     side = path.with_suffix(".json")
     meta = None
     if side.exists():
-        meta = json.loads(side.read_text())
+        meta = json.loads(side.read_text(encoding="utf-8"))
     else:
         try:
             import onnx

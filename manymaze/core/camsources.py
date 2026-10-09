@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .camhw import CameraHardware, GenICamControls, to_bgr
+from .camhw import CameraHardware, GenICamControls, UnsupportedPixelFormat, to_bgr
 
 
 @dataclass
@@ -634,7 +634,11 @@ def list_native_cameras() -> tuple[list[CameraInfo], list[str]]:
 class NativeCamera:
     """A native (SDK) camera behind the VideoSource interface used by the live pipeline.  Frames are BGR uint8
     whatever the PixelFormat; acquisition starts at the first read; ``timeout`` (s) bounds every read, so a
-    camera waiting for its external trigger returns (False, None) instead of blocking."""
+    camera waiting for its external trigger returns (False, None) instead of blocking.  A pixel format that cannot
+    be converted raises :class:`~.camhw.UnsupportedPixelFormat` from :meth:`read` (after bad_frames_tolerated
+    consecutive buffers) rather than looking like a camera that stopped delivering frames."""
+
+    bad_frames_tolerated = 5
 
     def __init__(self, source: str, width: int | None = None, height: int | None = None, fps: float | None = None,
                  timeout: float = 0.5):
@@ -645,6 +649,7 @@ class NativeCamera:
         self.is_camera = True
         self.frame_count = 0
         self.pos = 0
+        self._bad_frames = 0
         self.timeout = timeout
         self._lock = threading.RLock()
         self._acquiring = False
@@ -691,8 +696,15 @@ class NativeCamera:
         data, fmt, w, h = got
         try:
             frame = to_bgr(data, fmt, w, h)
+        except UnsupportedPixelFormat:
+            # reopening the camera (what a stalled camera gets) cannot help: fail with the reason instead
+            if self._bad_frames < self.bad_frames_tolerated:  # a single truncated buffer is a dropped frame
+                self._bad_frames += 1
+                return False, None
+            raise
         except Exception:
             return False, None
+        self._bad_frames = 0
         self.width, self.height = frame.shape[1], frame.shape[0]
         self.pos += 1
         return True, frame

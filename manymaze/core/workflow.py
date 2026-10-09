@@ -8,7 +8,7 @@ import random
 import string
 from dataclasses import asdict, dataclass
 
-from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test
+from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test, without_secrets
 
 MAX_STAGES = 50
 MAX_TRIALS = 99
@@ -480,6 +480,9 @@ def rename_animal(project: Project, animal: Animal, new_id: str) -> bool:
             t.animal_id = new_id
         if old in t.extra_animals:
             t.extra_animals = [new_id if x == old else x for x in t.extra_animals]
+    done = project.settings_extra.get("completed_stages", {})
+    if old in done:
+        done[new_id] = done.pop(old)
     return True
 
 
@@ -535,6 +538,9 @@ def rename_field(project: Project, old: str, new: str) -> bool:
     for a in project.animals:
         if old in a.fields:
             a.fields[new] = a.fields.pop(old)
+    dose = project.settings_extra.get("dose")
+    if isinstance(dose, dict) and dose.get("weight_field") == old:
+        dose["weight_field"] = new
     return True
 
 
@@ -544,6 +550,9 @@ def remove_field(project: Project, name: str) -> bool:
     project.animal_fields.remove(name)
     for a in project.animals:
         a.fields.pop(name, None)
+    dose = project.settings_extra.get("dose")
+    if isinstance(dose, dict) and dose.get("weight_field") == name:
+        dose.pop("weight_field")  # back to the default weight field (dose_settings)
     return True
 
 
@@ -713,7 +722,7 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
     procedures, I/O devices, training criteria, blind testing and animal ID options, the animal columns and the
-    experimenters (users);
+    experimenters (users); I/O device passwords and tokens are not copied (enter them again);
     with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
@@ -730,7 +739,7 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.behaviours = [Behaviour.from_dict(asdict(b)) for b in src.behaviours]
     dst.stages = list(src.stages)
     dst.procedures = _copy.deepcopy(src.procedures)
-    dst.io_devices = _copy.deepcopy(src.io_devices)
+    dst.io_devices = [without_secrets(d) for d in _copy.deepcopy(src.io_devices)]  # passwords stay behind
     dst.training_criteria = _copy.deepcopy(src.training_criteria)
     dst.blind = src.blind
     dst.animal_fields = list(src.animal_fields)

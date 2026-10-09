@@ -43,6 +43,7 @@ Device types, channel kinds and the configuration rules (new_device, watchdog_ms
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -60,6 +61,8 @@ from .iocontrol import AnalogFilter, Thermostat, sensor_value
 from .ioconfig import INPUT_KINDS, watchdog_ms
 
 FIRMWARE_ID = "MANYMAZE_IO"
+SHOCKER_MAX_ON_S = 60.0  # longest continuous on-time of a channel with the role "shocker" (procedures.SHOCK_MAX_S)
+LINE_OVERHEAD_B = 22  # bytes of an "S n first_ms period_us" batch line besides its samples
 
 
 def serial_ports() -> list[str] | None:
@@ -94,7 +97,10 @@ class Device:
         self.errors: list[str] = []
         self.connected = False
         self.transport = transport
+        self._injected = transport  # a transport given by the caller (tests): used again when the device reopens
+        self.ever_connected = False  # opened once: the device manager reopens it when the connection is lost
         self._pending: list[tuple[str, float, float | None]] = []  # (channel, value, board ms or None)
+        self._pend_lock = threading.Lock()  # _pending: filled by readers, emptied by pollers (other threads)
         self.watchdog_fired = 0  # times the board's watchdog switched every output off
         self.input_times: dict[str, float] = {}  # monotonic time of each input's last report
         self.filters: dict[str, AnalogFilter] = {}
@@ -135,7 +141,34 @@ class Device:
         self.input_times[channel] = time.monotonic()
         if self.inputs.get(channel) != value or force or (ms is not None and channel in self.filters):
             self.inputs[channel] = value
-            self._pending.append((channel, value, ms))
+            with self._pend_lock:
+                self._pending.append((channel, value, ms))
+
+    def max_on_s(self, channel: str) -> float | None:
+        """The longest an output may stay on (s), whatever the procedures ask: the channel's ``max_on_s`` option,
+        else 60 s for channels with the role "shocker"; None: no limit."""
+        c = self.channels.get(channel) or {}
+        try:
+            cap = float(c.get("max_on_s") or 0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        if cap > 0:
+            return cap
+        if str(c.get("role", "") or "").lower() in ("shocker", "shock"):
+            return SHOCKER_MAX_ON_S
+        return None
+
+    def times_max_on(self, channel: str) -> bool:
+        """Whether the device switches this output off itself after a maximum on-time (board timing)."""
+        return False
+
+    def host_max_on(self, channel: str, max_s: float | None) -> float | None:
+        """How long (s) the computer must let an output stay on before it switches it off itself: the shorter of
+        the requested maximum and the channel's cap, unless the device times it (None: no host cut-off)."""
+        if self.type == "virtual" or self.times_max_on(channel):
+            return None
+        caps = [float(x) for x in (max_s, self.max_on_s(channel)) if x is not None and float(x) > 0]
+        return min(caps) if caps else None
 
     def add_status(self, name: str, kind: str = "status"):
         """A derived input channel reported by the driver itself (pump running / stalled, thermostat set-point)."""
@@ -159,7 +192,11 @@ class Device:
     def poll_ex(self) -> list[tuple[str, float, float | None]]:
         """Input changes since the last call: [(channel, value, board time in ms or None)]."""
         self._read()
-        out, self._pending = self._pending, []
+        return self._take_pending()
+
+    def _take_pending(self) -> list:
+        with self._pend_lock:
+            out, self._pending = self._pending, []
         return out
 
     def poll(self) -> list[tuple[str, float]]:
@@ -174,6 +211,8 @@ class Device:
         return 0.0
 
     def set_output(self, channel: str, value: float, max_s: float | None = None):
+        """Switch an output; drivers return False when the command could not be sent (the cached state in
+        ``outputs`` is then left as it was)."""
         self.outputs[channel] = value
 
     def pulse_train(self, channel: str, period_s: float, width_s: float, count: int) -> bool:
@@ -205,7 +244,9 @@ class Device:
             th.set_target(kw.get("target"), kw.get("ramp", 0.0))
         return True
 
-    def notify(self, subject: str, text: str) -> bool:
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        """Send an alert (alert devices); kinds: ("email",) / ("sms",) / None = both; to: addresses / numbers
+        (comma-separated) instead of the configured ones."""
         return False
 
     def service(self, now: float):
@@ -216,13 +257,22 @@ class Device:
     def set_input(self, channel: str, value: float):
         """Simulate an input (virtual devices; ignored by hardware devices)."""
 
-    def all_off(self):
+    def all_off(self) -> bool:
+        """Every output off: 0 is written to every output channel whatever its cached state (a previous "off" may
+        not have reached the hardware). False when a write failed."""
         for th in self.thermostats.values():
             if th.target is not None:
                 th.off()
+        ok = True
         for ch in list(self.outputs):
-            if self.outputs[ch] and self.kind(ch) not in ("thermostat", "odour"):
-                self.set_output(ch, 0)
+            if self.kind(ch) in ("thermostat", "odour", "pump"):
+                continue
+            try:
+                ok = self.set_output(ch, 0) is not False and ok
+            except Exception as e:  # pragma: no cover - hardware dependent
+                self._error(f"{self.name}: {ch}: {e}")
+                ok = False
+        return ok
 
 
 class VirtualDevice(Device):
@@ -260,6 +310,8 @@ class _LineDevice(Device):
         self._last_write = 0.0
 
     def open(self):
+        if self.transport is None and self._injected is not None:
+            self.transport = self._injected  # reopened (tests' transports)
         if self.transport is None:
             port = self.cfg.get("port")
             if not port:
@@ -276,6 +328,10 @@ class _LineDevice(Device):
         self.connected = True
 
     def close(self):
+        self._drop()
+
+    def _drop(self):
+        """Close the port without sending anything (after a failed write: the device is gone)."""
         with self._io_lock:
             if self.transport is not None:
                 try:
@@ -285,20 +341,37 @@ class _LineDevice(Device):
             self.transport = None
             self.connected = False
 
+    def _encode(self, line: str) -> bytes:
+        return (line + self.cfg.get("eol", "\n")).encode()
+
     def write_line(self, line: str) -> bool:
+        """Send a line; False when it was not sent (not connected, or the write failed: the device is then marked
+        disconnected and its port closed, so that the device manager opens it again)."""
         with self._io_lock:
             self.sent.append(line)
             if len(self.sent) > 5000:
                 del self.sent[:1000]
-            if self.transport is None:
+            if self.transport is None or not self.connected:
                 return False
             try:
-                self.transport.write((line + self.cfg.get("eol", "\n")).encode())
+                self.transport.write(self._encode(line))
                 self._last_write = time.monotonic()
                 return True
-            except Exception as e:  # pragma: no cover - hardware dependent
+            except Exception as e:
                 self._error(f"{self.name}: write failed: {e}")
+                self._drop()
                 return False
+
+    def poll_ex(self) -> list[tuple[str, float, float | None]]:
+        """As Device.poll_ex, but never waits for the port: while another thread uses it (e.g. a balance being
+        read, a board's handshake) nothing is read now and the changes come with a later poll."""
+        if not self._io_lock.acquire(blocking=False):
+            return []
+        try:
+            self._read()
+            return self._take_pending()
+        finally:
+            self._io_lock.release()
 
     def read_lines(self) -> list[str]:
         with self._io_lock:
@@ -323,17 +396,26 @@ class SerialDevice(_LineDevice):
     type = "serial"
 
     def send(self, text: str) -> bool:
-        self.write_line(text)
-        return True
+        return self.write_line(text)
 
-    def set_output(self, channel: str, value: float, max_s: float | None = None):
-        self.outputs[channel] = value
+    def close(self):
+        if self.connected:  # every output's "off" command before the port closes
+            try:
+                self.all_off()
+            except Exception:  # pragma: no cover - hardware dependent
+                pass
+        super().close()
+
+    def set_output(self, channel: str, value: float, max_s: float | None = None) -> bool:
         c = self.channels.get(channel, {})
         cmd = c.get("on" if value else "off")
         if cmd is None:
             cmd = f"{channel} {'ON' if value else 'OFF'}" if not isinstance(value, float) or value in (0, 1) \
                 else f"{channel} {value:g}"
-        self.write_line(str(cmd))
+        if not self.write_line(str(cmd)):
+            return False
+        self.outputs[channel] = value
+        return True
 
     def _read(self):
         for line in self.read_lines():
@@ -352,9 +434,14 @@ class ArduinoDevice(_LineDevice):
     type = "arduino"
     hardware_pulses = True
 
+    ID_REPLY_S = 1.5  # identification replies expected this long after a "?"; later banners mean a reset
+
     def __init__(self, cfg: dict, transport=None):
         super().__init__(cfg, transport)
         self.version = ""
+        self.resets = 0  # times the board was seen restarting (power or USB glitch) and was configured again
+        self._configured = False
+        self._query_until = 0.0
         self.by_pin: dict[tuple[str, int], str] = {}
         self.dht: dict[int, dict[str, str]] = {}  # DHT22 pin -> {"temperature": channel, "humidity": channel}
         for n, c in self.channels.items():
@@ -374,23 +461,47 @@ class ArduinoDevice(_LineDevice):
         super().open()
         if not self.connected:
             return
+        self._configured = False
+        self.version = ""
         deadline = time.monotonic() + handshake_s
         retry = 0.0
-        while time.monotonic() < deadline and not self.version:
-            if time.monotonic() >= retry:  # most boards reset when the port opens: ask again every second
-                self.write_line("?")
-                retry = time.monotonic() + 1.0
-            for line in self.read_lines():
-                self._parse(line)
+        with self._io_lock:  # the handshake's replies are not taken by a poll meanwhile
+            while time.monotonic() < deadline and not self.version and self.connected:
+                if time.monotonic() >= retry:  # most boards reset when the port opens: ask again every second
+                    self._identify()
+                    retry = time.monotonic() + 1.0
+                for line in self.read_lines():
+                    self._parse(line)
+                if not self.version:
+                    time.sleep(0.05)
             if not self.version:
-                time.sleep(0.05)
-        if not self.version:
-            self._error(f"{self.name}: no reply from the mANY-MAZE firmware on {self.cfg.get('port', '?')}")
-        self.configure()
+                self._error(f"{self.name}: no reply from the mANY-MAZE firmware on {self.cfg.get('port', '?')}")
+            if self.connected:
+                self.configure()
+
+    def _identify(self):
+        self.write_line("?")
+        self._query_until = time.monotonic() + self.ID_REPLY_S
+
+    @property
+    def firmware_version(self) -> tuple[int, ...]:
+        """The firmware version from its identification ("MANYMAZE_IO 1.2 uno" -> (1, 2)); () if unknown."""
+        parts = self.version.split()
+        try:
+            return tuple(int(x) for x in parts[1].split(".")) if len(parts) > 1 else ()
+        except ValueError:
+            return ()
 
     def configure(self):
-        self.write_line("Z")
+        if self.write_line("Z"):
+            for ch in self.outputs:  # the board starts again with every output off
+                if self.kind(ch) in ("output", "pwm"):
+                    self.outputs[ch] = 0
         dht_done = set()
+        problems, refuse = bandwidth_check(self.cfg)
+        for msg in problems:
+            self._error(f"{self.name}: {msg}")
+        always = self.firmware_version >= (1, 2)  # deadband -1: every sample reported (filters need them all)
         for n, c in self.channels.items():
             k, pin = c.get("kind", "input"), c.get("pin")
             if k in ("thermostat", "odour") or c.get("derived"):
@@ -406,9 +517,12 @@ class ArduinoDevice(_LineDevice):
             elif k in ("output", "pwm"):
                 self.write_line(f"O {pin} {1 if c.get('invert') else 0}")
             elif k == "analog" or iface == "analog":
+                if refuse:
+                    continue  # more samples than the serial link carries: not configured (see bandwidth_check)
                 period = max(1, int(c.get("period_ms", 50)))
-                # filtered channels need every sample; fast channels are sent in batches of ~10 ms
-                deadband = 0 if n in self.filters else int(c.get("deadband", 2))
+                # filtered channels need every sample (deadband -1; firmware before 1.2: changes only); fast
+                # channels are sent in batches of ~10 ms
+                deadband = (-1 if always else 0) if n in self.filters else int(c.get("deadband", 2))
                 batch = max(1, min(16, 10 // period)) if period < 10 else 1
                 self.write_line(f"A {pin} {period} {deadband}" + (f" {batch}" if batch > 1 else ""))
             elif iface == "hx711":
@@ -429,6 +543,7 @@ class ArduinoDevice(_LineDevice):
         if wd:
             self.write_line(f"H {wd}")
         self.write_line("Q")
+        self._configured = True
 
     def watchdog_ms(self) -> int:
         return watchdog_ms(self.cfg)
@@ -524,49 +639,133 @@ class ArduinoDevice(_LineDevice):
             self.errors.append(f"{self.name}: watchdog fired — all outputs switched off")
         elif tag.startswith(FIRMWARE_ID):
             self.version = line
+            if self._configured and time.monotonic() > self._query_until:
+                self._board_reset()
+
+    def _board_reset(self):
+        """The board printed its banner by itself: it restarted (power or USB glitch, brown-out from a load on its
+        supply…) and lost its configuration and its outputs' states. It is configured again; the outputs are
+        reported off (as after a watchdog, so that the test's I/O log shows them off)."""
+        self.resets += 1
+        self.watchdog_fired += 1
+        for ch in self.outputs:
+            self.outputs[ch] = 0
+        self.errors.append(f"{self.name}: the board restarted (reset no. {self.resets}) — outputs off, configured "
+                           "again")
+        self.configure()
 
     def _read(self):
         for line in self.read_lines():
             self._parse(line)
 
-    def set_output(self, channel: str, value: float, max_s: float | None = None):
+    def close(self):
+        if self.connected:
+            self.write_line("R")  # every output off before the port closes (the board cannot see it close)
+        super().close()
+
+    def times_max_on(self, channel: str) -> bool:
+        return self.kind(channel) == "output"  # W pin 1 max_ms; PWM levels are also cut off by the computer
+
+    def set_output(self, channel: str, value: float, max_s: float | None = None) -> bool:
+        """False when the command could not be sent (the output's state is then unchanged). With max_s (or a
+        capped channel, see max_on_s) the board switches the output off itself after that time."""
         pin = self._pin(channel)
-        self.outputs[channel] = value
         if pin is None:
-            return
-        if self.channels[channel].get("kind") == "pwm" and value not in (0, 1, True, False):
-            self.write_line(f"P {pin} {int(round(max(0.0, min(1.0, float(value))) * 255))}")
-            return
+            self.outputs[channel] = value
+            return True
+        caps = [float(x) for x in (max_s, self.max_on_s(channel)) if x is not None and float(x) > 0]
+        limit = f" {max(1, math.ceil(min(caps) * 1000))}" if value and caps else ""  # never 0 (= no limit)
         if self.channels[channel].get("kind") == "pwm":
-            self.write_line(f"P {pin} {255 if value else 0}")
-            return
-        extra = f" {int(max_s * 1000)}" if (value and max_s) else ""
-        self.write_line(f"W {pin} {1 if value else 0}{extra}")
+            level = int(round(max(0.0, min(1.0, float(value))) * 255)) if value not in (True, False) else \
+                (255 if value else 0)
+            # firmware 1.2: P pin level max_ms (older boards ignore it; the computer cuts the level off too)
+            line = f"P {pin} {level}{limit if level else ''}"
+        else:
+            line = f"W {pin} {1 if value else 0}{limit}"
+        if not self.write_line(line):
+            return False
+        self.outputs[channel] = value
+        return True
 
     def pulse_train(self, channel, period_s, width_s, count):
         pin = self._pin(channel)
         if pin is None:
             return False
-        self.write_line(f"T {pin} {period_s * 1000:.3f} {width_s * 1000:.3f} {int(count)}")
-        return True
+        cap = self.max_on_s(channel)
+        if cap:
+            width_s = min(float(width_s), cap)
+        # the board times trains in microseconds, or in milliseconds when the period exceeds 60 s (firmware 1.2)
+        return self.write_line(f"T {pin} {period_s * 1000:.3f} {width_s * 1000:.3f} {int(count)}")
 
     def stop_train(self, channel):
         pin = self._pin(channel)
         if pin is None:
             return False
-        self.write_line(f"X {pin}")
-        return True
+        return self.write_line(f"X {pin}")
 
     def send(self, text: str) -> bool:
-        self.write_line(text)
-        return True
+        return self.write_line(text)
 
     def all_off(self):
         for th in self.thermostats.values():
             th.target = th.setpoint = None
-        self.write_line("R")
+        if not self.write_line("R"):
+            return  # not sent (a failed write closes the port): the outputs may still be on, not shown off
         for ch in self.outputs:
             self.outputs[ch] = 0
+
+
+# ---------------------------------------------------------------------------------------- serial bandwidth
+def serial_load(cfg: dict) -> tuple[float, float]:
+    """(bytes per second the board's reports may need at worst, bytes per second the serial link carries) for an
+    ``arduino`` or ``firmata`` device: fast analogue inputs (sent in batches), slower ones (one line per period
+    when they change), load cells and encoders. (0, 0) for other device types."""
+    typ = cfg.get("type")
+    if typ not in ("arduino", "firmata"):
+        return 0.0, 0.0
+    baud = float(cfg.get("baud") or (115200 if typ == "arduino" else 57600))
+    need = 0.0
+    if typ == "firmata":
+        analog = [c for c in cfg.get("channels") or [] if c.get("kind") in ("analog", "sensor")]
+        if analog:
+            ms = max(1, min(int(c.get("period_ms", 19) or 19) for c in analog))
+            need += 3 * len(analog) * 1000.0 / ms  # one 3-byte message per pin and sampling interval
+        return need, baud / 10.0
+    for c in cfg.get("channels") or []:
+        k = c.get("kind", "input")
+        iface = c.get("interface", "analog") if k == "sensor" else None
+        if c.get("derived") or c.get("pin") is None:
+            continue
+        if k == "analog" or iface == "analog":
+            period = max(1, int(c.get("period_ms", 50) or 50))
+            if period < 10:
+                batch = max(1, min(16, 10 // period))
+                need += 1000.0 / period * (5 + LINE_OVERHEAD_B / batch)  # " 1023" per sample + line overhead
+            else:
+                need += 1000.0 / period * 21  # "A 0 1023 4294967295" at worst once per period
+        elif iface == "hx711":
+            need += 1000.0 / max(100, int(c.get("period_ms", 100) or 100)) * 25
+        elif k == "encoder":
+            need += 50 * 20  # "E pin count ms" at most every 20 ms
+    return need, baud / 10.0
+
+
+def bandwidth_check(cfg: dict, warn_at: float = 0.7, refuse_at: float = 0.95) -> tuple[list[str], bool]:
+    """Problems of a device configuration whose inputs could saturate its serial link (the board then waits
+    while sending, delaying pulse edges, maximum on-time cut-offs and its watchdog): ([messages], refuse) —
+    refuse when they need more than refuse_at of the link: an Arduino's analogue inputs are then not configured.
+    The configuration dialog can call it to warn before the device is used."""
+    need, cap = serial_load(cfg)
+    if not cap or need <= warn_at * cap:
+        return [], False
+    pct = 100.0 * need / cap
+    baud = int(cap * 10)
+    if need > refuse_at * cap:
+        what = "they are not configured" if cfg.get("type") == "arduino" else "reports will be lost"
+        return [f"the analogue inputs need {need:.0f} bytes/s, {pct:.0f} % of what {baud} baud carries: {what} "
+                "(sample them less often: a longer period_ms)"], cfg.get("type") == "arduino"
+    return [f"warning: the inputs may use {pct:.0f} % of the serial link ({need:.0f} of {cap:.0f} bytes/s at "
+            f"{baud} baud); keep it below {warn_at:.0%} so that the board never waits to send"], False
 
 
 # ---------------------------------------------------------------------------------------- audio
@@ -678,6 +877,8 @@ class AudioDevice(Device):
         return self._play(str(path), vol if cmd == "file" else 1.0)
 
     def _play(self, path: str, volume: float, track: bool = True):
+        if track:  # forget the sounds that have ended
+            self._procs = [p for p in self._procs if not _finished(p)]
         if AudioDevice.player is not None:
             try:
                 h = AudioDevice.player(path, volume)
@@ -712,11 +913,26 @@ class AudioDevice(Device):
                     p.stop()
             except Exception:  # pragma: no cover
                 pass
+        for p in self._procs:
+            if isinstance(p, subprocess.Popen):  # reaped, not left as zombies
+                try:
+                    p.wait(timeout=0.5)
+                except Exception:  # pragma: no cover
+                    pass
         self._procs = []
 
     def close(self):
         self.stop()
         super().close()
+
+
+def _finished(p) -> bool:
+    """Whether a played sound (a player process, a :class:`_Loop`) has ended; GUI player handles: never known."""
+    poll = getattr(p, "poll", None)
+    try:
+        return poll is not None and poll() is not None
+    except Exception:  # pragma: no cover
+        return False
 
 
 def _wav_seconds(path: str) -> float | None:
@@ -734,16 +950,27 @@ class _Loop:
         self.dev, self.path, self.volume, self.repeat = dev, path, volume, max(0, int(repeat))
         self.plays = 0
         self._stop = threading.Event()
+        self._lock = threading.Lock()  # stop() and the thread starting the next play
         self._cur = None
         self._thread = threading.Thread(target=self._run, name="audio-loop", daemon=True)
 
     def start(self):
         self._thread.start()
 
+    def poll(self):
+        """None while playing (or about to), as Popen.poll."""
+        return 0 if self._thread.ident is not None and not self._thread.is_alive() else None
+
     def _run(self):
         length = _wav_seconds(self.path)
         while not self._stop.is_set() and (not self.repeat or self.plays < self.repeat):
-            self._cur = self.dev._play(self.path, self.volume, track=False)
+            cur = self.dev._play(self.path, self.volume, track=False)
+            with self._lock:
+                self._cur = cur
+                stopped = self._stop.is_set()
+            if stopped:  # stopped while this play was starting: stop() did not see it
+                self._halt(cur)
+                return
             self.plays += 1
             if self._cur is None or self._cur is False:
                 if self.dev.backend is None and AudioDevice.player is None:
@@ -763,9 +990,14 @@ class _Loop:
                 return
 
     def stop(self):
-        self._stop.set()
-        cur = self._cur
-        if cur is not None and cur is not False:
+        with self._lock:
+            self._stop.set()
+            cur = self._cur
+        self._halt(cur)
+
+    @staticmethod
+    def _halt(cur):
+        if cur is not None and cur is not False and cur is not True:
             try:
                 cur.terminate() if hasattr(cur, "terminate") else cur.stop()
             except Exception:  # pragma: no cover
@@ -794,15 +1026,26 @@ class DeviceManager:
 
     Thread-safe: tests run in their own threads, the GUI polls the status and a service thread sends the
     watchdog heartbeats of boards that have one (so a paused test or a stalled camera does not trip it), runs the
-    temperature controllers and times pulse sequences (:meth:`pulse_sequence`) on the computer's clock.
+    temperature controllers, times pulse sequences (:meth:`pulse_sequence`) on the computer's clock, switches off
+    outputs left on longer than their maximum on-time (:meth:`set_output` ``max_s``, a channel's ``max_on_s`` or
+    role "shocker") on devices that cannot time it themselves, and reopens devices whose connection was lost.
 
     Several tests at once each see their own box through a :class:`DeviceView`; input changes are fanned out to
-    every subscriber (:meth:`subscribe`) so that one test never consumes another test's lever presses.
+    every subscriber (:meth:`subscribe`) so that one test never consumes another test's lever presses. Devices are
+    polled outside the manager's lock, each by one thread at a time, and a device busy in another thread (a
+    balance being read) is skipped, so that no command waits for another device.
+
+    Heartbeats: once tests report that they run (:meth:`tick`), heartbeats are only sent while one of them ticked
+    within ``TICK_TIMEOUT_S``: if the program hangs, the boards' watchdogs switch their outputs off.
 
     ``transports`` maps device name -> file-like object (write/read/in_waiting) to drive arduino/serial
     devices without hardware (tests)."""
 
     MAX_QUEUE = 10000
+    SERVICE_S = 0.1  # controller period
+    RECONNECT_S = 5.0  # a lost device is opened again this often
+    TICK_TIMEOUT_S = 10.0  # heartbeats stop when no test ticked for this long (generous: camera reconnections)
+    HOST_RETRY_S = 0.2  # a host cut-off whose "off" could not be sent is tried again after this
 
     def __init__(self, configs=(), open: bool = True, transports: dict | None = None):
         self.configs = [dict(c) for c in (configs or []) if c.get("enabled", True)]
@@ -811,12 +1054,20 @@ class DeviceManager:
         self._lock = threading.RLock()
         self._subs: dict[int, tuple[set | None, deque]] = {}
         self._sub_seq = 0
+        self._default_sub: int | None = None  # read_inputs() without a subscriber
         self._wd_seen: dict[str, int] = {}
         self._ka_stop = threading.Event()
         self._ka_thread: threading.Thread | None = None
         self._sched: list = []  # timed outputs: (due monotonic, seq, device, channel, value, max_s)
         self._sched_seq = 0
         self._sched_wake = threading.Event()
+        self._opening: set[str] = set()  # devices being opened (outside the lock)
+        self._deadlines: dict[tuple[str, str], tuple[float, float]] = {}  # host cut-offs: (due, max_s)
+        self._poll_locks: dict[str, threading.Lock] = {}
+        self._ticks: dict[int, float] = {}
+        self._next_reconnect = 0.0
+        self._reconnecting: threading.Thread | None = None
+        self._closed = False
         for c in self.configs:
             cls = drivers().get(c.get("type", "virtual"), VirtualDevice)
             dev = cls(c, (transports or {}).get(c.get("name")))
@@ -831,27 +1082,51 @@ class DeviceManager:
 
     def open(self):
         with self._lock:
-            for d in self.devices.values():
-                if not d.connected:
-                    try:
-                        d.open()
-                    except Exception as e:  # pragma: no cover - hardware dependent
-                        d._error(f"{d.name}: {e}")
-            self._start_keepalive()
-
-    SERVICE_S = 0.1  # controller period
+            todo = [d for d in self.devices.values() if not d.connected and d.name not in self._opening]
+            self._opening.update(d.name for d in todo)
+        try:  # outside the lock: a board's handshake takes seconds, the other devices and tests go on meanwhile
+            for d in todo:
+                try:
+                    d.open()
+                except Exception as e:  # pragma: no cover - hardware dependent
+                    d._error(f"{d.name}: {e}")
+                if d.connected:
+                    d.ever_connected = True
+        finally:
+            with self._lock:
+                self._opening.difference_update(d.name for d in todo)
+                self._start_keepalive()
 
     def _needs_service(self) -> bool:
-        return bool(self._sched) or any(d.keepalive_period() or d.thermostats for d in self.devices.values())
+        return bool(self._sched) or bool(self._deadlines) or bool(self._lost()) or \
+            any(d.keepalive_period() or d.thermostats for d in self.devices.values())
 
-    def _start_keepalive(self):
+    def _lost(self) -> list:
+        """Devices that were connected and lost their connection (reopened by the service thread)."""
+        return [d for d in self.devices.values() if d.ever_connected and not d.connected and not self._closed]
+
+    def _start_keepalive(self, force: bool = False):
         if self._ka_thread is not None and self._ka_thread.is_alive():
             return
-        if not self._needs_service():
+        if self._closed or not (force or self._needs_service()):
             return
         self._ka_stop.clear()
         self._ka_thread = threading.Thread(target=self._keepalive_loop, name="io-service", daemon=True)
         self._ka_thread.start()
+
+    # -- program alive (heartbeat gating)
+    def tick(self, owner=None):
+        """A test using these devices is running normally (call it for every frame or safety tick): heartbeats go
+        on. Without ticks for TICK_TIMEOUT_S the heartbeats stop and the boards' watchdogs switch outputs off."""
+        self._ticks[id(owner)] = time.monotonic()
+
+    def untick(self, owner=None):
+        """The test is over: its ticks no longer gate the heartbeats."""
+        self._ticks.pop(id(owner), None)
+
+    def _alive(self) -> bool:
+        ticks = list(self._ticks.values())
+        return not ticks or time.monotonic() - max(ticks) < self.TICK_TIMEOUT_S
 
     def _keepalive_loop(self):
         next_service = 0.0
@@ -859,14 +1134,17 @@ class DeviceManager:
             periods = []
             now = time.monotonic()
             self._run_schedule(now)
+            self._run_deadlines(now)
+            alive = self._alive()
             for d in list(self.devices.values()):
                 per = d.keepalive_period()
                 if per:
                     periods.append(per)
-                    try:
-                        d.keepalive()
-                    except Exception as e:  # pragma: no cover - hardware dependent
-                        d._error(f"{d.name}: keep-alive failed: {e}")
+                    if alive:
+                        try:
+                            d.keepalive()
+                        except Exception as e:  # pragma: no cover - hardware dependent
+                            d._error(f"{d.name}: keep-alive failed: {e}")
                 if d.thermostats:
                     periods.append(self.SERVICE_S)
                     if now >= next_service:
@@ -877,16 +1155,85 @@ class DeviceManager:
                                 d._error(f"{d.name}: {e}")
             if now >= next_service:
                 next_service = now + self.SERVICE_S
+            self._reconnect(now)
             with self._lock:
                 due = self._sched[0][0] if self._sched else None
-            if not periods and due is None:
-                return
+                if self._deadlines:
+                    dl = min(v[0] for v in self._deadlines.values())
+                    due = dl if due is None else min(due, dl)
+                if self._lost():
+                    periods.append(1.0)
+                if not periods and due is None:
+                    # exit under the lock: pulse_sequence (which queues under it) then sees no thread and
+                    # starts a new one, instead of a thread about to return
+                    if self._ka_thread is threading.current_thread():
+                        self._ka_thread = None
+                    return
             wait = max(0.02, min(periods) / 4) if periods else 0.5
             if due is not None:
                 wait = min(wait, max(0.0, due - time.monotonic()))
             self._sched_wake.clear()
             if wait > 0:
                 self._sched_wake.wait(wait)
+
+    def _reconnect(self, now):
+        """Open again (in the background: a handshake takes seconds) the devices whose connection was lost."""
+        if now < self._next_reconnect or self._closed:
+            return
+        th = self._reconnecting
+        if th is not None and th.is_alive():
+            return
+        lost = self._lost()
+        if not lost:
+            return
+        self._next_reconnect = now + self.RECONNECT_S
+
+        def run():
+            self.open()
+            for d in lost:
+                if d.connected:
+                    d.errors.append(f"{d.name}: connection restored")
+
+        self._reconnecting = threading.Thread(target=run, name="io-reconnect", daemon=True)
+        self._reconnecting.start()
+
+    # -- outputs: the host's maximum on-time
+    def _set_output_dev(self, d: Device, channel: str, value, max_s=None):
+        """Switch a device's output and arm (or clear) the computer's cut-off of outputs with a maximum on-time
+        that the device cannot time itself (see Device.host_max_on)."""
+        ok = d.set_output(channel, value, max_s=max_s)
+        if ok is False:
+            return ok
+        limit = d.host_max_on(channel, max_s) if value else None
+        key = (d.name, channel)
+        with self._lock:
+            if limit:
+                self._deadlines[key] = (time.monotonic() + limit, limit)
+                self._start_keepalive(force=True)
+                self._sched_wake.set()
+            else:
+                self._deadlines.pop(key, None)
+        return ok
+
+    def _run_deadlines(self, now):
+        with self._lock:
+            due = [(k, v) for k, v in self._deadlines.items() if v[0] <= now + 0.0005]
+            for key, (_t, limit) in due:
+                d = self.devices.get(key[0])
+                if d is None:
+                    self._deadlines.pop(key, None)
+                    continue
+                try:
+                    ok = d.set_output(key[1], 0) is not False
+                except Exception as e:  # pragma: no cover - hardware dependent
+                    d._error(f"{d.name}: {e}")
+                    ok = False
+                if ok:
+                    self._deadlines.pop(key, None)
+                    d._error(f"{d.name}: {key[1]} switched off by the computer after its maximum on-time "
+                             f"({limit:g} s)")
+                else:  # not sent: tried again shortly (and the device reopens)
+                    self._deadlines[key] = (now + self.HOST_RETRY_S, limit)
 
     # -- timed outputs (pulse sequences)
     def _run_schedule(self, now):
@@ -900,7 +1247,7 @@ class DeviceManager:
                 d = self.devices.get(dev)
                 if d is not None:
                     try:
-                        d.set_output(ch, value, max_s=max_s)
+                        self._set_output_dev(d, ch, value, max_s=max_s)
                     except Exception as e:  # pragma: no cover - hardware dependent
                         d._error(f"{d.name}: {e}")
 
@@ -921,31 +1268,34 @@ class DeviceManager:
                     self._sched_seq += 1
                     heapq.heappush(self._sched, (t0 + max(0.0, dt), self._sched_seq, device, channel,
                                                  0 if v is None else v, mx if v else None))
-            if self._ka_thread is None or not self._ka_thread.is_alive():
-                self._ka_stop.clear()
-                self._ka_thread = threading.Thread(target=self._keepalive_loop, name="io-service", daemon=True)
-                self._ka_thread.start()
+            self._start_keepalive(force=True)
             self._sched_wake.set()
             return True
 
-    def _cancel_schedule(self, device, channel):
+    def _cancel_schedule(self, device, channel=None):
+        """Drop the timed outputs of a channel (None: of every channel) of a device."""
         import heapq
 
         with self._lock:
             n = len(self._sched)
-            self._sched = [e for e in self._sched if not (e[2] == device and e[3] == channel)]
+            self._sched = [e for e in self._sched if not (e[2] == device and channel in (None, e[3]))]
             if len(self._sched) != n:
                 heapq.heapify(self._sched)
 
     def close(self):
+        self._closed = True
         self._ka_stop.set()
         self._sched_wake.set()
         with self._lock:
             self._sched = []
+            self._deadlines = {}
         th = self._ka_thread
         if th is not None and th.is_alive() and th is not threading.current_thread():
             th.join(2.0)
         self._ka_thread = None
+        rc = self._reconnecting
+        if rc is not None and rc.is_alive() and rc is not threading.current_thread():
+            rc.join(5.0)  # a device being reopened: closed below once its handshake is over
         with self._lock:
             for d in self.devices.values():
                 try:
@@ -1007,8 +1357,9 @@ class DeviceManager:
         return out
 
     def set_output(self, device: str, channel: str, value: float, max_s: float | None = None):
+        """False when the device could not switch it (e.g. disconnected); None / True otherwise."""
         with self._lock:
-            self.device(device).set_output(channel, value, max_s=max_s)
+            return self._set_output_dev(self.device(device), channel, value, max_s=max_s)
 
     def pulse_train(self, device, channel, period_s, width_s, count) -> bool:
         with self._lock:
@@ -1041,10 +1392,11 @@ class DeviceManager:
         self._start_keepalive()
         return ok
 
-    def notify(self, subject: str, text: str) -> bool:
-        """Send an alert through every alert device (e-mail / SMS, in the background)."""
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        """Send an alert through every alert device (e-mail / SMS, in the background); see Device.notify."""
+        kw = {k: v for k, v in (("kinds", kinds), ("to", to)) if v}
         with self._lock:
-            sent = [d.notify(subject, text) for d in self.devices.values() if d.type == "notify"]
+            sent = [d.notify(subject, text, **kw) for d in self.devices.values() if d.type == "notify"]
         return any(sent)
 
     def set_input(self, device: str, channel: str, value: float):
@@ -1065,34 +1417,51 @@ class DeviceManager:
         with self._lock:
             self._subs.pop(sub, None)
 
-    def _poll_all(self) -> list[tuple]:
-        out = []
-        for d in list(self.devices.values()):
+    def _poll_device(self, d: Device) -> list[tuple]:
+        """Read one device (one thread at a time) and fan its changes out to the subscribers. Outside the
+        manager's lock: a slow device delays nobody else."""
+        with self._lock:
+            lk = self._poll_locks.setdefault(d.name, threading.Lock())
+        with lk:
             try:
                 changes = d.poll_ex()
             except Exception as e:  # pragma: no cover - hardware dependent
                 d._error(f"{d.name}: {e}")
-                continue
-            for ch, v, ms in changes:
-                out.append((d.name, ch, d.kind(ch) or "input", v, ms))
-            n = d.watchdog_fired
-            if n != self._wd_seen.get(d.name, 0):
-                self._wd_seen[d.name] = n
-                out.append((d.name, "", "watchdog", 1, None))
-        for filt, q in self._subs.values():
-            q.extend(c for c in out if filt is None or c[0] in filt)
+                return []
+            out = [(d.name, ch, d.kind(ch) or "input", v, ms) for ch, v, ms in changes]
+            with self._lock:
+                n = d.watchdog_fired
+                if n != self._wd_seen.get(d.name, 0):
+                    self._wd_seen[d.name] = n
+                    out.append((d.name, "", "watchdog", 1, None))
+                if out:
+                    for filt, q in self._subs.values():
+                        if filt is None or d.name in filt:
+                            q.extend(out)
+            return out
+
+    def _poll_all(self, devices=None) -> list[tuple]:
+        out = []
+        for d in list(self.devices.values()):
+            if devices is None or d.name in devices:
+                out += self._poll_device(d)
         return out
 
     def read_inputs_ex(self, sub: int | None = None) -> list[tuple]:
         """Like :meth:`read_inputs` with the board time: [(device, channel, kind, value, ms or None)].
-        kind "watchdog" (channel "") reports that the device's watchdog switched its outputs off."""
+        kind "watchdog" (channel "") reports that the device's watchdog switched its outputs off (or that the board
+        restarted)."""
         with self._lock:
-            out = self._poll_all()
             if sub is None:
-                return out
+                if self._default_sub is None:
+                    self._default_sub = self.subscribe()
+                sub = self._default_sub
             q = self._subs.get(sub)
-            if q is None:
-                return []
+            filt = q[0] if q is not None else set()
+        if q is None:
+            return []
+        self._poll_all(filt)  # only the subscriber's devices: each test reads its own box
+        with self._lock:
             res = list(q[1])
             q[1].clear()
             return res
@@ -1104,6 +1473,7 @@ class DeviceManager:
     def all_off(self):
         with self._lock:
             self._sched = []
+            self._deadlines = {}
             for d in self.devices.values():
                 d.all_off()
 
@@ -1125,6 +1495,14 @@ class DeviceView:
         self.devices: dict[str, Device] = {}  # private virtual devices
         self._sub = manager.subscribe({self.alias} if self.alias else set())
         self._released = False
+
+    def tick(self, owner=None):
+        """This test runs normally (see DeviceManager.tick)."""
+        if not self._released:
+            self.manager.tick(self)
+
+    def untick(self, owner=None):
+        self.manager.untick(self)
 
     # -- name resolution
     @property
@@ -1202,7 +1580,7 @@ class DeviceView:
         return fn(self.device(name))
 
     def set_output(self, device: str, channel: str, value: float, max_s: float | None = None):
-        self._call(device, lambda d: d.set_output(channel, value, max_s=max_s))
+        return self._call(device, lambda d: self.manager._set_output_dev(d, channel, value, max_s=max_s))
 
     def pulse_train(self, device, channel, period_s, width_s, count) -> bool:
         return self._call(device, lambda d: d.pulse_train(channel, period_s, width_s, count))
@@ -1227,8 +1605,8 @@ class DeviceView:
         self.manager._start_keepalive()
         return ok
 
-    def notify(self, subject: str, text: str) -> bool:
-        return self.manager.notify(subject, text)
+    def notify(self, subject: str, text: str, kinds=None, to=None) -> bool:
+        return self.manager.notify(subject, text, kinds=kinds, to=to)
 
     def pulse_sequence(self, device: str, channel: str, pulses, level: float = 1) -> bool:
         name = self._map(device)
@@ -1259,6 +1637,9 @@ class DeviceView:
         for d in self._own():
             if d.name == self.alias:
                 with self.manager._lock:
+                    self.manager._cancel_schedule(self.alias)  # its pending pulse sequences too
+                    for key in [k for k in self.manager._deadlines if k[0] == self.alias]:
+                        self.manager._deadlines.pop(key, None)
                     d.all_off()
             else:
                 d.all_off()
@@ -1273,5 +1654,6 @@ class DeviceView:
         except Exception:  # pragma: no cover - hardware dependent
             pass
         self.manager.unsubscribe(self._sub)
+        self.manager.untick(self)
 
     close = release

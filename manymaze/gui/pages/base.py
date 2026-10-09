@@ -116,6 +116,14 @@ ANALYSIS_SPEC = [
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_immobile_s", "Shortest immobility episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("freeze_threshold_mode", "Freezing thresholds", "choice",
+     [("manual", "Set manually (below)"), ("auto", "Automatic, from the motion of each test")],
+     "Automatic: the start / end thresholds are derived from the distribution of the motion index of each test "
+     "(the still and moving frames are separated on a log scale), adjusted by the sensitivity. Manual: the two "
+     "thresholds below."),
+    ("freeze_sensitivity", "Automatic threshold sensitivity (0–100)", "float", (0.0, 100.0, 5.0, 0),
+     "50 = the threshold separating still from moving frames. Higher: smaller movements count as movement, so "
+     "the animal must be stiller to be freezing (+25 halves the threshold); lower: it may move a little more."),
     ("freeze_on_pct", "Freezing starts when movement falls below (% of body)", "float", (0.0, 100.0, 0.1, 2),
      "Pixel change, as a % of the animal's area, under which freezing begins."),
     ("freeze_off_pct", "Freezing ends when movement rises above (% of body)", "float", (0.0, 100.0, 0.1, 2), ""),
@@ -150,6 +158,9 @@ ANALYSIS_SPEC = [
      "Distance from the arena wall counted as thigmotaxis. 0 = 25 % of the arena half-width."),
     ("exploration_facing_deg", "Exploring means facing the object within (°)", "float", (0.0, 180.0, 5.0, 1),
      "Head must point to the object within this angle (NOR / object exploration)."),
+    ("orientation_deg", "Oriented towards a zone / point within (°)", "float", (0.0, 180.0, 5.0, 1),
+     "Head direction (centre → head) within this angle of the zone / point: time facing a zone, time oriented "
+     "towards its centre, time head oriented towards a point. ANY-maze's default is 60° in total, i.e. 30°."),
     ("grid_cells", "Grid for line crossings (N×N, 0 = off)", "int", (0, 20, 1),
      "Grid used for line-crossing counts. 0 = off."),
     ("contact_distance", "Social contact within (units)", "float", (0.0, 1000.0, 0.5, 2), "0 = one body length."),
@@ -199,13 +210,14 @@ DETECTION_SECTIONS = [
 
 ANALYSIS_SECTIONS = [
     ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s"]),
-    ("Freezing", ["freeze_on_pct", "freeze_off_pct", "min_freeze_s"]),
+    ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
+                  "min_freeze_s"]),
     ("Activity", ["activity_threshold_pct", "min_inactive_s"]),
     ("Rearing", ["rearing", "rear_area_pct", "rear_length_pct", "min_rear_s"]),
     ("Zones", ["zone_body_part", "body_proportion_pct", "hidden_zone_margin", "entry_min_duration_s",
                "count_initial_entry", "latency_if_never"]),
-    ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "grid_cells", "contact_distance",
-                                "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
+    ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "orientation_deg", "grid_cells",
+                                "contact_distance", "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
     ("I/O measures", ["io_baseline_s", "io_deviation_sd", "opad_contact", "opad_lick", "opad_temperature",
                       "opad_temperatures", "opad_tolerance"]),

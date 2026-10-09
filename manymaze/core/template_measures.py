@@ -173,23 +173,24 @@ def _rapc(d: TemplateData):
 def _t_maze(d: TemplateData):
     seq = d.seq(["Left arm", "Right arm"])
     d.res["First choice"] = seq[0][0].split()[0] if seq else "None"
-    d.res["Choice latency (s)"] = _r(seq[0][1] - d.k.t0 if seq else d.k.duration)
+    d.res["Choice latency (s)"] = _r(seq[0][1] - d.k.t0 if seq else d.never())
     d.res["Arm alternations"] = sum(1 for i in range(len(seq) - 1) if seq[i][0] != seq[i + 1][0])
 
 
 def _water_maze(d: TemplateData):
     res, app, s, k = d.res, d.app, d.s, d.k
-    t, dur, T, u = k.t, k.dur, k.duration, app.unit
+    t, dur, u = k.t, k.dur, app.unit
     plat = app.zone("Platform")
     pc = app.point("Platform centre")
     if plat is not None:
-        inp = d.memb.get("Platform", np.zeros(len(t), bool))
-        idx = np.flatnonzero(inp)
-        res["Escape latency (s)"] = _r(float(t[idx[0]] - k.t0) if len(idx) else T)
-        res["Found platform"] = "Yes" if len(idx) else "No"
-        stop = idx[0] if len(idx) else len(t)
-        res[f"Path length to platform ({u})"] = _r(k.step[:stop + 1].sum(), 2)
-        res["Platform crossings"] = d.zent("Platform") - (1 if d.initial and inp[0] and s.count_initial_entry else 0)
+        # the platform entries as the zone measures count them (minimum entry duration, initial entry rule)
+        stop = _found(d, "Platform")
+        res["Escape latency (s)"] = _r(float(t[stop] - k.t0) if stop is not None else d.never())
+        res["Found platform"] = "Yes" if stop is not None else "No"
+        res[f"Path length to platform ({u})"] = _r(k.step[:(stop if stop is not None else len(t)) + 1].sum(), 2)
+        # crossings: the entries, without one at the start of the test (the animal released on the platform)
+        res["Platform crossings"] = d.zent("Platform") - (1 if d.initial and stop == 0 and s.count_initial_entry
+                                                         else 0)
         others = [z.name for z in app.zones if z.name.startswith("Platform position")]
         if others:
             res["Mean crossings of other platform positions"] = _r(np.mean([d.zent(o) for o in others]), 2)
@@ -217,13 +218,35 @@ def _water_maze(d: TemplateData):
     res["Search strategy"] = classify_water_maze_strategy(res, u)
 
 
+def _found(d: TemplateData, zone: str) -> int | None:
+    """Frame (in the period) of the first entry into the zone as the zone measures count entries, or None."""
+    seq = d.seq([zone])
+    return int(np.searchsorted(d.k.t, seq[0][1] - 1e-9)) if seq else None
+
+
 def _whishaw(d: TemplateData, pc):
     """Whishaw's corridor: a band from the release point (first position or a "Release point" point) to the
     platform; reports how much of the swim to the platform stayed inside it."""
-    res, app, s, k = d.res, d.app, d.s, d.k
+    res, app, k = d.res, d.app, d.k
+    stop = _found(d, "Platform") if d.app.zone("Platform") is not None else None
+    w = whishaw_corridor(k, app, d.s, pc.x, pc.y, stop if stop is not None else len(k.t) - 1)
+    if w is None:
+        return
+    res["Whishaw corridor time (s)"] = w["time"]
+    res["Whishaw corridor time (%)"] = w["time_pct"]
+    res["Whishaw corridor path (%)"] = w["path_pct"]
+    res[f"Whishaw corridor distance ({app.unit})"] = w["distance"]
+    res["Left Whishaw corridor"] = w["left"]
+
+
+def whishaw_corridor(k, app, s, gx: float, gy: float, stop: int) -> dict | None:
+    """Whishaw's corridor from the release point (a "Release point" / "Start" point, else the first position) to the
+    goal (gx, gy) px, *s.whishaw_width* wide (0 = 20 cm, or 13 % of the arena when not calibrated), over frames
+    from the first position to frame ``stop`` (the arrival): time (s and % of that time), path (% of the distance)
+    and distance inside it, and whether the animal left it. None without two positions."""
     ok = np.flatnonzero(np.isfinite(k.x))
     if len(ok) < 2:
-        return
+        return None
     rp = app.point("Release point") or app.point("Start")
     sx, sy = (rp.x, rp.y) if rp is not None else (k.x[ok[0]], k.y[ok[0]])
     width = s.whishaw_width
@@ -234,17 +257,15 @@ def _whishaw(d: TemplateData, pc):
             x0, _, x1, _ = app.arena_or_bounds().bounds()
             width = 0.13 * (x1 - x0)
     wpx = width / k.scale
-    inp = d.memb.get("Platform")
-    found = np.flatnonzero(inp) if inp is not None else np.zeros(0, int)
-    stop = found[0] if len(found) else len(k.t) - 1
     seg = slice(ok[0], stop + 1)
-    dist = point_segment_distance(k.x, k.y, sx, sy, pc.x, pc.y)
+    dist = point_segment_distance(k.x, k.y, sx, sy, gx, gy)
     inside = (dist <= wpx / 2)[seg]
     dd, st = k.dur[seg], k.step[seg]
-    res["Whishaw corridor time (%)"] = _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2)
-    res["Whishaw corridor path (%)"] = _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2)
-    res[f"Whishaw corridor distance ({app.unit})"] = _r(st[inside].sum(), 2)
-    res["Left Whishaw corridor"] = "No" if inside.all() else "Yes"
+    return {"time": _r(dd[inside].sum()),
+            "time_pct": _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2),
+            "path_pct": _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2),
+            "distance": _r(st[inside].sum(), 2),
+            "left": "No" if inside.all() else "Yes"}
 
 
 def classify_water_maze_strategy(res: dict, u: str) -> str:
@@ -276,10 +297,10 @@ def _barnes_maze(d: TemplateData):
         first = names.index(esc_name)
         res["Primary latency (s)"] = _r(seq[first][1] - k.t0)
         res["Primary errors"] = first
-        stop = np.searchsorted(k.t, seq[first][1])
+        stop = np.searchsorted(k.t, seq[first][1] - 1e-9)
         res[f"Primary path length ({app.unit})"] = _r(k.step[:stop + 1].sum(), 2)
     else:
-        res["Primary latency (s)"] = _r(k.duration)
+        res["Primary latency (s)"] = _r(d.never())
         res["Primary errors"] = len(names)
         res[f"Primary path length ({app.unit})"] = _r(k.step.sum(), 2)
     res["Total errors"] = sum(1 for n in names if n != esc_name)

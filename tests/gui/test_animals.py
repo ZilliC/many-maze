@@ -4,7 +4,7 @@ import csv
 import shutil
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from manymaze.core.demo import create_demo_project
@@ -82,6 +82,18 @@ def test_add_duplicate_delete(page):
     page.delete_selected_interactive()
     assert len(p.animals) == n - 1 and p.get_animal("M02") is None
     assert page.main.dirty
+
+
+def test_duplicate_several_lands_after_each_original(page):
+    p = page.project
+    page.add_several("D", 2)
+    page.table.clearSelection()
+    for aid in ("D01", "D02"):
+        page.table.selectionModel().select(page.table.model().index(row_of(page, aid), 0),
+                                           QItemSelectionModel.Select | QItemSelectionModel.Rows)
+    d1, d2 = page.duplicate_selected()
+    ids = [a.id for a in p.animals]
+    assert ids.index(d1.id) == ids.index("D01") + 1 and ids.index(d2.id) == ids.index("D02") + 1
 
 
 def test_inline_edit_rename_and_group(page):

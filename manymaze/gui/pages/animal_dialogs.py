@@ -16,7 +16,10 @@ from ..widgets import color_icon
 
 
 class AddSeveralDialog(QDialog):
-    def __init__(self, groups: list[str], parent=None):
+    """A numbered series of animals. ``labels``: how each treatment is shown (its code while testing blind; the
+    list then offers only the existing treatments, and ``treatment()`` gives the real name)."""
+
+    def __init__(self, groups: list[str], parent=None, labels: dict[str, str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Add animals")
         f = QFormLayout(self)
@@ -31,8 +34,10 @@ class AddSeveralDialog(QDialog):
         self.digits.setRange(1, 6)
         self.digits.setValue(2)
         self.group = QComboBox()
-        self.group.setEditable(True)
-        self.group.addItems([""] + groups)
+        self.group.setEditable(labels is None)
+        self.group.addItem("", "")
+        for g in groups:
+            self.group.addItem(labels.get(g, "??") if labels is not None else g, g)
         self.preview = QLabel()
         self.preview.setStyleSheet("color:palette(mid)")
         for w in (self.prefix,):
@@ -50,6 +55,14 @@ class AddSeveralDialog(QDialog):
         bb.rejected.connect(self.reject)
         f.addRow(bb)
         self._update()
+
+    def treatment(self) -> str:
+        """The chosen (or typed) treatment's name."""
+        if self.group.isEditable():
+            text = self.group.currentText().strip()
+            i = self.group.findText(text)
+            return (self.group.itemData(i) or text) if i >= 0 else text
+        return self.group.currentData() or ""
 
     def ids(self) -> list[str]:
         p, s, d = self.prefix.text().strip(), self.start.value(), self.digits.value()
@@ -268,19 +281,46 @@ class WeighDialog(QDialog):
         self.state.setText("")
 
     def read_scale(self) -> bool:
+        """Read the scale in a background thread (it may wait seconds for a stable weight) while the window keeps
+        painting; the dialog's commands are disabled meanwhile. Returns True when a weight was read."""
         cfg = self.scale.currentData()
-        if cfg is None:
+        if cfg is None or getattr(self, "_reading", False):
             return False
+        from PySide6.QtCore import QEventLoop
+
+        from ..widgets import Worker
+
+        def work(_progress, _stop):
+            try:
+                return self.reader(cfg, timeout=float(cfg.get("timeout_s", 5.0)), stable=True), None
+            except Exception as e:  # no pyserial, no port, time-out, balance error
+                return None, e
+
+        out = {}
+        loop = QEventLoop()
+        w = Worker(work)
+        w.signals.done.connect(lambda r: (out.update(r=r), loop.quit()))
+        w.signals.failed.connect(lambda m: (out.update(r=(None, RuntimeError(m))), loop.quit()))
+        self._reading = True
+        buttons = [b for b in (self.read_btn, self.record_btn, self.next_btn, self.scale) if b.isEnabled()]
+        for b in buttons:
+            b.setEnabled(False)
         self.state.setText("Reading the scale…")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            QApplication.processEvents()
-            grams, stable = self.reader(cfg, timeout=float(cfg.get("timeout_s", 5.0)), stable=True)
-        except Exception as e:  # no pyserial, no port, time-out, balance error
-            self.state.setText(f"<span style='color:#dc2626'>{e}</span>")
-            return False
+            w.start()
+            if not out:
+                loop.exec()
         finally:
             QApplication.restoreOverrideCursor()
+            self._reading = False
+            for b in buttons:
+                b.setEnabled(True)
+        res, err = out.get("r", (None, RuntimeError("the scale was not read")))
+        if err is not None:
+            self.state.setText(f"<span style='color:#dc2626'>{err}</span>")
+            return False
+        grams, stable = res
         self.grams.setValue(grams)
         self.state.setText(f"{scales.format_grams(grams)} g" + ("" if stable else " (not stable)"))
         return True

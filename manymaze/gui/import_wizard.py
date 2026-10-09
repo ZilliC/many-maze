@@ -76,6 +76,8 @@ class ImportDialog(QDialog):
             self.fields = QListWidget()
             self.fields.setMaximumHeight(120)
             self.extra.addRow("Also import as animal fields", self.fields)
+            for cb in self.combos.values():  # the columns left over follow the mapping
+                cb.currentIndexChanged.connect(self._fill_fields)
         elif kind == "tests":
             self.video_dir = QLineEdit()
             self.video_dir.setPlaceholderText("folder of the videos (if the file names are relative)")
@@ -134,23 +136,35 @@ class ImportDialog(QDialog):
                 self.preview.setItem(r, c, QTableWidgetItem(v))
         self.preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         guess = imp.guess_mapping(self.header, self.roles)
-        for role, cb in self.combos.items():
-            cb.clear()
-            cb.addItem("— not imported —", None)
-            for i, h in enumerate(self.header):
-                cb.addItem(h, i)
-            cb.setCurrentIndex(cb.findData(guess.get(role)) if guess.get(role) is not None else 0)
-        if self.kind == "animals":
-            self.fields.clear()
-            mapped = {v for v in guess.values() if v is not None}
-            for i, h in enumerate(self.header):
-                if i in mapped or h.lower() in ("animal", "status"):
-                    continue
-                it = QListWidgetItem(h)
-                it.setData(Qt.UserRole, i)
-                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-                it.setCheckState(Qt.Checked)
-                self.fields.addItem(it)
+        self._filling = True
+        try:
+            for role, cb in self.combos.items():
+                cb.clear()
+                cb.addItem("— not imported —", None)
+                for i, h in enumerate(self.header):
+                    cb.addItem(h, i)
+                cb.setCurrentIndex(cb.findData(guess.get(role)) if guess.get(role) is not None else 0)
+        finally:
+            self._filling = False
+        self._fill_fields()
+
+    def _fill_fields(self, *_):
+        """Animals: the columns not mapped to a role, offered as animal fields (a column mapped to a role is not
+        imported twice; a column un-mapped becomes available). Ticks are kept for the columns already listed."""
+        if self.kind != "animals" or getattr(self, "_filling", False):
+            return
+        ticked = {self.fields.item(i).data(Qt.UserRole): self.fields.item(i).checkState()
+                  for i in range(self.fields.count())}
+        self.fields.clear()
+        mapped = {v for v in self.mapping().values() if v is not None}
+        for i, h in enumerate(self.header):
+            if i in mapped or h.lower() in ("animal", "status"):
+                continue
+            it = QListWidgetItem(h)
+            it.setData(Qt.UserRole, i)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(ticked.get(i, Qt.Checked))
+            self.fields.addItem(it)
 
     def mapping(self) -> dict:
         return {role: cb.currentData() for role, cb in self.combos.items()}

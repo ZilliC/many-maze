@@ -5,6 +5,7 @@
     manymaze demo DIR             # create a demo project with synthetic videos
     manymaze track VIDEO --template open_field --bbox X,Y,W,H [--size-cm 40] [-o results.csv]
     manymaze project DIR track [--all]
+    manymaze project DIR relink --folder VIDEOS   # find moved videos by file name
     manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
     manymaze project DIR report -o report.html
     manymaze templates
@@ -46,7 +47,7 @@ def cmd_track(a):
 
         from .core.apparatus import Apparatus
 
-        d = json.loads(Path(a.apparatus).read_text())
+        d = json.loads(Path(a.apparatus).read_text(encoding="utf-8"))
         if isinstance(d, dict) and isinstance(d.get("apparatus"), list):  # apparatus file or experiment
             if not d["apparatus"]:
                 sys.exit(f"{a.apparatus} contains no apparatus")
@@ -85,21 +86,33 @@ def cmd_track(a):
             print(f"{k}: {v}")
 
 
+def _lock_for_writing(p):
+    """Lock the experiment while this command changes it; exit if another program has it open or it cannot be
+    saved by this version."""
+    from .core import explock
+
+    try:
+        p.check_writable()
+    except ValueError as e:
+        sys.exit(str(e))
+    other = explock.acquire(p.path)
+    if other is not None:
+        sys.exit(f"The experiment is open in {explock.describe(other)}: close it there first (this command saves "
+                 f"the experiment and would overwrite its changes).")
+
+
 def cmd_project(a):
+    from .core import explock
     from .core.project import Project
 
     p = Project.load(a.dir)
-    if a.action == "track":
-        from .core.batch import track_tests
-        from .core.project import INACTIVE_STATUSES
-
-        todo = [t for t in p.tests if t.video and (a.all or not p.has_track(t)) and t.status not in INACTIVE_STATUSES]
-        res = track_tests(p, todo, progress=_progress("tracking"), workers=a.workers)
-        p.save()
-        for e in res["errors"]:
-            print(e, file=sys.stderr)
-        print(f"Tracked {len(res['tracked'])} of {len(todo)} tests ({res['workers']} parallel workers)")
-    elif a.action == "results":
+    if a.action in ("track", "relink"):
+        _lock_for_writing(p)
+        try:
+            return _change_project(p, a)
+        finally:
+            explock.release(p.path)
+    if a.action == "results":
         from .core.export import export_results
 
         out = a.output or str(p.exports_dir() / ("results by animal.xlsx" if a.wide else "results.xlsx"))
@@ -107,10 +120,22 @@ def cmd_project(a):
             from .core.export import wide_rows, write_table
             from .core.project import result_columns
 
+            if Path(out).suffix.lower() == ".xml":
+                sys.exit("--wide writes a table (one row per animal): use .csv, .tsv, .txt, .xlsx, .slk or .dbf, or "
+                         "leave --wide out for the XML export of the whole experiment")
             rows = p.results(segmented=a.bins)
             info = {"Test", "Animal", "Group", "Sex", "Stage", "Trial", "Apparatus", "Period", *p.animal_fields}
-            wide = wide_rows(rows, [c for c in result_columns(rows) if c not in info])
-            write_table(wide, out, result_columns(wide), sheet="By animal")
+            measures = [c for c in result_columns(rows) if c not in info]
+            if a.column:  # only the chosen measures
+                missing = [c for c in a.column if c not in measures]
+                if missing:
+                    sys.exit(f"Unknown measure(s): {', '.join(missing)}")
+                measures = list(dict.fromkeys(a.column))
+            wide = wide_rows(rows, measures)
+            try:
+                write_table(wide, out, result_columns(wide), sheet="By animal")
+            except ValueError as e:
+                sys.exit(str(e))
         else:
             cols = None
             if a.column:  # the information columns, then the chosen measures
@@ -135,7 +160,10 @@ def cmd_project(a):
         out = a.output or str(p.exports_dir() / "event log.csv")
         rows = [{"Test": t.id, "Stage": t.stage, "Trial": t.trial, **r} for t in p.tests
                 if t.status not in INACTIVE_STATUSES for r in event_log_rows(p, t)]
-        write_table(rows, out, sheet="Event log")
+        try:
+            write_table(rows, out, sheet="Event log")
+        except ValueError as e:
+            sys.exit(str(e))
         print(f"Wrote {out} ({len(rows)} events)")
     elif a.action == "protocol":
         from .core.export import protocol_report
@@ -160,6 +188,51 @@ def cmd_project(a):
               f"{', '.join(x.name for x in p.apparatus)}")
         for t in p.tests:
             print(f"  #{t.id} {t.animal_id:>8} {t.stage:>8} {t.status:>8} {t.video}")
+        missing = p.missing_videos()
+        if missing:
+            print(f"{len(missing)} test(s) with a missing video: {', '.join(str(t.id) for t in missing)} (find them "
+                  f"with: manymaze project DIR relink --folder FOLDER)")
+
+
+def _change_project(p, a):
+    """The project actions that save the experiment (run with the experiment locked)."""
+    if a.action == "track":
+        from .core.batch import track_tests
+        from .core.project import INACTIVE_STATUSES
+
+        todo = [t for t in p.tests if t.video and (a.all or not p.has_track(t)) and t.status not in INACTIVE_STATUSES]
+        try:
+            res = track_tests(p, todo, progress=_progress("tracking"), workers=a.workers)
+        except ValueError as e:  # e.g. MANYMAZE_WORKERS is not a number
+            sys.exit(str(e))
+        for e in res["errors"]:
+            print(e, file=sys.stderr)
+        try:
+            p.save()
+        except Exception as e:
+            ids = ", ".join(str(i) for i in res["tracked"]) or "none"
+            sys.exit(f"The tracks were written (tests {ids}) but the experiment could not be saved, so these tests "
+                     f"are not marked as tracked: {e}\nFix the problem and run the command again (with --all to "
+                     f"track them again).")
+        print(f"Tracked {len(res['tracked'])} of {len(todo)} tests ({res['workers']} parallel workers)")
+    elif a.action == "relink":
+        from .core.project import relink_videos
+
+        if not a.folder:
+            sys.exit("relink needs --folder: the folder (searched with its subfolders) holding the moved videos")
+        if not Path(a.folder).is_dir():
+            sys.exit(f"Folder not found: {a.folder}")
+        res = relink_videos(p, a.folder)
+        if res["relinked"]:
+            try:
+                p.save()
+            except Exception as e:
+                sys.exit(f"The experiment could not be saved: {e}")
+        for tid, path in res["relinked"].items():
+            print(f"  #{tid} -> {path}")
+        print(f"Relinked {len(res['relinked'])} video(s); not found: {len(res['not_found'])}"
+              + (f"; several files of the same name (left alone): tests {', '.join(map(str, res['ambiguous']))}"
+                 if res["ambiguous"] else ""))
 
 
 def cmd_demo(a):
@@ -199,13 +272,16 @@ def main(argv=None):
     t.add_argument("-o", "--output", help=TABLE_OUTPUT_HELP)
     pr = sub.add_parser("project", help="batch operations on a project")
     pr.add_argument("dir")
-    pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive"])
+    pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive",
+                                       "relink"])
     pr.add_argument("--all", action="store_true", help="re-track tests that already have tracks")
     pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")
     pr.add_argument("--wide", action="store_true", help="results: one row per animal, stages / trials as columns")
     pr.add_argument("--column", action="append", metavar="MEASURE",
-                    help="results: export only this measure (repeat for several; the information columns are kept)")
+                    help="results: export only this measure (repeat for several; the information columns are kept; "
+                         "with --wide: these measures only)")
+    pr.add_argument("--folder", help="relink: folder holding the moved videos (searched with its subfolders)")
     pr.add_argument("-o", "--output", help="output file; for results and events " + TABLE_OUTPUT_HELP)
     d = sub.add_parser("demo", help="create a demo project with synthetic videos")
     d.add_argument("dir")

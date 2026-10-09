@@ -261,6 +261,6 @@ def test_archive_and_open_archive(win, tmp_path):
     z = win.archive_experiment(str(tmp_path / "exp"), wait=True)
     assert z and z.endswith("exp.zip")
     n = len(win.project.tests)
-    folder = win.open_archive(z, str(tmp_path / "unpacked"))
+    folder = win.open_archive(z, str(tmp_path / "unpacked"), wait=True)
     assert folder is not None and win.project.path == folder and len(win.project.tests) == n
     assert win.project.has_track(win.project.tests[0])

@@ -75,10 +75,198 @@ def _choice(rng, a):
     return rng.choice(s)
 
 
-def _shuffle(rng, a):
+def _group_key(v):
+    """A hashable key grouping equal values of the same type (lists by their contents)."""
+    if isinstance(v, list):
+        return (list, tuple(_group_key(x) for x in v))
+    return (type(v), v)
+
+
+def _shuffle(rng, a, max_run=0):
+    """A shuffled copy of a list; with max_run > 0, no value appears more than max_run times in a row (ANY-maze's
+    "randomise array" with a maximum number of consecutive repeats)."""
     s = _seq(a)
-    rng.shuffle(s)
-    return s
+    k = int(max_run or 0)
+    if k <= 0 or len(s) < 2:
+        rng.shuffle(s)
+        return s
+    groups: list[list] = []  # [value, count]: equal values (of the same type) in one group
+    index: dict = {}
+    for v in s:
+        try:
+            key = _group_key(v)
+            j = index.get(key)
+        except TypeError:  # pragma: no cover - every value the expressions make is hashable as a key
+            key, j = None, None
+        if j is None:
+            if key is not None:
+                index[key] = len(groups)
+            groups.append([v, 1])
+        else:
+            groups[j][1] += 1
+    most = max(g[1] for g in groups)
+    if most > k * (len(s) - most + 1):
+        raise ExprError(f"shuffle(): the list cannot be arranged with at most {k} repeats in a row")
+    for _ in range(200):
+        out = _bounded_runs(rng, groups, len(s), k)
+        if out is not None:
+            return out
+    raise ExprError(f"shuffle(): no arrangement with at most {k} repeats in a row was found")
+
+
+class _Weights:
+    """A Fenwick tree of the counts left of each group: weighted random picks and updates in O(log n)."""
+
+    def __init__(self, counts):
+        self.n = len(counts)
+        self.tree = [0] * (self.n + 1)
+        for i, c in enumerate(counts):
+            self.add(i, c)
+
+    def add(self, i, d):
+        i += 1
+        while i <= self.n:
+            self.tree[i] += d
+            i += i & -i
+
+    def find(self, r):
+        """The group holding the r-th (0-based) remaining item."""
+        pos, step = 0, 1 << self.n.bit_length()
+        while step:
+            nxt = pos + step
+            if nxt <= self.n and self.tree[nxt] <= r:
+                pos = nxt
+                r -= self.tree[nxt]
+            step >>= 1
+        return pos
+
+
+def _bounded_runs(rng, groups, n, k):
+    """One random arrangement of the grouped values with runs of at most k (None if this attempt got stuck).
+    Each value is drawn with a probability proportional to how many of it are left; a value that would otherwise
+    have too few separators left must be placed now (only the most frequent one can be in that position)."""
+    import heapq
+
+    left = [g[1] for g in groups]
+    w = _Weights(left)
+    heap = [(-c, j) for j, c in enumerate(left)]
+    heapq.heapify(heap)
+    out, last, run = [], -1, 0
+    for i in range(n):
+        rest = n - i
+        banned = last if run >= k else -1
+        while heap and -heap[0][0] != left[heap[0][1]]:  # stale entries
+            heapq.heappop(heap)
+        j = -1
+        if heap:
+            c, top = -heap[0][0], heap[0][1]
+            if top != banned and c > k * (rest - c):
+                j = top  # forced
+        if j < 0:
+            avail = rest - (left[banned] if banned >= 0 else 0)
+            if avail <= 0:
+                return None
+            if banned >= 0:
+                w.add(banned, -left[banned])
+            j = w.find(rng.randrange(avail))
+            if banned >= 0:
+                w.add(banned, left[banned])
+        out.append(groups[j][0])
+        left[j] -= 1
+        w.add(j, -1)
+        if left[j]:
+            heapq.heappush(heap, (-left[j], j))
+        run = run + 1 if j == last else 1
+        last = j
+    return out
+
+
+def _text_size(v, limit=MAX_SEQ) -> int:
+    """An estimate (at least the real length) of len(str(v)), counted without building the text; stops counting
+    once it passes `limit` (a list holding the same inner list many times is counted in full, without copies)."""
+    total = 0
+    stack = [v]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, list):
+            total += 2 + 2 * max(0, len(x) - 1)
+            if total > limit:
+                return total
+            stack.extend(x)
+            continue
+        if isinstance(x, str):
+            total += len(x) * 2 + 2  # quotes, and escapes inside a list
+        elif isinstance(x, bool) or x is None:
+            total += 5
+        elif isinstance(x, int):
+            total += x.bit_length() * 30103 // 100000 + 2
+        else:
+            total += 26
+        if total > limit:
+            return total
+    return total
+
+
+def _size(v, limit=MAX_SEQ) -> int:
+    """The length of a text, or the number of elements of a list with its nested lists (each copy of a shared
+    inner list counts); stops counting once it passes `limit`."""
+    if isinstance(v, str):
+        return len(v)
+    if not isinstance(v, list):
+        return 1
+    total = 0
+    stack = [v]
+    while stack:
+        x = stack.pop()
+        total += len(x)
+        if total > limit:
+            return total
+        stack.extend(e for e in x if type(e) is list)
+    return total
+
+
+def _str(v) -> str:
+    if _text_size(v) > MAX_SEQ:
+        raise ExprError("result too long")
+    return str(v)
+
+
+_FORMAT_SPEC = re.compile(r"%(?:\([^)]*\))?[#0\- +]*(\*|\d+)?(?:\.(\*|\d+))?[hlL]?(.)", re.S)
+
+
+def _check_format(fmt: str, args):
+    """Text % values: the widths and precisions of the format and the size of the values it formats are checked
+    before the text is built."""
+    for m in _FORMAT_SPEC.finditer(fmt):
+        for w in m.group(1, 2):
+            if w and w != "*" and (len(w) > 6 or int(w) > MAX_SEQ):
+                raise ExprError("result too long")
+    if len(fmt) + _text_size(args) > MAX_SEQ:
+        raise ExprError("result too long")
+
+
+def _undefined(x) -> int:
+    return int(x is None or (isinstance(x, float) and math.isnan(x)))
+
+
+def _deg(f):
+    return lambda x: f(math.radians(x))
+
+
+def _to_deg(f):
+    return lambda *a: math.degrees(f(*a))
+
+
+def _log10_or_base(x, base=None):
+    return math.log10(x) if base is None else math.log(x, base)
+
+
+# ANY-maze's maths: angles in degrees and Log in base 10. Used by the procedures that have "anymaze_maths" set
+# (e.g. imported from ANY-maze protocols); the d-suffixed functions are available everywhere.
+ANYMAZE_FUNCTIONS: dict[str, Callable] = {
+    "sin": _deg(math.sin), "cos": _deg(math.cos), "tan": _deg(math.tan), "asin": _to_deg(math.asin),
+    "acos": _to_deg(math.acos), "atan": _to_deg(math.atan), "atan2": _to_deg(math.atan2), "log": _log10_or_base,
+}
 
 
 # random numbers: the implementations take the evaluator's (seedable) generator first
@@ -100,7 +288,15 @@ FUNCTIONS: dict[str, tuple] = {
     "tan": (1, 1, math.tan, ""), "asin": (1, 1, math.asin, ""), "acos": (1, 1, math.acos, ""),
     "atan": (1, 1, math.atan, ""), "atan2": (2, 2, math.atan2, ""), "hypot": (2, 2, math.hypot, ""),
     "degrees": (1, 1, math.degrees, ""), "radians": (1, 1, math.radians, ""),
-    "int": (1, 1, int, ""), "float": (1, 1, float, ""), "bool": (1, 1, bool, ""), "str": (1, 1, str, ""),
+    "sind": (1, 1, ANYMAZE_FUNCTIONS["sin"], "sine of an angle in degrees"),
+    "cosd": (1, 1, ANYMAZE_FUNCTIONS["cos"], "cosine of an angle in degrees"),
+    "tand": (1, 1, ANYMAZE_FUNCTIONS["tan"], "tangent of an angle in degrees"),
+    "asind": (1, 1, ANYMAZE_FUNCTIONS["asin"], "arc sine in degrees"),
+    "acosd": (1, 1, ANYMAZE_FUNCTIONS["acos"], "arc cosine in degrees"),
+    "atand": (1, 1, ANYMAZE_FUNCTIONS["atan"], "arc tangent in degrees"),
+    "atan2d": (2, 2, ANYMAZE_FUNCTIONS["atan2"], "atan2(y, x) in degrees"),
+    "is_undefined": (1, 1, _undefined, "1 if the value is #N/A (NA), none or not a number"),
+    "int": (1, 1, int, ""), "float": (1, 1, float, ""), "bool": (1, 1, bool, ""), "str": (1, 1, _str, ""),
     "sign": (1, 1, lambda x: (x > 0) - (x < 0), "-1, 0 or 1"),
     "clamp": (3, 3, lambda x, lo, hi: max(lo, min(hi, x)), "clamp(x, low, high)"),
     "len": (1, 1, len, "length of a list or text"), "sum": (1, 1, lambda a: sum(_seq(a)), "sum of a list"),
@@ -116,7 +312,7 @@ FUNCTIONS: dict[str, tuple] = {
     "randint": (2, 2, None, "random integer a..b (inclusive)"),
     "gauss": (2, 2, None, "normal random number (mean, sd)"),
     "choice": (1, 1, None, "random element of a list"),
-    "shuffle": (1, 1, None, "shuffled copy of a list"),
+    "shuffle": (1, 2, None, "shuffled copy of a list; shuffle(list, n): at most n equal values in a row"),
     # live test state
     "time": (0, 0, None, "test time (s)"),
     "zone": (1, 1, None, "1 if the animal's centre is in the zone"),
@@ -137,6 +333,26 @@ FUNCTIONS: dict[str, tuple] = {
     "responses": (1, 1, None, "responses registered on a schedule"),
     "reinforcers": (1, 1, None, "reinforcers earned on a schedule"),
     "requirement": (1, 1, None, "current requirement of a schedule"),
+    "test_running": (0, 0, None, "1 while the test runs (not paused, not waiting to start)"),
+    "test_paused": (0, 0, None, "1 while the test is paused"),
+    "stage": (0, 0, None, "the test's stage"), "trial": (0, 0, None, "the test's trial number"),
+    "apparatus": (0, 0, None, "the test's apparatus"),
+    "treatment": (0, 0, None, "the animal's treatment group (its code when testing blind)"),
+    "animal": (0, 0, None, "the animal's number (id)"),
+    "animal_field": (1, 1, None, "animal_field('Sex'): a value from the animal's information"),
+    "date": (0, 0, None, "today's date, 'YYYY-MM-DD'"),
+    "time_of_day": (0, 0, None, "the clock time in seconds since midnight"),
+    "freezing_time": (0, 0, None, "total freezing time so far (s)"),
+    "immobile_time": (0, 0, None, "total immobile time so far (s)"),
+    "zone_distance": (1, 1, None, "distance from the animal's centre to a zone (0 inside it)"),
+    "point_distance": (1, 1, None, "distance from the animal's centre to a point"),
+    "head_x": (0, 0, None, "head x position"), "head_y": (0, 0, None, "head y position"),
+    "tail_x": (0, 0, None, "tail x position"), "tail_y": (0, 0, None, "tail y position"),
+    "x_percent": (0, 0, None, "x position as % of the arena's width (0 = left)"),
+    "y_percent": (0, 0, None, "y position as % of the arena's height (0 = top)"),
+    "sequence_duration": (1, 1, None, "duration of the last completed run of an apparatus zone sequence (s)"),
+    "speaker": (0, 1, None, "speaker([device]): 1 while a sound is playing"),
+    "output_volts": (1, 2, None, "output_volts([device,] channel): analogue output level in volts"),
 }
 
 _BIN = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv, ast.FloorDiv: op.floordiv,
@@ -204,6 +420,10 @@ def _check_node(n):
         raise ExprError(f"'{type(n).__name__}' is not allowed in expressions")
 
 
+# ANY-maze's undefined value; outside quoted text it reads as the constant NA
+_NA = re.compile(r"""('[^']*'|"[^"]*")|#N/A""")
+
+
 def compile_expr(src):
     """Parse and check an expression; returns an AST node (cached). Raises ExprError."""
     if isinstance(src, bool) or isinstance(src, (int, float)):
@@ -211,6 +431,8 @@ def compile_expr(src):
     if isinstance(src, list):
         return ast.Constant(None) if not src else ast.List([compile_expr(x) for x in src], ast.Load())
     s = "" if src is None else str(src).strip()
+    if "#N/A" in s:
+        s = _NA.sub(lambda m: m.group(1) or "NA", s)
     hit = _cache.get(s)
     if hit is not None:
         if isinstance(hit, ExprError):
@@ -264,7 +486,7 @@ def check_expr(src, names=None) -> list[str]:
 
 
 def _limit(v):
-    if isinstance(v, (str, list)) and len(v) > MAX_SEQ:
+    if isinstance(v, str) and len(v) > MAX_SEQ or isinstance(v, list) and _size(v) > MAX_SEQ:
         raise ExprError("result too long")
     if isinstance(v, int) and not isinstance(v, bool) and v.bit_length() > 1024:
         raise ExprError("number too large")
@@ -273,15 +495,31 @@ def _limit(v):
 
 class Evaluator:
     """Safe evaluation of a checked AST. lookup(name) -> value (raise ExprError if unknown);
-    call(name, args) -> value for engine functions."""
+    call(name, args) -> value for engine functions. anymaze: ANY-maze's maths (ANYMAZE_FUNCTIONS: degrees, Log in
+    base 10)."""
 
-    def __init__(self, lookup: Callable, call: Callable | None = None, rng: random.Random | None = None):
+    def __init__(self, lookup: Callable, call: Callable | None = None, rng: random.Random | None = None,
+                 anymaze: bool = False):
         self.lookup = lookup
         self.call_engine = call
         self.rng = rng or random.Random()
+        self.anymaze = anymaze
 
     def eval(self, src):
-        return self._ev(compile_expr(src))
+        """The value of an expression. Every failure is an ExprError (a procedure error, never a crash)."""
+        node = compile_expr(src)
+        try:
+            return self._ev(node)
+        except ExprError:
+            raise
+        except RecursionError:
+            raise ExprError("expression too deeply nested") from None
+        except MemoryError:
+            raise ExprError("result too large") from None
+        except (ValueError, TypeError, KeyError, IndexError, ArithmeticError, AttributeError) as e:
+            raise ExprError(str(e) or type(e).__name__) from None
+        except Exception as e:  # anything else from a function: still only an expression error
+            raise ExprError(f"{type(e).__name__}: {e}") from None
 
     def _ev(self, n):
         t = type(n)
@@ -353,7 +591,7 @@ class Evaluator:
             except IndexError:
                 raise ExprError(f"index {i} out of range (length {len(v)})") from None
         if t is ast.List or t is ast.Tuple:
-            return [self._ev(x) for x in n.elts]
+            return _limit([self._ev(x) for x in n.elts])
         raise ExprError(f"'{t.__name__}' is not allowed")
 
     def _binop(self, o, a, b):
@@ -365,8 +603,13 @@ class Evaluator:
                     raise ExprError("number too large")
             if o is ast.Mult:
                 for s_, n_ in ((a, b), (b, a)):
-                    if isinstance(s_, (str, list)) and isinstance(n_, int) and len(s_) * n_ > MAX_SEQ:
+                    if isinstance(s_, (str, list)) and isinstance(n_, int) and _size(s_) * n_ > MAX_SEQ:
                         raise ExprError("result too long")
+            if o is ast.Mod and isinstance(a, str):
+                _check_format(a, b)
+            if o is ast.Add and isinstance(a, (str, list)) and isinstance(b, type(a)) \
+                    and _size(a) + _size(b) > MAX_SEQ:
+                raise ExprError("result too long")
             if o is ast.Add and isinstance(a, list) and isinstance(b, list):
                 return a + b
             r = _BIN[o](a, b)
@@ -377,11 +620,12 @@ class Evaluator:
             raise ExprError("division by zero") from None
         except OverflowError:
             raise ExprError("numeric overflow") from None
-        except TypeError as e:
+        except (TypeError, ValueError) as e:
             raise ExprError(f"invalid operands: {e}") from None
 
     def _call(self, name, args):
-        fn = FUNCTIONS[name][2]
+        fn = ANYMAZE_FUNCTIONS.get(name) if self.anymaze else None
+        fn = fn or FUNCTIONS[name][2]
         try:
             if fn is not None:
                 return fn(*args)
@@ -404,7 +648,7 @@ def _fmt(v) -> str:
         return str(int(v))
     if isinstance(v, float):
         return f"{v:.6g}"
-    return str(v)
+    return _str(v)
 
 
 def interpolate(text: str, evaluate: Callable) -> str:

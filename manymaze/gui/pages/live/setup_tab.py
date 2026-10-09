@@ -255,7 +255,11 @@ class SetupMixin:
                                    "keyboards: PageDown / PageUp / F5 / B.")
         self.stop_keys = QLineEdit(", ".join(DEFAULT_STOP_KEYS))
         self.stop_keys.setToolTip("Keys that stop (and save) the running test(s).")
-        for w in (self.start_keys, self.stop_keys):
+        self.control_input = QLineEdit()
+        self.control_input.setPlaceholderText("none")
+        self.control_input.setToolTip("Test control switch: an input ([device/]channel). Closing it continues a "
+                                      "test that a procedure ended allowing continuation (waiting for test end).")
+        for w in (self.start_keys, self.stop_keys, self.control_input):
             w.editingFinished.connect(self._save_live_settings)
         self.sched_time.timeChanged.connect(self._save_live_settings)
         self.sched_daily.toggled.connect(self._save_live_settings)
@@ -264,6 +268,7 @@ class SetupMixin:
         f.addRow("Start time", trow)
         f.addRow("Start keys", self.start_keys)
         f.addRow("Stop keys", self.stop_keys)
+        f.addRow("Test control input", self.control_input)
         v.addWidget(sb)
 
         db = QGroupBox("Detection and recording")

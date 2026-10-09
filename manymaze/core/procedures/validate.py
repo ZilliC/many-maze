@@ -7,9 +7,10 @@ import re
 
 from .. import ioconfig
 from ..operant import parse_spec
-from .catalog import ACTION_SPECS, CONSTANTS, EVENT_SPECS, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT, WHEN_MODES
+from .catalog import (ACTION_SPECS, CONSTANTS, EVENT_SPECS, KEEP_SCOPES, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT,
+                      WHEN_MODES)
 from .expr import _INTERP, check_expr
-from .model import iter_statements, normalize_procedures, statement_fields, wait_mode
+from .model import iter_statements, normalize_procedures, path_text, statement_fields, wait_alternatives, wait_mode
 
 
 def _names(lst) -> list[str]:
@@ -30,6 +31,7 @@ def _context(context) -> dict:
             channels[d.get("name", "")] = {ch.get("name"): ch.get("kind", "input") for ch in d.get("channels", []) or []
                                            if ch.get("name")}
     return {"zones": set(_names(c.get("zones"))) if c.get("zones") is not None else None,
+            "points": set(_names(c.get("points"))) if c.get("points") is not None else None,
             "devices": set(_names(devs)) if devs is not None else None,
             "channels": channels or None,
             "areas": set(_names(c.get("areas"))) if c.get("areas") else None}
@@ -41,10 +43,24 @@ def project_context(project) -> dict:
     zones = [n for a in project.apparatus for n in a.names()]
     areas = [a.get("name") for a in (project.settings_extra.get("touchscreen", {}) or {}).get("areas", [])
              if a.get("name")]
+    points = [p.name for a in project.apparatus for p in getattr(a, "points", [])]
     ctx = {"zones": sorted(set(zones)) if zones else None, "devices": list(project.io_devices) or None}
+    if points:
+        ctx["points"] = sorted(set(points))
     if areas:
         ctx["areas"] = areas
     return ctx
+
+
+def test_context(project, test) -> dict:
+    """What the procedures know about the test they run in (``context["test"]`` of the engine: the stage(),
+    trial(), apparatus(), treatment(), animal() and animal_field() functions, and the per-animal / per-apparatus
+    kept variables)."""
+    a = project.get_animal(test.animal_id)
+    group = a.group if a else ""
+    return {"test": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
+            "trial": test.trial, "treatment": project.treatment_code(group) if project.blind else group,
+            "fields": dict(a.fields, Sex=a.sex) if a else {}}
 
 
 def declared_names(procedures) -> set[str]:
@@ -79,6 +95,21 @@ def _bad_var_name(n) -> str | None:
     return None
 
 
+class ValidationWarning(str):
+    """A validation message that is a warning, not an error: the procedures run as written (e.g. "Run a program",
+    or a loop with nothing in it). It is a str (the message); :func:`is_warning` tells them apart."""
+
+
+def is_warning(message) -> bool:
+    return isinstance(message, ValidationWarning)
+
+
+# number parameters that may be negative (a value, a step, a level or a temperature); the others (times, counts,
+# rates, sizes …) must not be
+_NEGATIVE_OK = {"value", "by", "threshold", "target"}
+_NUMBER = re.compile(r"^\s*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\s*$")
+
+
 def _a(word: str) -> str:
     return "an" if word[:1] in "aeiou" else "a"
 
@@ -91,8 +122,9 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     errs = []
     if typ in ("number", "int"):
         errs = check_expr(v, names)
-        if not errs and isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0 \
-                and p["name"] not in ("value", "by", "threshold"):
+        lit = v if isinstance(v, (int, float)) and not isinstance(v, bool) else \
+            float(v) if isinstance(v, str) and _NUMBER.match(v) else None
+        if not errs and lit is not None and lit < 0 and p["name"] not in _NEGATIVE_OK:
             errs = ["must not be negative"]
     elif typ == "expr":
         errs = check_expr(v, names)
@@ -102,6 +134,19 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     elif typ == "zone":
         if ctx["zones"] is not None and str(v) not in ctx["zones"]:
             errs = [f"unknown zone '{v}'"]
+    elif typ == "point":  # a zone or a point
+        if ctx["zones"] is not None and str(v) not in ctx["zones"] | (ctx.get("points") or set()):
+            errs = [f"unknown zone or point '{v}'"]
+    elif typ == "clock":
+        from .live_state import parse_clock
+
+        if parse_clock(v) is None:
+            errs = [f"'{v}' is not a time of day (HH:MM or HH:MM:SS)"]
+    elif typ == "plugin":
+        from . import plugins
+
+        if plugins.names() and str(v) not in plugins.names():
+            errs = [f"unknown plug-in '{v}' (installed: {', '.join(plugins.names())})"]
     elif typ == "sequence":
         zs = [z.strip() for z in str(v).split(",") if z.strip()]
         if len(zs) < 2:
@@ -142,8 +187,41 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     return [f"{label}: {e}" for e in errs]
 
 
-def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
+def _check_when_options(st) -> list[str]:
+    """The event-wizard options of a "when": times (≥ 1) within seconds (> 0), trials ("1, 3-5, odd")."""
+    from .live_state import parse_trials
+
+    errs = []
+    times, within = st.get("times"), st.get("within")
+    if times not in (None, ""):
+        try:
+            if int(times) < 1 or float(times) != int(times):
+                raise ValueError
+        except (TypeError, ValueError):
+            errs.append("“times”: give a whole number of at least 1")
+    if within not in (None, ""):
+        try:
+            if float(within) <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            errs.append("“within”: give a time in seconds above 0")
+        if times in (None, ""):
+            errs.append("“within” needs a number of times")
+    if st.get("trials") not in (None, "") and parse_trials(st["trials"]) is None:
+        errs.append(f"trials: '{st['trials']}' is not a list of trials (e.g. 1, 3-5, odd)")
+    return errs
+
+
+def _runs_something(stmts) -> bool:
+    """Whether a block has a statement that does something (not only comments, labels and disabled statements)."""
+    return any(isinstance(st, dict) and st.get("enabled", True) is not False
+               and st.get("type") not in ("comment", "label", "var", "when", None) for st in stmts or [])
+
+
+def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int, tuple, str]]:
     """Edit-time check. Returns [(procedure index, statement path, message)]; path () = the procedure itself.
+    Messages that are warnings (:func:`is_warning`: "Run a program" runs a command on this computer, a loop with
+    nothing in it) are included unless ``warnings`` is False; the others are errors.
 
     context: {"zones": [...], "devices": [names or io_devices configs], "areas": [...]} — optional; names are
     only checked against the lists that are given."""
@@ -153,11 +231,16 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
     issues: list[tuple[int, tuple, str]] = []
     seen_vars: dict[str, int] = {}
     proc_names = [p.get("name") for p in procs]
+    subs = {p.get("name") for p in procs if p.get("sub")}
 
-    def block(pi, stmts, path, top, in_loop):
+    def block(pi, stmts, path, top, in_loop, visible=(), event=None):
+        """visible: the label names of the enclosing blocks of the same thread (a Go to may jump to a label of its
+        own block or of an enclosing one, not into a nested block); event: the When handler's event."""
         if not isinstance(stmts, list):
             issues.append((pi, path, "statements must be a list"))
             return
+        here = {str(s.get("name") or "") for s in stmts if isinstance(s, dict) and s.get("type") == "label"}
+        visible = visible + (here,)
         for i, st in enumerate(stmts):
             p = path + (i,)
             if not isinstance(st, dict):
@@ -174,6 +257,8 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 continue
             if t in ("when", "var") and not top:
                 err("only allowed at the top level of a procedure")
+            if t == "when" and procs[pi].get("sub"):
+                err("a sub-procedure has no When handlers (it runs when it is called)")
 
             def check(fields, report=err):
                 for prm in fields:
@@ -186,7 +271,9 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 check(statement_fields(st))
                 if st.get("mode", "ignore") not in WHEN_MODES:
                     err(f"unknown mode '{st.get('mode')}'")
-                block(pi, st.get("body", []), p + ("body",), False, False)
+                for m in _check_when_options(st):
+                    err(m)
+                block(pi, st.get("body", []), p + ("body",), False, False, (), st.get("event"))
             elif t == "var":
                 e = _bad_var_name(st.get("name"))
                 if e:
@@ -198,29 +285,70 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                     seen_vars[n] = pi
                 for m in check_expr(st.get("value", 0), names):
                     err(f"initial value: {m}")
+                if st.get("keep") not in (None, False, True, 0, 1) and str(st.get("keep")) not in KEEP_SCOPES:
+                    err(f"unknown keep option '{st.get('keep')}'")
             elif t == "wait":
                 ev = st.get("event")
                 if wait_mode(st) == "event" and ev not in EVENT_SPECS:
                     err(f"unknown event '{ev}'")
-                elif wait_mode(st) == "event" and ev == "test_start":
+                elif wait_mode(st) == "event" and ev in ("test_start", "test_waiting"):
                     err("cannot wait for the test to start")
                 else:
                     check(statement_fields(st))
+                if wait_mode(st) == "event":
+                    for k, alt in enumerate(wait_alternatives(st)):
+                        a_ev = alt.get("event")
+
+                        def err3(msg, k=k):
+                            err(f"or event {k + 1}: {msg}")
+                        if a_ev not in EVENT_SPECS:
+                            err3(f"unknown event '{a_ev}'")
+                        elif a_ev in ("test_start", "test_waiting"):
+                            err3("cannot wait for the test to start")
+                        else:
+                            for prm in EVENT_SPECS[a_ev]["params"]:
+                                for m in _check_param(prm, alt.get(prm["name"], prm["default"]), names, ctx, alt):
+                                    err3(m)
                 if st.get("timeout") not in (None, "", 0):
                     for m in check_expr(st["timeout"], names):
                         err(f"timeout: {m}")
             elif t == "if":
                 check(statement_fields(st))
-                block(pi, st.get("body", []), p + ("body",), False, in_loop)
+                block(pi, st.get("body", []), p + ("body",), False, in_loop, visible, event)
+                clauses = st.get("elif", [])
+                if not isinstance(clauses, list):
+                    err("the else-if clauses must be a list")
+                    clauses = []
+                for k, clause in enumerate(clauses):
+                    cp = p + ("elif", k)
+                    if not isinstance(clause, dict):
+                        issues.append((pi, cp, "Else if: invalid clause"))
+                        continue
+                    for m in _check_param(statement_fields({"type": "if"})[0], clause.get("cond"), names, ctx, clause):
+                        issues.append((pi, cp, f"Else if: {m}"))
+                    block(pi, clause.get("body", []), cp + ("body",), False, in_loop, visible, event)
                 if "else" in st:
-                    block(pi, st.get("else") or [], p + ("else",), False, in_loop)
+                    block(pi, st.get("else") or [], p + ("else",), False, in_loop, visible, event)
             elif t == "repeat":
                 check(statement_fields(st))
                 if st.get("var"):
                     e = _bad_var_name(st["var"])
                     if e:
                         err(e)
-                block(pi, st.get("body", []), p + ("body",), False, True)
+                if warnings and not _runs_something(st.get("body")) and isinstance(st.get("body", []), list):
+                    issues.append((pi, p, ValidationWarning(f"{lab}: warning: the loop has nothing to do (it only "
+                                                            "uses up time, one check per frame)")))
+                block(pi, st.get("body", []), p + ("body",), False, True, visible, event)
+            elif t in ("call", "label", "goto", "resolution"):
+                check(statement_fields(st))
+                if t == "call" and st.get("procedure") and st["procedure"] not in subs:
+                    err(f"'{st['procedure']}' is not a sub-procedure" if st["procedure"] in proc_names
+                        else f"unknown procedure '{st['procedure']}'")
+                elif t == "label" and st.get("name") and labels[pi].count(str(st["name"])) > 1:
+                    err(f"another label is also called '{st['name']}'")
+                elif t == "goto" and st.get("label") and not any(str(st["label"]) in v for v in visible):
+                    err(f"no label '{st['label']}' in this block or a block around it" if str(st["label"])
+                        in labels[pi] else f"unknown label '{st['label']}'")
             elif t == "set":
                 e = _bad_var_name(st.get("var"))
                 if e:
@@ -244,6 +372,15 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                     if a in ("enable_procedure", "disable_procedure") and st.get("procedure") \
                             and st["procedure"] not in proc_names:
                         err2(f"unknown procedure '{st['procedure']}'")
+                    if a == "run_program" and warnings:
+                        issues.append((pi, p, ValidationWarning(f"{lab2}: warning: runs a program on this computer — "
+                                                                "only if it is allowed on this computer")))
+                    if a == "run_subprocedure" and st.get("procedure") and st["procedure"] not in subs:
+                        err2(f"'{st['procedure']}' is not a sub-procedure" if st["procedure"] in proc_names
+                             else f"unknown procedure '{st['procedure']}'")
+                    if a in ("prevent_test_start", "allow_test_start") and event != "test_waiting" \
+                            and not procs[pi].get("sub"):
+                        err2("only in a “test is waiting to start” handler")
                     if a == "schedule_response" and not st.get("spec"):
                         started = any(s2.get("action") == "schedule_start" and s2.get("schedule") == st.get("schedule")
                                       for q in procs for _pp, s2 in iter_statements(q.get("statements")))
@@ -256,6 +393,8 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
                 elif w == "loop" and not in_loop:
                     err("“exit the loop” is not inside a repeat")
 
+    labels = [[str(s.get("name") or "") for _p, s in iter_statements(q.get("statements")) if s.get("type") == "label"]
+              for q in procs]
     for pi, proc in enumerate(procs):
         if not str(proc.get("name", "")).strip():
             issues.append((pi, (), "the procedure has no name"))
@@ -264,3 +403,15 @@ def validate(procedures, context=None) -> list[tuple[int, tuple, str]]:
         block(pi, proc.get("statements"), (), True, False)
     return issues
 
+
+def check_before_test(procedures, context=None) -> list[str]:
+    """The errors that should stop a live test from being armed (warnings left out), as readable lines
+    ("'Procedure', statement 2.1: message"); [] when the procedures can run. The procedures of a project are
+    checked against its zones, devices and areas with ``project_context(project)`` (disabled procedures too: another
+    procedure may enable them)."""
+    procs = normalize_procedures(procedures)
+    out = []
+    for pi, path, msg in validate(procs, context, warnings=False):
+        name = procs[pi].get("name") or f"Procedure {pi + 1}"
+        out.append(f"'{name}'" + (f", statement {path_text(path)}" if path else "") + f": {msg}")
+    return out

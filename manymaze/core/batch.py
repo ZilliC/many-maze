@@ -40,7 +40,7 @@ def tracking_batches(project, tests) -> list[list]:
         if not t.video:
             continue
         s = project.detection_for(t)
-        if project.start_mode == "on_detection":
+        if project.start_mode in ("on_detection", "experimenter_leaves"):
             key = ("single", t.id)
         else:
             key = (project.abs_path(t.video), round(s.start_time_s, 4), round(s.duration_s, 4), s.frame_step)
@@ -61,9 +61,14 @@ def _total_ram_mb() -> int:
 def default_workers(n_batches: int, pose: bool = False) -> int:
     """Worker processes for n videos: all cores but one, limited by RAM (and to 2 when the Neural Engine /
     GPU is shared by pose inference)."""
-    env = os.environ.get("MANYMAZE_WORKERS")
+    env = os.environ.get("MANYMAZE_WORKERS", "").strip()
     if env:
-        return max(1, min(n_batches, int(env)))
+        try:
+            n = int(env)
+        except ValueError:
+            raise ValueError(f"MANYMAZE_WORKERS must be a whole number of tracking processes (e.g. 4), not "
+                             f"{env!r}: correct it or remove it from the environment") from None
+        return max(1, min(n_batches, n))
     cores = os.cpu_count() or 1
     n = min(n_batches, max(1, cores - 1), max(1, _total_ram_mb() // WORKER_RAM_MB - 1))
     return max(1, min(n, 2) if pose else n)

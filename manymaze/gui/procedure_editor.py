@@ -27,9 +27,17 @@ from .statement_tree import StatementTree
 from .widgets import loading, value_text
 
 ROLE = Qt.UserRole
-ADD_TYPES = ["when", "wait", "if", "repeat", "set", "do", "stop", "comment", "var"]
+ERROR_COLOUR = "#dc2626"  # validation errors: the procedures cannot run as written
+WARNING_COLOUR = "#b45309"  # warnings (amber): the procedures run, but have a look
+OK_COLOUR = "#15803d"
+ERROR_BG = (254, 226, 226)
+WARNING_BG = (254, 243, 199)
+ADD_TYPES = ["when", "wait", "if", "repeat", "set", "do", "stop", "comment", "var", "call", "label", "goto",
+             "resolution"]
 WAIT_MODES = {"seconds": "Fixed time", "until": "Until a condition", "event": "For an event"}
-REPEAT_MODES = {"count": "A number of times", "while": "While a condition is true", "forever": "Forever"}
+REPEAT_MODES = {"count": "A number of times", "while": "While a condition is true",
+                "until": "Until a condition is true (at least once)", "forever": "Forever"}
+KEEP_OPTIONS = {"": "No", **pr.KEEP_SCOPES}
 SPEC_EXAMPLES = ["CRF", "FR 5", "VR 5", "FI 30", "VI 30", "PR", "PR 2", "FT 60", "VT 60", "EXT"]
 
 
@@ -121,6 +129,15 @@ class ProcedureEditor(QWidget):
             self.proc_btns[key] = b
         pb.addStretch()
         lv.addLayout(pb)
+        self.sub_cb = QCheckBox("Sub-procedure")
+        self.sub_cb.setToolTip("A sub-procedure has no When handlers: its statements run when a Call statement or the "
+                               "Run sub-procedure action runs it")
+        self.maths_cb = QCheckBox("ANY-maze maths")
+        self.maths_cb.setToolTip("sin, cos, tan, asin, acos, atan and atan2 in degrees and log in base 10, as in "
+                                 "ANY-maze (otherwise radians and the natural log; sind … and log10 always exist)")
+        for cb, key in ((self.sub_cb, "sub"), (self.maths_cb, "anymaze_maths")):
+            cb.toggled.connect(lambda on, key=key: self._proc_option(key, on))
+            lv.addWidget(cb)
         split.addWidget(left)
 
         # statements tree
@@ -271,7 +288,22 @@ class ProcedureEditor(QWidget):
             p["name"], p["enabled"] = name, on
             self._emit()
 
+    def _proc_option(self, key, on):
+        p = self._cur_proc()
+        if p is None or self._loading or self._read_only or bool(p.get(key)) == on:
+            return
+        if on:
+            p[key] = True
+        else:
+            p.pop(key, None)
+        self._emit()
+
     def _proc_selected(self):
+        p = self._cur_proc()
+        with loading(self):
+            for cb, key in ((self.sub_cb, "sub"), (self.maths_cb, "anymaze_maths")):
+                cb.setChecked(bool(p and p.get(key)))
+                cb.setEnabled(p is not None and not self._read_only)
         self._populate_tree()
         self._update_buttons()
         self.validate()
@@ -423,39 +455,52 @@ class ProcedureEditor(QWidget):
     def _update_buttons(self):
         has_p = self._cur_proc() is not None
         path = self._cur_path()
-        st = self._statement(path) if path and path[-1] != "else" else None
+        st = self._statement(path) if path and not pr.is_branch(path) else None
+        elif_clause = bool(path) and pr.is_branch(path) and path[-1] != "else"
         ro = self._read_only
         self.add_proc_btn.setEnabled(not ro)
         for b in self.proc_btns.values():
             b.setEnabled(has_p and not ro)
         self.add_btn.setEnabled(not ro)
-        container = bool(path) and (path[-1] == "else" or (st is not None and st.get("type") in pr.CONTAINERS))
+        container = bool(path) and (pr.is_branch(path) or (st is not None and st.get("type") in pr.CONTAINERS))
         self.add_in_btn.setEnabled(container and not ro)
         for k, b in self.st_btns.items():
-            b.setEnabled(st is not None and not ro if k != "json" else has_p and not ro)
+            ok = st is not None or (k == "del" and elif_clause)
+            b.setEnabled(ok and not ro if k != "json" else has_p and not ro)
         self.tree.setDragEnabled(not ro)
 
     # ------------------------------------------------------------------ validation
     def validate(self):
         """Check the procedures (against the project's zones, devices and areas) and show the problems."""
-        self.issues = pr.validate(self.procs, self.context())
+        self.issues = pr.validate(self.procs, self.context(), warnings=True)
         self.issue_list.clear()
-        icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
-        for pi, path, msg in self.issues:
+        err_icon = self.style().standardIcon(QStyle.SP_MessageBoxCritical)
+        warn_icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+        errors = [x for x in self.issues if not pr.is_warning(x[2])]
+        warnings = [x for x in self.issues if pr.is_warning(x[2])]
+        if not errors:  # warnings alone do not stop the procedures running
+            n = len(warnings)
+            ok = QListWidgetItem("✓ No problems found" + (f" ({n} warning{'s' if n > 1 else ''})" if n else ""))
+            ok.setForeground(QBrush(QColor(OK_COLOUR)))
+            self.issue_list.addItem(ok)
+        for pi, path, msg in errors + warnings:  # errors first
+            warn = pr.is_warning(msg)
             name = self.procs[pi].get("name", "?") if 0 <= pi < len(self.procs) else "?"
             where = f"{name} › {pr.path_text(path)}" if path else name
-            it = QListWidgetItem(icon, f"{where}: {msg}")
+            text = str(msg)
+            if warn and "warning:" not in text.lower():
+                text = f"Warning: {text}"
+            it = QListWidgetItem(warn_icon if warn else err_icon, f"{where}: {text}")
+            it.setForeground(QBrush(QColor(WARNING_COLOUR if warn else ERROR_COLOUR)))
             it.setData(ROLE, (pi, path))
+            it.setData(ROLE + 1, "warning" if warn else "error")
             self.issue_list.addItem(it)
-        if not self.issues:
-            ok = QListWidgetItem("✓ No problems found")
-            ok.setForeground(QBrush(QColor("#15803d")))
-            self.issue_list.addItem(ok)
         self._mark_issues()
         for i in range(self.proc_list.count()):
-            bad = any(pi == i for pi, _p, _m in self.issues)
+            kinds = {pr.is_warning(m) for pi, _p, m in self.issues if pi == i}
             it = self.proc_list.item(i)
-            it.setForeground(QBrush(QColor("#dc2626")) if bad else QBrush())
+            colour = ERROR_COLOUR if False in kinds else WARNING_COLOUR if kinds else None
+            it.setForeground(QBrush(QColor(colour)) if colour else QBrush())
 
     def _mark_issues(self):
         pi = self._cur_proc_index()
@@ -463,16 +508,24 @@ class ProcedureEditor(QWidget):
         for i, path, msg in self.issues:
             if i == pi and path:
                 by_path.setdefault(tuple(path), []).append(msg)
-        icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+        err_icon = self.style().standardIcon(QStyle.SP_MessageBoxCritical)
+        warn_icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
         for it in self.tree.all_items():
             msgs = by_path.get(self.tree.path(it) or ())
-            it.setIcon(0, icon if msgs else QIcon())
+            only_warnings = bool(msgs) and all(pr.is_warning(m) for m in msgs)
+            it.setIcon(0, (warn_icon if only_warnings else err_icon) if msgs else QIcon())
             it.setToolTip(0, "\n".join(msgs) if msgs else "")
-            it.setBackground(0, QBrush(QColor(254, 226, 226)) if msgs else QBrush())
+            it.setBackground(0, QBrush(QColor(*(WARNING_BG if only_warnings else ERROR_BG))) if msgs else QBrush())
         if self._issue_lbl is not None:
-            msgs = by_path.get(self._cur_path() or (), [])
-            self._issue_lbl.setText("\n".join("⚠ " + m for m in msgs))
-            self._issue_lbl.setVisible(bool(msgs))
+            self._set_issue_label(by_path.get(self._cur_path() or (), []))
+
+    def _set_issue_label(self, msgs):
+        """The problems of the current statement under its fields: errors in red, warnings alone in amber."""
+        lbl = self._issue_lbl
+        lbl.setText("\n".join("⚠ " + m for m in msgs))
+        only_warnings = bool(msgs) and all(pr.is_warning(m) for m in msgs)
+        lbl.setStyleSheet(f"color:{WARNING_COLOUR if only_warnings else ERROR_COLOUR}")
+        lbl.setVisible(bool(msgs))
 
     def _issue_clicked(self, it: QListWidgetItem):
         d = it.data(ROLE)
@@ -510,6 +563,19 @@ class ProcedureEditor(QWidget):
         elif path[-1] == "else":
             self.form_box.setTitle("Else")
             self.form.addRow(_wrapped("Statements inside Else run when the If condition is false."))
+        elif pr.is_branch(path):
+            clause = self._statement(path)
+            self.form_box.setTitle(f"Else if — {pr.path_text(path)}")
+            if clause is not None:
+                with loading(self):
+                    self._line_field(clause, pr.P("cond", "expr", None, "Condition", True))
+                self.form.addRow(_wrapped("Its statements run when the If condition and the conditions of the "
+                                          "else-if clauses above are false and this one is true."))
+                b = QPushButton("Add else-if")
+                b.clicked.connect(self.add_elif)
+                self.form.addRow("", b)
+                self.form_box.setEnabled(not self._read_only)
+            return
         else:
             st = self._statement(path)
         if st is None:
@@ -524,9 +590,8 @@ class ProcedureEditor(QWidget):
                                else None)
             self.form.addRow("", en)
             msgs = [m for pi, pth, m in self.issues if pi == self._cur_proc_index() and tuple(pth) == path]
-            self._issue_lbl = _wrapped("\n".join("⚠ " + m for m in msgs))
-            self._issue_lbl.setStyleSheet("color:#dc2626")
-            self._issue_lbl.setVisible(bool(msgs))
+            self._issue_lbl = _wrapped("")
+            self._set_issue_label(msgs)
             self.form.addRow(self._issue_lbl)
         self.form_box.setEnabled(not self._read_only)
 
@@ -548,7 +613,7 @@ class ProcedureEditor(QWidget):
         key = "event" if t == "when" or wait == "event" else "action" if t == "do" else None
         specs = pr.ACTION_SPECS if key == "action" else pr.EVENT_SPECS
         if key:
-            self._spec_combo(st, key, key.capitalize(), specs, skip=("test_start",) if wait else ())
+            self._spec_combo(st, key, key.capitalize(), specs, skip=("test_start", "test_waiting") if wait else ())
         for prm in pr.statement_fields(st):
             self._param_field(st, prm)
         if key:
@@ -556,7 +621,16 @@ class ProcedureEditor(QWidget):
         if t == "when":
             self._combo_field(st, "mode", "If it recurs while running", pr.WHEN_MODES, st.get("mode", "ignore"))
             self._check_field(st, "once", "Only the first time")
+            # event wizard: only after N occurrences within S seconds, only in some trials
+            self._line_field(st, pr.P("times", "int", "", "Only after it happens (times)",
+                                      help="optional: e.g. 3 = runs on every 3rd occurrence"))
+            self._line_field(st, pr.P("within", "number", "", "… within (s)",
+                                      help="optional: the occurrences must fall within this time"))
+            self._line_field(st, pr.P("trials", "text", "", "Only in trials",
+                                      help="optional: e.g. 1, 3-5, odd, even"))
         elif t == "wait" and wait != "seconds":
+            if wait == "event":
+                self._alternative_fields(st)
             self._line_field(st, pr.P("timeout", "number", "", "Timeout (s)",
                                       help="optional; afterwards timed_out = 1"))
         elif t == "if":
@@ -564,6 +638,10 @@ class ProcedureEditor(QWidget):
             cb.setChecked("else" in st)
             cb.toggled.connect(self._toggle_else)
             self.form.addRow("", cb)
+            b = QPushButton("Add else-if")
+            b.setToolTip("Another condition, tested when the ones above are false")
+            b.clicked.connect(self.add_elif)
+            self.form.addRow("", b)
         elif t == "repeat":
             self._line_field(st, pr.P("var", "var", "", "Loop variable", help="optional: 0, 1, 2, …"))
         elif t == "comment":
@@ -572,9 +650,72 @@ class ProcedureEditor(QWidget):
             self._line_field(st, pr.P("name", "var", "", "Name", True))
             self._line_field(st, pr.P("value", "expr", 0, "Initial value",
                                       help="number, 'text' or an array such as [0, 0, 0]"))
-            self._check_field(st, "keep", "Keep the value between tests")
+            self._keep_field(st)
             self._check_field(st, "result", "Save as a test result")
             self._record_field(st)
+
+    def _keep_field(self, st):
+        """Keep the value between tests: no, one value for the experiment (old projects: keep = true), per animal or
+        per apparatus."""
+        cb = _combo()
+        for k, v in KEEP_OPTIONS.items():
+            cb.addItem(v, k)
+        cb.setCurrentIndex(max(0, cb.findData(pr.keep_scope(st) or "")))
+
+        def changed(_i):
+            if self._loading:
+                return
+            k = cb.currentData()
+            if not k:
+                st.pop("keep", None)
+            else:
+                st["keep"] = True if k == "experiment" else k
+            self._statement_edited()
+        cb.currentIndexChanged.connect(changed)
+        self.form.addRow("Keep between tests", cb)
+        self._form_widgets["keep"] = cb
+
+    def _alternative_fields(self, st):
+        """The other events a wait for an event also ends on ("or"): wait_event tells which one came."""
+        for k, alt in enumerate(pr.wait_alternatives(st)):
+            self._spec_combo(alt, "event", f"Or event {k + 2}", pr.EVENT_SPECS, skip=("test_start", "test_waiting"),
+                             widget_key=f"or{k}")
+            for prm in pr.EVENT_SPECS.get(alt.get("event"), {}).get("params", []):
+                self._param_field(alt, prm, widget_key=f"or{k}.{prm['name']}")
+            rm = QPushButton(f"Remove event {k + 2}")
+            rm.clicked.connect(lambda _c=False, k=k: self._remove_alternative(st, k))
+            self.form.addRow("", rm)
+        add = QPushButton("Or another event…")
+        add.setToolTip("End the wait on the first of several events; then wait_event = 1 for the first event, "
+                       "2 for the next … (0 after a timeout)")
+        add.clicked.connect(lambda: self._add_alternative(st))
+        self.form.addRow("", add)
+        self._form_widgets["or"] = add
+
+    def _add_alternative(self, st):
+        st.setdefault("or", []).append(dict({"event": "key_down"}, **pr.spec_defaults(pr.EVENT_SPECS["key_down"])))
+        self._statement_edited(rebuild=True)
+
+    def _remove_alternative(self, st, k):
+        alts = st.get("or") or []
+        if 0 <= k < len(alts):
+            del alts[k]
+        if not alts:
+            st.pop("or", None)
+        self._statement_edited(rebuild=True)
+
+    def add_elif(self) -> tuple | None:
+        """Add an else-if clause to the selected If (or to the If of the selected Else / else-if)."""
+        path, p = self._cur_path(), self._cur_proc()
+        if not path or p is None or self._read_only:
+            return None
+        if pr.is_branch(path):
+            path = path[:-1] if path[-1] == "else" else path[:-2]
+        new = pe.add_elif(p, path)
+        if new is not None:
+            self._populate_tree(new)
+            self._emit()
+        return new
 
     def _record_field(self, st):
         """How a variable is recorded for the results: its final value only (old projects), or every value it
@@ -605,7 +746,7 @@ class ProcedureEditor(QWidget):
             self.form.addRow(lbl)
 
 
-    def _spec_combo(self, st, key, label, specs, skip=()):
+    def _spec_combo(self, st, key, label, specs, skip=(), widget_key=None):
         cb = _combo()
         cb.setMaxVisibleItems(25)
         group = None
@@ -636,7 +777,7 @@ class ProcedureEditor(QWidget):
             self._statement_edited(rebuild=True)
         cb.currentIndexChanged.connect(changed)
         self.form.addRow(label, cb)
-        self._form_widgets[key] = cb
+        self._form_widgets[widget_key or key] = cb
 
     def _combo_field(self, st, key, label, options: dict, current, rebuild=False):
         cb = _combo()
@@ -673,6 +814,12 @@ class ProcedureEditor(QWidget):
         ctx = self.context()
         if typ == "zone":
             return list(ctx.get("zones") or [])
+        if typ == "point":  # a zone or a point
+            return list(ctx.get("zones") or []) + list(ctx.get("points") or [])
+        if typ == "plugin":
+            from ..core.procedures import plugins
+
+            return plugins.names()
         if typ in ("device", "audio"):
             devs = self.project.io_devices if self.project is not None else []
             return [d.get("name") for d in devs if typ == "device" or d.get("type") == "audio"]
@@ -685,6 +832,10 @@ class ProcedureEditor(QWidget):
             return sorted(pr.declared_names(self.procs) - set(pr.LOCAL_NAMES))
         if typ == "procedure":
             return [p.get("name", "") for p in self.procs]
+        if typ == "label":
+            p = self._cur_proc()
+            return [str(s.get("name")) for _pth, s in pr.iter_statements(p.get("statements") if p else [])
+                    if s.get("type") == "label" and s.get("name")]
         if typ == "area":
             return list(ctx.get("areas") or [])
         if typ == "spec":
@@ -699,22 +850,22 @@ class ProcedureEditor(QWidget):
                         names.add(str(s[prm["name"]]))
         return sorted(names)
 
-    def _param_field(self, st, prm):
+    def _param_field(self, st, prm, widget_key=None):
         typ = prm["type"]
         if typ == "bool":
             self._check_field(st, prm["name"], prm["label"])
         elif typ.startswith("choice:"):
             opts = {o: o.capitalize() for o in typ[7:].split("|")}
             self._combo_field(st, prm["name"], prm["label"], opts, st.get(prm["name"], prm["default"]))
-        elif typ in ("number", "int", "expr", "text", "sequence"):
-            self._line_field(st, prm)
+        elif typ in ("number", "int", "expr", "text", "sequence", "clock"):
+            self._line_field(st, prm, widget_key)
         else:
-            self._name_field(st, prm)
+            self._name_field(st, prm, widget_key)
 
-    def _line_field(self, st, prm):
+    def _line_field(self, st, prm, widget_key=None):
         key, typ = prm["name"], prm["type"]
         if typ in ("var",) and key in ("var", "name"):
-            return self._name_field(st, prm)
+            return self._name_field(st, prm, widget_key)
         ed = QLineEdit(value_text(st.get(key, prm["default"])))
         tip = {"number": "a number or an expression, e.g. 30 or randint(20, 40)",
                "int": "a whole number or an expression", "expr": "an expression, e.g. count >= 5 and zone('A')",
@@ -738,7 +889,7 @@ class ProcedureEditor(QWidget):
         ed.editingFinished.connect(changed)
         ed.textEdited.connect(lambda _t: self._live_preview(st, key, ed, typ))
         self.form.addRow(prm["label"], ed)
-        self._form_widgets[key] = ed
+        self._form_widgets[widget_key or key] = ed
 
     def _live_preview(self, st, key, ed, typ):
         """Colour the field red while it does not parse."""
@@ -748,7 +899,7 @@ class ProcedureEditor(QWidget):
             bad = bool(text.strip()) and bool(pr.check_expr(text))
         ed.setStyleSheet("background:#fee2e2" if bad else "")
 
-    def _name_field(self, st, prm):
+    def _name_field(self, st, prm, widget_key=None):
         key, typ = prm["name"], prm["type"]
         cb = _combo()
         cb.setEditable(True)
@@ -788,7 +939,7 @@ class ProcedureEditor(QWidget):
             h.addWidget(b)
             row = w
         self.form.addRow(prm["label"], row)
-        self._form_widgets[key] = cb
+        self._form_widgets[widget_key or key] = cb
 
     def _statement_edited(self, rebuild=False):
         path = self._cur_path()
@@ -797,7 +948,10 @@ class ProcedureEditor(QWidget):
         if st is None or it is None:
             return
         with loading(self):
-            self.tree.style_item(it, st)
+            if pr.is_branch(path):
+                self.tree.style_branch(it, st)
+            else:
+                self.tree.style_item(it, st)
         self._emit()
         if rebuild:
             QTimer.singleShot(0, self._build_form)
@@ -845,7 +999,9 @@ class ProcedureEditor(QWidget):
                 "<code>+ - * / // % **</code>, <code>== != &lt; &lt;= &gt; &gt;=</code>, <code>and or not</code>, "
                 "<code>a if condition else b</code>, <code>array[i]</code>, <code>x in array</code>.</p>"
                 "<p>Inside a handler: <code>event_time</code>, <code>event_name</code> (zone, input, key…), "
-                "<code>event_value</code>; after a wait with a timeout: <code>timed_out</code>.</p>"
+                "<code>event_value</code>; after a wait with a timeout: <code>timed_out</code>; after a wait for "
+                "one of several events: <code>wait_event</code> (1, 2, …; 0 after a timeout).</p>"
+                "<p><code>NA</code> (or <code>#N/A</code>) is the undefined value of ANY-maze.</p>"
                 f"<table cellspacing=4>{rows}</table>")
         dlg = QDialog(self)
         dlg.setWindowTitle("Expression functions")

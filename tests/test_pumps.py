@@ -238,9 +238,10 @@ def test_pump_api_is_safe():
 class FakeHarvard(FakePump):
     """Harvard "ultra" command set: data lines then a prompt ("01:", ">", "<", "*", "T*")."""
 
-    def __init__(self, legacy=False):
+    def __init__(self, legacy=False, direction="INFUSE"):
         super().__init__()
         self.legacy = legacy
+        self.direction = direction
         self.state = {}
 
     def st(self, addr):
@@ -267,6 +268,8 @@ class FakeHarvard(FakePump):
             st["i"] = 0.0
         elif cmd == "cwvolume":
             st["w"] = 0.0
+        elif cmd == "DIR":
+            data = [self.direction]
         elif cmd.startswith("bogus"):
             data = ["Command error"]
         prompt = (f"{addr:02d}" if addr else "") + st["p"]
@@ -321,7 +324,8 @@ def test_harvard_legacy_protocol():
         {"name": "a", "kind": "pump", "syringe": "BD Plastipak 20 ml"}]}, port)
     dev.clock = clock
     dev.open()
-    assert port.written == ["MMD 19.13", "CLV"]
+    assert port.written == ["MMD 19.13", "CLV", "DIR"]  # the direction the pump is set to is asked
+    step(dev, clock)
     dev.pump("a", "infuse", rate_ml_min=0.5, volume_ml=2)
     assert port.written[-3:] == ["ULM 500", "MLT 2", "RUN"]
     step(dev, clock)

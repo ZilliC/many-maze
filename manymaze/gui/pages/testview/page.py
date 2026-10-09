@@ -372,6 +372,8 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
 
     # ================================================================== page API
     def set_project(self, project):
+        # the main window ran end_scoring before switching (self.project is already the new experiment here): a
+        # running observation was stopped and stored in its own experiment; only the clock is left to reset
         self._close_open_states()
         self._reset_clock()
         self._confirmed.clear()
@@ -404,6 +406,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         """Re-read the current test from the project (it may have been edited or tracked elsewhere)."""
         t = self.test
         self._load_tracks()
+        self._undo.clear()  # the undo steps were of the tracks before (re-tracked or edited elsewhere meanwhile)
         self._loading = True
         self.start_spin.setValue(t.start_s)
         self.dur_spin.setValue(t.duration_s)
@@ -429,6 +432,19 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         (Ctrl+S must not end it). It is closed when the test is left (on_hide / load_test / shutdown)."""
         if self.test is not None:
             self.test.events.sort(key=lambda e: e["t"])
+
+    def scoring_in_progress(self) -> bool:
+        """A direct observation is running or behaviours are still being scored: unsaved, not yet in the test."""
+        return self.test is not None and (self.clock.state != "stopped" or bool(self._open_states))
+
+    def end_scoring(self):
+        """The experiment is closing: stop the observation (keeping its events and duration, as Stop does) and end
+        the behaviours still being scored, against the experiment they belong to."""
+        if self.test is None:
+            return
+        if self.clock.state != "stopped":
+            self.clock_stop()
+        self._close_open_states()
 
     def shutdown(self):
         self.player.close_video()
@@ -617,6 +633,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.test.start_s = self.start_spin.value()
         self.test.duration_s = self.dur_spin.value()
         self.main.mark_dirty()
+        self._mark_stale("results", "plots")  # the measures are over the new test window
         self._update_info()
         self._refresh_frame()
 

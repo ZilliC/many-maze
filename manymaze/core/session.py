@@ -18,6 +18,7 @@ END_PROCEDURE = "Ended by procedure"
 END_SOURCE = "End of the video"
 END_SOURCE_FAILED = "Camera or video failed"
 END_RECOVERED = "Interrupted (recovered after a crash)"
+END_ERROR = "Ended by an error"  # an unexpected error in the test's own processing (the other tests go on)
 END_ZONE = "Animal reached the end zone"
 
 
@@ -73,6 +74,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
     """Store a finished session in its test: track (camera sessions), recording, events, pauses, I/O events and
     procedure result variables.  Returns False if there was nothing to save.  The session's crash-recovery file
     is left to the caller, to remove once the project is saved."""
+    wait = getattr(session, "wait_recordings", None)
+    if wait is not None:  # the recording is closed in the background: its file must be complete
+        wait()
     tr = session.track()
     if tr is not None:
         if not len(tr):
@@ -95,7 +99,21 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         from .apparatus import CALIBRATION_KEY
 
         test.zone_overrides = {**test.zone_overrides, CALIBRATION_KEY: dict(session.calibration)}
-    test.io_events = list(test.io_events) + session.io_events
+    geometry = getattr(session, "geometry", None)
+    if geometry:  # the map moved during the test: the test's own position / zones, used by its analysis
+        test.zone_overrides = {**test.zone_overrides, **{k: (dict(v) if isinstance(v, dict) else v)
+                                                         for k, v in geometry.items()}}
+    moved = getattr(session, "procedure_zone_overrides", None)
+    if moved:  # zones / points moved by the procedures: the test's own positions
+        test.zone_overrides = {**test.zone_overrides, **copy.deepcopy(moved)}
+    eng = session.engine
+    labels = getattr(eng, "zone_labels", None)
+    if labels:  # "set zone label"
+        test.variables = {**test.variables, "zone_labels": dict(labels)}
+    for s in getattr(eng, "scheduled_tests", None) or []:  # "schedule another test for this animal"
+        _schedule_test(project, test, s)
+    full = getattr(session, "all_io_events", None)  # live sessions: every fast analogue sample too
+    test.io_events = list(test.io_events) + (full() if full is not None else session.io_events)
     rv = session.result_variables
     if rv:
         test.result_variables = {**test.result_variables, **rv}
@@ -111,7 +129,9 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
                 pass
     kept = session.kept_variables
     if kept:  # procedure variables kept between tests: only from tests that are saved
-        project.variables.update(copy.deepcopy(kept))
+        from .procedures import merge_kept_variables
+
+        merge_kept_variables(project.variables, kept)
     test.recorded_at = _dt.datetime.now().isoformat(timespec="seconds")
     test.end_reason = session.end_reason or END_USER
     if getattr(project, "current_user", ""):
@@ -127,12 +147,40 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
         notes.append("Live procedures: " + "; ".join(outs.log[:50]))
     for t_change, cal in getattr(session, "calibration_log", None) or []:
         notes.append(f"Calibration adjusted at {t_change:.2f} s: {cal['px_per_cm']:.4g} px/cm")
+    for t_change, _geo in getattr(session, "geometry_log", None) or []:
+        notes.append(f"Apparatus geometry adjusted at {t_change:.2f} s")
+    gaps = getattr(session, "capture_gaps", None) or []
+    if gaps:
+        notes.append("Video capture lost: " + "; ".join(
+            f"{a:.2f}–{b:.2f} s" if b is not None else f"from {a:.2f} s" for a, b in gaps))
     if session.pause_log:
         notes.append("Paused: " + "; ".join(f"at {p['t']:.2f} s for {p['duration_s']:.1f} s"
                                             for p in session.pause_log))
+    vlabels = getattr(session, "video_labels", None)
+    if vlabels:  # markers in the recorded video ("label the video recording")
+        test.variables = {**test.variables, "video_labels": [dict(v) for v in vlabels]}
+    rec_log = getattr(session, "recording_log", None)
+    if rec_log:
+        notes.append("Video recording: " + "; ".join(f"{m} at {t:.2f} s" for t, m in rec_log))
+    parts = getattr(session, "record_parts", None) or []
+    if len(parts) > 1:
+        notes.append("Recorded files: " + ", ".join(project.rel_path(p) for p in parts))
     if notes:
         test.notes = (test.notes + "\n" + "\n".join(notes)).strip()
     return True
+
+
+def _schedule_test(project, test, s: dict):
+    """A test the procedures scheduled for this test's animal: added to the experiment, due after a delay."""
+    stage = s.get("stage") or test.stage
+    if stage:
+        project.add_stage(stage)
+    due = _dt.datetime.now() + _dt.timedelta(minutes=float(s.get("delay_min") or 0))
+    trial = max([t.trial for t in project.tests if t.animal_id == test.animal_id and t.stage == stage],
+                default=0) + 1
+    project.add_test(animal_id=test.animal_id, apparatus=s.get("apparatus") or test.apparatus, stage=stage,
+                     trial=trial, notes=f"Scheduled by a procedure of test {test.id}",
+                     variables={"scheduled_for": due.isoformat(timespec="minutes")})
 
 
 def finish_live_test(project, test, session: Session, record_path: str | None = None, save: bool = True,

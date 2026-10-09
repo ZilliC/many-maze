@@ -61,6 +61,7 @@ def create_demo_project(path: str | Path, n_per_group: int = 3, seconds: float =
 
 
 def _wall_walk(n, bounds, seed=0, speed=3.0):
+    """Exactly n positions of an animal walking round the walls (perimeter laps with noise and pauses)."""
     rng = np.random.default_rng(seed)
     x0, y0, x1, y1 = bounds
     m = 32
@@ -68,12 +69,19 @@ def _wall_walk(n, bounds, seed=0, speed=3.0):
     per = [(x0 + m, y0 + m), (x1 - m, y0 + m), (x1 - m, y1 - m), (x0 + m, y1 - m)]
     pts = []
     pauses = {}
-    for lap in range(20):
-        for j, p in enumerate(per):
-            q = (p[0] + rng.normal(0, 6), p[1] + rng.normal(0, 6))
-            pts.append(q)
-            if rng.random() < 0.3:
-                pauses[len(pts) - 1] = int(rng.integers(30, 90))
+
+    def laps(k):
+        for _ in range(k):
+            for p in per:
+                q = (p[0] + rng.normal(0, 6), p[1] + rng.normal(0, 6))
+                pts.append(q)
+                if rng.random() < 0.3:
+                    pauses[len(pts) - 1] = int(rng.integers(30, 90))
+
+    laps(20)
     path = syn.waypoint_path(pts, speed_px_per_frame=speed, pauses=pauses)
     start = int(rng.integers(0, 50))
+    while len(path) < start + n:  # long tests: more laps
+        laps(20)
+        path = syn.waypoint_path(pts, speed_px_per_frame=speed, pauses=pauses)
     return path[start:start + n]

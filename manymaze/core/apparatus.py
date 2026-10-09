@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .atomicfile import write_text_atomic
 from .geometry import (Ellipse, Polygon, Shape, clip_convex, concentric_rings, radial_sectors, shape_from_dict,
                        similarity_points, square_grid)
 
@@ -59,6 +60,8 @@ class Zone:
     per test (Test.zone_overrides). entry_rule: body part / rule deciding occupancy ("" = analysis default).
     entry_orientation_deg: if > 0, a visit only starts once the animal is oriented towards the zone (body
     orientation within this many degrees of the direction from its centre to the zone centre); 0 = off.
+    whishaw_width_cm: if > 0, the width (units) of the zone's Whishaw's corridor - a band from the animal's start
+    position to the zone centre - for the time / distance in Whishaw's corridor measures; 0 = none.
     """
 
     name: str
@@ -70,11 +73,13 @@ class Zone:
     entry_rule: str = ""
     body_fraction: float = 0.8
     entry_orientation_deg: float = 0.0
+    whishaw_width_cm: float = 0.0
 
     def to_dict(self):
         d = {"name": self.name, "shape": self.shape.to_dict(), "color": self.color}
         for k, default in (("hidden", False), ("investigation_distance_cm", 0.0), ("moveable", False),
-                           ("entry_rule", ""), ("body_fraction", 0.8), ("entry_orientation_deg", 0.0)):
+                           ("entry_rule", ""), ("body_fraction", 0.8), ("entry_orientation_deg", 0.0),
+                           ("whishaw_width_cm", 0.0)):
             v = getattr(self, k)
             if v != default:
                 d[k] = v
@@ -85,7 +90,7 @@ class Zone:
         return cls(d["name"], shape_from_dict(d["shape"]), d.get("color", "#3b82f6"), bool(d.get("hidden", False)),
                    float(d.get("investigation_distance_cm", 0.0) or 0.0), bool(d.get("moveable", False)),
                    d.get("entry_rule", "") or "", float(d.get("body_fraction", 0.8)),
-                   float(d.get("entry_orientation_deg", 0.0) or 0.0))
+                   float(d.get("entry_orientation_deg", 0.0) or 0.0), float(d.get("whishaw_width_cm", 0.0) or 0.0))
 
 
 @dataclass
@@ -574,8 +579,8 @@ def save_apparatus_file(apps: list[Apparatus], path) -> Path:
     """Save apparatus maps (zones, points, lines, groups, sequences, grids, calibration) to a JSON file to share
     them between experiments or labs."""
     path = Path(path)
-    path.write_text(json.dumps({"format": APPARATUS_FILE_FORMAT, "version": 1,
-                                "apparatus": [a.to_dict() for a in apps]}, indent=1), encoding="utf-8")
+    write_text_atomic(path, json.dumps({"format": APPARATUS_FILE_FORMAT, "version": 1,
+                                        "apparatus": [a.to_dict() for a in apps]}, indent=1))
     return path
 
 

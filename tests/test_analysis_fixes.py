@@ -112,6 +112,14 @@ def test_min_durations_not_restarted_at_bin_edges():
     assert seg2["0-5 s"]["Time immobile (s)"] > 1.0 and seg2["5-10 s"]["Time immobile (s)"] > 1.0
 
 
+
+def test_exit_on_first_frame_of_bin_counts_in_that_bin():
+    t = np.arange(250) / FPS
+    seg = dict(analyse_segmented(_track(np.where(t < 5, 100.0, 300.0)), _app(), AnalysisSettings(bin_length_s=5.0)))
+    assert seg["Whole test"]["Left: exits"] == 1
+    assert seg["0-5 s"]["Left: exits"] == 0 and seg["5-10 s"]["Left: exits"] == 1
+    assert seg["5-10 s"]["Left: latency to first exit (s)"] == pytest.approx(0.0, abs=1e-6)
+
 # ---------------------------------------------------------------- 3. count_initial_entry=False keeps the time
 def test_initial_visit_time_counts_without_entry():
     t = np.arange(250) / FPS

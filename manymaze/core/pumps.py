@@ -18,13 +18,16 @@ Protocols (``PUMP_PROTOCOLS``):
 
 * ``new_era`` — New Era Pump Systems "basic mode" (NE-500/1000/1002X/1010/1200/1600/4000/8000 and OEM pumps such as
   WPI Aladdin). Commands ``DIA``, ``RAT``, ``VOL``, ``DIR``, ``RUN``, ``STP``, ``DIS``, ``CLD``; replies are
-  ``STX addr status [data] ETX``; ``A?S`` is the stall alarm.
+  ``STX addr status [data] ETX``; ``A?S`` is the stall alarm. ``"safe_mode_s": n`` (1-255) puts the pumps in the
+  pump's "safe mode" (``SAF n``): packets are framed with a length and a CRC-16 and a pump stops by itself when it
+  hears nothing valid for n seconds (the computer polls it, and sends a heartbeat while tests run normally). Safe mode
+  follows the NE-1000 manual and has not been tried on a pump: check it before relying on it.
 * ``harvard_ultra`` — Harvard Apparatus Pump 11 Elite / PHD Ultra and KD Scientific Legato ("ultra" command set:
   ``irate``, ``tvolume``, ``irun``, ``wrun``, ``stop``, ``ivolume``...). Prompts ``:`` idle, ``>`` infusing,
   ``<`` withdrawing, ``*`` stalled, ``T*`` target reached.
 * ``harvard_legacy`` — the older Harvard command set (PHD 2000, Pump 11, Pump 33 "22 protocol": ``MMD``, ``MLM``,
-  ``MLT``, ``RUN``, ``REV``, ``STP``, ``VOL``, ``CLV``) with the same prompts. ``REV`` reverses the direction and
-  runs; the driver assumes the pump is set to infuse when the device is opened.
+  ``MLT``, ``RUN``, ``REV``, ``STP``, ``VOL``, ``CLV``, ``DIR``) with the same prompts. ``REV`` reverses the direction
+  and runs; the pump's direction is asked (``DIR``) when the device opens.
 * ``chemyx`` — Chemyx Fusion / Nexus (``set units``, ``set diameter``, ``set rate``, ``set volume`` (negative =
   withdraw), ``start``, ``stop``, ``status``, ``dispensed volume``). One pump per port.
 * ``cavro_dt`` — the Cavro / DT "OEM" protocol of syringe drives (Tecan Cavro XCalibur / XLP / Centris, Hamilton
@@ -250,6 +253,16 @@ def _g(x: float) -> str:
     return f"{x:.6g}"
 
 
+def crc16(data: bytes) -> int:
+    """CRC-16/CCITT (XMODEM: polynomial 0x1021, initial value 0), as New Era's safe mode."""
+    crc = 0
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
 # ======================================================================================== pump state
 class _Pump:
     """State of one pump channel (as last reported by the pump)."""
@@ -309,6 +322,7 @@ class _Protocol:
     eol = "\r"
     baud = 9600
     content_match = False  # replies are matched by content (parse may return False: not the expected reply)
+    stop_before_run = True  # a run started while the pump runs is preceded by a stop (new parameters accepted)
 
     def split(self, buf: bytes) -> tuple[list[str], bytes]:
         *lines, rest = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
@@ -345,16 +359,39 @@ class NewEraProtocol(_Protocol):
                "?COM": "invalid communications packet", "?IGN": "command ignored"}
 
     def split(self, buf):
+        """Basic-mode frames (STX addr status data ETX) and safe-mode ones (STX length data CRC16 ETX, the length
+        byte counting itself and the CRC); a frame whose CRC is wrong is dropped."""
         frames = []
         while True:
             i = buf.find(b"\x02")
             if i < 0:
                 return frames, b""
+            if len(buf) < i + 2:
+                return frames, buf[i:]
+            n = buf[i + 1]
+            if n < 0x30:  # safe mode: a length byte (an address is an ASCII digit)
+                end = i + 1 + n
+                if len(buf) <= end:
+                    return frames, buf[i:]
+                body, crc = buf[i + 2:end - 2], buf[end - 2:end]  # ... data, CRC MSB, CRC LSB, ETX at end
+                if n >= 3 and buf[end] == 0x03 and crc16(bytes(body)).to_bytes(2, "big") == bytes(crc):
+                    frames.append(bytes(body).decode(errors="replace"))
+                    buf = buf[end + 1:]
+                else:
+                    buf = buf[i + 1:]  # not a valid packet: resynchronise on the next STX
+                continue
             j = buf.find(b"\x03", i + 1)
             if j < 0:
                 return frames, buf[i:]
             frames.append(buf[i + 1:j].decode(errors="replace"))
             buf = buf[j + 1:]
+
+    @staticmethod
+    def encode_safe(line: str) -> bytes:
+        """A safe-mode packet: STX, length (itself + command + CRC), the command, CRC-16 (CCITT/XMODEM, MSB first),
+        ETX."""
+        body = line.encode()
+        return b"\x02" + bytes([len(body) + 3]) + body + crc16(body).to_bytes(2, "big") + b"\x03"
 
     def _a(self, p):
         return str(p.addr)
@@ -364,6 +401,9 @@ class NewEraProtocol(_Protocol):
 
     def setup(self, dev, p):
         return self.set_diameter(dev, p) + [(f"{self._a(p)}CLD INF", "clear_i"), (f"{self._a(p)}CLD WDR", "clear_w")]
+
+    def safe_mode(self, dev, p, seconds: int) -> list:
+        return [(f"{self._a(p)}SAF{int(seconds)}", "ack")]
 
     def run(self, dev, p, direction, rate, volume):
         a = self._a(p)
@@ -473,6 +513,12 @@ class HarvardUltraProtocol(_Protocol):
         for ln in data:
             if self._ERR.search(ln):
                 dev._fail(p, f"{ln} ({tag})")
+            elif tag == "dir":  # legacy DIR: INFUSE / REFILL (withdraw)
+                word = ln.strip().upper()
+                if word.startswith("INF"):
+                    p.direction = "inf"
+                elif word.startswith(("REF", "WIT", "WDR")):
+                    p.direction = "wdr"
             elif tag in ("ivol", "wvol", "vol"):
                 v = _parse_volume(ln)
                 if v is not None:
@@ -488,7 +534,8 @@ class HarvardLegacyProtocol(HarvardUltraProtocol):
         return [(f"{self._a(p)}MMD {_g(p.diameter)}", "ack")] if p.diameter else []
 
     def setup(self, dev, p):
-        return self.set_diameter(dev, p) + [(f"{self._a(p)}CLV", "clear")]
+        # the direction the pump is set to (REV reverses it: a pump left withdrawing would otherwise run backwards)
+        return self.set_diameter(dev, p) + [(f"{self._a(p)}CLV", "clear"), (f"{self._a(p)}DIR", "dir")]
 
     def run(self, dev, p, direction, rate, volume):
         a = self._a(p)
@@ -659,7 +706,11 @@ class TextProtocol(_Protocol):
         return cmds
 
     def stop(self, dev, p):
-        return self._fmt(dev, p, "stop")
+        cmds = self._fmt(dev, p, "stop")
+        if not cmds:
+            dev._fail(p, "no 'stop' command template: the pump cannot be stopped")
+            return None
+        return cmds
 
     def poll(self, dev, p):
         return self._fmt(dev, p, "poll")
@@ -689,6 +740,7 @@ class TextProtocol(_Protocol):
 
 class SimulatedProtocol(_Protocol):
     id = "simulated"
+    stop_before_run = False
 
     def run(self, dev, p, direction, rate, volume):
         p.fold_counters()
@@ -750,6 +802,7 @@ class SyringePumpDevice(_LineDevice):
         if cls is None:
             self._error(f"{self.name}: unknown pump protocol '{pid}' (simulated instead)")
         self.clock = time.monotonic
+        self.safe_mode_s = 0  # New Era safe mode on (seconds), once switched on at open
         self._rx = b""
         self._expect: deque = deque()  # (pump name, tag, deadline) of the replies still to come
         self._next_poll = 0.0
@@ -802,8 +855,31 @@ class SyringePumpDevice(_LineDevice):
         super().open()
         if self.connected:
             with self._io_lock:
+                self.safe_mode_s = 0
                 for p in self.pumps.values():
                     self._send(p, self.protocol.setup(self, p))
+                saf = int(self.cfg.get("safe_mode_s") or 0)
+                if saf and isinstance(self.protocol, NewEraProtocol):
+                    saf = max(1, min(255, saf))
+                    for p in self.pumps.values():
+                        self._send(p, self.protocol.safe_mode(self, p, saf))
+                    self.safe_mode_s = saf  # from now on every command is a safe-mode packet
+
+    def _encode(self, line: str) -> bytes:
+        if self.safe_mode_s and isinstance(self.protocol, NewEraProtocol):
+            return NewEraProtocol.encode_safe(line)
+        return super()._encode(line)
+
+    def keepalive_period(self) -> float:
+        """Safe mode: the pumps stop by themselves without a valid command for safe_mode_s seconds."""
+        return self.safe_mode_s / 3.0 if self.safe_mode_s and self.connected else 0.0
+
+    def keepalive(self):
+        per = self.keepalive_period()
+        if per and time.monotonic() - self._last_write >= per:
+            with self._io_lock:
+                for p in self.pumps.values():
+                    self._send(p, self.protocol.poll(self, p))
 
     # -- protocol callbacks
     def _fail(self, p: _Pump | None, msg: str):
@@ -947,20 +1023,27 @@ class SyringePumpDevice(_LineDevice):
                         self._error(f"{self.name}: {channel}: no syringe set")
                         return False
                     direction = "inf" if op == "infuse" else "wdr"
+                    # a pump that runs is stopped first: most pumps refuse new parameters while running
+                    pre = self.protocol.stop(self, p) if p.running and self.protocol.stop_before_run else []
+                    if pre is None:
+                        return False
                     p.stalled = False
                     p.stop_requested = False
                     p.target_hit = False
                     p.armed = False
                     p.rate, p.target_ml = rate, vol
-                    ok = self._send(p, self.protocol.run(self, p, direction, rate, vol))
+                    cmds = self.protocol.run(self, p, direction, rate, vol)
+                    ok = self._send(p, None if cmds is None else list(pre) + list(cmds))
                     p.direction = direction
                     if ok:
                         self.outputs[channel] = rate if direction == "inf" else -rate
                     return ok
                 if op == "stop":
                     p.stop_requested = True
-                    self.outputs[channel] = 0
-                    return self._send(p, self.protocol.stop(self, p))
+                    ok = self._send(p, self.protocol.stop(self, p))
+                    if ok:  # not sent: the pump may still run, so it is not shown stopped
+                        self.outputs[channel] = 0
+                    return ok
                 if op == "set_syringe":
                     if not self._resolve_syringe(p, kw):
                         if not kw.get("syringe") and kw.get("diameter_mm") in (None, ""):
@@ -994,8 +1077,10 @@ class SyringePumpDevice(_LineDevice):
     def all_off(self):
         """Stop every pump."""
         for name, p in self.pumps.items():
-            if self.connected:
-                self.pump(name, "stop")
-            else:
+            if self.connected and (self.pump(name, "stop") or self.connected and self.pump(name, "stop")):
+                continue  # sent (at the second try at most)
+            if self.simulated:
                 p.running = False
                 self.outputs[name] = 0
+            elif p.running or self.outputs.get(name):  # not sent: the pump may still run, it is not shown stopped
+                self._error(f"{self.name}: {name}: could not stop the pump")

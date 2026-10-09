@@ -3,6 +3,7 @@ work area where each tab has an explorer list on the left and the selected page 
 
 from __future__ import annotations
 
+import copy
 import importlib
 import os
 import sys
@@ -19,7 +20,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 
 from .. import APP_NAME, __version__
 from ..core.export import protocol_report
-from ..core.project import PROJECT_FILE, Project
+from ..core import explock
+from ..core.project import PROJECT_FILE, Project, same_folder
 from ..core.templates import TEMPLATES
 from ..core.workflow import add_experimenter, copy_protocol, remove_experimenter
 from . import theme
@@ -150,6 +152,7 @@ class WelcomePage(QWidget):
                               ("archive", "Archive experiment", lambda: main.archive_experiment()),
                               ("open_archive", "Open archive", lambda: main.open_archive()),
                               ("folder", "Show in folder", main.reveal_folder),
+                              ("programs", "Allowed programs", lambda: main.allowed_programs_dialog()),
                               ("help", "User guide", main._open_guide), ("info", "About", main.about)):
             b = QPushButton(text)
             b.setFlat(True)
@@ -182,7 +185,7 @@ class WelcomePage(QWidget):
         self.recent = QListWidget()
         self.recent.setStyleSheet("QListWidget{border:none;background:transparent;font-size:14px;}"
                                   "QListWidget::item{padding:8px 6px;}")
-        self.recent.itemActivated.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
+        # one click opens (connecting itemActivated too would load the experiment twice)
         self.recent.itemClicked.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
         bl.addWidget(self.recent, 1)
         lay.addWidget(body, 1)
@@ -200,6 +203,26 @@ class WelcomePage(QWidget):
         has = self.main.project is not None
         for k in ("save", "save_as", "close", "folder", "import", "protocol_report", "restore", "archive"):
             self.side_buttons[k].setEnabled(has)
+
+
+def _merge_imported(p: Project, scratch: Project):
+    """Move what an import added to ``scratch`` (a copy of ``p``) into ``p``: animals matched by ID (existing ones
+    take their imported treatment, notes and fields), treatments and apparatus by name, tests by number."""
+    have = {a.id: a for a in p.animals}
+    for new in scratch.animals:
+        old = have.get(new.id)
+        if old is None:
+            p.animals.append(new)
+            have[new.id] = new
+        else:
+            vars(old).update(vars(new))
+    for f in ("groups", "apparatus"):
+        names = {x.name for x in getattr(p, f)}
+        getattr(p, f).extend(x for x in getattr(scratch, f) if x.name not in names)
+    ids = {t.id for t in p.tests}
+    p.tests.extend(t for t in scratch.tests if t.id not in ids)
+    p.animal_fields[:] = list(dict.fromkeys(list(p.animal_fields) + list(scratch.animal_fields)))
+    p.stages[:] = list(dict.fromkeys(list(p.stages) + list(scratch.stages)))
 
 
 def page_hook(page, hook: str, *args, on_error=None):
@@ -321,6 +344,9 @@ class SectionView(QWidget):
 
 class MainWindow(QMainWindow):
     project_loaded = Signal(object)
+    # the experiment's list of tests changed (tests added or removed outside the Test schedule, e.g. by Run tests):
+    # emitted by notify_tests_changed(), and by mark_dirty() / save() when they find the list changed
+    tests_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -412,6 +438,9 @@ class MainWindow(QMainWindow):
         self.ribbon.corner.insertWidget(0, self.user_btn)
         self._update_user_button()
         self.ribbon.tab_changed.connect(self._tab_changed)
+        # a ribbon command first stores the field being typed in (ribbon buttons take no focus, so the field would
+        # not see editingFinished before the command rebuilds the form)
+        self.ribbon.command_pressed.connect(self._flush_edits)
 
         central = QWidget()
         lay = QVBoxLayout(central)
@@ -455,6 +484,7 @@ class MainWindow(QMainWindow):
         act(fm, "Restore a backup…", lambda: self.restore_backup())
         act(fm, "Archive experiment…", lambda: self.archive_experiment())
         act(fm, "Open archive…", lambda: self.open_archive())
+        act(fm, "Allowed programs…", lambda: self.allowed_programs_dialog())
         fm.addSeparator()
         act(fm, "Quit", self.close, QKeySequence.Quit)
         gm = mb.addMenu("&Go")
@@ -493,6 +523,53 @@ class MainWindow(QMainWindow):
                           "water maze, Barnes maze, Y/T/radial mazes, novel object, light/dark, three-chamber, "
                           "fear conditioning and more.</p><p>Built with Python, OpenCV, NumPy, SciPy, matplotlib "
                           "and Qt (PySide6). Runs natively on Apple Silicon.</p>")
+
+    def allowed_programs_dialog(self, modal: bool = True) -> QDialog:
+        """File › Allowed programs: the programs the procedures' "Run a program" action may start on this computer
+        (a per-user setting, never stored in the experiment); remove the ones no longer trusted.  Programs are
+        added when a test is armed and the user allows them."""
+        from ..core.procedures import programs
+
+        programs.policy.reload()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Allowed programs")
+        dlg.resize(560, 340)
+        lay = QVBoxLayout(dlg)
+        info = QLabel("The procedures' “Run a program” action may start these programs on this computer. Programs "
+                      "are added when you arm a test and allow them.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        lst = QListWidget()
+        lst.setSelectionMode(QListWidget.ExtendedSelection)
+        lay.addWidget(lst)
+        dlg.program_list = lst
+
+        def fill():
+            lst.clear()
+            for path in sorted(programs.policy.allowed()):
+                lst.addItem(path)
+            remove.setEnabled(lst.count() > 0)
+
+        def remove_selected():
+            for it in lst.selectedItems():
+                programs.policy.disallow(it.text())
+            fill()
+
+        row = QHBoxLayout()
+        remove = QPushButton("Remove")
+        remove.clicked.connect(remove_selected)
+        row.addWidget(remove)
+        row.addStretch()
+        box = QDialogButtonBox(QDialogButtonBox.Close)
+        box.rejected.connect(dlg.reject)
+        row.addWidget(box)
+        lay.addLayout(row)
+        dlg.remove_selected = remove_selected
+        fill()
+        if modal:
+            dlg.exec()
+            dlg.deleteLater()
+        return dlg
 
     def _fill_recent(self):
         self.recent_menu.clear()
@@ -565,7 +642,7 @@ class MainWindow(QMainWindow):
                                         "their experimenter):", list(p.experimenters), 0, False)
         if ok and remove_experimenter(p, name):
             if self.current_user() == name:
-                self.settings.setValue("current_user", "")
+                self.set_current_user("")  # also the project's: new tests must not be stamped with the removed user
             self.mark_dirty()
             self._update_user_button()
 
@@ -583,9 +660,11 @@ class MainWindow(QMainWindow):
     def set_project(self, project: Project | None):
         if self.project is not None and project is not self.project:
             self._hide_current()  # the old project's page flushes against the old project, not the new one
+            self._for_pages("end_scoring")  # a running observation is stopped, not dropped
             self._current_page = None
         self.project = project
         self.dirty = False
+        self._hold_lock()  # before the pages see it: crash recovery checks the lock
         has = project is not None
         if has:
             project.current_user = self.current_user()
@@ -603,6 +682,7 @@ class MainWindow(QMainWindow):
         else:
             self._show_backstage()
         self.dirty = False  # page set-up must not count as user edits
+        self._tests_sig = self._tests_signature()
         self.update_title()
         self.project_loaded.emit(project)
 
@@ -724,12 +804,28 @@ class MainWindow(QMainWindow):
             return
         self.dirty = True
         self.update_title()
+        self._check_tests_changed()
+
+    def _tests_signature(self) -> tuple:
+        return tuple(id(t) for t in self.project.tests) if self.project is not None else ()
+
+    def _check_tests_changed(self):
+        sig = self._tests_signature()
+        if sig != getattr(self, "_tests_sig", None):
+            self._tests_sig = sig
+            self.tests_changed.emit()
+
+    def notify_tests_changed(self):
+        """Pages that add or remove tests of the experiment call this (the Test schedule's rows follow)."""
+        self._tests_sig = self._tests_signature()
+        self.tests_changed.emit()
 
     def update_title(self):
         if self.project is None:
             self.setWindowTitle(APP_NAME)
         else:
-            self.setWindowTitle(f"{self.project.name}{' •' if self.dirty else ''} — {APP_NAME}")
+            ro = " (read-only)" if self.project.read_only else ""
+            self.setWindowTitle(f"{self.project.name}{ro}{' •' if self.dirty else ''} — {APP_NAME}")
 
     def status(self, msg: str, ms: int = 6000):
         self.statusBar().showMessage(msg, ms)
@@ -738,16 +834,24 @@ class MainWindow(QMainWindow):
         """Before the experiment closes: stop (and save) live tests still running, then offer to save changes."""
         if not self._stop_live_tests():
             return False
-        if self.project is None or not self.dirty:
+        if self.project is None:
             return True
-        r = QMessageBox.question(self, APP_NAME, f"Save changes to “{self.project.name}”?",
+        self._flush_edits()
+        tv = self.page("TestViewPage")
+        scoring = tv is not None and tv.scoring_in_progress()
+        if not self.dirty and not scoring:
+            return True
+        r = QMessageBox.question(self, APP_NAME, f"Save changes to “{self.project.name}”?" +
+                                 (f"\n\nTest {tv.test.id} is still being scored: saving stops the observation and "
+                                  "the behaviours still running." if scoring else ""),
                                  QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
         if r == QMessageBox.Cancel:
             return False
         if r == QMessageBox.Save:
+            if scoring:
+                page_hook(tv, "end_scoring")
             return self.save()
-        self.dirty = False  # discarded: don't ask again on the way to the next experiment
-        return True
+        return True  # discarded: dirty stays set until the next experiment really replaces this one (set_project)
 
     def _stop_live_tests(self) -> bool:
         """Live tests keep running in the background (Run tests): they are stopped and saved, or nothing happens."""
@@ -771,7 +875,7 @@ class MainWindow(QMainWindow):
         path = dlg.project_path()
         if (path / PROJECT_FILE).exists():
             if QMessageBox.question(self, APP_NAME, f"{path} already exists. Open it instead?") == QMessageBox.Yes:
-                self.load_project(str(path))
+                self.load_project(str(path), confirmed=True)
             return
         p = Project(name=dlg.name.text().strip() or "Experiment", protocol=dlg.protocol.currentData(),
                     test_duration_s=dlg.duration.value())
@@ -802,7 +906,7 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Open experiment folder (.mmaze)", self._last_dir())
         if d:
             self._remember_dir(d)
-            self.load_project(d)
+            self.load_project(d, confirmed=True)
 
     def _last_dir(self) -> str:
         d = self.settings.value("last_dir", "")
@@ -813,22 +917,85 @@ class MainWindow(QMainWindow):
         p = Path(path)
         self.settings.setValue("last_dir", str(p.parent if p.suffix == ".mmaze" or p.is_file() else p))
 
-    def load_project(self, path: str):
-        if self.project is not None and not self.maybe_save():
+    def load_project(self, path: str, confirmed: bool = False):
+        """``confirmed``: the caller already ran maybe_save() (don't ask a second time)."""
+        if self.project is not None and not confirmed and not self.maybe_save():
             return
         try:
             p = Project.load(path)
         except Exception as e:
             error_box(self, "Open experiment", e)
             return
+        other = explock.held_by_other(p.path)
+        if other is not None:
+            choice = self._ask_locked(p, other)
+            if choice == "cancel":
+                return
+            p.read_only = choice == "read_only"
         self._add_recent(p.path)
         self.set_project(p)
         self.status(f"Opened {p.path}")
+        self.check_disk_space()
+
+    def _ask_locked(self, p: Project, other: dict) -> str:
+        """The experiment is open in another program: "read_only", "anyway" or "cancel"."""
+        box = QMessageBox(QMessageBox.Warning, "Open experiment",
+                          f"“{p.name}” is open in {explock.describe(other)}.\n\nOpen it read-only (you can look "
+                          "and export, and save a copy with Save as), or open it anyway — only if it is not really "
+                          "open there any more: both would save over each other's changes.", QMessageBox.NoButton,
+                          self)
+        ro = box.addButton("Open read-only", QMessageBox.AcceptRole)
+        anyway = box.addButton("Open anyway", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(ro)
+        box.exec()
+        return "read_only" if box.clickedButton() is ro else "anyway" if box.clickedButton() is anyway else "cancel"
+
+    def _hold_lock(self):
+        """Lock the open experiment's folder for this window (read-only experiments are not locked) and release
+        the folder locked before."""
+        p = self.project
+        new = p.path if p is not None and p.path is not None and not p.read_only else None
+        old = getattr(self, "_locked", None)
+        if old is not None and (new is None or not same_folder(old, new)):
+            explock.release(old)
+        if new is not None:
+            explock.acquire(new, force=True)
+        self._locked = new
+
+    def check_disk_space(self):
+        """Warn (without blocking) when the disk of the experiment is low on space or full."""
+        from ..core import diskspace
+
+        if self.project is None or self.project.path is None:
+            return None
+        space = diskspace.check(self.project.path)
+        if not space.ok:
+            self.status(space.message)
+            box = QMessageBox(QMessageBox.Warning, "Disk space", space.message + "\n\nFree some space before "
+                              "recording or tracking: recordings, tracks and the experiment file are written to "
+                              "this disk.", QMessageBox.Ok, self)
+            box.setAttribute(Qt.WA_DeleteOnClose)
+            box.open()
+            self._disk_box = box
+        return space
+
+    def _flush_edits(self):
+        """Store the edits not yet in the project: the field being typed in (most store on editingFinished, sent
+        when they lose focus; the focus is given back) and the pages' pending edits (their commit hook)."""
+        w = QApplication.focusWidget()
+        if w is not None and self.isAncestorOf(w):
+            w.clearFocus()
+            try:
+                w.setFocus()
+            except RuntimeError:  # the edit rebuilt the form: the field is gone
+                pass
+        self._for_pages("commit")
 
     def save(self) -> bool:
         if self.project is None:
             return False
-        self._for_pages("commit")
+        self._flush_edits()
         try:
             self.project.save()
         except Exception as e:
@@ -836,6 +1003,7 @@ class MainWindow(QMainWindow):
             return False
         self.dirty = False
         self.update_title()
+        self._check_tests_changed()
         self.status(f"Saved {self.project.path}")
         return True
 
@@ -845,34 +1013,27 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Choose a folder for the copy", self._last_dir())
         if not d:
             return
-        import shutil
-
+        self._flush_edits()
         self._for_pages("commit")
         safe = "".join(c for c in self.project.name.strip() if c not in '/\\:*?"<>|') or "experiment"
         dest = Path(d) / f"{safe}.mmaze"
         old = self.project.path
-        if dest == old:
+        if old is not None and same_folder(dest, old):  # also another spelling of the same folder
             return self.save()
         if dest.exists() and QMessageBox.question(
                 self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
             return False
-        videos = [t.video for t in self.project.tests]
+        other = explock.held_by_other(dest) if dest.exists() else None
+        if other is not None:
+            QMessageBox.warning(self, "Save as", f"{dest} is open in {explock.describe(other)}: close it there "
+                                "or choose another folder.")
+            return False
         try:
-            # keep video paths valid from the new location: make them absolute, then relative to the copy
-            for t in self.project.tests:
-                t.video = self.project.abs_path(t.video)
-            if old and (old / "tracks").exists():
-                shutil.copytree(old / "tracks", dest / "tracks", dirs_exist_ok=True)
-            self.project.save(dest)
-            for t in self.project.tests:
-                t.video = self.project.rel_path(t.video)
-            self.project.save()
+            self.project.save_as(dest)  # copies the tracks before replacing anything
         except Exception as e:
-            self.project.path = old
-            for t, v in zip(self.project.tests, videos):
-                t.video = v
             error_box(self, "Save as", e)
             return False
+        self._hold_lock()
         self._remember_dir(dest)
         self._add_recent(dest)
         self.dirty = False
@@ -930,10 +1091,21 @@ class MainWindow(QMainWindow):
                       "Export ▸ Export experiment as XML).")
             return None
 
+        # the import runs on a copy (the pages keep reading the experiment meanwhile); done() moves what it added
+        # into the experiment on the GUI thread, matching animals by ID, treatments and apparatus by name and tests
+        # by number (never by list position: nothing may assume the experiment is as it was when the import began)
+        scratch = copy.deepcopy(p)
+
         def work(progress, stop):
-            return import_anymaze_xml(p, path, origin, progress)
+            def step(f):
+                if stop():  # the window is closing (Worker.stop_all)
+                    raise InterruptedError("import stopped")
+                progress(f)
+
+            return import_anymaze_xml(scratch, path, origin, step)
 
         def done(res):
+            _merge_imported(p, scratch)
             self.mark_dirty()
             self.save()
             msg = (f"Imported {len(res['tests'])} tests of {len(res['animals'])} animals from ANY-maze"
@@ -1069,8 +1241,8 @@ class MainWindow(QMainWindow):
             return path if Path(path).exists() else None
         return w
 
-    def open_archive(self, path: str | None = None, dest: str | None = None):
-        """Unpack an experiment archive into a folder and open it."""
+    def open_archive(self, path: str | None = None, dest: str | None = None, wait: bool = False):
+        """Unpack an experiment archive into a folder (in the background) and open it."""
         from ..core.archive import extract_archive
 
         if not self.maybe_save():
@@ -1084,14 +1256,21 @@ class MainWindow(QMainWindow):
             dest = QFileDialog.getExistingDirectory(self, "Unpack the experiment into", self._last_dir())
             if not dest:
                 return None
-        try:
-            folder = extract_archive(path, dest)
-        except Exception as e:
-            error_box(self, "Open archive", e)
-            return None
-        self.dirty = False
-        self.load_project(str(folder))
-        return folder
+        out = {}
+
+        def done(folder):
+            out["folder"] = folder
+            self.dirty = False
+            self.load_project(str(folder), confirmed=True)
+
+        w = run_with_progress(self, "Unpacking the experiment archive",
+                              lambda progress, stop: extract_archive(path, dest, progress, stop), on_done=done,
+                              on_fail=lambda msg: error_box(self, "Open archive", msg), cancellable=False)
+        if wait:  # scripting / tests: block until opened
+            w.wait()
+            QApplication.processEvents()
+            return out.get("folder")
+        return w
 
     def reveal_folder(self):
         if self.project and self.project.path:
@@ -1106,7 +1285,7 @@ class MainWindow(QMainWindow):
             return
         path = Path(d) / "Demo open field.mmaze"
         if (path / PROJECT_FILE).exists():
-            self.load_project(str(path))
+            self.load_project(str(path), confirmed=True)
             return
         from ..core.demo import create_demo_project
 
@@ -1118,6 +1297,8 @@ class MainWindow(QMainWindow):
         if self.maybe_save():
             self._for_pages("shutdown")
             Worker.stop_all()
+            explock.release(getattr(self, "_locked", None))
+            self._locked = None
             e.accept()
         else:
             e.ignore()

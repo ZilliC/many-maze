@@ -6,7 +6,7 @@ import datetime as _dt
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
 
 from ....core.camera import CameraView, SourceSpec, camera_settings, set_camera_settings
@@ -15,6 +15,7 @@ from ....core.iodevices import DeviceView
 from ....core.livegroup import device_plan
 from ....core.procedures import Outputs
 from ....core.video import VIDEO_EXTENSIONS
+from ....core.workflow import confirm_id_enabled
 from ...confirm_id import confirm_animal_id
 from ...icons import icon
 from ...live_widgets import CameraOptionsDialog, TestPanel, short_time
@@ -78,7 +79,7 @@ class MultiTestMixin:
         meta = {"apparatus": apparatus, "animal": animal,
                 "stage": stage if stage is not None else (p.stages[0] if p.stages else ""),
                 "trial": trial or 1, "test_id": None}
-        e = self.group.add_entry(source_key, p.get_apparatus(apparatus) if apparatus else None, "", meta)
+        e = self.group.add_entry(source_key, p.find_apparatus(apparatus) if apparatus else None, "", meta)
         self._relabel(e)
         self._rebuild_session_table()
         self._save_group_layout()
@@ -92,6 +93,7 @@ class MultiTestMixin:
         if e.state in ("waiting", "running", "paused"):
             QMessageBox.information(self, "Run tests", "Stop this test before removing it.")
             return
+        self._cancel_pending([e])
         self.group.remove(e)
         keep = {x.source_key for x in self.group.entries}
         for k in [k for k in self.group.sources if k not in keep]:  # unused sources go too
@@ -172,7 +174,7 @@ class MultiTestMixin:
                     i = self.row_device.count() - 1
                 self.row_device.setCurrentIndex(i)
                 self.row_source.setCurrentIndex(max(0, self.row_source.findData(e.source_key)))
-                self.row_apparatus.setCurrentText(e.meta.get("apparatus", ""))
+                self.row_apparatus.setCurrentIndex(self.row_apparatus.findText(e.meta.get("apparatus", "")))
                 self.row_animal.setCurrentText(e.meta.get("animal", ""))
                 self.row_stage.setCurrentText(e.meta.get("stage", ""))
                 self.row_trial.setValue(int(e.meta.get("trial", 1)))
@@ -193,7 +195,7 @@ class MultiTestMixin:
         e.meta.update(apparatus=self.row_apparatus.currentText(), animal=self.row_animal.currentText().strip(),
                       stage=self.row_stage.currentText().strip(), trial=self.row_trial.value(), test_id=None,
                       device=self.row_device.currentData() or "")
-        e.apparatus = self.project.get_apparatus(e.meta["apparatus"]) if self.project else None
+        e.apparatus = self.project.find_apparatus(e.meta["apparatus"]) if self.project else None
         self._relabel(e)
         self._fill_row(self._entries().index(e), e)
         self._save_group_layout()
@@ -324,8 +326,10 @@ class MultiTestMixin:
                         p.set_zone_rows(rows, zones)
                 p.vals["events"].setText(str(len(s.events)))
             active = st in ("waiting", "running", "paused")
-            p.start_btn.setEnabled(st != "running" and self.project is not None)
-            p.start_btn.setText("Start now" if st == "waiting" else "Resume" if st == "paused" else "Arm / Start test")
+            wend = bool(getattr(s, "waiting_end", False)) if s is not None else False
+            p.start_btn.setEnabled((st != "running" or wend) and self.project is not None)
+            p.start_btn.setText("Continue test" if wend else "Start now" if st == "waiting" else
+                                "Resume" if st == "paused" else "Arm / Start test")
             p.start_btn.setToolTip(p.start_btn.text())
             p.pause_btn.setEnabled(st in ("running", "paused"))
             p.pause_btn.setText("Resume" if st == "paused" else "Pause")
@@ -408,7 +412,9 @@ class MultiTestMixin:
         dlg = CameraOptionsDialog(raw, spec.view, spec.second, spec.layout, self._merge_choices(spec.source), raw2,
                                   self, title=f"Camera options — {spec.label}", hardware=spec.hardware,
                                   camera=camera, is_camera=not spec.is_file, genicam=spec.is_native)
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
             return False
         self.apply_source_options(key, dlg.result())
         return True
@@ -469,29 +475,57 @@ class MultiTestMixin:
             meta = {"apparatus": sd.get("apparatus", ""), "animal": sd.get("animal", ""),
                     "stage": sd.get("stage", ""), "trial": sd.get("trial", 1), "test_id": None,
                     "device": sd.get("device", "") or ""}
-            e = self.group.add_entry(keys[i], self.project.get_apparatus(meta["apparatus"]), "", meta)
+            e = self.group.add_entry(keys[i], self.project.find_apparatus(meta["apparatus"]), "", meta)
             self._relabel(e)
 
     # ---- arming / control of the group
-    def arm_row(self, e) -> bool:
+    def _notice(self, title: str, msg: str):
+        """A non-modal message (the tests keep running; used instead of a dialog by scheduled starts)."""
+        box = QMessageBox(QMessageBox.Warning, title, msg, QMessageBox.Ok, self)
+        box.setModal(False)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.show()
+
+    def _source_open(self, key) -> bool:
+        """The source of a panel delivers images: its frame rate, size and (video file) background are known."""
+        r = self.group.runners.get(key)
+        return r is not None and r.size is not None and r.last_frame is not None
+
+    def _pending_entries(self) -> list:
+        return [e for e in self.group.entries if e.meta.get("arm_pending")]
+
+    def arm_row(self, e, interactive: bool = True) -> bool:
+        """Arm the test of panel `e`.  When its camera / video is not open yet, the test is armed as soon as it
+        is (_complete_pending_arms): its session needs the real frame rate, image size and background.
+        `interactive` False (scheduled starts): no modal dialog, problems are logged and shown as notices."""
         p = self.project
         if p is None or e.session is not None and e.state != "finished":
             return False
+        if e.meta.get("arm_pending"):
+            return True
         if p.path is None:
-            QMessageBox.information(self, "Run tests", "Save the experiment first.")
+            if interactive:
+                QMessageBox.information(self, "Run tests", "Save the experiment first.")
             return False
         m = e.meta
-        app = p.get_apparatus(m.get("apparatus") or "") if p.apparatus else None
+        app = p.find_apparatus(m.get("apparatus") or "")
         if app is None or not m.get("animal"):
-            self._log(f"{e.label}: choose an apparatus and an animal first.", e)
+            what = (f"apparatus “{m.get('apparatus')}” no longer exists — choose its apparatus"
+                    if m.get("apparatus") and app is None else "choose an apparatus and an animal")
+            self._log(f"{e.label}: not armed: {what} first.", e)
             return False
         plan, msg = self._io_plan(e)
         if plan is None:
             self._log(f"{e.label}: not armed. {msg}", e)
-            QMessageBox.warning(self, "Run tests", f"{e.label}: {msg}")
+            if interactive:
+                QMessageBox.warning(self, "Run tests", f"{e.label}: {msg}")
+            else:
+                self._notice("Run tests", f"{e.label}: {msg}")
             return False
-        if e.source_key not in self.group.runners and not self.start_cameras():
-            return False
+        if e.source_key not in self.group.runners:
+            if not self.group.sources:
+                return False
+            self.start_cameras()
         if p.get_animal(m["animal"]) is None:
             p.ensure_animal(m["animal"])
         test = p.get_test(m["test_id"]) if m.get("test_id") is not None else None
@@ -500,14 +534,37 @@ class MultiTestMixin:
                          and t.stage == m.get("stage", "") and t.trial == m.get("trial", 1)), None)
             test = pend or p.add_test("", m["animal"], app.name, stage=m.get("stage", ""), trial=m.get("trial", 1))
             m["new_test"] = pend is None
-        if not confirm_animal_id(self, test):
-            if m.get("new_test") and test in p.tests:
-                p.tests.remove(test)
-            return False
+        if interactive:
+            if not confirm_animal_id(self, test):
+                if m.get("new_test"):
+                    self._remove_test(test)
+                return False
+        elif confirm_id_enabled(p):  # nobody to scan the animal at a scheduled start: noted, not asked
+            note = f"{e.label}: scheduled start — the ID of animal {test.animal_id} was not checked."
+            self._log(note, e)
+            self._notice("Animal ID check", note)
         test.apparatus = app.name
         dur = self.duration.value()
         test.duration_s = 0.0 if abs(dur - p.test_duration_s) < 1e-9 else dur
         m["test_id"] = test.id
+        m["io_plan"] = plan
+        if not self._source_open(e.source_key):
+            m["arm_pending"] = True
+            self._log(f"{e.label}: opening the camera / video — the test is armed as soon as it delivers images.",
+                      e)
+            return True
+        return self._arm_row_session(e)
+
+    def _arm_row_session(self, e) -> bool:
+        """The session of panel `e` (its test chosen by arm_row), with the open source's frame rate and size."""
+        p = self.project
+        m = e.meta
+        test = p.get_test(m.get("test_id")) if m.get("test_id") is not None else None
+        app = p.find_apparatus(m.get("apparatus") or "")
+        if test is None or app is None:
+            self._log(f"{e.label}: not armed: its test or apparatus was removed meanwhile.", e)
+            m["test_id"] = None
+            return False
         r = self.group.runners.get(e.source_key)
         size, fps = (r.size if r is not None and r.size else (640, 480)), (r.fps if r is not None else 25.0)
         bg = self._group_bgs.get(e.source_key)
@@ -518,11 +575,11 @@ class MultiTestMixin:
         if self._group_outputs is None:
             self._group_outputs = Outputs(self.serial.currentText().strip() or None)
         try:
-            devices = self._session_devices(plan)
+            devices = self._session_devices(m.get("io_plan") or "*")
         except Exception as ex:
             self._log(f"{e.label}: not armed. I/O devices: {ex}", e)
-            if m.get("new_test") and test in p.tests:
-                p.tests.remove(test)
+            if m.get("new_test"):
+                self._remove_test(test)
             m["test_id"] = None
             return False
         panel = self._panels.get(e.id)
@@ -531,13 +588,55 @@ class MultiTestMixin:
         s = self._make_session(test, app, bg, size, fps, self._group_outputs, devices,
                                f"Test {test.id} · {test.animal_id} · {app.name}", entry=e)
         m["record_path"] = s.record_path
-        m["io_plan"] = plan
         self.group.arm(e, s)
         self.main.mark_dirty()
         if panel is not None:
             panel.view.set_apparatus(s.apparatus)
         self._log(f"{e.label}: test {test.id} armed ({self.start_mode.currentText().lower()}).", e)
         return True
+
+    def _cancel_pending(self, entries=None):
+        """Tests waiting for their camera / video to open are not armed after all (stopped, removed…)."""
+        p = self.project
+        for e in (entries if entries is not None else self._pending_entries()):
+            m = e.meta
+            if not m.pop("arm_pending", None):
+                continue
+            m.pop("start_now", None)
+            test = p.get_test(m.get("test_id")) if p is not None and m.get("test_id") is not None else None
+            if test is not None and m.get("new_test"):
+                self._remove_test(test)
+            m["test_id"] = None
+            self._log(f"{e.label}: not armed.", e)
+
+    def _complete_pending_arms(self):
+        """Arm the tests waiting for their source as soon as it delivers images (or give up when it failed)."""
+        done = []
+        for e in self._pending_entries():
+            r = self.group.runners.get(e.source_key)
+            failed = r is None or (not r.thread.is_alive() and r.last_frame is None)
+            if not failed and not self._source_open(e.source_key):
+                continue
+            if failed:
+                self._log(f"{e.label}: not armed: the camera / video did not open.", e)
+                self._cancel_pending([e])
+                continue
+            e.meta.pop("arm_pending", None)
+            start_now = e.meta.pop("start_now", False)
+            if self._arm_row_session(e):
+                done.append(e)
+                if start_now and e.state == "waiting":
+                    e.session.request_start()
+        if not done:
+            return
+        busy = {x.source_key for x in self.group.entries if x not in done and x.state in ("running", "paused")}
+        for key in {e.source_key for e in done}:
+            spec = self.group.sources.get(key)
+            if spec is not None and spec.is_file and key not in busy:
+                self.group.restart_source(key)  # the test starts at the beginning of the video
+        self._enable_shortcuts(True)
+        self._update_row_states()
+        self._update_buttons()
 
     def _io_plan(self, e) -> tuple[str | None, str]:
         """Which I/O devices the test of panel `e` may use (see livegroup.device_plan), given the running tests."""
@@ -559,15 +658,19 @@ class MultiTestMixin:
             return dm
         return DeviceView(dm, None if plan == "-" else plan)
 
-    def arm_all(self, entries=None) -> int:
+    def arm_all(self, entries=None, interactive: bool = True) -> int:
         """Arm every idle (or finished) row; video files restart so the tests start at their beginning (unless
         another test already running uses the same video)."""
         ents = [e for e in (entries or self.group.entries) if e.source_key is not None
                 and e.state in ("idle", "finished")]
         if not ents:
             return 0
+        if not self.procedures_ready(interactive):  # checked (and programs allowed) once for all the tests
+            for e in ents:
+                self._log(f"{e.label}: not armed (procedures).", e)
+            return 0
         busy = {x.source_key for x in self.group.entries if x not in ents and x.state in ("running", "paused")}
-        n = sum(1 for e in ents if self.arm_row(e))
+        n = sum(1 for e in ents if self.arm_row(e, interactive))
         if not n:
             return 0
         for key in {e.source_key for e in ents if e.session is not None}:
@@ -580,7 +683,7 @@ class MultiTestMixin:
                 self.group.restart_source(key)
         # a daily schedule re-arms its tests when it fires: they keep that schedule rather than get another one
         scheduled = {i for sch in self.group.schedules if sch.entry_ids is not None for i in sch.entry_ids}
-        ids = [e.id for e in ents if e.session is not None and e.id not in scheduled]
+        ids = [e.id for e in ents if (e.session is not None or e.meta.get("arm_pending")) and e.id not in scheduled]
         if self.start_mode.currentData() == "scheduled" and ids:
             sch = self._new_schedule(ids)
             self.group.on_schedule = self._on_group_schedule
@@ -592,14 +695,19 @@ class MultiTestMixin:
         return n
 
     def _on_group_schedule(self, sch, entries):
-        """A clock schedule fired: start waiting tests and re-arm finished rows (daily schedules)."""
+        """A clock schedule fired: start waiting tests, then re-arm finished rows (daily schedules) — without any
+        modal dialog (nobody may be there; the other tests keep running)."""
         self._save_finished_entries()
-        rearm = [e for e in entries if e.state in ("idle", "finished")]
-        if rearm:
-            self.arm_all(rearm)
+        rearm = [e for e in entries if e.state in ("idle", "finished") and not e.meta.get("arm_pending")]
         for e in entries:
             if e.state == "waiting":
                 e.session.request_start()
+        if rearm and self.arm_all(rearm, interactive=False):
+            for e in rearm:
+                if e.state == "waiting":
+                    e.session.request_start()
+                elif e.meta.get("arm_pending"):
+                    e.meta["start_now"] = True
         self._log(f"Scheduled start ({sch.at}): {len(entries)} test(s).")
 
     def row_action(self, e, kind: str):
@@ -617,6 +725,7 @@ class MultiTestMixin:
                 self.group.pause(e)
                 self._log(f"{fmt_time(e.elapsed)}  test paused", e)
         elif kind == "stop":
+            self._cancel_pending([e])
             self.group.stop(e, save=st in ("running", "paused"))
             self._save_finished_entries()
         self._update_row_states()
@@ -624,8 +733,10 @@ class MultiTestMixin:
 
     def _start_entry_now(self, e):
         """Panel ▶ ▾ Start now: arm the test if needed and start it without waiting for its start condition."""
-        if e.state in ("idle", "finished") and not self.arm_all([e]):
+        if e.state in ("idle", "finished") and not e.meta.get("arm_pending") and not self.arm_all([e]):
             return False
+        if e.meta.get("arm_pending"):
+            e.meta["start_now"] = True  # started as soon as its source is open
         if e.state == "waiting":
             e.session.request_start()
             self._log("Start requested.", e)
@@ -637,6 +748,8 @@ class MultiTestMixin:
         if not any(e.session is not None and e.state != "finished" for e in self.group.entries):
             self.arm_all()
         self.group.start_all()
+        for e in self._pending_entries():
+            e.meta["start_now"] = True
         self._update_buttons()
 
     def group_pause_all(self):
@@ -652,7 +765,9 @@ class MultiTestMixin:
         self._update_buttons()
 
     def _stop_all_clicked(self):
+        self._cancel_pending()
         if not any(e.state in ("waiting", "running", "paused") for e in self.group.entries):
+            self._update_buttons()
             return
         r = QMessageBox.question(self, "Stop all tests", "Stop every test now?\n\nSave keeps the data recorded so "
                                  "far; Discard throws the tests away.",
@@ -684,7 +799,8 @@ class MultiTestMixin:
                     self.row_trial.blockSignals(False)
             m["test_id"] = None
             m["record_path"] = None
-        if not any(e.state in ("waiting", "running", "paused") for e in self.group.entries):
+        if not any(e.state in ("waiting", "running", "paused") or e.meta.get("arm_pending")
+                   for e in self.group.entries):
             if self._group_outputs is not None:
                 self._group_outputs.close()
                 self._group_outputs = None

@@ -6,6 +6,7 @@ property panel (``PropertyPanel``) and the background (``BackgroundController``)
 
 from __future__ import annotations
 
+import copy
 import math
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,14 +17,14 @@ from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from ....core import templates
+from ....core import plots, templates
 from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, load_apparatus_file,
                                 make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
 from ....core.templates import PALETTE, TEMPLATES
 from ... import theme
 from ...icons import icon
-from ...widgets import hint, loading, separator
+from ...widgets import error_box, hint, loading, separator
 from ..base import Page
 from .background import BackgroundController
 from .dialogs import GridDialog, TemplateDialog
@@ -94,6 +95,9 @@ class ApparatusPage(Page):
                                        "apparatus file", self.import_apparatus)
         self.export_act = self._action("Export…", "save", "Save the current apparatus to a file to use it in "
                                        "other experiments or share it", self.export_apparatus)
+        self.map_img_act = self._action("Map image…", "export", "Export the zone map of the current "
+                                         "apparatus as an image (PNG, SVG or PDF), optionally over the background "
+                                         "frame", self.export_map_image)
         self.ren_act = self._action("Rename", "edit", "Rename the current apparatus (tests that use it follow)",
                                     self.rename_apparatus)
         self.del_act = self._action("Delete", "delete", "Delete the current apparatus", self.delete_apparatus)
@@ -174,7 +178,7 @@ class ApparatusPage(Page):
                         (self.group_act, "small"), (self.seq_act, "small")]),
             ("Calibration", [(t["calibrate"], "small"), (self.clear_cal_act, "small")]),
             ("Background", [(self.bg_act, "small"), (self.testvid_act, "small")]),
-            ("View", [(self.fit_act, "small"), (self.labels_act, "small")]),
+            ("View", [(self.fit_act, "small"), (self.labels_act, "small"), (self.map_img_act, "small")]),
         ]
 
     # ============================================================== explorer
@@ -338,8 +342,8 @@ class ApparatusPage(Page):
     def _set_enabled(self, on: bool):
         for a in list(self.tool_actions.values()) + [
                 self.undo_act, self.redo_act, self.grid_act, self.copy_act, self.paste_act, self.dup_act,
-                self.ren_act, self.del_act, self.export_act, self.bg_act, self.testvid_act, self.clear_cal_act,
-                self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
+                self.ren_act, self.del_act, self.export_act, self.map_img_act, self.bg_act, self.testvid_act,
+                self.clear_cal_act, self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
             a.setEnabled(on)
         for w in (self.panel.tabs, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
             w.setEnabled(on)
@@ -420,6 +424,30 @@ class ApparatusPage(Page):
         self.main.status(f"Saved {app.name} to {out}")
         return out
 
+    def export_map_image(self, path: str | None = None, background: bool | None = None) -> str | None:
+        """Save the zone map as an image (PNG / SVG / PDF by extension); background: draw it over the background
+        frame (by default when a video frame is shown)."""
+        app = self.app
+        if app is None:
+            return None
+        if path is None:
+            base = self.project.path.parent if self.project.path else Path.home()
+            path, _ = QFileDialog.getSaveFileName(self, "Export the zone map as an image",
+                                                  str(base / f"{app.name} map.png"),
+                                                  "PNG image (*.png);;SVG drawing (*.svg);;PDF document (*.pdf)")
+            if not path:
+                return None
+        if background is None:
+            background = self.bg.real
+        frame = self.bg.frame if background and self.bg.real else None
+        try:
+            out = plots.save_zone_map(app, path, frame, labels=self.labels_act.isChecked())
+        except Exception as e:
+            error_box(self, "Export map image", e)
+            return None
+        self.main.status(f"Saved the map of {app.name} to {out}")
+        return out
+
     def rename_apparatus(self, new_name: str | None = None) -> bool:
         app = self.app
         if app is None:
@@ -445,6 +473,7 @@ class ApparatusPage(Page):
         for t in users:
             t.apparatus = new_name
         app.name = new_name
+        self._rename_live_refs(old, new_name)
         self.main.mark_dirty()
         if users:
             self.main.status(f"Renamed “{old}” to “{new_name}” and updated {len(users)} test(s)")
@@ -468,6 +497,7 @@ class ApparatusPage(Page):
         row = p.apparatus.index(app)
         for t in users:
             t.apparatus = others[0].name if others else ""
+        self._rename_live_refs(app.name, "")  # test panels must choose another apparatus (never a silent one)
         p.apparatus.remove(app)
         self._undo.pop(id(app), None)
         self._redo.pop(id(app), None)
@@ -475,6 +505,24 @@ class ApparatusPage(Page):
         self.main.mark_dirty()
         self._refresh_app_list(select_row=max(0, row - 1))
         return True
+
+    def _rename_live_refs(self, old: str, new: str):
+        """An apparatus was renamed (or deleted: `new` ""): the test panels of Run tests (several tests) and their
+        saved layout follow, so no panel arms with another apparatus."""
+        live = self.project.settings_extra.get("live") or {}
+        for sd in (live.get("multi") or {}).get("sessions", []):
+            if sd.get("apparatus") == old:
+                sd["apparatus"] = new
+        page = self.main.page("LivePage") if hasattr(self.main, "page") else None
+        group = getattr(page, "group", None)
+        for e in (group.entries if group is not None else ()):
+            if e.meta.get("apparatus") == old:
+                e.meta["apparatus"] = new
+                if e.session is None or e.state == "finished":
+                    e.apparatus = self.project.find_apparatus(new) if new else None
+                relabel = getattr(page, "_relabel", None)
+                if relabel is not None:
+                    relabel(e)
 
     def refresh_info(self):
         """Title, template and calibration of the current apparatus."""
@@ -721,8 +769,15 @@ class ApparatusPage(Page):
             app.calibration_length_cm = None
 
     def _ppc_edited(self):
-        if not self._loading:
-            self.set_px_per_cm(self.ppc_spin.value())
+        """editingFinished also comes when the box just loses the focus: only a value that differs from the one
+        shown (the calibration rounded to the box's decimals) is a new calibration — else the ruler is kept."""
+        app = self.app
+        if self._loading or app is None:
+            return
+        v = self.ppc_spin.value()
+        if abs(round(app.px_per_cm or 0.0, self.ppc_spin.decimals()) - v) < 1e-9:
+            return
+        self.set_px_per_cm(v)
 
     def clear_calibration(self):
         self.set_px_per_cm(0)
@@ -846,7 +901,9 @@ class ApparatusPage(Page):
             return None
         key = self.view.selected_key()
         dlg = GridDialog(self, app, has_selection=key is not None and key[0] == "zone")
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
             return None
         spec = dlg.spec()
         return self.add_grid(spec["kind"], spec["region"], spec["name"], spec["group"], **spec["params"])
@@ -941,7 +998,7 @@ class ApparatusPage(Page):
             return
         self._undo_merge = merge
         st = self._undo.setdefault(id(app), [])
-        d = before if before is not None else app.to_dict()
+        d = self._state(app, before)
         if not st or st[-1] != d:
             st.append(d)
             del st[:-200]
@@ -960,7 +1017,7 @@ class ApparatusPage(Page):
                 self.view.cancel_drawing()
             return False
         st = src.get(id(app), [])
-        cur = app.to_dict()
+        cur = self._state(app)
         while st and st[-1] == cur:
             st.pop()
         if not st:
@@ -968,10 +1025,20 @@ class ApparatusPage(Page):
             return False
         dst.setdefault(id(app), []).append(cur)
         self._undo_merge = None
-        self._replace(app, Apparatus.from_dict(st.pop()))
+        old = st.pop()
+        self._replace(app, Apparatus.from_dict(old["app"]))
+        for t in self.project.tests_using(app.name):  # e.g. a zone rename moved them to the new name
+            t.zone_overrides = copy.deepcopy(old["overrides"].get(t.id, {}))
         self.main.mark_dirty()
         self._model_changed()
         return True
+
+    def _state(self, app: Apparatus, before: dict | None = None) -> dict:
+        """An undo step: the apparatus (or its state `before` an edit) and the per-test positions of its moveable
+        zones (Test.zone_overrides, keyed by zone name: a rename moves them)."""
+        return {"app": before if before is not None else app.to_dict(),
+                "overrides": {t.id: copy.deepcopy(t.zone_overrides) for t in self.project.tests_using(app.name)
+                              if t.zone_overrides}}
 
     @staticmethod
     def _replace(app: Apparatus, new: Apparatus):
@@ -988,7 +1055,9 @@ class ApparatusPage(Page):
         key = cur.template if cur is not None and cur.template in TEMPLATES and cur.template != "custom" \
             else self.project.protocol
         dlg = TemplateDialog(self, key, cur.name if cur else None, self._names(), self.bg.real)
-        if dlg.exec() != QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
             return
         spec = {"key": dlg.key(), "params": dlg.params(), "name": dlg.name(), "replace": dlg.is_replace(),
                 "square": dlg.square.isChecked()}

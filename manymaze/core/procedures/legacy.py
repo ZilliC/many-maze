@@ -77,7 +77,13 @@ def convert_rule(rule: dict) -> dict:
     else:
         body.append({"type": "do", "action": act})
     when["body"] = body
-    return {"name": describe_rule(rule), "enabled": True, "statements": [when]}
+    stmts = [when]
+    if trig in ("zone_enter", "zone_exit") and not str(when.get("zone") or "").strip():
+        # the old rule matched no zone, so it never fired; as a procedure an empty zone means "any zone"
+        when["enabled"] = False
+        stmts.insert(0, {"type": "comment", "text": "Converted from an old rule without a zone, which never ran: "
+                                                    "disabled (choose a zone and enable it to use it)"})
+    return {"name": describe_rule(rule), "enabled": True, "statements": stmts}
 
 
 def describe_rule(rule: dict) -> str:
