@@ -68,7 +68,7 @@ def test_monitor_charts_and_point_sequence_input_statistics():
     s.set_background(_floor())
     for i in range(60):
         s.process(_frame(30 + 2 * i, 100), i / 25)
-    s.engine.io_events.append({"t": 0.5, "device": "box", "channel": "Lever", "kind": "input", "value": 1})
+    s.engine._log_io(0.5, "box", "Lever", "input", 1)  # as the engine logs an input (running statistics too)
     m = MonitorPanel()
     m.resize(420, 900)
     m.show()

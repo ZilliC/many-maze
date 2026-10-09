@@ -104,6 +104,15 @@ def _stats_table(headers: list[str], min_h: int = 0) -> QTableWidget:
     return t
 
 
+def _input_rows(session, now: float) -> list:
+    """The inputs table of the monitor: a live session's running statistics (``session.input_rows``: nothing is
+    rescanned, however long the test), else the statistics of its I/O log."""
+    rows = getattr(session, "input_rows", None)
+    if callable(rows):
+        return rows(now)
+    return input_rows(list(getattr(session, "io_events", None) or []), now)
+
+
 def _fill_rows(t: QTableWidget, rows: list[list[str]]):
     if t.rowCount() != len(rows):
         t.setRowCount(len(rows))
@@ -285,10 +294,9 @@ class MonitorPanel(QWidget):
                     points = st.points.rows()
                     visits = [list(v) for v in st.visits]
                     now = session.elapsed
-                    io = list(getattr(session, "io_events", None) or [])
                 if param.startswith(CHART_PREFIX):  # computed from the track so far, outside the lock
                     t, y = self.charts.series(session, param[len(CHART_PREFIX):], win)
-                self._refresh_extra(app, points, visits, io, now, unit)
+                self._refresh_extra(app, points, visits, _input_rows(session, now), now, unit)
                 self.vals["distance"].setText(f"{dist:.1f} {unit}")
                 self.vals["speed"].setText(f"{spd:.1f} {unit}/s")
                 self.vals["state"].setText("not detected" if not det else
@@ -313,7 +321,7 @@ class MonitorPanel(QWidget):
             self.warnings.scrollToBottom()
             self._n_warn = len(ws)
 
-    def _refresh_extra(self, app, points, visits, io, now, unit):
+    def _refresh_extra(self, app, points, visits, ins, now, unit):
         """The points, sequences and inputs tables (each hidden when there is nothing to show)."""
         _fill_rows(self.points, [[n, f"{_num(d)} {unit}", _num(tn), str(k), _num(lat)]
                                  for n, d, tn, k, lat in points])
@@ -321,7 +329,6 @@ class MonitorPanel(QWidget):
         seqs = sequence_rows(app, visits, now)
         _fill_rows(self.sequences, [[n, str(c), str(a), str(e), _num(lat)] for n, c, a, e, lat in seqs])
         self.seq_box.setVisible(bool(seqs))
-        ins = input_rows(io, now)
         _fill_rows(self.inputs, [[n, val, str(k) if math.isfinite(on) else "", _num(on), _num(lat)]
                                  for n, val, k, on, lat in ins])
         self.inputs_box.setVisible(bool(ins))

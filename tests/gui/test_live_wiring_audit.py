@@ -241,3 +241,106 @@ def test_print_dialog_is_deleted_after_use(win, monkeypatch):
     assert page.print_table() is None
     QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert not page.findChildren(QPrintDialog)
+
+
+# ------------------------------------------------------------------ live monitor: running input statistics
+def test_monitor_inputs_come_from_the_sessions_running_statistics(monkeypatch):
+    from manymaze.core import livemonitor
+    from manymaze.gui.live_widgets import monitor as mon
+
+    calls = []
+
+    class Session:
+        io_events = property(lambda self: pytest.fail("the I/O log copied on every refresh"))
+
+        def input_rows(self, now):
+            calls.append(now)
+            return [("lever", "ON", 3, 1.5, 0.2)]
+
+    monkeypatch.setattr(mon, "input_rows", lambda *a: pytest.fail("the I/O log rescanned"))
+    assert mon._input_rows(Session(), 4.0) == [("lever", "ON", 3, 1.5, 0.2)] and calls == [4.0]
+    # a session without running statistics: its log
+    monkeypatch.setattr(mon, "input_rows", livemonitor.input_rows)
+
+    class Old:
+        io_events = [{"t": 0.5, "device": "box", "channel": "lever", "kind": "input", "value": 1}]
+
+    assert mon._input_rows(Old(), 2.0)[0][0] == "lever"
+
+
+# ------------------------------------------------------------------ I/O devices dialog
+def _io_dialog(configs):
+    from manymaze.gui.io_devices_dialog import IODevicesDialog
+
+    p = Project()
+    p.io_devices = configs
+    return IODevicesDialog(p)
+
+
+def _fast_arduino(period_ms):
+    return {"name": "box", "type": "arduino", "port": "x", "baud": 115200, "channels": [
+        {"name": f"a{i}", "kind": "analog", "pin": i, "period_ms": period_ms} for i in range(6)]}
+
+
+def test_io_dialog_checks_the_serial_bandwidth_before_accepting(monkeypatch):
+    from manymaze.core import iodevices as iod
+
+    cfg = _fast_arduino(1)
+    assert iod.bandwidth_check(cfg)[1]  # refused by the core
+    dlg = _io_dialog([cfg])
+    told = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]) or QMessageBox.Ok)
+    dlg.accept()
+    assert told and "box:" in told[0] and dlg.result() != QDialog.Accepted and dlg.project.io_devices[0] is cfg
+
+    # a warning only: asked, and No keeps the dialog open
+    ms = next((m for m in range(2, 200) if iod.bandwidth_check(_fast_arduino(m))[0]
+               and not iod.bandwidth_check(_fast_arduino(m))[1]), None)
+    assert ms is not None
+    dlg.configs = [_fast_arduino(ms)]
+    dlg._refresh_list(0)
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    dlg.accept()
+    assert asked and dlg.result() != QDialog.Accepted
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    dlg.accept()
+    assert dlg.result() == QDialog.Accepted and dlg.project.io_devices[0]["channels"][0]["period_ms"] == ms
+    dlg.deleteLater()
+
+
+def test_io_dialog_shocker_role_max_on_time_and_pump_safe_mode():
+    from manymaze.core import iodevices as iod
+    from manymaze.gui.io_devices_dialog import CH_COLS
+
+    cfg = {"name": "box", "type": "virtual", "channels": [{"name": "shock", "kind": "output", "role": "shocker"},
+                                                          {"name": "light", "kind": "output", "debounce_ms": 5}]}
+    dlg = _io_dialog([cfg])
+    col = {k: i for i, (k, _l) in enumerate(CH_COLS)}
+    t = dlg.ch_table
+    assert not t.isColumnHidden(col["role"]) and not t.isColumnHidden(col["max_on_s"])
+    assert t.cellWidget(0, col["role"]).currentData() == "shocker"
+    assert "role" not in t.item(0, col["options"]).text()
+    role = t.cellWidget(1, col["role"])
+    role.setCurrentIndex(role.findData("shocker"))
+    t.item(1, col["max_on_s"]).setText("2.5")
+    chans = dlg._cur()["channels"]
+    assert chans[0]["role"] == "shocker" and "max_on_s" not in chans[0]
+    assert chans[1]["role"] == "shocker" and chans[1]["max_on_s"] == 2.5 and chans[1]["debounce_ms"] == 5
+    dev = iod.VirtualDevice({**cfg, "channels": chans})
+    assert dev.max_on_s("light") == 2.5 and dev.max_on_s("shock") == iod.SHOCKER_MAX_ON_S
+    t.item(1, col["max_on_s"]).setText("")
+    assert "max_on_s" not in dlg._cur()["channels"][1]
+
+    # syringe pumps: safe mode, only for them
+    assert dlg.f_safe.isHidden()
+    dlg.add_device("syringe_pump")
+    assert not dlg.f_safe.isHidden()
+    dlg.f_safe.setValue(10)
+    assert dlg._cur()["safe_mode_s"] == 10
+    dlg.f_safe.setValue(0)
+    assert "safe_mode_s" not in dlg._cur()
+    dlg.f_safe.setValue(5)
+    dlg.f_type.setCurrentIndex(dlg.f_type.findData("virtual"))
+    assert "safe_mode_s" not in dlg._cur() and dlg.f_safe.isHidden()
+    dlg.deleteLater()
