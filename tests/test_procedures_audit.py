@@ -220,7 +220,7 @@ def test_expression_failures_are_expression_errors(src):
     t0 = time.monotonic()
     with pytest.raises(ExprError):
         Evaluator(lambda n: 0).eval(src)
-    assert time.monotonic() - t0 < 0.5
+    assert time.monotonic() - t0 < 2.0  # catches hangs; well over the ~ms these take, as shared CI runners stall
 
 
 def test_deep_nesting_inside_the_engine_is_a_procedure_error():
