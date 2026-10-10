@@ -558,9 +558,12 @@ class Project:
                     if d.get(k) == old:
                         d[k] = new
         for c in self.training_criteria:
-            m = c.get("measure", "") if isinstance(c, dict) else ""
-            if m.startswith(old + ":") or m.startswith(old + " in "):
-                c["measure"] = new + m[len(old):]
+            if not isinstance(c, dict):
+                continue
+            for d in (c, c.get("variability")):  # the criterion's measure and its acceptable variability's
+                m = d.get("measure", "") if isinstance(d, dict) else ""
+                if m.startswith(old + ":") or m.startswith(old + " in "):
+                    d["measure"] = new + m[len(old):]
         return n
 
     def ensure_animal(self, aid: str, group: str = "") -> Animal:
