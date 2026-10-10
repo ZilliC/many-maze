@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBo
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ...core import pose
+from ...core import pose, security
 from ...core import workflow as wf
 from ...core.apparatus import unique_name
 from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
@@ -47,6 +47,8 @@ BEH_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", 
               "#06b6d4"]
 MET_ACTIONS = [("complete_stage", "Stage completed: skip remaining trials"), ("report", "Report only")]
 FORM_WIDTH = 900  # property pages with only settings stay at a readable width
+LOCKED_TEXT = ("The protocol is locked: only an administrator can change it (File ▸ Users and security). You can look "
+               "at it and run tests.")
 
 
 # record tables (see RecordTable): training criteria, time periods, event-anchored time periods
@@ -82,6 +84,11 @@ class ExperimentPage(Page):
         self.elements: dict[str, ElementPage] = {}
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.lock_lbl = QLabel(LOCKED_TEXT)
+        self.lock_lbl.setWordWrap(True)
+        self.lock_lbl.setStyleSheet("background:#fff7e0;border-bottom:1px solid #f0d58a;padding:6px 28px;")
+        self.lock_lbl.hide()
+        lay.addWidget(self.lock_lbl)
         lay.addWidget(self.stack)
         self._build_protocol()
         self._build_tracking()
@@ -482,7 +489,35 @@ class ExperimentPage(Page):
         self._show_key()
         self._update_mode()
         self._update_summary()
+        self._apply_lock()
         self.main.select_explorer(self, self.element)
+
+    @property
+    def locked(self) -> bool:
+        """The protocol is locked for the current user (Project.security, see core.security)."""
+        p = self.project
+        return p is not None and not security.can(p, "edit_protocol")
+
+    def _apply_lock(self):
+        """A locked protocol is shown read-only: the element pages and the ribbon's editing commands are
+        disabled."""
+        locked = self.locked
+        self.lock_lbl.setVisible(locked)
+        for pg in self.elements.values():
+            pg.widget().setEnabled(not locked)
+        acts = [self.add_item_act, self.template_act, self.apparatus_tpl_act]
+        acts += [a[1] if isinstance(a, tuple) else a for v in self.element_acts.values() for a in v]
+        for a in acts:
+            a.setEnabled(not locked)
+
+    def security_changed(self):
+        self._apply_lock()
+        if self.main.current_page() is self:
+            self._quiet_show = True
+            try:
+                self.main.refresh_ribbon()
+            finally:
+                self._quiet_show = False
 
     def _load(self, p):
         self.name.setText(p.name)
@@ -1054,6 +1089,12 @@ class ExperimentPage(Page):
     def _blind_toggled(self, on):
         p = self.project
         if self._loading or p is None:
+            return
+        if not on and p.blind and not security.can(p, "reveal_codes"):
+            with loading(self):
+                self.blind.setChecked(True)
+            QMessageBox.information(self, "Unblind", "Only an administrator can reveal the treatment coding of this "
+                                    "experiment (File ▸ Users and security).")
             return
         if not on and p.blind and QMessageBox.question(
                 self, "Unblind", "Reveal the treatment groups? The experimenter will no longer be blind to the "

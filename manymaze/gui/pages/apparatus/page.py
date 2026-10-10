@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from ....core import plots, templates
+from ....core import plots, security, templates
 from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, load_apparatus_file,
                                 make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
@@ -216,6 +216,12 @@ class ApparatusPage(Page):
         self.app_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         top.addWidget(self.app_info)
         lay.addLayout(top)
+        self.lock_lbl = QLabel("The protocol is locked: only an administrator can change the apparatus (File ▸ "
+                               "Users and security).")
+        self.lock_lbl.setWordWrap(True)
+        self.lock_lbl.setStyleSheet("background:#fff7e0;border:1px solid #f0d58a;padding:6px 8px;")
+        self.lock_lbl.hide()
+        lay.addWidget(self.lock_lbl)
         lay.addWidget(self.view, 1)
         sb = QHBoxLayout()
         self.hint = hint(HINTS["select"], wrap=False)
@@ -339,18 +345,35 @@ class ApparatusPage(Page):
         self.panel.refresh()
         self.refresh_info()
 
+    @property
+    def locked(self) -> bool:
+        """The protocol is locked for the current user (core.security): the apparatus is shown read-only."""
+        p = self.project
+        return p is not None and not security.can(p, "edit_protocol")
+
     def _set_enabled(self, on: bool):
-        for a in list(self.tool_actions.values()) + [
-                self.undo_act, self.redo_act, self.grid_act, self.copy_act, self.paste_act, self.dup_act,
-                self.ren_act, self.del_act, self.export_act, self.map_img_act, self.bg_act, self.testvid_act,
-                self.clear_cal_act, self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
+        locked = self.locked
+        edit = on and not locked
+        for a in [a for k, a in self.tool_actions.items() if k != "select"] + [
+                self.undo_act, self.redo_act, self.grid_act, self.paste_act, self.dup_act, self.ren_act,
+                self.del_act, self.bg_act, self.testvid_act, self.clear_cal_act, self.delete_sel_act, self.group_act,
+                self.seq_act]:
+            a.setEnabled(edit)
+        for a in (self.tool_actions["select"], self.copy_act, self.export_act, self.map_img_act, self.select_all_act):
             a.setEnabled(on)
         for w in (self.panel.tabs, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
-            w.setEnabled(on)
-        self.bg.set_enabled(on)
-        self.new_act.setEnabled(self.project is not None)
-        self.import_act.setEnabled(self.project is not None)
-        self.tpl_act.setEnabled(self.project is not None)
+            w.setEnabled(edit)
+        self.bg.set_enabled(edit)
+        self.view.setInteractive(not locked)  # nothing on the map can be selected, moved or reshaped
+        self.lock_lbl.setVisible(locked)
+        for a in (self.new_act, self.import_act, self.tpl_act):
+            a.setEnabled(self.project is not None and not locked)
+
+    def security_changed(self):
+        """Another user, or other security settings: the apparatus is editable or read-only."""
+        if self.locked:
+            self.set_tool("select")
+        self._set_enabled(self.app is not None)
 
     def _names(self, exclude: Apparatus | None = None):
         return [a.name for a in self.project.apparatus if a is not exclude]
@@ -388,10 +411,14 @@ class ApparatusPage(Page):
                 "Experiments and apparatus files (project.json *.json);;All files (*)")
             if not source:
                 return []
-        try:
-            apps = load_apparatus_file(source)
+        src = Path(source)
+        try:  # another experiment protected by a password asks for it
+            apps = self.main.with_password(lambda pw: load_apparatus_file(source, pw), "Import apparatus",
+                                           f"“{src.stem if src.is_dir() else src.parent.stem}”")
         except Exception as e:
             QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{e}")
+            return []
+        if apps is None:
             return []
         if names is None and len(apps) > 1:
             choices = ["All"] + [a.name for a in apps]
@@ -598,6 +625,8 @@ class ApparatusPage(Page):
 
     def show_context_menu(self, global_pos):
         """Right-click menu of the map (select tool)."""
+        if self.locked:
+            return
         m = QMenu(self)
         has_sel = self.view.selected_key() is not None
         for a, on in ((self.copy_act, has_sel), (self.paste_act, bool(ApparatusPage._clipboard)),

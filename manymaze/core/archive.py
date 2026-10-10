@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .explock import LOCK_FILE
-from .project import BACKUP_DIR, PROJECT_FILE, SECRETS_FILE, Project, dumps_json
+from .project import BACKUP_DIR, PROJECT_FILE, SECRETS_FILE, Project
 from .video import is_playlist, playlist_parts
 
 ARCHIVE_SUFFIX = ".zip"
@@ -27,7 +27,8 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
     """Write the experiment to a zip file. Videos stored outside the experiment folder are copied into
     ``videos/external/`` and the tests point to the copies (the experiment itself is not changed). Automatic
     backups, the lock file and the I/O device passwords and tokens (io-secrets.json; project.json has none) are
-    left out. Returns the zip path, or None if stopped."""
+    left out. An experiment protected by a password keeps its project.json encrypted in the archive (opening the
+    archive asks for the password). Returns the zip path, or None if stopped."""
     if project.path is None:
         raise ValueError("Save the experiment first")
     root = Path(project.path).resolve()
@@ -96,7 +97,7 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
     tmp = zip_path.with_name(zip_path.name + ".part")
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
-            z.writestr(f"{top}/{PROJECT_FILE}", dumps_json(d))
+            z.writestr(f"{top}/{PROJECT_FILE}", project.file_text(d))  # encrypted when protected
             for name, text in playlists.items():
                 z.writestr(f"{top}/{name}", text)
             for src, name in files:

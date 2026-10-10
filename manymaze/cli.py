@@ -9,11 +9,14 @@
     manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
     manymaze project DIR report -o report.html
     manymaze templates
+
+An experiment protected by a password is opened with the password in the environment variable MANYMAZE_PASSWORD.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +25,23 @@ from . import __version__
 
 TABLE_OUTPUT_HELP = ("the format follows the extension: .csv, .tsv / .txt, .xlsx, .slk (SYLK) or .dbf (dBase III); "
                      "results also .xml")
+PASSWORD_ENV = "MANYMAZE_PASSWORD"  # the password of an experiment protected by one
+
+
+def _password() -> str | None:
+    return os.environ.get(PASSWORD_ENV) or None
+
+
+def _load_project(path):
+    """The experiment at path; a protected one is opened with MANYMAZE_PASSWORD (exit with a message otherwise)."""
+    from .core.project import Project
+    from .core.security import PasswordRequired
+
+    try:
+        return Project.load(path, password=_password())
+    except PasswordRequired as e:
+        sys.exit(f"{e}. Set the environment variable {PASSWORD_ENV} to its password." if not e.wrong else
+                 f"{e} (the environment variable {PASSWORD_ENV}).")
 
 
 def _progress(prefix):
@@ -43,11 +63,13 @@ def cmd_track(a):
     with VideoSource(a.video) as v:
         W, H = v.width, v.height
     if a.apparatus:
-        import json
-
         from .core.apparatus import Apparatus
+        from .core.security import PasswordRequired, loads
 
-        d = json.loads(Path(a.apparatus).read_text(encoding="utf-8"))
+        try:  # an apparatus file, or an experiment's project.json (MANYMAZE_PASSWORD if it is protected)
+            d = loads(Path(a.apparatus).read_text(encoding="utf-8"), _password(), a.apparatus)[0]
+        except PasswordRequired as e:
+            sys.exit(f"{e} (set the environment variable {PASSWORD_ENV})")
         if isinstance(d, dict) and isinstance(d.get("apparatus"), list):  # apparatus file or experiment
             if not d["apparatus"]:
                 sys.exit(f"{a.apparatus} contains no apparatus")
@@ -103,9 +125,8 @@ def _lock_for_writing(p):
 
 def cmd_project(a):
     from .core import explock
-    from .core.project import Project
 
-    p = Project.load(a.dir)
+    p = _load_project(a.dir)
     if a.action in ("track", "relink"):
         _lock_for_writing(p)
         try:

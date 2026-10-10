@@ -584,6 +584,7 @@ class LiveSession(_Scoring):
     autosave_path: str | None = None  # crash-recovery side file (track, events, I/O log), rewritten periodically
     autosave_s: float = 5.0
     autosave_meta: dict | None = None  # test id, animal, apparatus … stored in the side file
+    autosave_key: object = None  # the experiment's security.ExperimentKey: the side file is encrypted
     record_from_start: bool = True  # False: only the procedures' "start video recording" starts the recording
     disk_low_mb: float = 1024.0  # "disk space low" below this much free space on the recording disk
     disk_full_mb: float = 50.0  # below this the recording stops ("disk full")
@@ -671,7 +672,7 @@ class LiveSession(_Scoring):
         self._rec_frames = 0
         self._last_rec_frame: np.ndarray | None = None
         self._autosave_last = -1e9
-        self._autosaver = Autosaver(self.autosave_path, self.autosave_snapshot, self.warn) \
+        self._autosaver = Autosaver(self.autosave_path, self.autosave_snapshot, self.warn, self.autosave_key) \
             if self.autosave_path else None
         self._closers: list[threading.Thread] = []  # recorders being closed in the background
         self._last_frame_wall: float | None = None  # monotonic time of the last frame (safety thread)

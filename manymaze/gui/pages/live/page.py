@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QInputDialog, QMenu, QMessa
 
 from ....core import autosave
 from ....core import camsources
+from ....core import security
 from ....core.camera import CameraView
 from ....core.camhw import CameraHardware
 from ....core.live import LiveSession, ObservationSession
@@ -526,6 +527,15 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._rebuild_session_table()
         self.on_show()
 
+    def security_changed(self):
+        """The procedures (Procedures tab) are part of the protocol: read-only while it is locked for the current
+        user (core.security)."""
+        p = self.project
+        locked = p is not None and not security.can(p, "edit_protocol")
+        self.proc_editor.setEnabled(not locked)
+        self.proc_editor.setToolTip("The protocol is locked: only an administrator can change the procedures"
+                                    if locked else "")
+
     def _recover_interrupted(self, project):
         """Live tests interrupted by a crash leave an autosave side file: store what they recorded."""
         try:
@@ -590,6 +600,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._load_single_view()
         self._refresh_row_choices()
         self.proc_editor.set_project(p)
+        self.security_changed()
         sig = [(b.name, b.key, b.kind, b.group, b.color) for b in p.behaviours]
         if sig != self._pad_sig:
             self._pad_sig = sig

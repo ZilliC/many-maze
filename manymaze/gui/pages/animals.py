@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QC
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QStackedWidget,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
-from ...core import export, scales
+from ...core import export, scales, security
 from ...core import workflow as wf
 from ...core.project import Animal
 from ...core.workflow import treatment_code, treatment_text
@@ -26,6 +26,8 @@ STATUSES = ["Normal", "Retired"]
 COMBO_KINDS = ("status", "treatment", "sex")
 ROW_H = 32
 MUTED_ROW = "#9ca3af"
+REVEAL_TIP = ("On: the treatments are visible. Off: blind testing — treatments are shown only as codes while testing "
+              "and scoring")
 
 
 def unique_id(base: str, taken: set[str]) -> str:
@@ -157,9 +159,7 @@ class AnimalsPage(Page):
                                  "Add a numbered series of animals (e.g. M01…M12)")
         self.a_del_animals = act("Delete animals", "animal_delete", self.delete_selected_interactive,
                                  "Delete the selected animals")
-        self.a_reveal = act("Reveal treatment coding", "eye", self._reveal_toggled,
-                            "On: the treatments are visible. Off: blind testing — treatments are shown only as "
-                            "codes while testing and scoring", True)
+        self.a_reveal = act("Reveal treatment coding", "eye", self._reveal_toggled, REVEAL_TIP, True)
         self.a_import_animals = act("Import animals", "import", lambda: self.main.import_table("animals"),
                                     "Import animals (ID, treatment, sex and other columns) from a spreadsheet saved "
                                     "by ANY-maze or other software")
@@ -327,6 +327,11 @@ class AnimalsPage(Page):
     def on_show(self):
         self.refresh()
 
+    def security_changed(self):
+        """Another user, or other security settings: who may reveal the treatment coding."""
+        if self.project is not None:
+            self._update_actions()
+
     def _group_names(self) -> list[str]:
         return [g.name for g in self.project.groups] if self.project else []
 
@@ -483,6 +488,10 @@ class AnimalsPage(Page):
         if field:
             self.a_field_remove.setToolTip(f"Remove the column “{field}” and its values")
         blind = has and p.blind
+        reveal = not blind or security.can(p, "reveal_codes")
+        self.a_reveal.setEnabled(has and reveal)
+        self.a_reveal.setToolTip(REVEAL_TIP if reveal else "Only an administrator can reveal the treatment coding of "
+                                 "this experiment (File ▸ Users and security)")
         self.a_treat_add.setEnabled(has and not blind)
         cur = self._current_group() if has else None
         for a in (self.a_treat_rename, self.a_treat_color, self.a_treat_delete):
@@ -492,6 +501,13 @@ class AnimalsPage(Page):
     def _reveal_toggled(self, on: bool):
         p = self.project
         if p is None:
+            return
+        if on and p.blind and not security.can(p, "reveal_codes"):
+            self.a_reveal.blockSignals(True)
+            self.a_reveal.setChecked(False)
+            self.a_reveal.blockSignals(False)
+            QMessageBox.information(self, "Reveal treatment coding", "Only an administrator can reveal the treatment "
+                                    "coding of this experiment (File ▸ Users and security).")
             return
         if on and p.blind and QMessageBox.question(
                 self, "Reveal treatment coding", "Reveal the treatments? The experimenter will no longer be blind "

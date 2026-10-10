@@ -637,7 +637,7 @@ class SingleTestMixin:
             path = autosave.path_for(p, test)
         except Exception:
             return {}
-        return {"autosave_path": path, "autosave_meta": {
+        return {"autosave_path": path, "autosave_key": p.file_key, "autosave_meta": {
             "test_id": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
             "trial": test.trial}}
 

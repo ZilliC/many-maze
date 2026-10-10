@@ -61,9 +61,10 @@ simply saves it; replacing another experiment swaps its tracks only once the cop
 
 **Based on another experiment**: choose an existing experiment under *Based on* and the new one gets its protocol —
 apparatus, stages, keys, test duration and start, animal tracking and analysis settings, procedures, I/O devices,
-training criteria, blind testing and animal ID options, animal columns and (optionally) the treatments. Animals,
-tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again). Use it for a new
-cohort or a replication.
+the synchronisation element, analysis plug-ins, training criteria, blind testing, weighing, start delay and animal ID
+options, animal columns, the users with their roles and passwords and the security settings, and (optionally) the
+treatments. Animals, tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again),
+nor the experiment password. Use it for a new cohort or a replication.
 
 **Protocol report** (*File ▸ Protocol report*) saves a printable HTML description of the protocol: the experiment
 options, stages, keys, a map of each apparatus with its zones, zone groups, points, lines and sequences (shape,
@@ -79,7 +80,9 @@ back to the chosen one (the current state is backed up first). Tracks are not pa
 recordings, exports and the video of every test — also videos stored outside the experiment folder, which are copied
 into `videos/external/` (the tests in the archive point to the copies). Use it to move an experiment to another
 computer or to keep it with a publication. **Open archive** unpacks an archive into a folder and opens it.
-Automatic backups, the lock file and the I/O devices' passwords and tokens (`io-secrets.json`) are not archived.
+Automatic backups, the lock file and the I/O devices' passwords and tokens (`io-secrets.json`) are not archived. The
+experiment file of an experiment protected by a password stays encrypted in the archive (opening it asks for the
+password).
 
 *File ▸ Create demo experiment* builds a complete open-field experiment from synthetic videos so you can try
 everything without a camera.
@@ -409,12 +412,49 @@ Starting the clock again on a scored test asks whether to delete the previous ev
 ### Users (experimenters)
 
 The current user is shown at the top right of the window (**User: name ▾**, or *File ▸ Current user…*). Pick a name
-from the experiment's list, or **New user…** to type one; the choice is remembered on this computer. No passwords are
-involved: it only records who did what. The current user is stamped on every test as its *experimenter* when the
-test is run live (the user who ran it), and when it is tracked or scored if it has no experimenter yet. The Test
-schedule shows it in the **User** column, where it can be changed by hand, and the results can show and group by it
-(*User* column, Statistics factors). Each experiment keeps its own list of users; **Remove a user from this
-experiment…** takes a name off the list (tests keep their experimenter).
+from the experiment's list, or **New user…** to type one; the choice is remembered on this computer. Until somebody
+sets a password no passwords are involved: it only records who did what. The current user is stamped on every test as
+its *experimenter* when the test is run live (the user who ran it), and when it is tracked or scored if it has no
+experimenter yet. The Test schedule shows it in the **User** column, where it can be changed by hand, and the results
+can show and group by it (*User* column, Statistics factors). Each experiment keeps its own list of users; **Remove a
+user from this experiment…** takes a name off the list (tests keep their experimenter; a user with a password can be
+removed by an administrator or by that user).
+
+### Users, passwords and security
+
+As in ANY-maze this is **casual security**: it keeps colleagues from changing a protocol or unblinding an experiment
+by mistake, and a casual reader out of an experiment file. It does not stop someone determined who can edit the
+experiment's files (the users' password hashes and roles are stored in `project.json`, which is plain JSON unless the
+experiment itself has a password).
+
+- **Passwords.** *Set password…* in the user menu gives the current user a password (asked for the old one first).
+  Passwords are never stored: only a salted scrypt hash of each. Choosing a user who has a password — from the user
+  menu, *File ▸ Current user…*, or when an experiment is opened with that user remembered on this computer — asks for
+  it (three tries; cancelling leaves the current user as it was, or no user when opening).
+- **Administrator.** The first user who sets a password becomes the experiment's **administrator**. Administrators
+  make other users with a password administrators too, set or clear anyone's password and change the security
+  settings, in **File ▸ Users and security…** (also in the user menu). The last administrator cannot be made an
+  ordinary user; clearing their password (after a confirmation) leaves nobody in charge, and everything is allowed
+  again until the next user sets a password.
+- **Security settings** (administrators only), in *Users and security*:
+  - **Reveal treatment coding** — *Anyone* (the default) or *Administrators only*: who may unblind a blind experiment
+    (*Reveal treatment coding* on the Experiment tab, or unticking *Blind testing*).
+  - **Lock the protocol** — only administrators can change the protocol: the protocol elements (Protocol page), the
+    apparatus maps and the procedures (also on the Run tests page) are shown read-only to everybody else, who can
+    still run tests, score them and look at the results.
+- **No password, no change.** While no user has a password (no administrator), nothing is restricted and nobody is
+  asked for a password: experiments behave exactly as before.
+
+**Protect experiment** (*File ▸ Protect experiment…*, also on the File tab; administrators only once there is one)
+sets an **experiment password**: `project.json` is then stored encrypted (AES-256-GCM, the key derived from the
+password with scrypt), and the password is asked whenever the experiment is opened — in the window, when it is the
+base of a new experiment, when its apparatus is imported, and on the command line (the environment variable
+`MANYMAZE_PASSWORD`). Its automatic backups, its copy in an archive and the crash-recovery files of live tests are
+encrypted too; restoring a backup made under an earlier password asks for that one. Changing the password asks for
+the current one; an empty new password removes the protection (the file and its backups are written as plain JSON
+again). Tracks, recordings, exports and the I/O devices' passwords (`io-secrets.json`, readable only by your user
+account) are not encrypted, and the lock file (`.manymaze.lock`) stays readable so that another computer can tell who
+has the experiment open. **A forgotten experiment password cannot be recovered.**
 
 ### Training criteria
 
@@ -448,6 +488,8 @@ re-coloured. While blind, the *Treatment* (Group) column of the results, statist
 shows the code (the same as the *Treatment code* column), never the treatment's name, so results can be analysed
 blind too. Unticking the box (unblinding) asks for confirmation. The **Reveal treatment coding** button on the
 Experiment tab (and unticking the box) unblinds after a confirmation; the results then show the real treatments.
+With *Reveal treatment coding: Administrators only* (*File ▸ Users and security…*, see *Users, passwords and
+security*) only an administrator can unblind.
 
 ### Animal identification
 
@@ -1823,6 +1865,9 @@ manymaze project ~/exp.mmaze protocol -o protocol.html
 manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file
 manymaze templates                        # list apparatus templates
 ```
+
+An experiment protected by a password (*File ▸ Protect experiment…*) is opened with the password in the environment
+variable `MANYMAZE_PASSWORD`, e.g. `MANYMAZE_PASSWORD='…' manymaze project ~/exp.mmaze results -o results.xlsx`.
 
 ## 12. Tips for good tracking
 
