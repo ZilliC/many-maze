@@ -17,7 +17,7 @@ import numpy as np
 from .. import __version__
 from .atomicfile import atomic_write, write_text_atomic
 from .apparatus import CALIBRATION_KEY, ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
-from .ioconfig import is_secret
+from .ioconfig import OPERANT_PRESETS, PRESET_KEY, is_secret
 from .project import ERROR_COLUMN, INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
 
@@ -581,8 +581,13 @@ def protocol_report(project: Project, path) -> Path:
     if p.description:
         out.append(f"<p>{html.escape(p.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}.</p>")
+    mode = p.settings_extra.get("mode", "tracking")
+    preset = OPERANT_PRESETS.get(p.settings_extra.get(PRESET_KEY) or "", {}).get("label")
     out.append("<h2>Protocol</h2>" + table(("Item", "Value"), [
-        ("Protocol", p.protocol), ("Test duration (s)", p.test_duration_s or "until the end of the video"),
+        ("Protocol", p.protocol),
+        ("Mode", {"takenote": "TakeNote", "io_only": "Input/output only"}.get(mode, "Video tracking")),
+        *([("Operant chambers", preset)] if preset else []),
+        ("Test duration (s)", p.test_duration_s or "until the end of the video"),
         ("Test starts", {"on_detection": "when the animal is first detected",
                          "experimenter_leaves": "when the experimenter's hand has left the image"}.get(
             p.start_mode, "at the test's start time")),
