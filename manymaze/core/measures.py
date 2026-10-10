@@ -26,7 +26,7 @@ from .apparatus import Apparatus
 from .freezing import thresholds as freeze_thresholds
 from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures, io_track_measures
-from .occupancy import occupancy
+from .occupancy import occupancy, occupancy_map
 from .pauses import drop_pauses, shift_events
 from .series import count_rotations  # noqa: F401 (re-exported)
 from .series import (drop_short_runs, ffill, initial_heading_frames, partial_rotation_events, rotation_events,
@@ -1324,6 +1324,13 @@ def _zone_lines(res, p: _Period, zn: str, fm: np.ndarray):
 def _points(res, p: _Period):
     P, s, k, dur, u = p.P, p.P.s, p.k, p.dur, p.P.app.unit
     for pt in P.app.points:
+        if pt.heatmap:  # ANY-maze's heat-map point (4.17-4.19): where the whole test's heat map is hottest
+            hot = P.cached(("hot", pt.heatmap), lambda b=pt.heatmap: _hot_spot(P, b))
+            if hot is None:  # e.g. the animal never froze
+                res[f"{pt.name}: X ({u})"] = res[f"{pt.name}: Y ({u})"] = math.nan
+                res[f"{pt.name}: approximate time at point (s)"] = math.nan
+                continue
+            pt = replace(pt, x=hot[0], y=hot[1])
         A = P.cached(("point", pt.name), lambda pt=pt: _point_arrays(P, pt))
         dist = A["dist"][p.sl]
         res[f"{pt.name}: mean distance ({u})"] = _r(np.nanmean(dist), 2)
@@ -1376,9 +1383,56 @@ def _points(res, p: _Period):
         _point_heading(res, p, pt)
         res[f"{pt.name}: X ({u})"] = _r(pt.x * k.scale, 2)
         res[f"{pt.name}: Y ({u})"] = _r(pt.y * k.scale, 2)
-        fin = np.flatnonzero(np.isfinite(dist))
-        res[f"{pt.name}: approximate time at point (s)"] = _r(
-            float(p.t[fin[np.argmin(dist[fin])]] - p.t0) if len(fin) else math.nan)
+        # as ANY-maze: the time the heat map gives at the point's location (approximate: heat maps are smoothed)
+        res[f"{pt.name}: approximate time at point (s)"] = _r(_heat_at(p, pt.heatmap or "time", pt.x, pt.y), 2)
+
+
+HEAT_BINS, HEAT_SIGMA = 60, 1.5  # heat maps of the heat-map points: squares and smoothing, as the Heat maps view
+
+
+def _heat_map(P: _Prepared, basis: str, i0: int, i1: int) -> tuple | None:
+    """The heat map (occupancy.occupancy_map: seconds per square, as the Heat maps view) of frames [i0, i1) of the
+    test: of the animal's position ("time"), or of its position while "freezing", "immobile" or "rearing"; None
+    without an apparatus or a position."""
+    def make():
+        tr, K = P.track, P.k
+        x, y = tr.x[i0:i1], tr.y[i0:i1]  # hidden-blanked: no time where the animal could not be seen
+        ok = np.isfinite(x) & np.isfinite(y)
+        if basis == "freezing":
+            ok &= K.freezing[i0:i1]
+        elif basis == "immobile":
+            ok &= ~K.mobile[i0:i1]
+        elif basis == "rearing":
+            ok &= _rears(P)[i0:i1]
+        try:
+            bounds = P.app.arena_or_bounds().bounds()
+        except ValueError:
+            return None
+        return occupancy_map(x[ok], y[ok], K.dur[i0:i1][ok], bounds, HEAT_BINS, HEAT_SIGMA)
+    return P.cached(("heat", basis, i0, i1), make)
+
+
+def _hot_spot(P: _Prepared, basis: str) -> tuple[float, float] | None:
+    """The centre (px) of the hottest square of the whole test's heat map (see _heat_map), or None."""
+    hm = _heat_map(P, basis, 0, len(P.k.t))
+    if hm is None or not hm[0].size or hm[0].max() <= 0:
+        return None
+    H, xe, ye = hm
+    ix, iy = np.unravel_index(int(np.argmax(H)), H.shape)
+    return float(xe[ix] + xe[ix + 1]) / 2, float(ye[iy] + ye[iy + 1]) / 2
+
+
+def _heat_at(p: _Period, basis: str, x: float, y: float) -> float:
+    """The approximate time (s) spent at the point x, y (px) in the period, from its heat map (see _heat_map): the
+    smoothed map's value there × the area of its Gaussian (2π sigma²), so that each position counts by its
+    closeness to the point (1 on it, 0.6 one sigma - 1.5 squares - away) and a stay on the point counts in full."""
+    hm = _heat_map(p.P, basis, p.i0, p.i1)
+    if hm is None:
+        return math.nan
+    H, xe, ye = hm
+    ix, iy = int(np.searchsorted(xe, x, "right")) - 1, int(np.searchsorted(ye, y, "right")) - 1
+    inside = 0 <= ix < H.shape[0] and 0 <= iy < H.shape[1]
+    return float(H[ix, iy]) * 2 * math.pi * HEAT_SIGMA ** 2 if inside else 0.0
 
 
 def _point_heading(res, p: _Period, pt):

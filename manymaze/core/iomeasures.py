@@ -277,7 +277,14 @@ def _index_reversals(res, log, t0, t1):
     """ANY-maze's on/off input reversals: with two or more inputs given an ``index`` option, the order in which
     they are activated rises or falls; a positive reversal is a change from falling to rising, a negative one from
     rising to falling (e.g. a rat running back and forth along a row of beams)."""
-    idx = _indexed_inputs(log)
+    idx = {}
+    for key in log.series:
+        v = log.conf(key).get("index")
+        if key[0] == "input" and log.kind(key) == "input" and v not in (None, ""):
+            try:
+                idx[key] = float(v)
+            except (TypeError, ValueError):
+                pass
     if len(idx) < 2:
         return
     acts = sorted((t, idx[key]) for key in idx for t in _digital(log.series[key], -math.inf, math.inf)[1])
@@ -294,19 +301,6 @@ def _index_reversals(res, log, t0, t1):
     res["On/off inputs: negative reversals"] = neg
 
 
-def _indexed_inputs(log) -> dict:
-    """{series key: index} of the on/off inputs given an ``index`` option."""
-    idx = {}
-    for key in log.series:
-        v = log.conf(key).get("index")
-        if key[0] == "input" and log.kind(key) == "input" and v not in (None, ""):
-            try:
-                idx[key] = float(v)
-            except (TypeError, ValueError):
-                pass
-    return idx
-
-
 def _rapc(res, log, t0, t1):
     """ANY-maze's RAPC door measures (2.54-2.56), from 12 on/off inputs with the indices 1-12: the doors, 1-3 from
     the first chamber, 4-6 from the second, 7-9 from the third and 10-12 from the fourth. A latched door still
@@ -314,12 +308,16 @@ def _rapc(res, log, t0, t1):
     Type 1 errors: openings of latched doors; type 2 errors: openings of an unlatched door before the last one (the
     animal opened it without going through); door sequence: the unlatched door of each chamber, 1-3 ("1321"; "-"
     for a chamber with no door opened). Errors count the openings in the period; the doors are those of the test."""
-    door = {}
-    for key, i in _indexed_inputs(log).items():
-        door.setdefault(i, key)  # the first input of each index
+    door = {}  # the inputs of the devices' configuration (a door never opened has nothing in the log)
+    for (dev, ch), c in log.cfg.items():
+        if c.get("kind", "input") == "input" and c.get("index") not in (None, ""):
+            try:
+                door.setdefault(float(c["index"]), ("input", str(dev), str(ch)))  # the first input of each index
+            except (TypeError, ValueError):
+                pass
     if not all(float(i) in door for i in range(1, 13)):
         return
-    opened = {i: _digital(log.series[door[float(i)]], -math.inf, math.inf)[1] for i in range(1, 13)}
+    opened = {i: _digital(log.series.get(door[float(i)], []), -math.inf, math.inf)[1] for i in range(1, 13)}
     t1e = t2e = 0
     seq = ""
     for c in range(4):

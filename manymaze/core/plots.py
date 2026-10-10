@@ -16,10 +16,10 @@ from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch, Polygon as MplPolygon  # noqa: E402
-from scipy.ndimage import gaussian_filter  # noqa: E402
 
 from . import charts  # noqa: E402
 from .apparatus import Apparatus  # noqa: E402
+from .occupancy import occupancy_map  # noqa: E402
 from .pauses import period_frames, to_recording_time  # noqa: E402
 from .project import Behaviour  # noqa: E402
 from .stats import descriptive, error_value, stars  # noqa: E402
@@ -353,12 +353,7 @@ def occupancy(tracks: list[Track], app: Apparatus | None, bins: int = 60, sigma:
     except Exception as e:
         log.debug("no arena bounds, using the track's extent: %s", e)
         x0, y0, x1, y1 = (x.min(), y.min(), x.max(), y.max()) if len(x) else (0, 0, 1, 1)
-    span = max(x1 - x0, y1 - y0, 1e-6)
-    nx = max(2, int(round(bins * (x1 - x0) / span)))
-    ny = max(2, int(round(bins * (y1 - y0) / span)))
-    H, xe, ye = np.histogram2d(x, y, bins=[nx, ny], range=[[x0, x1], [y0, y1]], weights=w)
-    if sigma > 0:
-        H = gaussian_filter(H, sigma)
+    H = occupancy_map(x, y, w, (x0, y0, x1, y1), bins, sigma)[0]
     if len(tracks) > 0:
         H = H / len(tracks)
     if norm == "percent":
