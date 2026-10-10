@@ -84,6 +84,11 @@ class AnalysisSettings:
     arena_quadrants: bool = False  # time in each quadrant of the arena (NE, SE, SW, NW)
     behaviour_by_zone: bool = False  # manually scored behaviours split by zone
     paired_chamber: str = "Chamber A"  # conditioned place preference: drug-paired chamber
+    barnes_strategy_method: str = "simple"  # Barnes maze search strategy: "simple" | "classic" | "unmc"
+    barnes_target_region: int = 2  # holes either side of the escape hole in its target region (direct strategy)
+    barnes_serial_visits: int = 3  # consecutive hole visits that start a serial strategy
+    barnes_serial_skip: int = 1  # holes the animal may skip during a serial strategy
+    barnes_centre_zone: str = "Centre"  # entering it breaks a serial strategy (and a direct one)
     io_baseline_s: float = 10.0  # analogue inputs: baseline = the first io_baseline_s seconds of each period
     io_deviation_sd: float = 2.0  # analogue inputs: a deviation is more than this many baseline SDs from it
     opad_contact: str = ""  # operant plantar assay: digital input of the paw contact with the thermal plate

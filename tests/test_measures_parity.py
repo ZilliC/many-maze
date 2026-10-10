@@ -601,3 +601,101 @@ def test_forced_swim_protocol_and_live_immobility():
     for i, m in enumerate(motion):
         speed.update(i / FPS, Detection(70 + 0.6 * i, 100, area=AREA, motion=m * AREA / 100, detected=True), {}, False)
     assert not speed.immobile  # the speed-based immobility sees the drift
+
+
+# ------------------------------------------------------------------ Barnes maze search strategy
+def _visits(*seq):
+    """Hole numbers and "C" (the centre) one second apart, as (kind, hole, t) visits."""
+    return [("centre", None, float(i)) if v == "C" else ("hole", v, float(i)) for i, v in enumerate(seq)]
+
+
+def test_barnes_strategy_anymaze_method():
+    from manymaze.core.template_measures import BarnesRules, barnes_classic, classic_strategy
+
+    r = BarnesRules(20, target=5)  # target region 3-7, serial from 3 holes, one hole may be skipped
+    assert classic_strategy(_visits(3, 4, 5), r) == "Direct" and classic_strategy(_visits(5), r) == "Direct"
+    assert classic_strategy(_visits("C", 7, 5), r) == "Direct"  # the start in the centre does not count
+    assert classic_strategy(_visits(1, 2, 3, 4, 5), r) == "Serial"
+    assert classic_strategy(_visits(1, 3, 4, 5), r) == "Serial"  # hole 2 skipped …
+    assert classic_strategy(_visits(1, 3, 4, 5), BarnesRules(20, 5, skip=0)) == "Random"  # … unless not allowed
+    # ANY-maze 7.54: reversals are allowed, so a first move the wrong way then a serial search is still serial
+    assert classic_strategy(_visits(10, 9, 10, 11, 12, 11, 12, 13, 5), BarnesRules(20, 5, region=1, skip=8)) == \
+        "Serial"
+    assert classic_strategy(_visits(20, 19, 20, 1, 2, 3, 4, 5), r) == "Serial"  # round past hole 20
+    assert classic_strategy(_visits(1, 2, 3, "C", 4, 5), r) == "Random"  # the centre breaks a serial strategy
+    assert classic_strategy(_visits(12, 2, 3, 4, 5), r) == "Random"  # 12 → 2 is no serial move
+    assert classic_strategy(_visits(1, 2), r) == "Random"  # never found the escape hole
+    assert classic_strategy([("centre", None, 0.0)], r) == "None"
+    # ANY-maze's example: escape hole 4, holes 1, 2, 3, 4, then 6, 7, the centre and 4 again
+    res = barnes_classic(_visits(1, 2, 3, 4, 6, 7, "C", 4), BarnesRules(20, target=4))
+    assert res["Primary strategy"] == "Serial" and res["Search strategy"] == "Random"
+    # errors (T1464): reference = other holes, working = other holes again, perseverative = the same hole again
+    res = barnes_classic(_visits(7, 8, 8, 7, 5, 6, 6), r)
+    assert (res["Total reference errors"], res["Total working errors"], res["Total perseverative errors"]) == \
+        (6, 3, 2)
+    assert (res["Primary reference errors"], res["Primary working errors"], res["Primary perseverative errors"]) == \
+        (4, 2, 1)
+    assert res["Hole deviation score"] == 2 and res["Primary strategy"] == "Serial"  # 8 is outside the region
+    res = barnes_classic(_visits(9, 10), r)  # never found: the primary values are undefined
+    assert res["Primary strategy"] == "None" and math.isnan(res["Primary reference errors"])
+    assert res["Total reference errors"] == 2 and res["Hole deviation score"] == 4
+    assert math.isnan(barnes_classic([], r)["Hole deviation score"])
+
+
+def test_barnes_strategy_unmc_method():
+    from manymaze.core.template_measures import BarnesRules, barnes_unmc, unmc_strategies
+
+    # ANY-maze's example: escape hole 4, holes 2, 3, 4, 5, 13, 8: Serial from the start, then (the analysis
+    # starting again on finding the escape hole) Random from that moment (a target region of one hole either side)
+    r = BarnesRules(20, target=4, region=1)
+    assert unmc_strategies(_visits(2, 3, 4, 5, 13, 8), r, 0.0) == [("Serial", 0.0, 0), ("Random", 2.0, 0)]
+    # a serial search started again at once is one serial strategy (holes 1, 2, 3, then 14, 15, 16) …
+    r = BarnesRules(20, target=10, region=1)
+    assert unmc_strategies(_visits(1, 2, 3, 14, 15, 16), r, 0.0) == [("Serial", 0.0, 0)]
+    # … else the holes between are a Random strategy, from the centre entry that ended the serial one
+    used = unmc_strategies(_visits(7, 6, 5, "C", 2, 18, 15, 14, 13, 10), r, 0.0)
+    assert used == [("Serial", 0.0, 0), ("Random", 3.0, 0), ("Serial", 6.0, 0)]
+    used = unmc_strategies(_visits(1, 2, 3, 12, 7, 6, 5), r, 0.0)
+    assert used == [("Serial", 0.0, 0), ("Random", 3.0, 0), ("Serial", 4.0, 0)]
+    # Direct: to the escape hole within its target region (its errors: the other holes of the region)
+    used = unmc_strategies(_visits("C", 9, 11, 10), r, 0.0)
+    assert used == [("Direct", 0.0, 2)]
+    assert unmc_strategies(_visits(9, "C", 10), r, 0.0)[0][0] == "Random"  # not through the centre
+    assert unmc_strategies([("centre", None, 0.0)], r, 0.0) == []
+    # the measures (T1465), the strategies lasting until the next one starts or the period ends
+    res = barnes_unmc(_visits(1, 2, 3, 12, 7, 6, 5), r, 0.0, 10.0, 10.0)
+    assert res["Search strategy"] == res["Initial strategy used"] == "Serial"
+    assert res["List of strategies used"] == "Serial, Random, Serial"
+    assert res["Serial strategy - number times used"] == 2 and res["Random strategy - number times used"] == 1
+    assert res["Serial strategy - time using (s)"] == 9.0 and res["Random strategy - time using (s)"] == 1.0
+    assert res["Serial strategy - latency (s)"] == 0 and res["Random strategy - latency (s)"] == 3.0
+    assert res["Direct strategy - number times used"] == 0 and res["Direct strategy - errors"] == 0
+    res = barnes_unmc(_visits(9, 11, 10), r, 0.0, 5.0, 5.0)
+    assert res["Direct strategy - number times used"] == 1 and res["Direct strategy - time using (s)"] == 5.0
+    assert res["Direct strategy - errors"] == 2 and res["Serial strategy - latency (s)"] == 5.0
+
+
+def test_barnes_strategy_method_setting():
+    app = templates.build("barnes_maze", 0, 0, 400, 400, escape_hole=5)
+    assert app.zone("Centre") is not None
+    centre = app.zone("Centre").shape.centroid()
+
+    def at(name):
+        return app.zone(name).shape.centroid() if name != "C" else centre
+
+    seq = ["C", "Hole 2", "Hole 3", "Hole 4", "Hole 5", "Hole 9", "C", "Hole 12"]
+    pts = np.vstack([hold(at(z), 20) for z in seq])
+    tr = make_track(pts, head=False)
+    simple = analyse(tr, app, AnalysisSettings())
+    assert simple["Search strategy"] == "Serial" and "Primary strategy" not in simple  # unchanged by default
+    res = analyse(tr, app, AnalysisSettings(barnes_strategy_method="classic", barnes_target_region=1))
+    assert res["Primary strategy"] == "Serial" and res["Search strategy"] == "Random"
+    assert res["Total reference errors"] == 5 and res["Hole deviation score"] == 3
+    res = analyse(tr, app, AnalysisSettings(barnes_strategy_method="unmc", barnes_target_region=1))
+    assert res["Search strategy"] == "Serial" and res["List of strategies used"] == "Serial, Random"
+    assert res["Random strategy - latency (s)"] == pytest.approx(80 / FPS, abs=0.05)  # on finding hole 5
+    assert res["Serial strategy - time using (s)"] + res["Random strategy - time using (s)"] == \
+        pytest.approx(res["Test duration (s)"], abs=0.05)
+    # holes without numbers: the simple method
+    app.zones[1].name = "Hole A"
+    assert "Primary strategy" not in analyse(tr, app, AnalysisSettings(barnes_strategy_method="classic"))

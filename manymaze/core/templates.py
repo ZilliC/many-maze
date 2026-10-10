@@ -302,6 +302,8 @@ def barnes_maze(x, y, w, h, diameter_cm=122.0, n_holes=20, hole_diameter_cm=5.0,
     cx, cy, r = x + w / 2, y + h / 2, min(w, h) / 2
     s = 2 * r / diameter_cm
     app.arena = circle(cx, cy, r)
+    # the start area: entering it breaks a serial search strategy (AnalysisSettings.barnes_centre_zone)
+    app.zones.append(Zone("Centre", circle(cx, cy, r * 0.3), "#cbd5e1"))
     rr = r * hole_ring_fraction - hole_diameter_cm * s
     names = []
     for i in range(n_holes):

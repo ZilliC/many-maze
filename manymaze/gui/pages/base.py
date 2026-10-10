@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
                                QVBoxLayout, QWidget)
 
 from ...core.freezing import IMMOBILITY_MODES
+from ...core.template_measures import BARNES_METHODS
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -195,6 +196,20 @@ ANALYSIS_SPEC = [
      "Water maze corridor from the release point to the platform. 0 = 20 cm."),
     ("paired_chamber", "Drug-paired chamber (place preference)", "text", None,
      "Conditioned place preference: drug-paired chamber."),
+    ("barnes_strategy_method", "Barnes maze search strategy", "choice", list(BARNES_METHODS.items()),
+     "Simple: Direct with at most two holes visited before the escape hole, Serial when most moves are to the "
+     "next hole. ANY-maze (as revised in ANY-maze 7.54, after Gawel et al. 2018): the overall strategy, the "
+     "primary strategy up to the first visit to the escape hole, and the reference, working and perseverative "
+     "errors. UNMC method (University of Nebraska Medical Center): every strategy used in turn, with the time "
+     "using each."),
+    ("barnes_target_region", "Target region: holes either side of the escape hole", "int", (0, 13, 1),
+     "The Direct strategy goes to the escape hole visiting only holes of this region on the way."),
+    ("barnes_serial_visits", "A serial strategy starts after (consecutive hole visits)", "int", (2, 28, 1),
+     "e.g. 3: visiting holes 6, 7 and 8 starts it (from hole 6)."),
+    ("barnes_serial_skip", "Holes the animal may skip in a serial strategy", "int", (0, 13, 1),
+     "e.g. 1: visiting holes 9, 11 and 12 is still serial."),
+    ("barnes_centre_zone", "Centre zone of the Barnes maze", "text", None,
+     "Entering it breaks a serial strategy (ANY-maze method) and rules out a Direct one."),
     ("bin_length_s", "Split each test into time bins of (s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
      "0 = no time bins."),
     ("novel_object", "The novel object is the point named", "text", None, "Name of the point that is the novel object."),
@@ -244,6 +259,8 @@ ANALYSIS_SECTIONS = [
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "orientation_deg", "grid_cells",
                                 "contact_distance", "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
+    ("Barnes maze strategy", ["barnes_strategy_method", "barnes_target_region", "barnes_serial_visits",
+                              "barnes_serial_skip", "barnes_centre_zone"]),
     ("I/O measures", ["io_baseline_s", "io_deviation_sd", "opad_contact", "opad_lick", "opad_temperature",
                       "opad_temperatures", "opad_tolerance"]),
     ("Test end", ["end_zone", "end_zone_s"]),

@@ -199,6 +199,18 @@ def test_forced_swim_settings_on_the_protocol_page(win):
     assert ex.an_form.editors["immobility_mode"].currentData() == "speed"
 
 
+def test_barnes_strategy_settings(win):
+    p = win.project
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "analysis")
+    assert "Barnes maze strategy" in ex.an_form.forms
+    combo = ex.an_form.editors["barnes_strategy_method"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["simple", "classic", "unmc"]
+    combo.setCurrentIndex(combo.findData("unmc"))
+    ex.an_form.editors["barnes_target_region"].setValue(1)
+    assert p.analysis.barnes_strategy_method == "unmc" and p.analysis.barnes_target_region == 1
+
+
 def test_procedure_editors_stay_in_sync(win):
     p = win.project
     ex = win.goto("ExperimentPage")
