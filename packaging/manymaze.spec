@@ -19,9 +19,14 @@ a = Analysis(
                                           "manymaze.core.pose", "manymaze.gui.pose_model", "onnx", "onnx.helper",
                                           "onnx.numpy_helper"] +
                   ["manymaze.core." + m for m in ("iodevices", "operant", "periods", "sequences", "charts",
-                                                  "videoexport", "workflow", "camera", "livegroup")] +
+                                                  "videoexport", "workflow", "camera", "livegroup", "security",
+                                                  "sync", "plugins", "datafiles")] +
+                  # imported only when a protected experiment is opened (PyInstaller's hook bundles its Rust
+                  # extension and OpenSSL)
+                  ["cryptography.hazmat.primitives.ciphers.aead"] +
                   ["manymaze.gui." + m for m in ("procedure_editor", "touchscreen", "live_widgets", "confirm_id", "import_wizard",
-                                                 "ribbon", "theme", "icons", "pages.protocol_pages")] +
+                                                 "ribbon", "theme", "icons", "pages.protocol_pages",
+                                                 "security_dialog", "plugin_dialog")] +
                   ["manymaze.core.importers"],
     excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "IPython"],
     noarchive=False,

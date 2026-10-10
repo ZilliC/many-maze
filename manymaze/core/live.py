@@ -24,16 +24,18 @@ from .autosave import Autosaver
 from .diskspace import free_mb as disk_free_mb, is_disk_full
 from .freezing import LiveStruggle, LiveThresholds
 from .geometry import body_fraction_inside
+from .ioconfig import DIGITAL_INPUT_KINDS
 from .iolog import LiveIOLog
 from .livemonitor import LivePoints
 from .measures import AnalysisSettings
 from .procedures import Outputs, ProcedureEngine
 from .session import END_DURATION, END_PROCEDURE, END_USER, Session
+from .sync import SyncOutput, sync_on
 from .track import Track
 from .tracking import ArenaTracker, Detection, DetectionSettings, TrackBuilder, postprocess, to_gray
 from .video import SplitRecorder, VideoRecorder
 
-START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual")
+START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual", "input")
 
 
 def open_devices(project):
@@ -550,7 +552,9 @@ class LiveSession(_Scoring):
     States: "waiting" (armed, waiting for the start condition) -> "running" <-> "paused" -> "finished".
     start_mode: "immediate" | "on_detection" (animal detected inside the arena for start_hold_s) |
     "experimenter_leaves" (a large object — the experimenter's hand — appears and leaves, then the animal is
-    detected for start_hold_s) | "manual" (keyboard / remote / scheduled: call :meth:`request_start`).
+    detected for start_hold_s) | "manual" (keyboard / remote / scheduled: call :meth:`request_start`) | "input" (the
+    start switch ``start_input`` closes). After the start switch — a start key or remote (``request_start(switch=
+    True)``) or the start input — the test starts ``start_delay_s`` later (Project.start_switch_delay_s).
     While paused the test clock stops: no track rows, no recording and no procedure timing; the "test paused"
     handlers run at once, pulse trains stop and shocks (by default every output) go off, keys and touches still
     reach the procedures (e.g. a "resume test" key) and safety tasks keep running in real time.
@@ -594,6 +598,7 @@ class LiveSession(_Scoring):
     autosave_path: str | None = None  # crash-recovery side file (track, events, I/O log), rewritten periodically
     autosave_s: float = 5.0
     autosave_meta: dict | None = None  # test id, animal, apparatus … stored in the side file
+    autosave_key: object = None  # the experiment's security.ExperimentKey: the side file is encrypted
     record_from_start: bool = True  # False: only the procedures' "start video recording" starts the recording
     disk_low_mb: float = 1024.0  # "disk space low" below this much free space on the recording disk
     disk_full_mb: float = 50.0  # below this the recording stops ("disk full")
@@ -601,6 +606,9 @@ class LiveSession(_Scoring):
     control_input: str = ""  # test control switch: "[device/]channel"; closing it continues a test waiting to end
     test_info: dict | None = None  # the test for the procedures (procedures.test_context): trial(), animal() …
     frame_timeout_s: float = 0.5  # no frame for this long: the safety thread runs the procedures (0 = never)
+    sync: dict | None = None  # the synchronisation element (Project.sync, see core.sync)
+    start_input: str = ""  # start switch "[device/]channel" (start_mode "input")
+    start_delay_s: float = 0.0  # the test starts this long after the start switch (Project.start_switch_delay_s)
 
     SAFETY_TICK_S = 0.05
 
@@ -668,6 +676,8 @@ class LiveSession(_Scoring):
         self._frame_i = 0
         self._still_since: float | None = None
         self._start_requested = False
+        self._start_due: float | None = None  # monotonic time the test starts at (the delay after the start switch)
+        self._start_input_prev = True  # (a switch already closed when the test is armed does not start it)
         self._wait_ts0: float | None = None  # first frame while waiting to start (procedures' pre-test clock)
         self._resume_pending = False
         self._pause_ts: float | None = None
@@ -681,11 +691,18 @@ class LiveSession(_Scoring):
         self._rec_frames = 0
         self._last_rec_frame: np.ndarray | None = None
         self._autosave_last = -1e9
-        self._autosaver = Autosaver(self.autosave_path, self.autosave_snapshot, self.warn) \
+        self._autosaver = Autosaver(self.autosave_path, self.autosave_snapshot, self.warn, self.autosave_key) \
             if self.autosave_path else None
         self._closers: list[threading.Thread] = []  # recorders being closed in the background
         self._last_frame_wall: float | None = None  # monotonic time of the last frame (safety thread)
         self._ticker: threading.Thread | None = None
+        self.sync_output: SyncOutput | None = None  # synchronisation pulses (Project.sync)
+        self._in_frame = False  # a frame is being processed …
+        self._frame_pulsed = False  # … and a synchronisation pulse was already sent for it
+        if sync_on(self.sync):
+            self.sync_output = SyncOutput(self.devices, self.sync)
+            if self.sync_output.problem:
+                self.warn(self.sync_output.problem, 0.0)
 
     # ------------------------------------------------------------------
     def set_background(self, frame: np.ndarray):
@@ -1026,11 +1043,32 @@ class LiveSession(_Scoring):
             return list(zip(self.cols["x"][-n:], self.cols["y"][-n:]))
 
     # ------------------------------------------------------------------ control (any thread)
-    def request_start(self):
-        """Start on the next frame (keyboard / remote / scheduled / collective start)."""
+    def request_start(self, switch: bool = False):
+        """Start on the next frame (keyboard / remote / scheduled / collective start); ``switch``: the start switch
+        was pressed (a start key, a remote, the start input): the test starts start_delay_s later."""
         with self.lock:
-            if self.state == "waiting":
-                self._start_requested = True
+            if self.state != "waiting":
+                return
+            if switch and self.start_delay_s > 0:
+                if self._start_due is None:
+                    self._start_due = time.monotonic() + float(self.start_delay_s)
+                    self.start_phase = "delay"
+                    self.log.append((0.0, f"Start switch: the test starts in {self.start_delay_s:g} s"))
+                return
+            self._start_requested = True
+
+    def _start_switch_on(self) -> bool:
+        """The start switch input ("[device/]channel") is closed (its device is read at once)."""
+        dev, _, ch = self.start_input.rpartition("/")
+        d = self.devices
+        if d is None or not ch:
+            return False
+        dev = dev or d.find_channel(ch, DIGITAL_INPUT_KINDS) or ""
+        fn = getattr(d, "input_value", None)
+        try:
+            return bool(fn(dev, ch)) if fn is not None and dev else False
+        except Exception:  # pragma: no cover - hardware dependent
+            return False
 
     @property
     def waiting_end(self) -> bool:
@@ -1164,10 +1202,21 @@ class LiveSession(_Scoring):
             try:
                 return self._process(frame, timestamp)
             finally:
+                self._in_frame = self._frame_pulsed = False
                 if self.state != "finished":
                     self._io_tick()
                 self._last_frame_wall = time.monotonic()
                 self._ensure_ticker()
+
+    def _sync(self, what: str):
+        """A synchronisation pulse for ``what`` (core.sync); one pulse per frame at most: what happens in a frame
+        that already had its pulse (the test start in its first frame, its position, the end in its last) counts
+        that pulse."""
+        so = self.sync_output
+        if so is None or not so.wants(what):
+            return
+        if so.pulse(what, merged=self._in_frame and self._frame_pulsed) and self._in_frame:
+            self._frame_pulsed = True
 
     # ------------------------------------------------------------------ safety without frames (safety thread)
     def _io_tick(self):
@@ -1219,6 +1268,9 @@ class LiveSession(_Scoring):
         return ran
 
     def _process(self, frame, timestamp):
+        self._in_frame, self._frame_pulsed = True, False
+        if self.state in ("running", "paused"):
+            self._sync("frame")  # as the frame arrives, before it is tracked
         self._ensure_tracker(frame)
         self._frame_shape = frame.shape[:2]
         ts = timestamp if timestamp is not None else self._frame_i / self.fps
@@ -1236,6 +1288,7 @@ class LiveSession(_Scoring):
             self._check_start(ts, dets, fg)
             if self.state != "running":
                 return dets
+            self._sync("frame")  # the test's first frame (its start pulse, sent by _start, counts for it)
         if self.state == "paused":
             self._call_engine(self.engine.paused_tick, time.monotonic() - self._pause_wall)
             return dets
@@ -1254,6 +1307,7 @@ class LiveSession(_Scoring):
         if self._gap_pending is not None:  # the first frame after a capture drop-out
             self._mark_gap(t)
         self._track.add(t, d)
+        self._sync("position")
         zones, head_zones = self.occupancy.update(d, t)
         freezing = self._freezing_now(d)
         self.stats.update(t, d, zones, freezing)
@@ -1279,8 +1333,19 @@ class LiveSession(_Scoring):
             return
         detected = any(d.detected for d in dets)
         mode = self.start_mode
-        if self._start_requested or mode == "immediate":
+        if mode == "input" and self.start_input:  # the start switch: closing it starts the test
+            on = self._start_switch_on()
+            if on and not self._start_input_prev:
+                self.request_start(switch=True)
+            self._start_input_prev = on
+        if self._start_requested or mode == "immediate":  # (Start now: also during the delay)
+            self._start_due = None
             self._start(ts)
+            return
+        if self._start_due is not None:  # the delay after the start switch
+            if time.monotonic() >= self._start_due:
+                self._start_due = None
+                self._start(ts)
             return
         if mode == "experimenter_leaves":
             intruder = self._intruder(fg)
@@ -1409,6 +1474,7 @@ class LiveSession(_Scoring):
         self.state = "running"
         self.start_phase = ""
         self.t0 = ts
+        self._sync("test_start")
         if self.record_path and self.record_from_start:
             self._open_recorder(0.0)
         self._call_engine(self.engine.start, 0.0, t=0.0)
@@ -1418,6 +1484,7 @@ class LiveSession(_Scoring):
         with self._locked():
             if self.state == "finished":
                 return
+            started = self.state in ("running", "paused")
             eng = self.engine
             waiting = self.waiting_end
             if waiting:  # waiting for the test end and not continued: the procedure ended the test
@@ -1458,6 +1525,8 @@ class LiveSession(_Scoring):
                     untick(self)
                 except Exception:  # pragma: no cover
                     pass
+            if started:  # after the outputs went off: nothing cuts the pulse short
+                self._sync("test_end")
             if self._autosaver is not None and self.cols["t"]:
                 self._autosaver.request(force=True)  # the final state, until the test is saved or discarded
 

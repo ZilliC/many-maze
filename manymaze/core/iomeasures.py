@@ -14,6 +14,8 @@ import math
 
 import numpy as np
 
+from .ioconfig import DECIBEL_SENSORS
+
 log = logging.getLogger(__name__)
 
 _STR_VALUES = {"on": 1.0, "true": 1.0, "yes": 1.0, "high": 1.0, "off": 0.0, "false": 0.0, "no": 0.0, "low": 0.0}
@@ -476,6 +478,9 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
     res[f"{g}: change"] = _r(last - first)
     if c.get("sensor") == "weight":  # food / liquid intake: what the container lost
         res[f"{g}: intake"] = _r(max(0.0, first - last) if vals else math.nan)
+    if c.get("sensor") in DECIBEL_SENSORS:  # a level in dB: the mean of the sound energy, not of the decibels
+        res[f"{g}: equivalent level (Leq)"] = _r(10 * math.log10(sum(10 ** (v / 10) for v in smp) / len(smp))
+                                                 if smp else math.nan)
     oor = log.derived(key, "out_of_range")
     if oor or c.get("alert_min") not in (None, "") or c.get("alert_max") not in (None, ""):
         spans, onsets, _, _ = _digital(oor, t0, t1, log.end)

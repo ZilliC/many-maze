@@ -8,7 +8,8 @@ relative one no longer leads to the file; :func:`relink_videos` finds moved vide
 
 Passwords and tokens of I/O devices (alert e-mail / SMS) are kept out of ``project.json`` in ``io-secrets.json``
 (readable by the owner only; left out of archives, reports and protocol copies). ``.manymaze.lock`` says which
-program has the experiment open (see :mod:`.explock`).
+program has the experiment open (see :mod:`.explock`). An experiment protected by a password stores ``project.json``
+(and its backups) encrypted; users, roles and the security settings are described in :mod:`.security`.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from .measures import (AnalysisSettings, add_warning, all_periods, analyse, anal
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
 from .periods import Period, calculation_columns, no_end_warning, uses_calculations
 from .reports import find_report, report_columns, report_rows, reports_from
+from .security import SECURITY_DEFAULTS, ExperimentKey, PasswordRequired, loads as _loads, security_from, users_from
 from .session import END_ZONE
 from .template_measures import FST_TEMPLATES
 from .templates import apply_overrides
@@ -155,6 +157,10 @@ class Test:
     replaces: int = 0  # id of the test this attempt re-performs (0 = none)
     experimenter: str = ""  # the user who ran (live) or tracked / scored the test
     end_reason: str = ""  # why a live test ended (END_* values); "" for tests tracked from a video
+    # analysis plug-ins (plugins.py): their time series ({name: {"source", "samples", "unit"}}, the samples in
+    # tracks/test_NNNN_series.json) and per-test measures ({name: value})
+    extra_series: dict = field(default_factory=dict)
+    extra_measures: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d):
@@ -192,6 +198,12 @@ class Project:
     statistics: dict = field(default_factory=dict)  # the Statistics page's settings (factors, test, alpha …)
     blind: bool = False  # hide group / treatment while testing and scoring
     experimenters: list = field(default_factory=list)  # user names offered as the current user / test experimenter
+    users: list = field(default_factory=list)  # roles and password hashes of experimenters (see security.py)
+    security: dict = field(default_factory=lambda: dict(SECURITY_DEFAULTS))  # who may reveal codes / edit protocol
+    sync: dict = field(default_factory=dict)  # the synchronisation element: pulses on an output (see sync.py)
+    analysis_plugins: list = field(default_factory=list)  # configured analysis plug-ins, run in order (plugins.py)
+    require_weight_before_test: bool = False  # a live test is armed only once its animal was weighed today
+    start_switch_delay_s: float = 0.0  # a live test starts this long after its start key / switch is pressed
     settings_extra: dict = field(default_factory=dict)  # misc. UI / workflow settings
     created: str = field(default_factory=lambda: _dt.datetime.now().isoformat(timespec="seconds"))
     path: Path | None = None
@@ -201,6 +213,10 @@ class Project:
     read_only: bool = False  # opened while another program has it open (not saved): save() refuses
     # stored video path -> absolute path saved with it, for videos outside the experiment folder (not saved as such)
     video_alternatives: dict = field(default_factory=dict, repr=False)
+    # the experiment password (not saved): its key encrypts project.json, the backups and crash-recovery files
+    _password: str | None = field(default=None, repr=False, compare=False)
+    _key: ExperimentKey | None = field(default=None, repr=False, compare=False)
+    _rekey_from: tuple | None = field(default=None, repr=False, compare=False)  # backups to write again on save
 
     # ---- persistence -----------------------------------------------------
     @staticmethod
@@ -218,11 +234,55 @@ class Project:
         self.check_writable()
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / "tracks").mkdir(exist_ok=True)
-        text = dumps_json(self.to_dict())
+        text = self.file_text()
         if self.settings_extra.get("backups", True):
             self.backup(min_interval_s=BACKUP_INTERVAL_S)
         write_text_atomic(self.path / PROJECT_FILE, text)
         self._save_secrets()
+        if self._rekey_from is not None:
+            self._rekey_backups()
+
+    # ---- experiment password -----------------------------------------------------------------------
+    @property
+    def protected(self) -> bool:
+        """The experiment file is stored encrypted (an experiment password is set)."""
+        return self._key is not None
+
+    @property
+    def file_key(self) -> ExperimentKey | None:
+        """The key that encrypts the experiment's files (None: not protected), e.g. for crash-recovery files."""
+        return self._key
+
+    @property
+    def password(self) -> str | None:
+        """The experiment password it was opened with (None: not protected)."""
+        return self._password
+
+    def file_text(self, d: dict | None = None) -> str:
+        """The experiment file's text as stored: its JSON (``d``, default the experiment's), encrypted when the
+        experiment has a password."""
+        text = dumps_json(self.to_dict() if d is None else d)
+        return self._key.encrypt(text) if self._key is not None else text
+
+    def set_experiment_password(self, password: str | None):
+        """Protect the experiment file with a password, change it, or remove the protection (None / ""). Save the
+        experiment to store it: project.json is then written encrypted (or as plain JSON again) and so are its
+        backups (those that cannot be read with the old password are left as they are)."""
+        old = self._password
+        self._password = password or None
+        self._key = ExperimentKey(password) if password else None
+        if self._rekey_from is None:
+            self._rekey_from = (old,)
+
+    def _rekey_backups(self):
+        """After the experiment password changed: write the backups again with the new one (or as plain JSON)."""
+        (old,), self._rekey_from = self._rekey_from, None
+        for b in self.list_backups():
+            try:
+                d, _key = _loads(b.read_text(encoding="utf-8"), old or self._password, f"The backup {b.name}")
+                write_text_atomic(b, self.file_text(d))
+            except (OSError, ValueError) as e:  # (PasswordRequired is a ValueError)
+                log.warning("backup %s not written again: %s", b.name, e)
 
     def check_writable(self):
         """Raise ValueError if this experiment must not be saved: opened read-only, or written by a newer version."""
@@ -363,12 +423,18 @@ class Project:
                 pass
         return dest
 
-    def restore_backup(self, backup: str | os.PathLike) -> "Project":
-        """The experiment as stored in a backup (the current file is backed up first). Save it to restore."""
+    def restore_backup(self, backup: str | os.PathLike, password: str | None = None) -> "Project":
+        """The experiment as stored in a backup (the current file is backed up first). Save it to restore. The
+        restored experiment keeps this one's password; a backup encrypted with another password needs ``password``
+        (PasswordRequired / WrongPassword otherwise)."""
         self.check_writable()
-        data = json.loads(Path(backup).read_text(encoding="utf-8"))  # read first: backup() prunes the oldest copy
+        # read first: backup() prunes the oldest copy
+        data, _key = _loads(Path(backup).read_text(encoding="utf-8"), password or self._password,
+                            f"The backup {Path(backup).name}")
         self.backup()
-        return Project.from_dict(data, self.path)
+        p = Project.from_dict(data, self.path)
+        p._password, p._key = self._password, self._key
+        return p
 
     def to_dict(self) -> dict:
         return {
@@ -398,6 +464,12 @@ class Project:
             "statistics": self.statistics,
             "blind": self.blind,
             "experimenters": self.experimenters,
+            "users": [dict(u) for u in self.users],
+            "security": security_from(self.security),
+            "sync": dict(self.sync),
+            "analysis_plugins": [dict(c) for c in self.analysis_plugins],
+            "require_weight_before_test": bool(self.require_weight_before_test),
+            "start_switch_delay_s": float(self.start_switch_delay_s or 0.0),
             "settings_extra": self.settings_extra,
             "created": self.created,
         }
@@ -419,9 +491,15 @@ class Project:
         return self.abs_path(v)
 
     @classmethod
-    def load(cls, path: str | os.PathLike) -> "Project":
+    def load(cls, path: str | os.PathLike, password: str | None = None) -> "Project":
+        """Open an experiment folder. One protected by a password needs it: PasswordRequired without it,
+        WrongPassword (a PasswordRequired) when it is not the right one."""
         pdir = cls.project_dir(path)
-        return cls.from_dict(json.loads((pdir / PROJECT_FILE).read_text(encoding="utf-8")), pdir)
+        d, key = read_project_file(pdir / PROJECT_FILE, password)
+        p = cls.from_dict(d, pdir)
+        if key is not None:
+            p._password, p._key = password, key
+        return p
 
     @classmethod
     def from_dict(cls, d: dict, path: str | os.PathLike | None = None) -> "Project":
@@ -450,6 +528,12 @@ class Project:
             statistics=dict(d["statistics"]) if isinstance(d.get("statistics"), dict) else {},
             blind=d.get("blind", False),
             experimenters=[str(u) for u in d.get("experimenters", []) if str(u).strip()],
+            users=users_from(d.get("users")),
+            security=security_from(d.get("security")),
+            sync=dict(d["sync"]) if isinstance(d.get("sync"), dict) else {},
+            analysis_plugins=[dict(c) for c in d.get("analysis_plugins") or [] if isinstance(c, dict)],
+            require_weight_before_test=bool(d.get("require_weight_before_test", False)),
+            start_switch_delay_s=_float(d.get("start_switch_delay_s"), 0.0),
             settings_extra=d.get("settings_extra", {}),
             created=d.get("created", ""),
         )
@@ -799,8 +883,17 @@ class Project:
         calc = None
         if uses_calculations(s.event_periods) and app is not None:
             calc = analyse(track, app, s, **self._analysis_kw(test, [track], 0, self.calculation_steps()))
-        return all_periods(track, app, s, None, test.events, test.io_events, test.zone_overrides, test.pauses,
-                           calc=calc)
+        return all_periods(track, app, s, None, test.events, self.analysis_io_events(test), test.zone_overrides,
+                           test.pauses, calc=calc)
+
+    def analysis_io_events(self, test: Test) -> list:
+        """The I/O log the analysis sees: the test's own (Test.io_events) and the time series of the analysis
+        plug-ins as analogue samples (plugins.series_events)."""
+        if not test.extra_series:
+            return test.io_events
+        from .plugins import series_events
+
+        return list(test.io_events) + series_events(self, test)
 
     def test_info(self, test: Test, animal_id: str | None = None) -> dict:
         """The information columns of a results row (INFO_COLUMNS and the animal fields). The columns that come
@@ -915,9 +1008,10 @@ class Project:
         others = [o for j, o in enumerate(tracks) if j != i]
         return dict(events=test.events if i == 0 else [], behaviours=self.behaviours if i == 0 else None,
                     other_tracks=others or None, zone_overrides=test.zone_overrides or None,
-                    io_events=test.io_events or None, pauses=test.pauses or None,
+                    io_events=self.analysis_io_events(test) or None, pauses=test.pauses or None,
                     io_devices=self.io_devices or None,
-                    result_variables=test.result_variables if i == 0 else None, calculations=steps or None)
+                    result_variables=test.result_variables if i == 0 else None, calculations=steps or None,
+                    extra_measures=test.extra_measures if i == 0 else None)
 
     def _scored_duration(self, test: Test) -> float:
         """Length of a test without a track (scored by hand, or I/O only): its duration, else the protocol's, else
@@ -930,8 +1024,9 @@ class Project:
 
     @staticmethod
     def _io_only(test: Test) -> bool:
-        """A test without a track analysed from its I/O log (ANY-maze's I/O only mode), not only scored keys."""
-        return bool(test.io_events or test.result_variables)
+        """A test without a track analysed from its I/O log (ANY-maze's I/O only mode) or the data of the analysis
+        plug-ins, not only scored keys."""
+        return bool(test.io_events or test.result_variables or test.extra_series or test.extra_measures)
 
     def _untracked_periods(self, test: Test, calc: dict | None = None) -> list[Period]:
         """The time periods of a test without a track (calc: its whole-test results, for periods defined by
@@ -939,8 +1034,8 @@ class Project:
         dur, s = self._scored_duration(test), self.analysis_for(test)
         if not self._io_only(test):
             return [Period(label, a, b) for label, a, b in time_periods(dur, s)]
-        return io_only_periods(dur, s, test.events, test.io_events, self.get_apparatus(test.apparatus), test.pauses,
-                               calc=calc, resolved=True)
+        return io_only_periods(dur, s, test.events, self.analysis_io_events(test), self.get_apparatus(test.apparatus),
+                               test.pauses, calc=calc, resolved=True)
 
     def _untracked_measures(self, test: Test, t_range=None) -> dict | None:
         """Measures of a test without a track, whole or for a period (None: the test ended before it)."""
@@ -950,8 +1045,9 @@ class Project:
         if not self._io_only(test):  # TakeNote: the scored keys
             a, b = (0.0, dur) if t_range is None else (t_range[0], min(t_range[1], dur))
             return behaviour_measures(test.events, self.behaviours, a, b)
-        return io_only_measures(dur, self.analysis_for(test), test.io_events, self.io_devices or None, test.events,
-                                self.behaviours, test.result_variables, t_range, test.pauses)
+        return io_only_measures(dur, self.analysis_for(test), self.analysis_io_events(test), self.io_devices or None,
+                                test.events, self.behaviours, test.result_variables, t_range, test.pauses,
+                                test.extra_measures)
 
     def _scored_period(self, test: Test, spec, calc: dict | None = None) -> dict | None:
         """result_for_period() of a test without a track: its measures for a part of the test (a time period's
@@ -1134,6 +1230,35 @@ class Project:
             row = {"Test": test.id, "Animal": test.animal_id}
         row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: f"{type(error).__name__}: {error}"})
         return row
+
+
+def read_project_file(path, password: str | None = None) -> tuple[dict, ExperimentKey | None]:
+    """The decoded experiment file (project.json, or a backup of it) and the key that decrypted it (None: not
+    protected). PasswordRequired / WrongPassword for a protected one without its password."""
+    path = Path(path)
+    name = path.parent.stem if path.name == PROJECT_FILE else path.name
+    return _loads(path.read_text(encoding="utf-8"), password, f"The experiment “{name}”")
+
+
+def is_protected_file(path) -> bool:
+    """Whether an experiment (its folder or project.json) is protected by a password (read without it)."""
+    path = Path(path)
+    f = path if path.name == PROJECT_FILE else path / PROJECT_FILE
+    try:
+        _loads(f.read_text(encoding="utf-8"))
+    except PasswordRequired:
+        return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _float(v, default: float) -> float:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return default
+    return x if math.isfinite(x) else default
 
 
 def same_folder(a, b) -> bool:

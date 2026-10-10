@@ -17,7 +17,8 @@ RESOLUTIONS = [("Camera default", None), ("640 × 480", (640, 480)), ("800 × 60
                ("1280 × 720", (1280, 720)), ("1920 × 1080", (1920, 1080))]
 START_MODES = [("immediate", "Immediately when armed"), ("on_detection", "When the animal is detected"),
                ("experimenter_leaves", "When the experimenter leaves the view"),
-               ("manual", "On a start key (keyboard / remote)"), ("scheduled", "At a clock time")]
+               ("manual", "On a start key (keyboard / remote)"), ("input", "On a start switch (an input)"),
+               ("scheduled", "At a clock time")]
 MODES = [("single", "One test"), ("multi", "Several tests"), ("observe", "Observation only")]
 MODE_ACTIONS = [("single", "One test", "video", "Run one test: one camera, one apparatus."),
                 ("multi", "Several tests", "grid", "Run several tests at once: several cameras and / or several "

@@ -123,7 +123,8 @@ def _fresh_copy(project: Project, test: Test, **changes) -> Test:
     """A pending copy of `test` with a new id and none of its recorded data (scoring, I/O log, results, pauses)."""
     d = asdict(test)
     d.update(id=project.next_test_id(), events=[], status="pending", recorded_at="", notes="", io_events=[],
-             result_variables={}, pauses=[], experimenter="", end_reason="", **changes)
+             result_variables={}, pauses=[], experimenter="", end_reason="", extra_series={}, extra_measures={},
+             **changes)
     return Test.from_dict(d)
 
 
@@ -158,8 +159,13 @@ def clear_tracks(project: Project, test: Test) -> int:
 
 
 def delete_test(project: Project, test: Test) -> int:
-    """Remove the test and its track files (videos are kept). Returns the number of track files removed."""
+    """Remove the test, its track files and the time series of the analysis plug-ins (videos are kept). Returns the
+    number of track files removed."""
     n = clear_tracks(project, test)
+    if project.path is not None and test.extra_series:
+        from .plugins import series_path
+
+        series_path(project, test).unlink(missing_ok=True)
     project.tests.remove(test)
     return n
 
@@ -693,10 +699,14 @@ def add_experimenter(project: Project, name: str) -> str:
 
 
 def remove_experimenter(project: Project, name: str) -> bool:
-    """Remove a user from the list (the tests keep the name they were stamped with)."""
+    """Remove a user from the list, with their role and password (the tests keep the name they were stamped
+    with)."""
+    from .security import remove_user
+
     if name not in project.experimenters:
         return False
     project.experimenters.remove(name)
+    remove_user(project, name)
     if project.current_user == name:
         project.current_user = ""
     return True
@@ -793,10 +803,11 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     """Give ``dst`` the protocol of ``src`` (ANY-maze: new experiment based on another one's protocol).
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
-    calculations, results reports, statistics settings, procedures, I/O devices, training criteria, blind testing and
-    animal ID options, the animal columns and the experimenters (users); I/O device passwords and tokens are not
-    copied (enter them again);
-    with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
+    calculations, results reports, statistics settings, procedures, I/O devices, the synchronisation element,
+    analysis plug-ins, training criteria, blind testing, weighing, start delay and animal ID options, the animal
+    columns and the experimenters (users, with their roles and passwords, and the security settings); I/O device
+    passwords and tokens are not copied (enter them again), nor is the experiment password; with ``treatments``
+    also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
 
@@ -820,6 +831,13 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.blind = src.blind
     dst.animal_fields = list(src.animal_fields)
     dst.experimenters += [u for u in src.experimenters if u not in dst.experimenters]
+    have = {u.get("name") for u in dst.users}
+    dst.users += [dict(u) for u in src.users if u.get("name") not in have]
+    dst.security = dict(src.security)
+    dst.sync = _copy.deepcopy(src.sync)
+    dst.analysis_plugins = _copy.deepcopy(src.analysis_plugins)
+    dst.require_weight_before_test = src.require_weight_before_test
+    dst.start_switch_delay_s = src.start_switch_delay_s
     for k in PROTOCOL_EXTRAS:
         if k in src.settings_extra:
             dst.settings_extra[k] = _copy.deepcopy(src.settings_extra[k])

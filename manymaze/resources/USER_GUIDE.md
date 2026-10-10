@@ -61,9 +61,10 @@ simply saves it; replacing another experiment swaps its tracks only once the cop
 
 **Based on another experiment**: choose an existing experiment under *Based on* and the new one gets its protocol —
 apparatus, stages, keys, test duration and start, animal tracking and analysis settings, procedures, I/O devices,
-training criteria, blind testing and animal ID options, animal columns and (optionally) the treatments. Animals,
-tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again). Use it for a new
-cohort or a replication.
+the synchronisation element, analysis plug-ins, training criteria, blind testing, weighing, start delay and animal ID
+options, animal columns, the users with their roles and passwords and the security settings, and (optionally) the
+treatments. Animals, tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again),
+nor the experiment password. Use it for a new cohort or a replication.
 
 **Protocol report** (*File ▸ Protocol report*) saves a printable HTML description of the protocol: the experiment
 options, stages, keys, a map of each apparatus with its zones, zone groups, points, lines and sequences (shape,
@@ -79,7 +80,9 @@ back to the chosen one (the current state is backed up first). Tracks are not pa
 recordings, exports and the video of every test — also videos stored outside the experiment folder, which are copied
 into `videos/external/` (the tests in the archive point to the copies). Use it to move an experiment to another
 computer or to keep it with a publication. **Open archive** unpacks an archive into a folder and opens it.
-Automatic backups, the lock file and the I/O devices' passwords and tokens (`io-secrets.json`) are not archived.
+Automatic backups, the lock file and the I/O devices' passwords and tokens (`io-secrets.json`) are not archived. The
+experiment file of an experiment protected by a password stays encrypted in the archive (opening it asks for the
+password).
 
 *File ▸ Create demo experiment* builds a complete open-field experiment from synthetic videos so you can try
 everything without a camera.
@@ -119,6 +122,10 @@ everything without a camera.
   so the animal must be stiller to count as freezing (+25 halves the threshold); lower lets it move a little more
   (−25 doubles it). Tests with fewer than 50 motion samples use the manual
   thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
+* **Testing** – blind testing (§6), confirming the animal's ID and **weighing the animal before each live test**
+  (§7, *Starting and ending a test*).
+* **Hardware** – the I/O devices, the **Synchronisation** element (pulses for other recording systems, §8) and the
+  touch screen.
 * **Forced swim / tail suspension** (shown on the Protocol page when the type of test is *Forced swim test* or
   *Tail suspension test*; the same settings are under *Analysis*) – as ANY-maze's Forced swim / Tail suspension
   mode, immobility comes from the struggle seen in the image rather than from the animal's speed (*Detect
@@ -505,12 +512,49 @@ Starting the clock again on a scored test asks whether to delete the previous ev
 ### Users (experimenters)
 
 The current user is shown at the top right of the window (**User: name ▾**, or *File ▸ Current user…*). Pick a name
-from the experiment's list, or **New user…** to type one; the choice is remembered on this computer. No passwords are
-involved: it only records who did what. The current user is stamped on every test as its *experimenter* when the
-test is run live (the user who ran it), and when it is tracked or scored if it has no experimenter yet. The Test
-schedule shows it in the **User** column, where it can be changed by hand, and the results can show and group by it
-(*User* column, Statistics factors). Each experiment keeps its own list of users; **Remove a user from this
-experiment…** takes a name off the list (tests keep their experimenter).
+from the experiment's list, or **New user…** to type one; the choice is remembered on this computer. Until somebody
+sets a password no passwords are involved: it only records who did what. The current user is stamped on every test as
+its *experimenter* when the test is run live (the user who ran it), and when it is tracked or scored if it has no
+experimenter yet. The Test schedule shows it in the **User** column, where it can be changed by hand, and the results
+can show and group by it (*User* column, Statistics factors). Each experiment keeps its own list of users; **Remove a
+user from this experiment…** takes a name off the list (tests keep their experimenter; a user with a password can be
+removed by an administrator or by that user).
+
+### Users, passwords and security
+
+As in ANY-maze this is **casual security**: it keeps colleagues from changing a protocol or unblinding an experiment
+by mistake, and a casual reader out of an experiment file. It does not stop someone determined who can edit the
+experiment's files (the users' password hashes and roles are stored in `project.json`, which is plain JSON unless the
+experiment itself has a password).
+
+- **Passwords.** *Set password…* in the user menu gives the current user a password (asked for the old one first).
+  Passwords are never stored: only a salted scrypt hash of each. Choosing a user who has a password — from the user
+  menu, *File ▸ Current user…*, or when an experiment is opened with that user remembered on this computer — asks for
+  it (three tries; cancelling leaves the current user as it was, or no user when opening).
+- **Administrator.** The first user who sets a password becomes the experiment's **administrator**. Administrators
+  make other users with a password administrators too, set or clear anyone's password and change the security
+  settings, in **File ▸ Users and security…** (also in the user menu). The last administrator cannot be made an
+  ordinary user; clearing their password (after a confirmation) leaves nobody in charge, and everything is allowed
+  again until the next user sets a password.
+- **Security settings** (administrators only), in *Users and security*:
+  - **Reveal treatment coding** — *Anyone* (the default) or *Administrators only*: who may unblind a blind experiment
+    (*Reveal treatment coding* on the Experiment tab, or unticking *Blind testing*).
+  - **Lock the protocol** — only administrators can change the protocol: the protocol elements (Protocol page), the
+    apparatus maps and the procedures (also on the Run tests page) are shown read-only to everybody else, who can
+    still run tests, score them and look at the results.
+- **No password, no change.** While no user has a password (no administrator), nothing is restricted and nobody is
+  asked for a password: experiments behave exactly as before.
+
+**Protect experiment** (*File ▸ Protect experiment…*, also on the File tab; administrators only once there is one)
+sets an **experiment password**: `project.json` is then stored encrypted (AES-256-GCM, the key derived from the
+password with scrypt), and the password is asked whenever the experiment is opened — in the window, when it is the
+base of a new experiment, when its apparatus is imported, and on the command line (the environment variable
+`MANYMAZE_PASSWORD`). Its automatic backups, its copy in an archive and the crash-recovery files of live tests are
+encrypted too; restoring a backup made under an earlier password asks for that one. Changing the password asks for
+the current one; an empty new password removes the protection (the file and its backups are written as plain JSON
+again). Tracks, recordings, exports and the I/O devices' passwords (`io-secrets.json`, readable only by your user
+account) are not encrypted, and the lock file (`.manymaze.lock`) stays readable so that another computer can tell who
+has the experiment open. **A forgotten experiment password cannot be recovered.**
 
 ### Training criteria
 
@@ -560,6 +604,8 @@ re-coloured. While blind, the *Treatment* (Group) column of the results, statist
 shows the code (the same as the *Treatment code* column), never the treatment's name, so results can be analysed
 blind too. Unticking the box (unblinding) asks for confirmation. The **Reveal treatment coding** button on the
 Experiment tab (and unticking the box) unblinds after a confirmation; the results then show the real treatments.
+With *Reveal treatment coding: Administrators only* (*File ▸ Users and security…*, see *Users, passwords and
+security*) only an administrator can unblind.
 
 ### Animal identification
 
@@ -595,11 +641,18 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
     animal area, or touching the arena edge) to appear and leave again, then for the animal to be detected. The
     image shows *WAITING FOR EXPERIMENTER*, *WAITING FOR HAND TO LEAVE*, then *WAITING FOR ANIMAL*.
   - *On a start key (keyboard / remote)* — armed tests wait until a start key is pressed.
+  - *On a start switch (an input)* — armed tests wait until the **Start switch** input (`[device/]channel`, e.g.
+    `box/start`: a push button or a TTL from another system) closes. A switch already closed when the test is armed
+    must open and close again. With several tests at once each test watches the switch of its own box.
   - *At a clock time* — the test starts at the **Start time** (HH:MM). With **every day** (several-tests mode)
     the tests start every day at that time; finished rows are re-armed automatically as new tests (trial + 1).
 - **Start keys / Stop keys** — default *Space, PageDown, F5* to start (or resume) and *B, PageUp* to stop and save.
   USB presentation remotes act as keyboards, so their buttons work as remote controls. Keys used for scoring
   behaviours are never used as start / stop keys.
+- **Delay after the start switch** — after a start key, a remote or the start switch input, the test starts this
+  many seconds later (e.g. to put the animal in and step away; *WAITING* shows *starting* meanwhile and the log
+  says when it will start). The **Start** button and *Start now* start at once, also during the delay, and clock-time
+  starts are not delayed. It is saved with the protocol (`start_switch_delay_s`).
 - **Arm / Start test** arms the test; while it waits the button becomes **Start now**.
 - **Pause** stops the test clock: no tracking data, no recording and no procedure timing while paused. **Resume**
   (or a start key) continues where it stopped. Pauses are saved with the test (`pauses`; the length of each pause
@@ -641,6 +694,12 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
 
 If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
 test starts.
+
+**Weigh the animal before each live test** (Protocol tab, *Testing*; needs a balance among the I/O devices): arming a
+test of an animal that has no weight of today opens the *Weigh* dialog for it (*Read scale* or type the weight,
+*Record*); the test is armed only once the weight is recorded (in the animal's *Weight (g)* column and weight
+history, as *Animals ▸ Weigh*). An animal already weighed today is not asked again. Tests started at a clock time
+are not blocked (nobody is there to weigh the animal): the log notes that it was not weighed.
 
 ### Several tests at once
 
@@ -1122,9 +1181,10 @@ the list of allowed programs is a setting of this computer (`allowed_programs.js
 folder), never part of the experiment. A program that is not on the list is not run and the procedure reports
 an error (or, when mANY-MAZE asks for confirmation, it runs once you allow it, and is then remembered). The
 procedure checks list *Run a program* as a warning. *Trigger a plug-in* calls a Python function registered with
-`manymaze.core.procedures.plugins.register(name, fn)` (or installed through the `manymaze.procedure_plugins`
-entry point): `fn(argument, info)` receives the test time, the variables and the test, and its result can be
-stored in a variable.
+`manymaze.core.plugins.register(name, fn)` (also available as `manymaze.core.procedures.plugins`; or installed
+through the `manymaze.procedure_plugins` entry point): `fn(argument, info)` receives the test time, the variables
+and the test, and its result can be stored in a variable. Analysis plug-ins, which bring other systems' data into the
+results, are described in §9.
 
 **Zones.** *Set zone label* records which zone is which in this test (saved in the test's variables as
 `zone_labels`; `zone_label("Zone")` reads it); *Set moveable zone location* moves a zone (or point) to a new
@@ -1251,7 +1311,10 @@ samples with its own time stamps). `filter=lowpass` with `cutoff_hz` (and `order
 (`cutoff_hz`), `filter=bandpass` (`low_hz`, `high_hz`) apply a Butterworth filter to each sample as it arrives;
 `filter=average` with `window` (samples) or `window_ms` a moving average. Filtered channels report every sample.
 
-**Sensors** (kind *Sensor*): `sensor=weight|light|temperature|humidity|generic`, `units`, and where the readings
+**Sensors** (kind *Sensor*): `sensor=weight|light|temperature|humidity|sound|ultrasound|ultrasound_level|generic`
+(*sound*: a sound level meter's analogue output in dBA; *ultrasound*: an ultrasonic vocalisation / bat detector's
+peak frequency in kHz, and *ultrasound_level* its level in dB — two channels when the detector gives both), `units`,
+and where the readings
 come from — `interface=analog` (an analogue pin: `scale`, `offset`), `interface=hx711` (a load cell through an
 HX711 amplifier: *Pin* = DOUT, *Pin B* = SCK, `scale` grams per count, `offset`) or `interface=dht22` (a DHT22
 temperature / humidity sensor: two channels on the same pin, one with `sensor=temperature`, one with
@@ -1305,6 +1368,32 @@ switches a simulated input, *Test* pulses the selected output for 0.5 s or plays
 (`pip install pyserial`) is needed for Arduino and serial devices.
 
 Every input and output change during a test is recorded in the test's I/O log (`Test.io_events`).
+
+### Synchronisation
+
+**Protocol ▸ Hardware ▸ Synchronisation** sends TTL pulses on a digital output so that another recording system —
+electrophysiology, imaging, fibre photometry, a second camera — can align its data with the test, set up once for
+every live test of the experiment (the *Sync pulse* procedure action remains for pulses at moments of your choice):
+
+- **Output** — a digital output of an I/O device; **Pulse width** — 0.001 to 1000 ms (default 1 ms).
+- **Send a pulse** when the test starts, when it ends, for every captured frame (while the test runs or is paused)
+  and / or for every position stored in the track (one per track row: the recorded positions can be matched one to
+  one with the pulses).
+- Pulses due at the same moment are sent as **one**: the first frame's pulse also marks the test start, the last
+  frame's the test end, and a frame's pulse its position. With *every frame* there are therefore exactly as many
+  pulses as frames; with *every position* as many as track rows. A test stopped between frames (the Stop button)
+  gets an end pulse of its own, sent after the outputs went off.
+- Each device sends them by its **fastest path**. The Arduino firmware (1.3) switches the output on as soon as it
+  reads the `SYNC` command and ends the pulse from a timer interrupt (Timer1 on AVR boards), so the width is exact
+  whatever else the board is doing; the start is delayed by the USB link by a roughly constant ~1 ms. Older firmware
+  gets `W pin 1 max_ms` (millisecond timing). A LabJack times pulses up to 5 ms itself (`WAIT_US_BLOCKING`). National
+  Instruments devices and the other devices use their digital line: the output is switched on and, after the width,
+  off by the computer (by waiting, up to 2 ms; otherwise from the I/O service thread, about 1 ms jitter).
+- With several tests at once, each test pulses the output of its own box. An I/O-only test (no camera) gets its start
+  and end pulses.
+- The saved test's notes say how many pulses of each kind were sent (*Synchronisation pulses on box/sync (1 ms): test
+  start 1, frames 7500, test end 1 (7500 pulses sent)*). An output that does not exist is reported as a warning of the
+  test, and no pulses are sent. The element is part of the protocol (protocol report, *Based on another experiment*).
 
 ### Operant chamber presets
 
@@ -1412,6 +1501,9 @@ latencies of things that never happen follow *When an event never occurs, its la
   default 1 s), and beams already broken when the test starts are not counted;
 * **sensors** — initial and final value, mean (the average of the readings, as ANY-maze), maximum, minimum, change,
   time out of the alert range and times out of range; weight sensors also give the **intake** (initial − final);
+  sound-level and ultrasound-level sensors (dB) also give the **equivalent level (Leq)**, 10 · log10 of the mean of
+  10^(L/10) over the readings — the level of the average sound energy, which a loud moment raises more than the mean
+  of the decibels does;
 * **syringe pumps** — volume infused and withdrawn (ml; from the pump's own counters when it reports them, otherwise
   from the rates and times), infusions, withdrawals, time pumping, latency to first start, stalls;
 * **procedure events** — `Event <name>: count` and `latency (s)` for the When statements given *Record as the
@@ -1816,6 +1908,41 @@ printed in the protocol report; a time period can start or end at a calculation'
 training criterion can use one (§6); renaming a calculation updates the formulas, time periods and criteria that
 use it, and a new experiment based on this one's protocol gets its calculations.
 
+### Analysis plug-ins
+
+**Protocol ▸ Analysis ▸ Analysis plug-ins** brings data recorded by other systems — heart rate from telemetry, fibre
+photometry, a Spike2 or LabChart text export, a thermal camera's readings — into the results:
+
+- **Add plug-in ▾** lists the plug-ins installed. The built-in **Data file (CSV / TSV)** needs no code: one file per
+  test, found from a name pattern with the test's `{test}`, `{animal}`, `{stage}`, `{trial}` and `{video}` (the
+  video's name without its extension), relative to the experiment folder unless absolute, e.g.
+  `photometry/{animal}_day{trial}.csv`. The file has a header row (rows above it, such as Spike2's information lines,
+  are skipped), a **time column** (name or number; the first by default) in s, ms, min or h, and the **columns to
+  import** (all the others by default). Commas, semicolons, tabs or spaces separate the columns; with semicolons or
+  tabs a decimal comma is understood. **The test starts** at a given time in the file, or **at the first pulse in a
+  synchronisation column** — the channel that recorded the *Synchronisation* element's test-start pulse (or the
+  first frame's pulse): where it first rises through the threshold (0.5 by default). Samples before the test start
+  and after its end are left out; **Average into samples of (Hz)** keeps long, fast recordings small. Each column
+  becomes a series named after its header (with an optional prefix), and the test gets the measure *<plug-in
+  name>: test start in the file (s)*.
+- **Run on the tests** runs every plug-in on each test that was performed (tracked or scored) and saves the
+  experiment; problems (a missing file, a column not found) are listed per test. Run them again when the files
+  change: the results use what was imported, not the files themselves (`manymaze project DIR plugins` does the same
+  on the command line). The series are stored with the tests (`Test.extra_series`, the samples in
+  `tracks/test_NNNN_series.json`), so archives and copies keep them.
+- Each **series** gets the measures of an analogue signal (§8, *I/O results*): mean, minimum, maximum, the times of
+  the maximum and minimum, baseline, deviations from it and the integrals above / below it — for the whole test,
+  every time period (`Heart rate: mean` in each period) and every zone (`Heart rate in Centre: mean`, …, and the
+  values at entry and exit of each visit). Series also count as inputs for the time periods anchored to an input.
+  The **measures** a plug-in returns for a test are shown in every row of that test, as result variables are, and
+  can be used in calculations.
+
+Writing a plug-in: a Python function `fn(test, project, options)` returning `{"series": {name: (times, values)},
+"measures": {name: value}}` (times in s from the test start, pauses included as in the I/O log), registered with
+`manymaze.core.plugins.register_analysis(name, fn, title=…, options=[(key, label, kind, default), …])` or installed
+through the `manymaze.analysis_plugins` entry point; `options` (kinds `text`, `file`, `number`, `int`, `bool`,
+`choice`) build its settings form.
+
 ### Track plots (Results ▸ Data ▸ Track plots)
 
 Select a row of the results table to see the test's track on its first video frame. The options under the plot apply
@@ -2104,8 +2231,12 @@ manymaze project ~/exp.mmaze report -o report.html    # (--report NAME: that rep
 manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
 manymaze project ~/exp.mmaze protocol -o protocol.html
 manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file
+manymaze project ~/exp.mmaze plugins      # run the protocol's analysis plug-ins on every test performed (§9)
 manymaze templates                        # list apparatus templates
 ```
+
+An experiment protected by a password (*File ▸ Protect experiment…*) is opened with the password in the environment
+variable `MANYMAZE_PASSWORD`, e.g. `MANYMAZE_PASSWORD='…' manymaze project ~/exp.mmaze results -o results.xlsx`.
 
 ## 12. Tips for good tracking
 

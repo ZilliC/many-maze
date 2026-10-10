@@ -41,7 +41,7 @@ outputs unless *Watchdog* is set otherwise in the device settings, and sends the
 thread, so pausing a test or a stalled camera does not trip it — but only while the tests keep running: if the
 program hangs, the heartbeats stop after 10 s and the watchdog switches the outputs off.
 
-Resets: from firmware 1.2 the board prints its banner (`MANYMAZE_IO 1.2 <board>`) when it starts. A board that
+Resets: from firmware 1.2 the board prints its banner (`MANYMAZE_IO 1.3 <board>`) when it starts. A board that
 restarts during a test (power glitch, USB re-enumeration, a brown-out caused by a load on its supply) has lost
 its configuration and switched its outputs off; mANY-MAZE sees the banner arrive unasked, logs it (the outputs
 are shown off in the test's I/O log, as after a watchdog) and configures the board again. A board whose USB
@@ -61,6 +61,15 @@ Trains whose period is longer than 60 s (and single pulses longer than that) are
 
 Filtered analogue channels need every sample, not just the changes: mANY-MAZE asks firmware 1.2 for every
 sample (`deadband` -1); with older firmware the filter only sees changed values.
+
+Synchronisation pulses (the *Synchronisation* element, Protocol ▸ Hardware; firmware 1.3): mANY-MAZE sends `SYNC`
+when a test starts and ends, for every captured frame and / or for every position stored. The pulse begins when the
+board reads the command (the USB link adds a roughly constant delay of about a millisecond) and its width is timed
+by Timer1's compare interrupt on AVR boards. Timer1 is borrowed for the length of the pulse only and given back as
+the Arduino core set it up: PWM on its pins (9 and 10 on an Uno, 11 and 12 on a Mega) works between pulses, and
+while a PWM output on one of those pins is on, the pulse is timed by the loop instead (microsecond clock, as on
+SAMD, RP2040 and ESP32 boards, whose pulses are always timed by the loop). With firmware 1.2 or older mANY-MAZE
+sends `W pin 1 max_ms` instead (the board ends the pulse with millisecond timing).
 
 ## Protocol
 
@@ -82,6 +91,7 @@ Computer → board:
 | `L dout sck period_ms` | HX711 load cell (period ≥ 100 ms) |
 | `U pin period_ms` | DHT22 temperature / humidity sensor (period ≥ 2000 ms) |
 | `E pinA pinB` | quadrature encoder (count reset to 0) |
+| `SYNC pin width_us` | a synchronisation pulse on an output (1.3): on at once, off after `width_us` (1 µs – 1 s). On AVR boards (Uno, Nano, Mega, Leonardo) the end of the pulse is timed by a Timer1 interrupt, so the width is exact even while the board reads a sensor or sends reports; `SYNC` alone repeats the last pin and width (2 bytes less per pulse on the link). A new pulse, `W`, `T`, `X` or `R` on the pin ends a pulse early |
 | `R` | all outputs off, pulse trains stopped (configuration kept) |
 | `Q` | report all inputs now |
 | `H timeout_ms` | heartbeat watchdog: all outputs off if no line arrives within the timeout (0 = off; mANY-MAZE sends `H 2000` by default when outputs are configured) |

@@ -9,12 +9,16 @@
     manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
     manymaze project DIR results --report NAME -o results.csv   # a results report saved on the Data page
     manymaze project DIR report -o report.html [--report NAME]
+    manymaze project DIR plugins                 # run the protocol's analysis plug-ins on every test performed
     manymaze templates
+
+An experiment protected by a password is opened with the password in the environment variable MANYMAZE_PASSWORD.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +27,23 @@ from . import __version__
 
 TABLE_OUTPUT_HELP = ("the format follows the extension: .csv, .tsv / .txt, .xlsx, .slk (SYLK) or .dbf (dBase III); "
                      "results also .xml")
+PASSWORD_ENV = "MANYMAZE_PASSWORD"  # the password of an experiment protected by one
+
+
+def _password() -> str | None:
+    return os.environ.get(PASSWORD_ENV) or None
+
+
+def _load_project(path):
+    """The experiment at path; a protected one is opened with MANYMAZE_PASSWORD (exit with a message otherwise)."""
+    from .core.project import Project
+    from .core.security import PasswordRequired
+
+    try:
+        return Project.load(path, password=_password())
+    except PasswordRequired as e:
+        sys.exit(f"{e}. Set the environment variable {PASSWORD_ENV} to its password." if not e.wrong else
+                 f"{e} (the environment variable {PASSWORD_ENV}).")
 
 
 def _progress(prefix):
@@ -44,11 +65,13 @@ def cmd_track(a):
     with VideoSource(a.video) as v:
         W, H = v.width, v.height
     if a.apparatus:
-        import json
-
         from .core.apparatus import Apparatus
+        from .core.security import PasswordRequired, loads
 
-        d = json.loads(Path(a.apparatus).read_text(encoding="utf-8"))
+        try:  # an apparatus file, or an experiment's project.json (MANYMAZE_PASSWORD if it is protected)
+            d = loads(Path(a.apparatus).read_text(encoding="utf-8"), _password(), a.apparatus)[0]
+        except PasswordRequired as e:
+            sys.exit(f"{e} (set the environment variable {PASSWORD_ENV})")
         if isinstance(d, dict) and isinstance(d.get("apparatus"), list):  # apparatus file or experiment
             if not d["apparatus"]:
                 sys.exit(f"{a.apparatus} contains no apparatus")
@@ -104,10 +127,9 @@ def _lock_for_writing(p):
 
 def cmd_project(a):
     from .core import explock
-    from .core.project import Project
 
-    p = Project.load(a.dir)
-    if a.action in ("track", "relink"):
+    p = _load_project(a.dir)
+    if a.action in ("track", "relink", "plugins"):
         _lock_for_writing(p)
         try:
             return _change_project(p, a)
@@ -264,6 +286,19 @@ def _change_project(p, a):
                      f"are not marked as tracked: {e}\nFix the problem and run the command again (with --all to "
                      f"track them again).")
         print(f"Tracked {len(res['tracked'])} of {len(todo)} tests ({res['workers']} parallel workers)")
+    elif a.action == "plugins":
+        from .core.plugins import run_analysis_plugins
+
+        if not p.analysis_plugins:
+            sys.exit("The protocol has no analysis plug-ins (Protocol ▸ Analysis ▸ Analysis plug-ins)")
+        res = run_analysis_plugins(p, progress=_progress("plug-ins"))
+        for tid, msg in res["errors"]:
+            print(f"  #{tid}: {msg}", file=sys.stderr)
+        try:
+            p.save()
+        except Exception as e:
+            sys.exit(f"The experiment could not be saved: {e}")
+        print(f"Ran the analysis plug-ins on {len(res['done'])} test(s); {len(res['errors'])} problem(s)")
     elif a.action == "relink":
         from .core.project import relink_videos
 
@@ -322,7 +357,7 @@ def main(argv=None):
     pr = sub.add_parser("project", help="batch operations on a project")
     pr.add_argument("dir")
     pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive",
-                                       "relink"])
+                                       "relink", "plugins"])
     pr.add_argument("--all", action="store_true", help="re-track tests that already have tracks")
     pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")

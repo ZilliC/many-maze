@@ -672,13 +672,15 @@ def save_apparatus_file(apps: list[Apparatus], path) -> Path:
     return path
 
 
-def load_apparatus_file(path) -> list[Apparatus]:
+def load_apparatus_file(path, password: str | None = None) -> list[Apparatus]:
     """Apparatus maps from an apparatus file (save_apparatus_file) or from another experiment (its .mmaze folder
-    or project.json)."""
+    or project.json; one protected by a password needs it: security.PasswordRequired otherwise)."""
+    from .security import loads
+
     p = Path(path)
     if p.is_dir():
         p = p / "project.json"
-    d = json.loads(p.read_text(encoding="utf-8"))
+    d = loads(p.read_text(encoding="utf-8"), password, f"The experiment “{p.parent.stem}”")[0]
     if not isinstance(d, dict) or not isinstance(d.get("apparatus"), list):
         raise ValueError(f"{p.name} contains no apparatus")
     return [Apparatus.from_dict(a) for a in d["apparatus"]]

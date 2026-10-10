@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ....core.live import ObservationSession
-from ...confirm_id import confirm_animal_id
+from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...widgets import fmt_time
 
 
@@ -22,7 +22,7 @@ class ObservationMixin:
         test, new = self._prepare_test(need_apparatus=False)
         if test is None:
             return False
-        if not confirm_animal_id(self, test):
+        if not confirm_animal_id(self, test) or not weigh_before_test(self, test, reader=self.scale_reader):
             if new:
                 self._remove_test(test)
             return False

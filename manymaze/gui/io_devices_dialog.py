@@ -221,7 +221,8 @@ class IODevicesDialog(QDialog):
         self.ch_table.setToolTip(
             "Options (key=value, comma separated): pullup, debounce_ms, counts_per_rev, cm_per_rev, scale, offset, "
             "period_ms (1 = 1 kHz), deadband, filter (lowpass, highpass, bandpass, average) with cutoff_hz / low_hz "
-            "/ high_hz / order / window; sensors: sensor (weight, light, temperature, humidity), interface (analog, "
+            "/ high_hz / order / window; sensors: sensor (weight, light, temperature, humidity, sound (dBA), "
+            "ultrasound (peak kHz), ultrasound_level (dB)), interface (analog, "
             "hx711, dht22), units, alert_min, alert_max; intensity (the output "
             "that sets a shocker's or laser's intensity) with calibration or max_ma; thermostat: sensor, heat, cool, "
             "kp, ki, kd, band, max_temp, set_cmd; olfactometer: odours=name:valve|name:valve, blank, flow, max_flow; "

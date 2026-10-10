@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDou
                                QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QSpinBox,
                                QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ...core import ioconfig, pose
+from ...core import ioconfig, plugins, pose, security
 from ...core import workflow as wf
 from ...core.apparatus import unique_name
 from ...core.ioconfig import PRESET_KEY
@@ -22,6 +22,7 @@ from ...core.export import display_text
 from ...core.measures import AnalysisSettings
 from ...core.periods import ANCHORS, END_ANCHORS, TARGET_KEY, check_periods
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
+from ...core.sync import sync_from
 from ...core.template_measures import FST_TEMPLATES
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
@@ -49,6 +50,8 @@ BEH_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", 
               "#06b6d4"]
 MET_ACTIONS = [("complete_stage", "Stage completed: skip remaining trials"), ("report", "Report only")]
 FORM_WIDTH = 900  # property pages with only settings stay at a readable width
+LOCKED_TEXT = ("The protocol is locked: only an administrator can change it (File ▸ Users and security). You can look "
+               "at it and run tests.")
 
 
 # record tables (see RecordTable): training criteria, time periods, event-anchored time periods
@@ -97,6 +100,11 @@ class ExperimentPage(Page):
         self.elements: dict[str, ElementPage] = {}
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.lock_lbl = QLabel(LOCKED_TEXT)
+        self.lock_lbl.setWordWrap(True)
+        self.lock_lbl.setStyleSheet("background:#fff7e0;border-bottom:1px solid #f0d58a;padding:6px 28px;")
+        self.lock_lbl.hide()
+        lay.addWidget(self.lock_lbl)
         lay.addWidget(self.stack)
         self._build_protocol()
         self._build_tracking()
@@ -203,8 +211,13 @@ class ExperimentPage(Page):
         self.confirm_id = QCheckBox("Confirm the animal's ID before each test")
         self.confirm_id.setToolTip("Scan the barcode / microchip or type the ID; a mismatch blocks the test")
         self.confirm_id.toggled.connect(self._store_workflow)
+        self.weigh_first = QCheckBox("Weigh the animal before each live test (when a balance is connected)")
+        self.weigh_first.setToolTip("A live test is armed only once its animal has a weight of today: the Weigh "
+                                    "dialog opens for it. Needs a balance among the I/O devices.")
+        self.weigh_first.toggled.connect(self._store_weigh)
         pg.add(self.blind)
         pg.add(self.confirm_id)
+        pg.add(self.weigh_first)
         pg.body.addSpacing(10)
         self.summary_lbl = hint("")
         pg.add(self.summary_lbl)
@@ -387,6 +400,26 @@ class ExperimentPage(Page):
         pg.add(self.ev_periods_lbl)
         pg.add(button_row(small_button("New event period", "add", slot=self._add_event_period),
                           small_button("Remove", "delete", slot=self.ev_periods.remove_current)))
+
+        pg.section("Analysis plug-ins")
+        pg.add(hint("Data recorded by other systems — heart rate, Spike2 or LabChart exports, fibre photometry — "
+                    "brought into the results: each series gets the analogue-signal measures (mean, minimum, "
+                    "maximum, baseline…) for the whole test, every time period and every zone. The built-in "
+                    "plug-in reads a CSV / TSV file per test; others are installed as Python packages. Run them "
+                    "once the tests are done (and again when the files change)."))
+        self.plugin_list = QListWidget()
+        self.plugin_list.setFixedHeight(110)
+        self.plugin_list.setStyleSheet("QListWidget::item{padding:4px 4px;}")
+        self.plugin_list.itemDoubleClicked.connect(lambda *_: self.edit_plugin())
+        pg.add(self.plugin_list)
+        self.plugin_add = small_button("Add plug-in", "add")
+        self.plugin_menu = QMenu(self.plugin_add)
+        self.plugin_menu.aboutToShow.connect(self._fill_plugin_menu)
+        self.plugin_add.setMenu(self.plugin_menu)
+        pg.add(button_row(self.plugin_add, small_button("Edit…", "edit", slot=self.edit_plugin),
+                          small_button("Remove", "delete", slot=self.remove_plugin),
+                          small_button("Run on the tests", "play", slot=self.run_plugins,
+                                       tip="Run the plug-ins on every test performed and save the experiment")))
         pg.finish()
 
     def _build_calculations(self):
@@ -437,6 +470,40 @@ class ExperimentPage(Page):
                                    tip="Arduino boards, serial devices, audio and simulated devices used by "
                                        "procedures")
         pg.add(button_row(self.io_btn))
+        pg.add(separator())
+        pg.section("Synchronisation")
+        pg.add(hint("Pulses on a digital output that let another recording system (electrophysiology, imaging, "
+                    "photometry) align its data with the test. Pulses due at the same moment are sent as one: with "
+                    "a pulse for every frame, there are as many pulses as frames. The Arduino firmware times each "
+                    "pulse's width on the board; LabJack and National Instruments devices use their digital line."))
+        f = property_form()
+        self.sync_on = QCheckBox("Send synchronisation pulses in live tests")
+        self.sync_out = QComboBox()
+        self.sync_out.setMinimumWidth(320)
+        self.sync_out.setToolTip("A digital output of an I/O device (Set up I/O devices…)")
+        self.sync_checks = {}
+        boxes = QVBoxLayout()
+        boxes.setSpacing(2)
+        for key, text in (("test_start", "When the test starts"), ("test_end", "When the test ends"),
+                          ("per_frame", "For every captured frame (while the test runs or is paused)"),
+                          ("per_position", "For every position stored in the track")):
+            cb = QCheckBox(text)
+            cb.toggled.connect(self._store_sync)
+            self.sync_checks[key] = cb
+            boxes.addWidget(cb)
+        self.sync_width = QDoubleSpinBox()
+        self.sync_width.setRange(0.001, 1000.0)
+        self.sync_width.setDecimals(3)
+        self.sync_width.setSuffix(" ms")
+        self.sync_width.setToolTip("How long each pulse lasts")
+        f.addRow(self.sync_on)
+        f.addRow("Output", self.sync_out)
+        f.addRow("Send a pulse", boxes)
+        f.addRow("Pulse width", self.sync_width)
+        pg.add(f)
+        self.sync_on.toggled.connect(self._store_sync)
+        self.sync_out.currentIndexChanged.connect(self._store_sync)
+        self.sync_width.valueChanged.connect(self._store_sync)
         pg.add(separator())
         pg.section("Touch screen")
         f = property_form()
@@ -565,7 +632,35 @@ class ExperimentPage(Page):
         self._show_key()
         self._update_mode()
         self._update_summary()
+        self._apply_lock()
         self.main.select_explorer(self, self.element)
+
+    @property
+    def locked(self) -> bool:
+        """The protocol is locked for the current user (Project.security, see core.security)."""
+        p = self.project
+        return p is not None and not security.can(p, "edit_protocol")
+
+    def _apply_lock(self):
+        """A locked protocol is shown read-only: the element pages and the ribbon's editing commands are
+        disabled."""
+        locked = self.locked
+        self.lock_lbl.setVisible(locked)
+        for pg in self.elements.values():
+            pg.widget().setEnabled(not locked)
+        acts = [self.add_item_act, self.template_act, self.apparatus_tpl_act]
+        acts += [a[1] if isinstance(a, tuple) else a for v in self.element_acts.values() for a in v]
+        for a in acts:
+            a.setEnabled(not locked)
+
+    def security_changed(self):
+        self._apply_lock()
+        if self.main.current_page() is self:
+            self._quiet_show = True
+            try:
+                self.main.refresh_ribbon()
+            finally:
+                self._quiet_show = False
 
     def _load(self, p):
         self.name.setText(p.name)
@@ -586,6 +681,7 @@ class ExperimentPage(Page):
         self._validate_behaviours()
         self.blind.setChecked(p.blind)
         self.confirm_id.setChecked(wf.confirm_id_enabled(p))
+        self.weigh_first.setChecked(bool(p.require_weight_before_test))
         self.crit.set_records(self._criterion_row(c) for c in p.training_criteria)
         self.periods.set_records({"label": lbl, "start": a, "end": b} for lbl, a, b in p.analysis.custom_periods)
         self.ev_periods.set_records(self._event_period_record(d) for d in p.analysis.event_periods)
@@ -596,6 +692,7 @@ class ExperimentPage(Page):
         self.fst_form.load(p.analysis)
         self._update_fst()
         self._fill_calculations()
+        self._fill_plugins()
 
     def _update_summary(self):
         p = self.project
@@ -688,9 +785,48 @@ class ExperimentPage(Page):
             self.main.status("Input/output only: set up the I/O devices of the chambers from a preset with "
                              "“Operant chambers…”.")
 
+    def _load_sync(self, p):
+        """The synchronisation element of the Hardware page (Project.sync)."""
+        s = sync_from(p.sync if p is not None else None)
+        with loading(self):
+            self.sync_out.clear()
+            for d in (p.io_devices if p is not None else []):
+                for c in d.get("channels") or []:
+                    if c.get("kind", "input") == "output" and c.get("name"):
+                        self.sync_out.addItem(f"{d.get('name', '?')}/{c['name']}", (d.get("name", ""), c["name"]))
+            want = (s["device"], s["channel"])
+            i = next((k for k in range(self.sync_out.count()) if self.sync_out.itemData(k) == want or
+                      not s["device"] and self.sync_out.itemData(k)[1] == s["channel"]), -1)
+            if i < 0 and s["channel"]:
+                self.sync_out.addItem(f"{'/'.join(x for x in want if x)} (not configured)", want)
+                i = self.sync_out.count() - 1
+            self.sync_out.setCurrentIndex(max(i, 0) if self.sync_out.count() else -1)  # default: the first output
+            self.sync_on.setChecked(s["enabled"])
+            for k, cb in self.sync_checks.items():
+                cb.setChecked(s[k])
+            self.sync_width.setValue(s["width_ms"])
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        on = self.sync_on.isChecked()
+        for w in [self.sync_out, self.sync_width, *self.sync_checks.values()]:
+            w.setEnabled(on)
+
+    def _store_sync(self, *_):
+        self._sync_enabled()
+        p = self.project
+        if self._loading or p is None:
+            return
+        dev, ch = self.sync_out.currentData() or ("", "")
+        p.sync = sync_from({"enabled": self.sync_on.isChecked(), "device": dev, "channel": ch,
+                            "width_ms": self.sync_width.value(),
+                            **{k: cb.isChecked() for k, cb in self.sync_checks.items()}})
+        self.main.mark_dirty()
+
     def _update_hardware(self):
         p = self.project
         self.io_list.clear()
+        self._load_sync(p)
         if p is None:
             self.hw_lbl.setText("")
             self.ts_lbl.setText("")
@@ -986,6 +1122,100 @@ class ExperimentPage(Page):
         form.load(obj)
         self.main.mark_dirty()
 
+    # ================================================================== analysis plug-ins
+    def _fill_plugins(self):
+        p = self.project
+        row = self.plugin_list.currentRow()
+        self.plugin_list.clear()
+        for c in (p.analysis_plugins if p is not None else []):
+            pl = plugins.analysis_plugin(c.get("plugin", ""))
+            kind = pl.title if pl is not None else f"{c.get('plugin')} (not installed)"
+            off = "" if c.get("enabled", True) else " — not run"
+            self.plugin_list.addItem(QListWidgetItem(icon("chart"), f"{c.get('name') or kind}  ·  {kind}{off}"))
+        if self.plugin_list.count():
+            self.plugin_list.setCurrentRow(min(max(row, 0), self.plugin_list.count() - 1))
+
+    def _fill_plugin_menu(self):
+        self.plugin_menu.clear()
+        for name in plugins.analysis_names():
+            pl = plugins.analysis_plugin(name)
+            a = self.plugin_menu.addAction(pl.title)
+            a.setToolTip(pl.description)
+            a.triggered.connect(lambda _=False, n=name: self.add_plugin(n))
+
+    def add_plugin(self, name: str, dlg=None) -> dict | None:
+        """Add a configured analysis plug-in to the protocol (its settings are asked first)."""
+        p = self.project
+        if p is None:
+            return None
+        cfg = plugins.new_config(name, [c.get("name") for c in p.analysis_plugins])
+        cfg = self._plugin_dialog(cfg, dlg)
+        if cfg is None:
+            return None
+        p.analysis_plugins.append(cfg)
+        self.main.mark_dirty()
+        self._fill_plugins()
+        self.plugin_list.setCurrentRow(self.plugin_list.count() - 1)
+        return cfg
+
+    def _plugin_dialog(self, cfg: dict, dlg=None) -> dict | None:
+        from ..plugin_dialog import PluginOptionsDialog
+
+        given = dlg is not None
+        dlg = dlg or PluginOptionsDialog(self.project, cfg, self)
+        if not given and dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.values()
+
+    def edit_plugin(self, dlg=None) -> dict | None:
+        p = self.project
+        i = self.plugin_list.currentRow()
+        if p is None or not 0 <= i < len(p.analysis_plugins):
+            return None
+        cfg = self._plugin_dialog(p.analysis_plugins[i], dlg)
+        if cfg is None:
+            return None
+        p.analysis_plugins[i] = cfg
+        self.main.mark_dirty()
+        self._fill_plugins()
+        return cfg
+
+    def remove_plugin(self):
+        p = self.project
+        i = self.plugin_list.currentRow()
+        if p is None or not 0 <= i < len(p.analysis_plugins):
+            return
+        del p.analysis_plugins[i]
+        self.main.mark_dirty()
+        self._fill_plugins()
+
+    def run_plugins(self, wait: bool = False):
+        """Run the analysis plug-ins on every test performed (in the background), then save the experiment."""
+        p = self.project
+        if p is None or not p.analysis_plugins:
+            return None
+        if p.path is None and not self.main.save():
+            return None
+
+        def done(res):
+            self.main.mark_dirty()
+            self.main.save()
+            msg = f"Ran the analysis plug-ins on {len(res['done'])} test(s)."
+            self.main.status(msg)
+            if res["errors"]:
+                lines = [f"Test {tid}: {m}" for tid, m in res["errors"][:20]]
+                QMessageBox.warning(self, "Analysis plug-ins", msg + "\n\n" + "\n".join(lines))
+            self.last_plugin_run = res
+
+        w = run_with_progress(self, "Running the analysis plug-ins",
+                              lambda progress, stop: plugins.run_analysis_plugins(p, progress=progress),
+                              on_done=done, on_fail=lambda m: QMessageBox.warning(self, "Analysis plug-ins", m),
+                              cancellable=False)
+        if wait:
+            w.wait()
+            QApplication.processEvents()
+        return w
+
     def edit_io_devices(self):
         if self.project is None:
             return None
@@ -1214,6 +1444,12 @@ class ExperimentPage(Page):
         p = self.project
         if self._loading or p is None:
             return
+        if not on and p.blind and not security.can(p, "reveal_codes"):
+            with loading(self):
+                self.blind.setChecked(True)
+            QMessageBox.information(self, "Unblind", "Only an administrator can reveal the treatment coding of this "
+                                    "experiment (File ▸ Users and security).")
+            return
         if not on and p.blind and QMessageBox.question(
                 self, "Unblind", "Reveal the treatment groups? The experimenter will no longer be blind to the "
                 "treatments on the Experiment, Test schedule, Run tests and Review and score pages.") != QMessageBox.Yes:
@@ -1229,6 +1465,12 @@ class ExperimentPage(Page):
         if self._loading or self.project is None:
             return
         self.project.settings_extra["confirm_id"] = self.confirm_id.isChecked()
+        self.main.mark_dirty()
+
+    def _store_weigh(self, on: bool):
+        if self._loading or self.project is None:
+            return
+        self.project.require_weight_before_test = bool(on)
         self.main.mark_dirty()
 
     # ================================================================== training criteria, time periods

@@ -66,6 +66,7 @@ def fingerprint(project) -> tuple:
     tests = tuple((t.id, t.status, _mtimes(project, t), t.animal_id, t.stage, t.trial, t.apparatus,
                    tuple(t.extra_animals), _dump(_result_variables(t.variables)), _dump(t.events), t.duration_s,
                    _dump(t.zone_overrides), _dump(t.pauses), _dump(t.io_events), _dump(t.result_variables),
+                   _dump(t.extra_series), _dump(t.extra_measures),  # analysis plug-ins
                    t.notes, t.recorded_at, t.experimenter, t.end_reason, t.video, t.start_s)  # (information columns)
                   for t in project.tests)
     return (str(project.path), tests, project.test_duration_s, _dump(project.analysis.to_dict()),

@@ -23,7 +23,7 @@ from ....core.project import INFO_COLUMNS
 from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_live_test
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
-from ...confirm_id import confirm_animal_id
+from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...io_devices_dialog import open_device_manager
 from ...live_widgets import CameraOptionsDialog, short_time
 from ...widgets import Worker, error_box, fmt_time
@@ -637,7 +637,7 @@ class SingleTestMixin:
             path = autosave.path_for(p, test)
         except Exception:
             return {}
-        return {"autosave_path": path, "autosave_meta": {
+        return {"autosave_path": path, "autosave_key": p.file_key, "autosave_meta": {
             "test_id": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
             "trial": test.trial}}
 
@@ -659,7 +659,8 @@ class SingleTestMixin:
                              devices=devices, variables=p.variables, name=name, zone_overrides=test.zone_overrides,
                              on_stimulus=on_stimulus, outputs_off_on_pause=self.pause_off.isChecked(),
                              test_info=test_context(p, test), control_input=self.control_input.text().strip(),
-                             **self._autosave_args(test))
+                             sync=p.sync, start_input=self.start_input.text().strip(),
+                             start_delay_s=float(p.start_switch_delay_s or 0.0), **self._autosave_args(test))
         settings = self._detection_settings(test)
         if settings.background == "frame" and bg is None:
             settings.background = "adaptive"
@@ -672,8 +673,9 @@ class SingleTestMixin:
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
                         outputs_off_on_pause=self.pause_off.isChecked(), test_info=test_context(p, test),
-                        control_input=self.control_input.text().strip(),
-                        **self._autosave_args(test))
+                        control_input=self.control_input.text().strip(), sync=p.sync,
+                        start_input=self.start_input.text().strip(),
+                        start_delay_s=float(p.start_switch_delay_s or 0.0), **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)
         if s.record_path:  # room for the recording?
@@ -738,7 +740,7 @@ class SingleTestMixin:
             return False
         self.test = test
         self._new_test = new
-        if not confirm_animal_id(self, test):
+        if not confirm_animal_id(self, test) or not weigh_before_test(self, test, reader=self.scale_reader):
             self._discard_new_test()
             return False
         if self.io_only:

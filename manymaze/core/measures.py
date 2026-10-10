@@ -301,6 +301,7 @@ class _Prepared:
     others: list
     behaviours: list | None = None  # Project.behaviours (the keys that count as activity)
     cache: dict = field(default_factory=dict)
+    extra: dict = field(default_factory=dict)  # per-test measures of the analysis plug-ins (Test.extra_measures)
 
     def cached(self, key, fn):
         if key not in self.cache:
@@ -342,7 +343,15 @@ def end_of_test(track: Track, app: Apparatus, s: AnalysisSettings) -> float | No
 
 
 def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_events=None, other_tracks=None,
-             zone_overrides=None, pauses=None, duration=None, behaviours=None) -> _Prepared:
+             zone_overrides=None, pauses=None, duration=None, behaviours=None, extra=None) -> _Prepared:
+    P = _prepare_track(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration,
+                       behaviours)
+    P.extra = dict(extra or {})
+    return P
+
+
+def _prepare_track(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration,
+                   behaviours=None) -> _Prepared:
     app = apply_overrides(app, zone_overrides)
     track, breaks = drop_pauses(track, pauses)
     events = shift_events(events, pauses)
@@ -384,13 +393,16 @@ def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, eve
             duration: float | None = None, other_tracks: list[Track] | None = None,
             zone_overrides: dict | None = None, io_events: list | None = None,
             result_variables: dict | None = None, pauses: list | None = None,
-            io_devices: list | None = None, calculations: list | None = None) -> "OrderedDict[str, object]":
+            io_devices: list | None = None, calculations: list | None = None,
+            extra_measures: dict | None = None) -> "OrderedDict[str, object]":
     """Compute all applicable measures for one animal's track.
 
     zone_overrides: per-test positions of moveable zones (Test.zone_overrides); io_events: Test.io_events
     (I/O measures; io_devices: Project.io_devices); result_variables: Test.result_variables; pauses: Test.pauses;
     calculations: Project.calculations (or calculations.plan() steps), added after the measures (see
-    calculations.evaluate_test: those that need other tests are NaN here and worked out by Project.results).
+    calculations.evaluate_test: those that need other tests are NaN here and worked out by Project.results);
+    extra_measures: the analysis plug-ins' per-test measures (Test.extra_measures), in every row as result variables
+    are (their series come as analogue samples in io_events, see core.plugins).
 
     Times are *test time*: paused intervals are removed and everything after a pause moves back by its length
     (track, scored events, I/O events and other animals' tracks alike); t_range is in test time. Per-frame states
@@ -399,7 +411,8 @@ def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, eve
     episodes that start inside it.
     """
     s = s or AnalysisSettings()
-    P = _prepare(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration, behaviours)
+    P = _prepare(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration, behaviours,
+                 extra_measures)
     return _results(P, t_range, behaviours, result_variables, io_devices, calculations)
 
 
@@ -1827,6 +1840,7 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
             res[f"Variable: {name}"] = str(v)
     if s.immobility_mode == "motion" and P.k.struggle is None:
         warnings.append("No pixel-change data: immobility comes from the speed of the animal")
+    _add_extra(res, P.extra)
     if not P.app.px_per_cm:
         warnings.insert(0, "Apparatus not calibrated: distances, speeds and distance thresholds (mobility, "
                            "thigmotaxis, contact, ...) are in pixels")
@@ -2184,7 +2198,8 @@ def analyse_segmented(track: Track, app: Apparatus, s: AnalysisSettings, **kw) -
     kw = dict(kw)
     kw.pop("t_range", None)
     P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
-                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"), kw.get("behaviours"))
+                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"), kw.get("behaviours"),
+                 kw.get("extra_measures"))
     rest = dict(behaviours=kw.get("behaviours"), result_variables=kw.get("result_variables"),
                 io_devices=kw.get("io_devices"), calculations=kw.get("calculations"))
     out = [("Whole test", _results(P, None, **rest))]
@@ -2204,7 +2219,8 @@ def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, calc
     whole test's results with its calculations, for time periods defined by calculations (default: worked out with
     the `calculations` keyword)."""
     P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
-                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"), kw.get("behaviours"))
+                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"), kw.get("behaviours"),
+                 kw.get("extra_measures"))
     args = (kw.get("behaviours"), kw.get("result_variables"), kw.get("io_devices"))
     if calc_values is not None:
         P.cache["calc_view"] = calc_values
@@ -2218,11 +2234,11 @@ def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, calc
 def io_only_measures(duration: float, s: AnalysisSettings | None = None, io_events: list | None = None,
                      io_devices: list | None = None, events: list | None = None,
                      behaviours: list[Behaviour] | None = None, result_variables: dict | None = None,
-                     t_range: tuple[float, float] | None = None, pauses: list | None = None
-                     ) -> "OrderedDict[str, object]":
+                     t_range: tuple[float, float] | None = None, pauses: list | None = None,
+                     extra_measures: dict | None = None) -> "OrderedDict[str, object]":
     """Measures of a test without a track (ANY-maze's I/O only mode): its duration, the scored keys, the I/O log
-    (iomeasures.io_measures) and the procedures' result variables, for the whole test or a period t_range (test
-    time; up to the end of the test)."""
+    (iomeasures.io_measures), the procedures' result variables and the analysis plug-ins' measures, for the whole
+    test or a period t_range (test time; up to the end of the test)."""
     s = s or AnalysisSettings()
     events, io_events = shift_events(events, pauses), shift_events(io_events, pauses)
     a, b = (0.0, float(duration)) if t_range is None else (float(t_range[0]), min(float(t_range[1]), duration))
@@ -2242,7 +2258,15 @@ def io_only_measures(duration: float, s: AnalysisSettings | None = None, io_even
             res[f"Variable: {name}"] = _r(float(v))
         except (TypeError, ValueError):
             res[f"Variable: {name}"] = str(v)
+    _add_extra(res, extra_measures)
     return res
+
+
+def _add_extra(res: dict, extra: dict | None):
+    """The analysis plug-ins' per-test measures (Test.extra_measures), under their own names."""
+    for name, v in (extra or {}).items():
+        numeric = isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool)
+        res[name] = _r(v) if numeric else v
 
 
 def io_only_periods(duration: float, s: AnalysisSettings, events=None, io_events=None, app=None,

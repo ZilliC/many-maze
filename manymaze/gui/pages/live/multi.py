@@ -18,8 +18,9 @@ from ....core.livegroup import SHARED_DEVICE_TYPES, device_plan
 from ....core.livemonitor import io_panel_lines
 from ....core.procedures import Outputs
 from ....core.video import VIDEO_EXTENSIONS
+from ....core.scales import weight_needed
 from ....core.workflow import confirm_id_enabled
-from ...confirm_id import confirm_animal_id
+from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...icons import icon
 from ...live_widgets import CameraOptionsDialog, TestPanel, short_time
 from ...widgets import fmt_time
@@ -410,7 +411,8 @@ class MultiTestMixin:
             st = e.state
             s = e.session
             if st == "waiting" and s.start_phase:
-                txt = {"experimenter": "wait hand", "leaving": "hand in", "animal": "wait animal"}[s.start_phase]
+                txt = {"experimenter": "wait hand", "leaving": "hand in", "animal": "wait animal",
+                       "delay": "starting"}.get(s.start_phase, s.start_phase)
             else:
                 txt = {"idle": "not armed"}.get(st, st)
             it = self.sess_table.item(r, 5)
@@ -607,14 +609,19 @@ class MultiTestMixin:
             test = pend or p.add_test("", m["animal"], app_name, stage=m.get("stage", ""), trial=m.get("trial", 1))
             m["new_test"] = pend is None
         if interactive:
-            if not confirm_animal_id(self, test):
+            if not confirm_animal_id(self, test) or not weigh_before_test(self, test, reader=self.scale_reader):
                 if m.get("new_test"):
                     self._remove_test(test)
                 return False
-        elif confirm_id_enabled(p):  # nobody to scan the animal at a scheduled start: noted, not asked
-            note = f"{e.label}: scheduled start — the ID of animal {test.animal_id} was not checked."
-            self._log(note, e)
-            self._notice("Animal ID check", note)
+        else:  # nobody to scan or weigh the animal at a scheduled start: noted, not asked
+            if confirm_id_enabled(p):
+                note = f"{e.label}: scheduled start — the ID of animal {test.animal_id} was not checked."
+                self._log(note, e)
+                self._notice("Animal ID check", note)
+            if weight_needed(p, test.animal_id):
+                note = f"{e.label}: scheduled start — animal {test.animal_id} was not weighed today."
+                self._log(note, e)
+                self._notice("Weigh the animal", note)
         test.apparatus = app_name
         dur = self.duration.value()
         test.duration_s = 0.0 if abs(dur - p.test_duration_s) < 1e-9 else dur
