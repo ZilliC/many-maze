@@ -58,6 +58,7 @@ class DetectionSettings:
     pose_model: str = "topviewmouse_rtmpose_s"  # core.pose.MODELS key or path to a custom .onnx
     pose_min_conf: float = 0.3  # keypoints below this confidence fall back to the contour estimate
     pose_device: str = "auto"  # "auto" (Core ML on macOS) | "cpu"
+    pose_species: str = "mouse"  # the animal the pose model is for (core.pose.SPECIES): "mouse" | "rat" | "other"
     # colour: method "colour" detects pixels of target_colour (a coloured animal, dye mark or collar); with several
     # animals, identity_colours ("#ff0000, #0000ff", one per animal) identifies each animal by its colour mark
     target_colour: str = "#ff0000"

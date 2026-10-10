@@ -489,6 +489,60 @@ def test_registry_entry():
     assert "CPUExecutionProvider" in pose.available_providers()
 
 
+def test_species_without_a_released_model():
+    # checked October 2026: DeepLabCut's SuperAnimal family has no top-view rat model (TopViewMouse, Quadruped)
+    assert pose.SPECIES["mouse"]["model"] == "topviewmouse_rtmpose_s"
+    assert pose.SPECIES["rat"]["model"] is None and "No pose model of rats" in pose.SPECIES["rat"]["note"]
+    assert not any("rat" in k for k in pose.MODELS)
+
+
+def test_convert_own_checkpoint(tmp_path, monkeypatch, tiny_ckpt):
+    """One's own DeepLabCut RTMPose checkpoint (e.g. TopViewMouse fine-tuned on rats) becomes a custom model."""
+    monkeypatch.setenv("MANYMAZE_MODELS", str(tmp_path / "models"))
+    names = ["snout", "neck", "back", "tailbase", "tailend"]
+    assert pose.checkpoint_keypoint_count(tiny_ckpt[0]) == len(names)
+    with pytest.raises(ValueError, match="5 keypoints but 4"):
+        pose.convert_checkpoint(tiny_ckpt[0], names[:4], {})
+    with pytest.raises(ValueError, match="unknown keypoint"):
+        pose.convert_checkpoint(tiny_ckpt[0], names, {"nose": "nose"}, (64, 64))
+    seen = []
+    path = pose.convert_checkpoint(tiny_ckpt[0], names, {"nose": "snout", "centre": "back", "tail_base": "tailbase"},
+                                   (64, 64), "rat", progress=seen.append)
+    assert path == tmp_path / "models" / "custom" / "tiny.onnx" and seen[-1] == 1.0
+    info = pose.load_model_info(path)
+    assert info["keypoints"] == names and info["species"] == "rat" and info["input_size"] == [64, 64]
+    est = pose.PoseEstimator(str(path), device="cpu")
+    frame = np.random.default_rng(0).integers(0, 255, (120, 160, 3), dtype=np.uint8)
+    [kp] = est.predict(frame, [(10, 20, 50, 40)])
+    assert kp.shape == (5, 3) and set(est.body_parts(kp)) == {"nose", "centre", "tail_base"}
+    # the same network as converted for the built-in model
+    ref = pose.build_rtmpose_onnx(pose.find_state_dict(pose.load_torch_checkpoint(tiny_ckpt[0])), _tiny_meta())
+    import onnx
+    assert len(onnx.load(str(path)).graph.node) == len(ref.graph.node)
+    bad = tmp_path / "not_rtmpose.pt"
+    _write_torch_zip(bad, {"model": {"a": np.zeros(3, np.float32)}})
+    with pytest.raises(ValueError, match="not a DeepLabCut RTMPose"):
+        pose.checkpoint_keypoint_count(bad)
+
+
+def test_bodyparts_from_dlc_configs(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("Task: rats\nscorer: me\nbodyparts:\n- snout\n- 'leftear'\n- tail_base\nstart: 0\n")
+    assert pose.bodyparts_from_config(cfg) == ["snout", "leftear", "tail_base"]
+    ma = tmp_path / "ma.yaml"
+    ma.write_text("multianimalproject: true\nbodyparts: MULTI!\nmultianimalbodyparts:\n  - nose\n  - tail\n")
+    assert pose.bodyparts_from_config(ma) == ["nose", "tail"]
+    pt = tmp_path / "pytorch_config.yaml"
+    pt.write_text("data:\n  colormode: RGB\nmetadata:\n  project_path: /x\n  bodyparts:\n  - nose\n  - centre\n"
+                  "  unique_bodyparts: []\n  individuals:\n  - single\nmethod: td\n")
+    assert pose.bodyparts_from_config(pt) == ["nose", "centre"]
+    inline = tmp_path / "inline.yaml"
+    inline.write_text("bodyparts: [nose, 'centre', tail_base]\n")
+    assert pose.bodyparts_from_config(inline) == ["nose", "centre", "tail_base"]
+    (tmp_path / "none.yaml").write_text("Task: x\n")
+    assert pose.bodyparts_from_config(tmp_path / "none.yaml") == []
+
+
 @pytest.mark.skipif(os.environ.get("MANYMAZE_TEST_DOWNLOAD") != "1", reason="set MANYMAZE_TEST_DOWNLOAD=1")
 def test_download_real_model(tmp_path, monkeypatch):
     monkeypatch.setenv("MANYMAZE_MODELS", str(tmp_path))
