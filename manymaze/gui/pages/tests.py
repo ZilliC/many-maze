@@ -37,10 +37,9 @@ STATUS_COLORS = {"pending": "#d97706", "tracked": "#16a34a", "scored": "#0891b2"
                  "superseded": "#94a3b8", "excluded": "#94a3b8"}
 STATUS_TEXT = {"pending": "", "tracked": "Tracked", "scored": "Scored", "skipped": "Skipped",
                "superseded": "Superseded", "excluded": "Excluded"}
-READY_FG = "#1e8e3e"  # the next test of each apparatus (ANY-maze green)
-READY_BG = "#e8f4e8"
-LINK_FG = "#1f6fc5"  # animal IDs (blue, as links in ANY-maze)
-GREY_FG = "#a3a3a3"  # skipped / excluded / superseded tests
+# light-scheme colours of the next test of each apparatus (ANY-maze green), animal IDs (blue, as links in ANY-maze) and
+# skipped / excluded / superseded tests: the table uses theme.READY_FG, READY_BG, LINK and INACTIVE (both schemes)
+READY_FG, READY_BG, LINK_FG, GREY_FG = (theme.LIGHT[k] for k in ("READY_FG", "READY_BG", "LINK", "INACTIVE"))
 
 
 def _dot(color: str, size: int = 12):
@@ -204,23 +203,23 @@ class TestsModel(QAbstractTableModel):
         elif role == Qt.ForegroundRole:
             inactive = t.status in wf.INACTIVE_STATUSES
             if inactive:
-                return QBrush(QColor(GREY_FG))
+                return QBrush(QColor(theme.INACTIVE))
             if t.id in self.ready:
-                return QBrush(QColor(READY_FG))
+                return QBrush(QColor(theme.READY_FG))
             if c == C_ANIMAL:
                 a = p.get_animal(t.animal_id)
-                return QBrush(QColor("#dc2626" if a and a.retired else LINK_FG))
+                return QBrush(QColor(theme.ERROR if a and a.retired else theme.LINK))
             if c == C_VIDEO and (not t.video or not self.video_exists(t)):
-                return QBrush(QColor("#94a3b8" if not t.video else "#dc2626"))
+                return QBrush(QColor(theme.FAINT if not t.video else theme.ERROR))
             if c == C_DUR and not t.duration_s:
-                return QBrush(QColor("#64748b"))
+                return QBrush(QColor(theme.SLATE))
         elif role == Qt.BackgroundRole:
             if t.id in self.ready:
-                return QBrush(QColor(READY_BG))
+                return QBrush(QColor(theme.READY_BG))
         elif role == Qt.DecorationRole:
             if c == C_ID:
                 inactive = t.status in wf.INACTIVE_STATUSES
-                return self.dot(GREY_FG if inactive else READY_FG if t.id in self.ready else LINK_FG)
+                return self.dot(theme.INACTIVE if inactive else theme.READY_FG if t.id in self.ready else theme.LINK)
             if c == C_GROUP and not p.blind:
                 a = p.get_animal(t.animal_id)
                 if a and a.group:
@@ -399,12 +398,12 @@ class TestsPage(Page):
         self.table.setWordWrap(False)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(32)
-        self.table.setStyleSheet(
-            "QTableView{font-size:14px;border:none;background:white;outline:0;}"
-            "QTableView::item{padding:0 6px;border-bottom:1px solid #f0f0f0;}"
+        theme.style(self.table, lambda: (
+            f"QTableView{{font-size:14px;border:none;background:{theme.BASE};outline:0;}}"
+            f"QTableView::item{{padding:0 6px;border-bottom:1px solid {theme.ROW_LINE};}}"
             f"QTableView::item:selected{{background:{theme.SELECTION};}}"
             "QHeaderView::section{font-size:14px;font-weight:600;padding:7px 8px;border:none;"
-            "border-bottom:1px solid #d6d6d6;background:white;}")
+            f"border-bottom:1px solid {theme.BORDER};background:{theme.BASE};}}"))
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(True)

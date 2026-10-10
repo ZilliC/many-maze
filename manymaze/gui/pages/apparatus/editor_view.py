@@ -55,8 +55,12 @@ class EditorView(FrameView):
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setBackgroundBrush(QBrush(QColor(theme.WORK_BG)))
         self.setFrameShape(QFrame.NoFrame)
+        self.theme_changed()
+
+    def theme_changed(self):
+        """The work area colour of the scheme in use (also behind the apparatus map)."""
+        self.setBackgroundBrush(QBrush(QColor(theme.WORK_BG)))
         self.setStyleSheet(f"QGraphicsView{{background:{theme.WORK_BG};border:none;}}")
 
     @property

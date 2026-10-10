@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QGridLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from ....core.tracking import DetectionSettings, arena_tracker, compute_background, draw_overlay
+from ... import theme
 from ...widgets import Worker
 from ..base import DETECTION_SPEC, SettingsForm
 
@@ -28,7 +29,7 @@ class DetectionMixin:
         lay.addWidget(sc, 1)
         self.preview_lbl = QLabel()
         self.preview_lbl.setWordWrap(True)
-        self.preview_lbl.setStyleSheet("color:#475569;")
+        theme.style(self.preview_lbl, lambda: f"color:{theme.HINT};")
         lay.addWidget(self.preview_lbl)
         row = QGridLayout()
         reset = QPushButton("Reset to experiment defaults")
@@ -91,7 +92,7 @@ class DetectionMixin:
                              for i, d in enumerate(dets) if d.detected)
             info = f"Detected {len(found)}/{len(dets)} — {info}"
         else:
-            info = "<span style='color:#dc2626'>No animal detected in this frame.</span> Try a lower threshold, " \
+            info = f"<span style='color:{theme.ERROR}'>No animal detected in this frame.</span> Try a lower threshold, " \
                    "a smaller minimum area or a different contrast."
         fg_px = int((fg > 0).sum())
         self._set_preview_info(f"{info}<br>Foreground pixels: {fg_px}")

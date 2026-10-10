@@ -79,7 +79,7 @@ class LiveView(FrameView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setBackgroundBrush(QBrush(QColor("#ffffff")))
+        self.theme_changed()
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -96,6 +96,9 @@ class LiveView(FrameView):
         self._zone_area: dict[str, float] = {}
         self._labels: list[QGraphicsSimpleTextItem] = []
         self._active: set[str] = set()
+
+    def theme_changed(self):
+        self.setBackgroundBrush(QBrush(QColor(theme.BASE)))
 
     # ---- image
     def set_pixmap(self, pix: QPixmap):
@@ -245,13 +248,15 @@ class LiveView(FrameView):
         self._update_group_visibility()
 
 
-PANEL_QSS = f"""
-QFrame#TestPanel {{ background: white; border: 1px solid #dcdcdc; }}
-QWidget#PanelHead {{ background: #f5f5f5; }}
-QWidget#PanelHead[selected="true"] {{ background: #e6eef9; }}
+def panel_qss() -> str:
+    """The style sheet of the test panels, in the colours of the scheme in use."""
+    return f"""
+QFrame#TestPanel {{ background: {theme.BASE}; border: 1px solid {theme.PANEL_BORDER}; }}
+QWidget#PanelHead {{ background: {theme.PANEL_HEAD}; }}
+QWidget#PanelHead[selected="true"] {{ background: {theme.PANEL_HEAD_SELECTED}; }}
 QToolButton#PanelTool {{ background: transparent; border: 1px solid transparent; border-radius: 2px; padding: 2px; }}
-QToolButton#PanelTool:hover {{ background: {theme.HOVER}; border-color: #c5d7ef; }}
-QToolButton#PanelTool:checked {{ background: {theme.SELECTION}; border-color: #8fb0de; }}
+QToolButton#PanelTool:hover {{ background: {theme.HOVER}; border-color: {theme.HOVER_BORDER}; }}
+QToolButton#PanelTool:checked {{ background: {theme.SELECTION}; border-color: {theme.SELECTION_BORDER}; }}
 QToolButton#PanelTool[popupMode="1"] {{ padding-right: 12px; }}
 QLabel#PanelTitle {{ color: {theme.TEXT}; font-size: 13px; }}
 QLabel#PanelTitle[large="true"] {{ color: {theme.TEXT}; font-size: 20px; font-weight: 300; }}
@@ -259,15 +264,16 @@ QLabel#PanelSource {{ color: {theme.MUTED}; }}
 QLabel#PanelCaption {{ color: {theme.MUTED}; font-size: 11px; }}
 QLabel#PanelValue {{ color: {theme.TEXT}; }}
 QLabel#PanelTime {{ color: {theme.TEXT}; font-size: 13px; }}
-QFrame#PanelSep {{ color: #d9d9d9; }}
-QTabBar#PanelTabs {{ background: white; }}
+QFrame#PanelSep {{ color: {theme.PANEL_BORDER}; }}
+QTabBar#PanelTabs {{ background: {theme.BASE}; }}
 QTabBar#PanelTabs::tab {{ background: transparent; border: 1px solid transparent; border-top: none;
     padding: 3px 10px; margin: 0 1px; color: {theme.TEXT}; }}
-QTabBar#PanelTabs::tab:selected {{ color: {theme.ACCENT}; border-color: {theme.BORDER}; background: white; }}
+QTabBar#PanelTabs::tab:selected {{ color: {theme.ACCENT}; border-color: {theme.BORDER}; background: {theme.BASE}; }}
 QTabBar#PanelTabs::tab:hover:!selected {{ background: {theme.HOVER}; }}
-QSlider#PanelSlider::groove:horizontal {{ height: 6px; background: #dcdcdc; border-radius: 3px; }}
-QSlider#PanelSlider::sub-page:horizontal {{ background: #7a7a7a; border-radius: 3px; }}
-QSlider#PanelSlider::handle:horizontal {{ background: white; border: 1px solid #8a8a8a; width: 10px;
+QSlider#PanelSlider::groove:horizontal {{ height: 6px; background: {theme.SLIDER_GROOVE}; border-radius: 3px; }}
+QSlider#PanelSlider::sub-page:horizontal {{ background: {theme.SLIDER_FILL}; border-radius: 3px; }}
+QSlider#PanelSlider::handle:horizontal {{ background: {theme.BASE}; border: 1px solid {theme.SLIDER_HANDLE_BORDER};
+    width: 10px;
     margin: -4px 0; border-radius: 5px; }}
 QListWidget#PanelLog, QTableWidget#PanelZones {{ border: none; }}
 QListWidget#PanelLog::item {{ padding: 2px 6px; }}
@@ -327,7 +333,7 @@ class TestPanel(QFrame):
     def __init__(self, single: bool = False, parent=None):
         super().__init__(parent)
         self.setObjectName("TestPanel")
-        self.setStyleSheet(PANEL_QSS)
+        theme.style(self, panel_qss)
         self.single = single
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -625,7 +631,7 @@ class PanelGrid(QWidget):
         super().__init__(parent)
         self.setObjectName("PanelGrid")
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(f"QWidget#PanelGrid{{background:{theme.BORDER};}}")
+        theme.style(self, lambda: f"QWidget#PanelGrid{{background:{theme.BORDER};}}")
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(4)
@@ -636,7 +642,7 @@ class PanelGrid(QWidget):
                             "for every apparatus (Add test panel).")
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
-        self.empty.setStyleSheet(f"background:white;color:{theme.MUTED};font-size:14px;padding:30px")
+        theme.style(self.empty, lambda: f"background:{theme.BASE};color:{theme.MUTED};font-size:14px;padding:30px")
         self.grid.addWidget(self.empty, 0, 0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 

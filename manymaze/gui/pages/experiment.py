@@ -24,6 +24,7 @@ from ...core.project import ERROR_COLUMN, Behaviour, result_columns
 from ...core.templates import TEMPLATES
 from ...core.terminology import TERMS, term, terminology_from
 from ...core.tracking import DetectionSettings
+from .. import theme
 from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
@@ -178,8 +179,9 @@ class ExperimentPage(Page):
         self.terms.setHorizontalHeaderLabels(["Term", "Called", "Plural"])
         self.terms.verticalHeader().hide()
         self.terms.setMaximumWidth(560)
-        self.terms.setFixedHeight(self.terms.horizontalHeader().sizeHint().height() + 26 * len(TERMS) + 4)
         self.terms.verticalHeader().setDefaultSectionSize(26)
+        self.terms.setFixedHeight(26 * len(TERMS) + 44)
+        self.terms.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for c, w in ((0, 160), (1, 190), (2, 190)):
             self.terms.setColumnWidth(c, w)
         for r, (one, many) in enumerate(TERMS.values()):
@@ -198,7 +200,8 @@ class ExperimentPage(Page):
         self.takenote_lbl = QLabel("This protocol uses TakeNote mode: tests are scored by hand and these settings "
                                    "are only used if you track a test anyway.")
         self.takenote_lbl.setWordWrap(True)
-        self.takenote_lbl.setStyleSheet("background:#fff7e0;border:1px solid #f0d58a;padding:6px 8px;")
+        theme.style(self.takenote_lbl, lambda: f"background:{theme.NOTE_BG};border:1px solid {theme.NOTE_BORDER};"
+                    "padding:6px 8px;")
         self.takenote_lbl.hide()
         pg.add(self.takenote_lbl)
         self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS)
@@ -223,7 +226,7 @@ class ExperimentPage(Page):
         f.addRow("Enter the stages, one per line", self.stages)
         pg.add(f)
         self.stages_lbl = QLabel()
-        self.stages_lbl.setStyleSheet("color:#dc2626;")
+        theme.style(self.stages_lbl, lambda: f"color:{theme.ERROR};")
         self.stages_lbl.hide()
         pg.add(self.stages_lbl)
         pg.add(separator())
@@ -267,7 +270,7 @@ class ExperimentPage(Page):
         left.addWidget(self.beh, 1)
         self.beh_lbl = QLabel()
         self.beh_lbl.setWordWrap(True)
-        self.beh_lbl.setStyleSheet("color:#dc2626;")
+        theme.style(self.beh_lbl, lambda: f"color:{theme.ERROR};")
         self.beh_lbl.hide()
         left.addWidget(self.beh_lbl)
         left.addLayout(button_row(small_button("New key", "add", slot=self._add_behaviour),
@@ -360,7 +363,7 @@ class ExperimentPage(Page):
     def _error_label() -> QLabel:
         lbl = QLabel()
         lbl.setWordWrap(True)
-        lbl.setStyleSheet("color:#dc2626;")
+        theme.style(lbl, lambda: f"color:{theme.ERROR};")
         lbl.hide()
         return lbl
 

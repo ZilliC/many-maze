@@ -43,7 +43,9 @@ VIEWS = [("compare", "Compare groups", "bars"), ("two", "Two factors", "chart"),
          ("correlation", "Correlation", "scatter"), ("grouped", "Grouped", "table"),
          ("categorical", "Categorical", "histogram")]
 
-STYLE = f"""
+def page_style() -> str:
+    """The Statistics page's style sheet in the colours of the scheme in use."""
+    return f"""
 QLabel#StatsHeading {{ color: {theme.HEADING}; font-size: 20px; font-weight: 300; padding: 14px 0 2px 0; }}
 QLabel#StatsPrompt {{ font-size: 13px; }}
 QLabel#ReportTitle {{ color: {theme.HEADING}; font-size: 20px; font-weight: 300; }}
@@ -412,7 +414,7 @@ class StatisticsPage(Page):
         lay.setSpacing(4)
         lay.addLayout(top)
         lay.addLayout(body, 1)
-        self.setStyleSheet(STYLE)
+        theme.style(self, page_style)
 
         # ---- ribbon ------------------------------------------------------------------------------------------
         def act(text, ic, fn, tip="", small=False):
@@ -925,8 +927,10 @@ class StatisticsPage(Page):
                          + f"</tr>{body}</table>")
         if a.summary_text:
             parts.append(f"<h2>Summary</h2><pre>{escape(a.summary_text)}</pre>")
-        style = (f"body{{font-family:'Segoe UI',Helvetica,Arial,sans-serif;margin:32px;color:{theme.TEXT}}}"
-                 f"h1,h2{{color:{theme.HEADING};font-weight:300}}h1{{margin-bottom:0}}.sub{{color:{theme.MUTED}}}"
+        light = theme.LIGHT  # a document: light whatever the window's scheme
+        style = (f"body{{font-family:'Segoe UI',Helvetica,Arial,sans-serif;margin:32px;color:{light['TEXT']}}}"
+                 f"h1,h2{{color:{light['HEADING']};font-weight:300}}h1{{margin-bottom:0}}"
+                 f".sub{{color:{light['MUTED']}}}"
                  "table{border-collapse:collapse;margin:6px 0 18px}td,th{padding:4px 10px;text-align:right;"
                  "border-bottom:1px solid #e3e3e3}td:first-child,th:first-child{text-align:left}"
                  "th{font-style:italic;font-weight:normal}table.settings td{text-align:left;border:none}"

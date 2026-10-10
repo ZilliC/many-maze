@@ -13,6 +13,12 @@ can start right away — **Protocol → Experiment → Test → Results**.
   (animals, treatments and test schedules from spreadsheets saved by ANY-maze, ANY-maze's experiment XML export and
   zone maps — see *Importing from ANY-maze* in section 9), *Protocol report*, *Restore a backup*, *Archive
   experiment* / *Open archive*, user guide.
+* **View ▸ Appearance** (menu bar) — *System* (light or dark as macOS is set, following it when it changes), *Light*
+  or *Dark*; the choice is remembered. The dark scheme covers the ribbon (its icons in lighter tints), the explorer,
+  tables, forms, test panels, the apparatus and review views, the procedure blocks and the plots shown in the window.
+  Figures you save, copy or put in a report, and the HTML documents exported, stay light (they are for papers and
+  printing). Colours with a meaning — treatments, zones, behaviours, heat-map scales, the video itself — are the same
+  in both schemes.
 * **Help** — the user guide, *Check for updates* (asks GitHub for the latest release and offers to open its page;
   *Check for updates at startup*, off by default, does so at most once a week) and *About*.
 * **Explorer** — the list on the left of each tab: the protocol elements (Protocol, Animal tracking, Stages, Keys,

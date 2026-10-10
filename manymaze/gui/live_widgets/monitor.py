@@ -12,8 +12,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QGridLayout, QGroup
                                QListWidget, QSizePolicy, QTableWidget, QVBoxLayout, QWidget)
 
 from ...core.livemonitor import CHART_PREFIX, FAST_PARAMS, LiveCharts, chart_parameters, input_rows, sequence_rows
+from .. import theme
 from ..widgets import fmt_time
 from .panels import ElidedLabel, table_item
+
+LINE, LINE_DARK = "#2563eb", "#7fb0f0"  # the charted value (light / dark scheme)
 
 
 # ====================================================================== live chart
@@ -74,7 +77,7 @@ class LiveChart(QWidget):
             else:
                 path.moveTo(pt)
                 started = True
-        p.setPen(QPen(QColor("#2563eb"), 1.6))
+        p.setPen(QPen(QColor(LINE_DARK if theme.is_dark() else LINE), 1.6))
         p.drawPath(path)
         p.setPen(pal.text().color())
         p.drawText(QRectF(0, r.top() - 4, 35, 14), Qt.AlignRight, f"{hi:.3g}")

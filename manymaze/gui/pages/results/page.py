@@ -29,17 +29,21 @@ VIEWS = [("spreadsheet", "Spreadsheet", "table", "Data"), ("track", "Track plots
          ("heat", "Heat maps", "heatmap", "Heat maps"), ("charts", "Charts", "chart", "Charts"),
          ("video", "Video export", "video_file", "Video export")]
 
-TABLE_STYLE = f"""
-QTableView#ResultsTable {{ border: none; border-top: 1px solid {theme.BORDER}; background: white; font-size: 13px;
-    gridline-color: #e6e6e6; }}
+def table_style() -> str:
+    """The Data page's style sheet in the colours of the scheme in use."""
+    return f"""
+QTableView#ResultsTable {{ border: none; border-top: 1px solid {theme.BORDER}; background: {theme.BASE};
+    font-size: 13px; gridline-color: {theme.SHEET_GRID}; }}
 QTableView#ResultsTable::item {{ padding: 0 8px; }}
-QTableView#ResultsTable QHeaderView::section {{ background: #fbfbfb; font-size: 13px; font-weight: normal;
-    padding: 7px 8px; border: none; border-right: 1px solid #e6e6e6; border-bottom: 1px solid {theme.BORDER}; }}
-QListWidget#TestList {{ border: none; border-right: 1px solid {theme.BORDER}; background: white; font-size: 13px; }}
-QListWidget#TestList::item {{ padding: 5px 8px; border-bottom: 1px solid #f0f0f0; }}
+QTableView#ResultsTable QHeaderView::section {{ background: {theme.HEADER_BG}; font-size: 13px; font-weight: normal;
+    padding: 7px 8px; border: none; border-right: 1px solid {theme.SHEET_GRID}; border-bottom: 1px solid {theme.BORDER}; }}
+QListWidget#TestList {{ border: none; border-right: 1px solid {theme.BORDER}; background: {theme.BASE};
+    font-size: 13px; }}
+QListWidget#TestList::item {{ padding: 5px 8px; border-bottom: 1px solid {theme.ROW_LINE}; }}
 QListWidget#TestList::item:selected {{ background: {theme.SELECTION}; color: {theme.TEXT}; }}
-QToolButton#ModeButton {{ border: 1px solid #c8c8c8; background: white; padding: 3px 12px; }}
-QToolButton#ModeButton:checked {{ background: {theme.SELECTION}; border-color: #8fb0de; }}
+QToolButton#ModeButton {{ border: 1px solid {theme.INPUT_BORDER}; background: {theme.BASE}; color: {theme.TEXT};
+    padding: 3px 12px; }}
+QToolButton#ModeButton:checked {{ background: {theme.SELECTION}; border-color: {theme.SELECTION_BORDER}; }}
 QLabel#PlotCaption {{ font-size: 14px; color: {theme.TEXT}; }}
 QTreeWidget::item {{ height: 22px; }}
 """
@@ -197,7 +201,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         lay.setSpacing(4)
         lay.addLayout(top)
         lay.addWidget(self.main_tabs, 1)
-        self.setStyleSheet(TABLE_STYLE)
+        theme.style(self, table_style)
         self._build_actions()
         self._update_actions()
 

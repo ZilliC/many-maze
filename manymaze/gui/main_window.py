@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
@@ -137,11 +137,11 @@ class WelcomePage(QWidget):
         side = QWidget()
         side.setObjectName("BackstageSide")
         side.setFixedWidth(250)
-        side.setStyleSheet(f"QWidget#BackstageSide{{background:{theme.ACCENT};}}"
-                           "QPushButton{color:white;background:transparent;border:none;text-align:left;"
-                           "padding:10px 26px;font-size:15px;border-radius:0;}"
-                           "QPushButton:hover{background:rgba(255,255,255,0.18);}"
-                           "QPushButton:disabled{color:rgba(255,255,255,0.45);background:transparent;}")
+        theme.style(side, lambda: f"QWidget#BackstageSide{{background:{theme.ACCENT_BG};}}"
+                    f"QPushButton{{color:{theme.ON_ACCENT};background:transparent;border:none;text-align:left;"
+                    "padding:10px 26px;font-size:15px;border-radius:0;}"
+                    "QPushButton:hover{background:rgba(255,255,255,0.18);}"
+                    "QPushButton:disabled{color:rgba(255,255,255,0.45);background:transparent;}")
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 18, 0, 12)
         sl.setSpacing(0)
@@ -178,10 +178,9 @@ class WelcomePage(QWidget):
         logo = QLabel()
         logo.setPixmap(QIcon(str(Path(__file__).resolve().parent.parent / "resources" / "icon.svg")).pixmap(56, 56))
         head.addWidget(logo)
-        title = QLabel(f"<span style='font-size:26px;color:{theme.HEADING};font-weight:300'>{APP_NAME}</span><br>"
-                       f"<span style='color:{theme.MUTED}'>Libre video tracking and behavioural analysis · "
-                       f"version {__version__}</span>")
-        head.addWidget(title, 1)
+        self.title = QLabel()
+        self.theme_changed()
+        head.addWidget(self.title, 1)
         bl.addLayout(head)
         bl.addSpacing(18)
         cap = QLabel("Recent experiments")
@@ -194,6 +193,11 @@ class WelcomePage(QWidget):
         self.recent.itemClicked.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
         bl.addWidget(self.recent, 1)
         lay.addWidget(body, 1)
+
+    def theme_changed(self):
+        self.title.setText(f"<span style='font-size:26px;color:{theme.HEADING};font-weight:300'>{APP_NAME}</span>"
+                           f"<br><span style='color:{theme.MUTED}'>Libre video tracking and behavioural analysis · "
+                           f"version {__version__}</span>")
 
     def refresh(self):
         self.recent.clear()
@@ -494,6 +498,19 @@ class MainWindow(QMainWindow):
         act(fm, "Allowed programs…", lambda: self.allowed_programs_dialog())
         fm.addSeparator()
         act(fm, "Quit", self.close, QKeySequence.Quit)
+        vm = mb.addMenu("&View")
+        am = vm.addMenu("Appearance")
+        self.appearance_actions = {}
+        group = QActionGroup(self)
+        for key, text in theme.APPEARANCES:
+            a = QAction(text, self, checkable=True)
+            a.setChecked(key == theme.appearance())
+            a.setToolTip({"system": "Light or dark as macOS is set (System Settings ▸ Appearance)",
+                          "light": "Always the light colours", "dark": "Always the dark colours"}[key])
+            a.triggered.connect(lambda _=False, k=key: self.set_appearance(k))
+            group.addAction(a)
+            am.addAction(a)
+            self.appearance_actions[key] = a
         gm = mb.addMenu("&Go")
         for i, page in enumerate(self.pages):
             a = act(gm, getattr(page, "title", f"Page {i}"), lambda _=False, p=page: self.show_page(p),
@@ -506,6 +523,17 @@ class MainWindow(QMainWindow):
         act(hm, f"About {APP_NAME}", self.about)
         # the ribbon replaces the menu bar, except on macOS where the menu bar lives at the top of the screen
         mb.setVisible(sys.platform == "darwin")
+
+    def set_appearance(self, appearance: str):
+        """View ▸ Appearance: System, Light or Dark, applied at once and kept in the app settings."""
+        theme.apply(QApplication.instance(), appearance, self.settings)
+        for k, a in self.appearance_actions.items():
+            a.setChecked(k == theme.appearance())
+
+    def theme_changed(self):
+        """The colour scheme changed: the shown page fills its tables again in the new colours."""
+        if self._current_page is not None:
+            self.refresh_ribbon()
 
     def _open_guide(self):
         from .help import show_user_guide

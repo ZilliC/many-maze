@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from ...core import workflow as wf
 from ...core.workflow import treatment_text
+from .. import theme
 
 
 class AddVideosDialog(QDialog):
@@ -149,7 +150,7 @@ class ScheduleDialog(QDialog):
         f.addRow("", self.skip_done)
         lay.addLayout(f)
         self.preview = QLabel()
-        self.preview.setStyleSheet("color:#475569;")
+        theme.style(self.preview, lambda: f"color:{theme.HINT};")
         self.preview.setWordWrap(True)
         lay.addWidget(self.preview)
         for w in (self.trials, self.seed):

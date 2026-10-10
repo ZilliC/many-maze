@@ -6,6 +6,8 @@ from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QLayout, QPushButton, QWidget
 
+from . import theme
+
 BEHAVIOUR_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", "#ef4444", "#84cc16",
                     "#f97316", "#06b6d4"]
 KIND_TEXT = {"state": "toggle", "hold": "hold", "point": "point"}
@@ -120,6 +122,6 @@ class ScoringPad(QWidget):
                 css = (f"background:{c.name()};color:white;border:2px solid {c.darker(130).name()};"
                        "border-radius:8px;font-weight:bold;padding:4px 10px;")
             else:
-                css = (f"background:rgba({c.red()},{c.green()},{c.blue()},38);color:#0f172a;"
+                css = (f"background:rgba({c.red()},{c.green()},{c.blue()},38);color:{theme.TEXT};"
                        f"border:2px solid {c.name()};border-radius:8px;padding:4px 10px;")
             btn.setStyleSheet(f"QPushButton{{{css}}}QPushButton:pressed{{background:{c.name()};color:white;}}")

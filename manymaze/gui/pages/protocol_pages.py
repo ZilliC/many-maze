@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QLabel, QLineEdit
 from ...core import workflow as wf
 from ...core.calculations import AGGREGATES, MAX_DECIMALS, MAX_NAMED_VALUES, MAX_UNITS, Calculation
 from ...core.workflow import RADIO_SET, key_mode, mode_to_kind
+from .. import theme
 from ..icons import icon
 from ..widgets import ColorButton, button_row, hint, loading, separator
 from .base import property_form, section_title
@@ -348,7 +349,7 @@ class CalculationEditor(QWidget):
         self.edited.emit(self.values())
 
     def set_status(self, errors: list[str], text: str = ""):
-        self.status.setStyleSheet("color:#dc2626;" if errors else "color:#475569;")
+        self.status.setStyleSheet(f"color:{theme.ERROR if errors else theme.HINT};")
         self.status.setText("\n".join(errors) if errors else text)
 
     def _insert_text(self, text: str, back: int = 0):

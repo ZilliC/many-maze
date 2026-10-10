@@ -64,7 +64,7 @@ class ApparatusPage(Page):
         lay.setSpacing(0)
         lay.addWidget(self._build_centre(), 1)
         lay.addWidget(self.panel)
-        self.setStyleSheet(f"QLabel#FooterCaption {{ color: {theme.HEADING}; font-size: 13px; }}")
+        theme.style(self, lambda: f"QLabel#FooterCaption {{ color: {theme.HEADING}; font-size: 13px; }}")
         self._set_enabled(False)
 
     # ================================================================ ribbon
@@ -553,7 +553,7 @@ class ApparatusPage(Page):
                                        + (f" <span style='color:{theme.MUTED}'>· {extra}</span>" if extra else ""))
                 self.ppc_spin.setValue(app.px_per_cm)
             else:
-                self.cal_label.setText("<span style='color:#c2410c'>Not calibrated</span> "
+                self.cal_label.setText(f"<span style='color:{theme.WARNING}'>Not calibrated</span> "
                                        f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
                 self.ppc_spin.setValue(0)
 

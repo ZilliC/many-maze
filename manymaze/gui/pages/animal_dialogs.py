@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 from ...core import scales
 from ...core import workflow as wf
 from ...core.workflow import treatment_text
+from .. import theme
 from ..widgets import color_icon
 
 
@@ -188,7 +189,7 @@ class CriteriaDialog(QDialog):
                                    str(row["met_at_trial"] or "–"), outcome)):
                 it = QTableWidgetItem(v)
                 if c == 4:
-                    it.setForeground(QColor("#16a34a" if row["met"] else "#dc2626" if row["failed"] else "#475569"))
+                    it.setForeground(QColor(theme.OK if row["met"] else theme.ERROR if row["failed"] else theme.HINT))
                 t.setItem(r, c, it)
         lay.addWidget(t, 1)
         bb = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
@@ -318,7 +319,7 @@ class WeighDialog(QDialog):
                 b.setEnabled(True)
         res, err = out.get("r", (None, RuntimeError("the scale was not read")))
         if err is not None:
-            self.state.setText(f"<span style='color:#dc2626'>{err}</span>")
+            self.state.setText(f"<span style='color:{theme.ERROR}'>{err}</span>")
             return False
         grams, stable = res
         self.grams.setValue(grams)
@@ -330,7 +331,7 @@ class WeighDialog(QDialog):
         if a is None:
             return False
         if g <= 0:
-            self.state.setText("<span style='color:#dc2626'>Read the scale or type the weight first.</span>")
+            self.state.setText(f"<span style='color:{theme.ERROR}'>Read the scale or type the weight first.</span>")
             return False
         self.on_record(a, g)
         self.recorded.append((a.id, g))

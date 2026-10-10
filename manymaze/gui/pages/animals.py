@@ -214,7 +214,7 @@ class AnimalsPage(Page):
         self.blind_lbl = QLabel("Blind testing is on: treatments are shown only as codes and cannot be edited. "
                                 "Click <b>Reveal treatment coding</b> to unblind.")
         self.blind_lbl.setWordWrap(True)
-        self.blind_lbl.setStyleSheet("color:#7c3aed;padding:2px 0 6px 0;")
+        theme.style(self.blind_lbl, lambda: f"color:{theme.NOTE};padding:2px 0 6px 0;")
         self.blind_lbl.hide()
 
         # ---- Animals sheet ---------------------------------------------------------------
@@ -271,10 +271,10 @@ class AnimalsPage(Page):
         t.horizontalHeader().setHighlightSections(False)
         t.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         t.horizontalHeader().setMinimumHeight(34)
-        t.setStyleSheet("QTableWidget{font-size:14px;gridline-color:#e6e6e6;border:none;}"
-                        "QTableWidget::item{padding:0 6px;}"
-                        "QHeaderView::section{font-size:14px;padding:6px 8px;border:none;"
-                        "border-right:1px solid #ececec;border-bottom:1px solid #d6d6d6;}")
+        theme.style(t, lambda: f"QTableWidget{{font-size:14px;gridline-color:{theme.SHEET_GRID};border:none;}}"
+                    "QTableWidget::item{padding:0 6px;}"
+                    "QHeaderView::section{font-size:14px;padding:6px 8px;border:none;"
+                    f"border-right:1px solid {theme.HEADER_LINE};border-bottom:1px solid {theme.BORDER};}}")
 
     # ------------------------------------------------------------------ ribbon / explorer hooks
     def ribbon_groups(self):
@@ -418,7 +418,7 @@ class AnimalsPage(Page):
         ids = counts.get(a.id, [])
         n = self._item(editable=False, align=Qt.AlignRight | Qt.AlignVCenter)
         n.setData(Qt.DisplayRole, len(ids))
-        n.setForeground(QColor("#6b7280"))
+        n.setForeground(QColor(theme.MUTED))
         if ids:
             n.setToolTip("Tests: " + ", ".join(str(i) for i in ids))
         items["tests"] = n
@@ -429,7 +429,7 @@ class AnimalsPage(Page):
                     f"{str(w.get('date', '')).replace('T', ' ')}   {scales.format_grams(w.get('grams', 0))} g"
                     for w in a.weights[-12:]))
             if a.retired:
-                it.setForeground(QColor(MUTED_ROW))
+                it.setForeground(QColor(theme.INACTIVE if theme.is_dark() else MUTED_ROW))
             self.table.setItem(r, c, it)
 
     def _refresh_side(self, counts=None):
@@ -459,7 +459,7 @@ class AnimalsPage(Page):
             name = self._item(g.name if not p.blind else "Hidden (blind testing)", editable=not p.blind)
             name.setData(Qt.UserRole, g.name)
             if p.blind:
-                name.setForeground(QColor(MUTED_ROW))
+                name.setForeground(QColor(theme.INACTIVE if theme.is_dark() else MUTED_ROW))
             col = self._item(wf.display_color(p, g.name) if not p.blind else "", editable=False)
             col.setIcon(color_icon(wf.display_color(p, g.name), 16))
             col.setToolTip("Double-click to change the colour")
@@ -675,7 +675,8 @@ class AnimalsPage(Page):
                 for c in range(self.table.columnCount()):
                     it = self.table.item(r, c)
                     if it is not None and self._col_kind(c) != "tests":
-                        it.setForeground(QColor(MUTED_ROW) if a.retired else QColor(theme.TEXT))
+                        it.setForeground(QColor(theme.INACTIVE if theme.is_dark() else MUTED_ROW) if a.retired
+                                         else QColor(theme.TEXT))
                 self._changed()
                 self._refresh_side()
             elif kind == "treatment":

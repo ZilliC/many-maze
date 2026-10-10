@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, QSettings
 
 
 def main(project: str | None = None, argv_project: bool = True) -> int:
@@ -26,11 +26,10 @@ def main(project: str | None = None, argv_project: bool = True) -> int:
     icon = Path(__file__).resolve().parent.parent / "resources" / "icon.svg"
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
-    try:  # colours, overlays and plots are designed for a light theme (Qt >= 6.8)
-        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
-    except AttributeError:
-        pass
-    theme.apply(app)
+    # View ▸ Appearance (System / Light / Dark), kept in the app settings as the window's other preferences
+    ini = os.environ.get("MANYMAZE_SETTINGS")
+    settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings("manymaze", "mANY-MAZE")
+    theme.apply(app, theme.saved_appearance(settings))
     w = MainWindow()
     w.show()
     app.installEventFilter(_FileOpenFilter(w))

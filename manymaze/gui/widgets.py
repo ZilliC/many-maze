@@ -551,14 +551,14 @@ class PlotCanvas(QWidget):
         self.figure = None
 
     def set_figure(self, fig):
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from .figures import ThemedCanvas  # drawn in the colours of the window's scheme
 
         if self.canvas is not None:
             self._lay.removeWidget(self.canvas)
             self.canvas.setParent(None)
             self.canvas.deleteLater()
         self.figure = fig
-        self.canvas = FigureCanvasQTAgg(fig)
+        self.canvas = ThemedCanvas(fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._lay.addWidget(self.canvas)
         self.canvas.draw_idle()
@@ -594,7 +594,7 @@ def separator() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.HLine)
     line.setFixedHeight(1)
-    line.setStyleSheet(f"background:{theme.BORDER};border:none;margin:0;")
+    theme.style(line, lambda: f"background:{theme.BORDER};border:none;margin:0;")
     return line
 
 
