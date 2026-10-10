@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
+                               QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ...core import pose, security
+from ...core import plugins, pose, security
 from ...core import workflow as wf
 from ...core.apparatus import unique_name
 from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
@@ -314,6 +314,26 @@ class ExperimentPage(Page):
         pg.add(self.ev_periods_lbl)
         pg.add(button_row(small_button("New event period", "add", slot=self._add_event_period),
                           small_button("Remove", "delete", slot=self.ev_periods.remove_current)))
+
+        pg.section("Analysis plug-ins")
+        pg.add(hint("Data recorded by other systems — heart rate, Spike2 or LabChart exports, fibre photometry — "
+                    "brought into the results: each series gets the analogue-signal measures (mean, minimum, "
+                    "maximum, baseline…) for the whole test, every time period and every zone. The built-in "
+                    "plug-in reads a CSV / TSV file per test; others are installed as Python packages. Run them "
+                    "once the tests are done (and again when the files change)."))
+        self.plugin_list = QListWidget()
+        self.plugin_list.setFixedHeight(110)
+        self.plugin_list.setStyleSheet("QListWidget::item{padding:4px 4px;}")
+        self.plugin_list.itemDoubleClicked.connect(lambda *_: self.edit_plugin())
+        pg.add(self.plugin_list)
+        self.plugin_add = small_button("Add plug-in", "add")
+        self.plugin_menu = QMenu(self.plugin_add)
+        self.plugin_menu.aboutToShow.connect(self._fill_plugin_menu)
+        self.plugin_add.setMenu(self.plugin_menu)
+        pg.add(button_row(self.plugin_add, small_button("Edit…", "edit", slot=self.edit_plugin),
+                          small_button("Remove", "delete", slot=self.remove_plugin),
+                          small_button("Run on the tests", "play", slot=self.run_plugins,
+                                       tip="Run the plug-ins on every test performed and save the experiment")))
         pg.finish()
 
     def _build_calculations(self):
@@ -582,6 +602,7 @@ class ExperimentPage(Page):
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
         self._fill_calculations()
+        self._fill_plugins()
 
     def _update_summary(self):
         p = self.project
@@ -943,6 +964,100 @@ class ExperimentPage(Page):
             setattr(obj, attr, getattr(default, attr))
         form.load(obj)
         self.main.mark_dirty()
+
+    # ================================================================== analysis plug-ins
+    def _fill_plugins(self):
+        p = self.project
+        row = self.plugin_list.currentRow()
+        self.plugin_list.clear()
+        for c in (p.analysis_plugins if p is not None else []):
+            pl = plugins.analysis_plugin(c.get("plugin", ""))
+            kind = pl.title if pl is not None else f"{c.get('plugin')} (not installed)"
+            off = "" if c.get("enabled", True) else " — not run"
+            self.plugin_list.addItem(QListWidgetItem(icon("chart"), f"{c.get('name') or kind}  ·  {kind}{off}"))
+        if self.plugin_list.count():
+            self.plugin_list.setCurrentRow(min(max(row, 0), self.plugin_list.count() - 1))
+
+    def _fill_plugin_menu(self):
+        self.plugin_menu.clear()
+        for name in plugins.analysis_names():
+            pl = plugins.analysis_plugin(name)
+            a = self.plugin_menu.addAction(pl.title)
+            a.setToolTip(pl.description)
+            a.triggered.connect(lambda _=False, n=name: self.add_plugin(n))
+
+    def add_plugin(self, name: str, dlg=None) -> dict | None:
+        """Add a configured analysis plug-in to the protocol (its settings are asked first)."""
+        p = self.project
+        if p is None:
+            return None
+        cfg = plugins.new_config(name, [c.get("name") for c in p.analysis_plugins])
+        cfg = self._plugin_dialog(cfg, dlg)
+        if cfg is None:
+            return None
+        p.analysis_plugins.append(cfg)
+        self.main.mark_dirty()
+        self._fill_plugins()
+        self.plugin_list.setCurrentRow(self.plugin_list.count() - 1)
+        return cfg
+
+    def _plugin_dialog(self, cfg: dict, dlg=None) -> dict | None:
+        from ..plugin_dialog import PluginOptionsDialog
+
+        given = dlg is not None
+        dlg = dlg or PluginOptionsDialog(self.project, cfg, self)
+        if not given and dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.values()
+
+    def edit_plugin(self, dlg=None) -> dict | None:
+        p = self.project
+        i = self.plugin_list.currentRow()
+        if p is None or not 0 <= i < len(p.analysis_plugins):
+            return None
+        cfg = self._plugin_dialog(p.analysis_plugins[i], dlg)
+        if cfg is None:
+            return None
+        p.analysis_plugins[i] = cfg
+        self.main.mark_dirty()
+        self._fill_plugins()
+        return cfg
+
+    def remove_plugin(self):
+        p = self.project
+        i = self.plugin_list.currentRow()
+        if p is None or not 0 <= i < len(p.analysis_plugins):
+            return
+        del p.analysis_plugins[i]
+        self.main.mark_dirty()
+        self._fill_plugins()
+
+    def run_plugins(self, wait: bool = False):
+        """Run the analysis plug-ins on every test performed (in the background), then save the experiment."""
+        p = self.project
+        if p is None or not p.analysis_plugins:
+            return None
+        if p.path is None and not self.main.save():
+            return None
+
+        def done(res):
+            self.main.mark_dirty()
+            self.main.save()
+            msg = f"Ran the analysis plug-ins on {len(res['done'])} test(s)."
+            self.main.status(msg)
+            if res["errors"]:
+                lines = [f"Test {tid}: {m}" for tid, m in res["errors"][:20]]
+                QMessageBox.warning(self, "Analysis plug-ins", msg + "\n\n" + "\n".join(lines))
+            self.last_plugin_run = res
+
+        w = run_with_progress(self, "Running the analysis plug-ins",
+                              lambda progress, stop: plugins.run_analysis_plugins(p, progress=progress),
+                              on_done=done, on_fail=lambda m: QMessageBox.warning(self, "Analysis plug-ins", m),
+                              cancellable=False)
+        if wait:
+            w.wait()
+            QApplication.processEvents()
+        return w
 
     def edit_io_devices(self):
         if self.project is None:

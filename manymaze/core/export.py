@@ -686,6 +686,12 @@ def protocol_report(project: Project, path) -> Path:
             ("A pulse", ", ".join(label for opt, label in EVENTS.values() if s[opt]).replace(
                 "frames", "every frame").replace("positions", "every position stored")),
             ("Pulse width (ms)", s["width_ms"])]))
+    if p.analysis_plugins:
+        out.append("<h2>Analysis plug-ins</h2>" + table(("Name", "Plug-in", "Settings"), [
+            (c.get("name", ""), c.get("plugin", "") + ("" if c.get("enabled", True) else " (not run)"),
+             ", ".join(f"{k}={v}" for k, v in c.items()
+                       if k not in ("name", "plugin", "enabled") and v not in ("", None)))
+            for c in p.analysis_plugins]))
     if p.training_criteria:
         out.append("<h2>Training criteria</h2><ul>" + "".join(
             f"<li>{html.escape(criterion_text(c))}</li>" for c in p.training_criteria) + "</ul>")

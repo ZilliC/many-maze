@@ -8,6 +8,7 @@
     manymaze project DIR relink --folder VIDEOS   # find moved videos by file name
     manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
     manymaze project DIR report -o report.html
+    manymaze project DIR plugins                 # run the protocol's analysis plug-ins on every test performed
     manymaze templates
 
 An experiment protected by a password is opened with the password in the environment variable MANYMAZE_PASSWORD.
@@ -127,7 +128,7 @@ def cmd_project(a):
     from .core import explock
 
     p = _load_project(a.dir)
-    if a.action in ("track", "relink"):
+    if a.action in ("track", "relink", "plugins"):
         _lock_for_writing(p)
         try:
             return _change_project(p, a)
@@ -236,6 +237,19 @@ def _change_project(p, a):
                      f"are not marked as tracked: {e}\nFix the problem and run the command again (with --all to "
                      f"track them again).")
         print(f"Tracked {len(res['tracked'])} of {len(todo)} tests ({res['workers']} parallel workers)")
+    elif a.action == "plugins":
+        from .core.plugins import run_analysis_plugins
+
+        if not p.analysis_plugins:
+            sys.exit("The protocol has no analysis plug-ins (Protocol ▸ Analysis ▸ Analysis plug-ins)")
+        res = run_analysis_plugins(p, progress=_progress("plug-ins"))
+        for tid, msg in res["errors"]:
+            print(f"  #{tid}: {msg}", file=sys.stderr)
+        try:
+            p.save()
+        except Exception as e:
+            sys.exit(f"The experiment could not be saved: {e}")
+        print(f"Ran the analysis plug-ins on {len(res['done'])} test(s); {len(res['errors'])} problem(s)")
     elif a.action == "relink":
         from .core.project import relink_videos
 
@@ -294,7 +308,7 @@ def main(argv=None):
     pr = sub.add_parser("project", help="batch operations on a project")
     pr.add_argument("dir")
     pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive",
-                                       "relink"])
+                                       "relink", "plugins"])
     pr.add_argument("--all", action="store_true", help="re-track tests that already have tracks")
     pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")

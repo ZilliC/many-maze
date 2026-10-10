@@ -1027,9 +1027,10 @@ the list of allowed programs is a setting of this computer (`allowed_programs.js
 folder), never part of the experiment. A program that is not on the list is not run and the procedure reports
 an error (or, when mANY-MAZE asks for confirmation, it runs once you allow it, and is then remembered). The
 procedure checks list *Run a program* as a warning. *Trigger a plug-in* calls a Python function registered with
-`manymaze.core.procedures.plugins.register(name, fn)` (or installed through the `manymaze.procedure_plugins`
-entry point): `fn(argument, info)` receives the test time, the variables and the test, and its result can be
-stored in a variable.
+`manymaze.core.plugins.register(name, fn)` (also available as `manymaze.core.procedures.plugins`; or installed
+through the `manymaze.procedure_plugins` entry point): `fn(argument, info)` receives the test time, the variables
+and the test, and its result can be stored in a variable. Analysis plug-ins, which bring other systems' data into the
+results, are described in §9.
 
 **Zones.** *Set zone label* records which zone is which in this test (saved in the test's variables as
 `zone_labels`; `zone_label("Zone")` reads it); *Set moveable zone location* moves a zone (or point) to a new
@@ -1613,6 +1614,41 @@ test. The results are listed under **Calculation results** in *Select data*, exp
 printed in the protocol report; renaming a calculation updates the formulas that use it, and a new experiment based
 on this one's protocol gets its calculations.
 
+### Analysis plug-ins
+
+**Protocol ▸ Analysis ▸ Analysis plug-ins** brings data recorded by other systems — heart rate from telemetry, fibre
+photometry, a Spike2 or LabChart text export, a thermal camera's readings — into the results:
+
+- **Add plug-in ▾** lists the plug-ins installed. The built-in **Data file (CSV / TSV)** needs no code: one file per
+  test, found from a name pattern with the test's `{test}`, `{animal}`, `{stage}`, `{trial}` and `{video}` (the
+  video's name without its extension), relative to the experiment folder unless absolute, e.g.
+  `photometry/{animal}_day{trial}.csv`. The file has a header row (rows above it, such as Spike2's information lines,
+  are skipped), a **time column** (name or number; the first by default) in s, ms, min or h, and the **columns to
+  import** (all the others by default). Commas, semicolons, tabs or spaces separate the columns; with semicolons or
+  tabs a decimal comma is understood. **The test starts** at a given time in the file, or **at the first pulse in a
+  synchronisation column** — the channel that recorded the *Synchronisation* element's test-start pulse (or the
+  first frame's pulse): where it first rises through the threshold (0.5 by default). Samples before the test start
+  and after its end are left out; **Average into samples of (Hz)** keeps long, fast recordings small. Each column
+  becomes a series named after its header (with an optional prefix), and the test gets the measure *<plug-in
+  name>: test start in the file (s)*.
+- **Run on the tests** runs every plug-in on each test that was performed (tracked or scored) and saves the
+  experiment; problems (a missing file, a column not found) are listed per test. Run them again when the files
+  change: the results use what was imported, not the files themselves (`manymaze project DIR plugins` does the same
+  on the command line). The series are stored with the tests (`Test.extra_series`, the samples in
+  `tracks/test_NNNN_series.json`), so archives and copies keep them.
+- Each **series** gets the measures of an analogue signal (§8, *I/O results*): mean, minimum, maximum, the times of
+  the maximum and minimum, baseline, deviations from it and the integrals above / below it — for the whole test,
+  every time period (`Heart rate: mean` in each period) and every zone (`Heart rate in Centre: mean`, …, and the
+  values at entry and exit of each visit). Series also count as inputs for the time periods anchored to an input.
+  The **measures** a plug-in returns for a test are shown in every row of that test, as result variables are, and
+  can be used in calculations.
+
+Writing a plug-in: a Python function `fn(test, project, options)` returning `{"series": {name: (times, values)},
+"measures": {name: value}}` (times in s from the test start, pauses included as in the I/O log), registered with
+`manymaze.core.plugins.register_analysis(name, fn, title=…, options=[(key, label, kind, default), …])` or installed
+through the `manymaze.analysis_plugins` entry point; `options` (kinds `text`, `file`, `number`, `int`, `bool`,
+`choice`) build its settings form.
+
 ### Track plots (Results ▸ Data ▸ Track plots)
 
 Select a row of the results table to see the test's track on its first video frame. The options under the plot apply
@@ -1889,6 +1925,7 @@ manymaze project ~/exp.mmaze report -o report.html
 manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
 manymaze project ~/exp.mmaze protocol -o protocol.html
 manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file
+manymaze project ~/exp.mmaze plugins      # run the protocol's analysis plug-ins on every test performed (§9)
 manymaze templates                        # list apparatus templates
 ```
 

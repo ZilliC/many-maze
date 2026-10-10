@@ -150,6 +150,10 @@ class Test:
     replaces: int = 0  # id of the test this attempt re-performs (0 = none)
     experimenter: str = ""  # the user who ran (live) or tracked / scored the test
     end_reason: str = ""  # why a live test ended (END_* values); "" for tests tracked from a video
+    # analysis plug-ins (plugins.py): their time series ({name: {"source", "samples", "unit"}}, the samples in
+    # tracks/test_NNNN_series.json) and per-test measures ({name: value})
+    extra_series: dict = field(default_factory=dict)
+    extra_measures: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d):
@@ -791,7 +795,16 @@ class Project:
         """The time bins, custom and event-anchored periods of a test, in test time (as the segmented results).
         app: the test's apparatus without its per-test zone positions (default: the test's)."""
         return all_periods(track, app or self.get_apparatus(test.apparatus), self.analysis_for(test), None,
-                           test.events, test.io_events, test.zone_overrides, test.pauses)
+                           test.events, self.analysis_io_events(test), test.zone_overrides, test.pauses)
+
+    def analysis_io_events(self, test: Test) -> list:
+        """The I/O log the analysis sees: the test's own (Test.io_events) and the time series of the analysis
+        plug-ins as analogue samples (plugins.series_events)."""
+        if not test.extra_series:
+            return test.io_events
+        from .plugins import series_events
+
+        return list(test.io_events) + series_events(self, test)
 
     def test_info(self, test: Test, animal_id: str | None = None) -> dict:
         """The information columns of a results row (INFO_COLUMNS and the animal fields). The columns that come
@@ -902,9 +915,10 @@ class Project:
         others = [o for j, o in enumerate(tracks) if j != i]
         return dict(events=test.events if i == 0 else [], behaviours=self.behaviours if i == 0 else None,
                     other_tracks=others or None, zone_overrides=test.zone_overrides or None,
-                    io_events=test.io_events or None, pauses=test.pauses or None,
+                    io_events=self.analysis_io_events(test) or None, pauses=test.pauses or None,
                     io_devices=self.io_devices or None,
-                    result_variables=test.result_variables if i == 0 else None, calculations=steps or None)
+                    result_variables=test.result_variables if i == 0 else None, calculations=steps or None,
+                    extra_measures=test.extra_measures if i == 0 else None)
 
     def _scored_duration(self, test: Test) -> float:
         """Length of a test without a track (scored by hand, or I/O only): its duration, else the protocol's, else
@@ -917,14 +931,16 @@ class Project:
 
     @staticmethod
     def _io_only(test: Test) -> bool:
-        """A test without a track analysed from its I/O log (ANY-maze's I/O only mode), not only scored keys."""
-        return bool(test.io_events or test.result_variables)
+        """A test without a track analysed from its I/O log (ANY-maze's I/O only mode) or the data of the analysis
+        plug-ins, not only scored keys."""
+        return bool(test.io_events or test.result_variables or test.extra_series or test.extra_measures)
 
     def _untracked_periods(self, test: Test) -> list[tuple[str, float, float]]:
         dur, s = self._scored_duration(test), self.analysis_for(test)
         if not self._io_only(test):
             return time_periods(dur, s)
-        return io_only_periods(dur, s, test.events, test.io_events, self.get_apparatus(test.apparatus), test.pauses)
+        return io_only_periods(dur, s, test.events, self.analysis_io_events(test),
+                               self.get_apparatus(test.apparatus), test.pauses)
 
     def _untracked_measures(self, test: Test, t_range=None) -> dict | None:
         """Measures of a test without a track, whole or for a period (None: the test ended before it)."""
@@ -934,8 +950,9 @@ class Project:
         if not self._io_only(test):  # TakeNote: the scored keys
             a, b = (0.0, dur) if t_range is None else (t_range[0], min(t_range[1], dur))
             return behaviour_measures(test.events, self.behaviours, a, b)
-        return io_only_measures(dur, self.analysis_for(test), test.io_events, self.io_devices or None, test.events,
-                                self.behaviours, test.result_variables, t_range, test.pauses)
+        return io_only_measures(dur, self.analysis_for(test), self.analysis_io_events(test), self.io_devices or None,
+                                test.events, self.behaviours, test.result_variables, t_range, test.pauses,
+                                test.extra_measures)
 
     def _scored_period(self, test: Test, spec) -> dict | None:
         """result_for_period() of a test without a track: its measures for a part of the test (a time period's

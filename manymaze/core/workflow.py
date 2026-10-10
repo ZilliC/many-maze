@@ -123,7 +123,8 @@ def _fresh_copy(project: Project, test: Test, **changes) -> Test:
     """A pending copy of `test` with a new id and none of its recorded data (scoring, I/O log, results, pauses)."""
     d = asdict(test)
     d.update(id=project.next_test_id(), events=[], status="pending", recorded_at="", notes="", io_events=[],
-             result_variables={}, pauses=[], experimenter="", end_reason="", **changes)
+             result_variables={}, pauses=[], experimenter="", end_reason="", extra_series={}, extra_measures={},
+             **changes)
     return Test.from_dict(d)
 
 
@@ -158,8 +159,13 @@ def clear_tracks(project: Project, test: Test) -> int:
 
 
 def delete_test(project: Project, test: Test) -> int:
-    """Remove the test and its track files (videos are kept). Returns the number of track files removed."""
+    """Remove the test, its track files and the time series of the analysis plug-ins (videos are kept). Returns the
+    number of track files removed."""
     n = clear_tracks(project, test)
+    if project.path is not None and test.extra_series:
+        from .plugins import series_path
+
+        series_path(project, test).unlink(missing_ok=True)
     project.tests.remove(test)
     return n
 
