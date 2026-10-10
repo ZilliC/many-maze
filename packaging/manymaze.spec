@@ -19,7 +19,8 @@ a = Analysis(
                                           "manymaze.core.pose", "manymaze.gui.pose_model", "onnx", "onnx.helper",
                                           "onnx.numpy_helper"] +
                   ["manymaze.core." + m for m in ("iodevices", "operant", "periods", "sequences", "charts",
-                                                  "videoexport", "workflow", "camera", "livegroup", "security")] +
+                                                  "videoexport", "workflow", "camera", "livegroup", "security",
+                                                  "sync")] +
                   # imported only when a protected experiment is opened (PyInstaller's hook bundles its Rust
                   # extension and OpenSSL)
                   ["cryptography.hazmat.primitives.ciphers.aead"] +

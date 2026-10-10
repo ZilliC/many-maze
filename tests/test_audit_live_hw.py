@@ -355,7 +355,8 @@ def test_long_trains_and_pulses_are_sent_whole():
 # ====================================================================== firmware 1.2
 def test_firmware_source_has_the_protocol_fixes():
     src = FIRMWARE.read_text()
-    assert '#define FW_VERSION "1.2"' in src
+    version = re.search(r'#define FW_VERSION "(\d+)\.(\d+)"', src)
+    assert version and tuple(map(int, version.groups())) >= (1, 2)  # 1.2's fixes, kept by later versions
     setup = src[src.index("void setup()"):src.index("void loop()")]
     assert "printId();" in setup  # the banner at start-up: resets are noticed
     dht = src[src.index("bool readDHT"):src.index("void reportEnc")]

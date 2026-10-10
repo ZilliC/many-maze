@@ -677,6 +677,15 @@ def protocol_report(project: Project, path) -> Path:
                 f"{k}={v}" for k, v in d.items()  # passwords and tokens are never printed
                 if k not in ("name", "type") and not is_secret(k) and not isinstance(v, (list, dict))))
             for d in p.io_devices]))
+    from .sync import EVENTS, sync_from, sync_on
+
+    if sync_on(p.sync):
+        s = sync_from(p.sync)
+        out.append("<h2>Synchronisation</h2>" + table(("Item", "Value"), [
+            ("Output", "/".join(x for x in (s["device"], s["channel"]) if x)),
+            ("A pulse", ", ".join(label for opt, label in EVENTS.values() if s[opt]).replace(
+                "frames", "every frame").replace("positions", "every position stored")),
+            ("Pulse width (ms)", s["width_ms"])]))
     if p.training_criteria:
         out.append("<h2>Training criteria</h2><ul>" + "".join(
             f"<li>{html.escape(criterion_text(c))}</li>" for c in p.training_criteria) + "</ul>")

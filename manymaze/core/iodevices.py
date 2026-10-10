@@ -102,6 +102,7 @@ class Device:
         self._pending: list[tuple[str, float, float | None]] = []  # (channel, value, board ms or None)
         self._pend_lock = threading.Lock()  # _pending: filled by readers, emptied by pollers (other threads)
         self.watchdog_fired = 0  # times the board's watchdog switched every output off
+        self.sync_pulses: dict[str, int] = {}  # synchronisation pulses sent per output channel (core.sync)
         self.input_times: dict[str, float] = {}  # monotonic time of each input's last report
         self.filters: dict[str, AnalogFilter] = {}
         for n, c in list(self.channels.items()):
@@ -219,6 +220,15 @@ class Device:
         """Start a hardware-timed train (count 0 = until stopped). False if the device cannot time pulses."""
         return False
 
+    def sync_pulse(self, channel: str, width_s: float) -> bool | None:
+        """One synchronisation pulse by the device's fastest path (core.sync): True when the device sends and times
+        it itself, False when it could not be sent, None when the device cannot time it (the device manager then
+        switches the output on and off itself)."""
+        return None
+
+    def _count_sync(self, channel: str):
+        self.sync_pulses[channel] = self.sync_pulses.get(channel, 0) + 1
+
     def stop_train(self, channel: str) -> bool:
         return False
 
@@ -297,6 +307,14 @@ class VirtualDevice(Device):
         if channel not in self.channels:
             self.channels[channel] = {"name": channel, "kind": "output"}
         self.outputs[channel] = value
+
+    def sync_pulse(self, channel: str, width_s: float) -> bool:
+        """A simulated pulse: counted (sync_pulses), the output's shown state does not change."""
+        if channel not in self.channels:
+            self.channels[channel] = {"name": channel, "kind": "output"}
+            self.outputs.setdefault(channel, 0)
+        self._count_sync(channel)
+        return True
 
 
 class _LineDevice(Device):
@@ -441,6 +459,7 @@ class ArduinoDevice(_LineDevice):
         self.version = ""
         self.resets = 0  # times the board was seen restarting (power or USB glitch) and was configured again
         self._configured = False
+        self._sync_last: tuple[int, int] | None = None  # the board's last SYNC (pin, µs): "SYNC" alone repeats it
         self._query_until = 0.0
         self.by_pin: dict[tuple[str, int], str] = {}
         self.dht: dict[int, dict[str, str]] = {}  # DHT22 pin -> {"temperature": channel, "humidity": channel}
@@ -493,6 +512,7 @@ class ArduinoDevice(_LineDevice):
             return ()
 
     def configure(self):
+        self._sync_last = None  # (Z forgets the last SYNC too)
         if self.write_line("Z"):
             for ch in self.outputs:  # the board starts again with every output off
                 if self.kind(ch) in ("output", "pwm"):
@@ -702,6 +722,26 @@ class ArduinoDevice(_LineDevice):
         if pin is None:
             return False
         return self.write_line(f"X {pin}")
+
+    def sync_pulse(self, channel: str, width_s: float) -> bool:
+        """``SYNC pin width_us`` (firmware 1.3: the end of the pulse is timed by a timer interrupt; ``SYNC`` alone
+        repeats the last pulse), or ``W pin 1 max_ms`` with older firmware (millisecond timing)."""
+        pin = self._pin(channel)
+        if pin is None or self.kind(channel) != "output":
+            if pin is not None:
+                self._error(f"{self.name}: synchronisation pulses need a digital output, not '{channel}'")
+            return False
+        us = max(1, min(1_000_000, int(round(float(width_s) * 1e6))))
+        if self.firmware_version >= (1, 3):
+            line = "SYNC" if self._sync_last == (pin, us) else f"SYNC {pin} {us}"
+            ok = self.write_line(line)
+            if ok:
+                self._sync_last = (pin, us)
+        else:
+            ok = self.write_line(f"W {pin} 1 {max(1, math.ceil(us / 1000))}")
+        if ok:
+            self._count_sync(channel)
+        return ok
 
     def send(self, text: str) -> bool:
         return self.write_line(text)
@@ -1046,6 +1086,7 @@ class DeviceManager:
     RECONNECT_S = 5.0  # a lost device is opened again this often
     TICK_TIMEOUT_S = 10.0  # heartbeats stop when no test ticked for this long (generous: camera reconnections)
     HOST_RETRY_S = 0.2  # a host cut-off whose "off" could not be sent is tried again after this
+    SYNC_SPIN_S = 0.002  # synchronisation pulses up to this long that the device cannot time: ended by waiting
 
     def __init__(self, configs=(), open: bool = True, transports: dict | None = None):
         self.configs = [dict(c) for c in (configs or []) if c.get("enabled", True)]
@@ -1370,6 +1411,34 @@ class DeviceManager:
             self._cancel_schedule(device, channel)
             return self.device(device).stop_train(channel)
 
+    def sync_pulse(self, device: str, channel: str, width_s: float) -> bool:
+        """One synchronisation pulse (core.sync) by the device's fastest path: timed by the device when it can
+        (Device.sync_pulse); otherwise the output is switched on at once and off after the width — by waiting here
+        for pulses up to SYNC_SPIN_S, else from the service thread on the computer's clock (about 1 ms jitter)."""
+        with self._lock:
+            return self._sync_dev(self.device(device), channel, width_s)
+
+    def _sync_dev(self, d: Device, channel: str, width_s: float) -> bool:
+        import heapq
+
+        width_s = max(0.0, float(width_s))
+        r = d.sync_pulse(channel, width_s)
+        if r is not None:
+            return bool(r)
+        if self._set_output_dev(d, channel, 1) is False:
+            return False
+        d._count_sync(channel)
+        if width_s <= self.SYNC_SPIN_S:
+            end = time.perf_counter() + width_s
+            while time.perf_counter() < end:
+                pass
+            return self._set_output_dev(d, channel, 0) is not False
+        self._sched_seq += 1
+        heapq.heappush(self._sched, (time.monotonic() + width_s, self._sched_seq, d.name, channel, 0, None))
+        self._start_keepalive(force=True)
+        self._sched_wake.set()
+        return True
+
     def send(self, device: str, text: str) -> bool:
         with self._lock:
             d = self.devices.get(device)
@@ -1590,6 +1659,14 @@ class DeviceView:
         if self.alias is not None and name == self.alias:
             self.manager._cancel_schedule(name, channel)
         return self._call(device, lambda d: d.stop_train(channel))
+
+    def sync_pulse(self, device: str, channel: str, width_s: float) -> bool:
+        """A synchronisation pulse on this test's box (see DeviceManager.sync_pulse)."""
+        name = self._map(device)
+        if self.alias is not None and name == self.alias:
+            return self.manager.sync_pulse(name, channel, width_s)
+        d = self.device(name)  # a private simulated device
+        return bool(d.sync_pulse(channel, width_s))
 
     def send(self, device: str, text: str) -> bool:
         return self._call(device, lambda d: d.send(text)) if self.has(device) else False

@@ -29,6 +29,7 @@ from .livemonitor import LivePoints
 from .measures import AnalysisSettings
 from .procedures import Outputs, ProcedureEngine
 from .session import END_DURATION, END_PROCEDURE, END_USER, Session
+from .sync import SyncOutput, sync_on
 from .track import Track
 from .tracking import ArenaTracker, Detection, DetectionSettings, TrackBuilder, postprocess, to_gray
 from .video import SplitRecorder, VideoRecorder
@@ -592,6 +593,7 @@ class LiveSession(_Scoring):
     control_input: str = ""  # test control switch: "[device/]channel"; closing it continues a test waiting to end
     test_info: dict | None = None  # the test for the procedures (procedures.test_context): trial(), animal() …
     frame_timeout_s: float = 0.5  # no frame for this long: the safety thread runs the procedures (0 = never)
+    sync: dict | None = None  # the synchronisation element (Project.sync, see core.sync)
 
     SAFETY_TICK_S = 0.05
 
@@ -677,6 +679,13 @@ class LiveSession(_Scoring):
         self._closers: list[threading.Thread] = []  # recorders being closed in the background
         self._last_frame_wall: float | None = None  # monotonic time of the last frame (safety thread)
         self._ticker: threading.Thread | None = None
+        self.sync_output: SyncOutput | None = None  # synchronisation pulses (Project.sync)
+        self._in_frame = False  # a frame is being processed …
+        self._frame_pulsed = False  # … and a synchronisation pulse was already sent for it
+        if sync_on(self.sync):
+            self.sync_output = SyncOutput(self.devices, self.sync)
+            if self.sync_output.problem:
+                self.warn(self.sync_output.problem, 0.0)
 
     # ------------------------------------------------------------------
     def set_background(self, frame: np.ndarray):
@@ -1155,10 +1164,21 @@ class LiveSession(_Scoring):
             try:
                 return self._process(frame, timestamp)
             finally:
+                self._in_frame = self._frame_pulsed = False
                 if self.state != "finished":
                     self._io_tick()
                 self._last_frame_wall = time.monotonic()
                 self._ensure_ticker()
+
+    def _sync(self, what: str):
+        """A synchronisation pulse for ``what`` (core.sync); one pulse per frame at most: what happens in a frame
+        that already had its pulse (the test start in its first frame, its position, the end in its last) counts
+        that pulse."""
+        so = self.sync_output
+        if so is None or not so.wants(what):
+            return
+        if so.pulse(what, merged=self._in_frame and self._frame_pulsed) and self._in_frame:
+            self._frame_pulsed = True
 
     # ------------------------------------------------------------------ safety without frames (safety thread)
     def _io_tick(self):
@@ -1210,6 +1230,9 @@ class LiveSession(_Scoring):
         return ran
 
     def _process(self, frame, timestamp):
+        self._in_frame, self._frame_pulsed = True, False
+        if self.state in ("running", "paused"):
+            self._sync("frame")  # as the frame arrives, before it is tracked
         self._ensure_tracker(frame)
         self._frame_shape = frame.shape[:2]
         ts = timestamp if timestamp is not None else self._frame_i / self.fps
@@ -1227,6 +1250,7 @@ class LiveSession(_Scoring):
             self._check_start(ts, dets, fg)
             if self.state != "running":
                 return dets
+            self._sync("frame")  # the test's first frame (its start pulse, sent by _start, counts for it)
         if self.state == "paused":
             self._call_engine(self.engine.paused_tick, time.monotonic() - self._pause_wall)
             return dets
@@ -1245,6 +1269,7 @@ class LiveSession(_Scoring):
         if self._gap_pending is not None:  # the first frame after a capture drop-out
             self._mark_gap(t)
         self._track.add(t, d)
+        self._sync("position")
         zones, head_zones = self.occupancy.update(d, t)
         freezing = self._freezing_now(d)
         self.stats.update(t, d, zones, freezing)
@@ -1400,6 +1425,7 @@ class LiveSession(_Scoring):
         self.state = "running"
         self.start_phase = ""
         self.t0 = ts
+        self._sync("test_start")
         if self.record_path and self.record_from_start:
             self._open_recorder(0.0)
         self._call_engine(self.engine.start, 0.0, t=0.0)
@@ -1409,6 +1435,7 @@ class LiveSession(_Scoring):
         with self._locked():
             if self.state == "finished":
                 return
+            started = self.state in ("running", "paused")
             eng = self.engine
             waiting = self.waiting_end
             if waiting:  # waiting for the test end and not continued: the procedure ended the test
@@ -1449,6 +1476,8 @@ class LiveSession(_Scoring):
                     untick(self)
                 except Exception:  # pragma: no cover
                     pass
+            if started:  # after the outputs went off: nothing cuts the pulse short
+                self._sync("test_end")
             if self._autosaver is not None and self.cols["t"]:
                 self._autosaver.request(force=True)  # the final state, until the test is saved or discarded
 

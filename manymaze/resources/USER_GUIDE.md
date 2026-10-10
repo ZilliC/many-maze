@@ -1210,6 +1210,32 @@ switches a simulated input, *Test* pulses the selected output for 0.5 s or plays
 
 Every input and output change during a test is recorded in the test's I/O log (`Test.io_events`).
 
+### Synchronisation
+
+**Protocol ▸ Hardware ▸ Synchronisation** sends TTL pulses on a digital output so that another recording system —
+electrophysiology, imaging, fibre photometry, a second camera — can align its data with the test, set up once for
+every live test of the experiment (the *Sync pulse* procedure action remains for pulses at moments of your choice):
+
+- **Output** — a digital output of an I/O device; **Pulse width** — 0.001 to 1000 ms (default 1 ms).
+- **Send a pulse** when the test starts, when it ends, for every captured frame (while the test runs or is paused)
+  and / or for every position stored in the track (one per track row: the recorded positions can be matched one to
+  one with the pulses).
+- Pulses due at the same moment are sent as **one**: the first frame's pulse also marks the test start, the last
+  frame's the test end, and a frame's pulse its position. With *every frame* there are therefore exactly as many
+  pulses as frames; with *every position* as many as track rows. A test stopped between frames (the Stop button)
+  gets an end pulse of its own, sent after the outputs went off.
+- Each device sends them by its **fastest path**. The Arduino firmware (1.3) switches the output on as soon as it
+  reads the `SYNC` command and ends the pulse from a timer interrupt (Timer1 on AVR boards), so the width is exact
+  whatever else the board is doing; the start is delayed by the USB link by a roughly constant ~1 ms. Older firmware
+  gets `W pin 1 max_ms` (millisecond timing). A LabJack times pulses up to 5 ms itself (`WAIT_US_BLOCKING`). National
+  Instruments devices and the other devices use their digital line: the output is switched on and, after the width,
+  off by the computer (by waiting, up to 2 ms; otherwise from the I/O service thread, about 1 ms jitter).
+- With several tests at once, each test pulses the output of its own box. An I/O-only test (no camera) gets its start
+  and end pulses.
+- The saved test's notes say how many pulses of each kind were sent (*Synchronisation pulses on box/sync (1 ms): test
+  start 1, frames 7500, test end 1 (7500 pulses sent)*). An output that does not exist is reported as a warning of the
+  test, and no pulses are sent. The element is part of the protocol (protocol report, *Based on another experiment*).
+
 ### Touch screen
 
 A full-screen stimulus window on a second display (the ANY-maze Touch equivalent) divided into response areas

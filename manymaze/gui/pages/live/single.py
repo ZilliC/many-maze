@@ -657,7 +657,7 @@ class SingleTestMixin:
                              devices=devices, variables=p.variables, name=name, zone_overrides=test.zone_overrides,
                              on_stimulus=on_stimulus, outputs_off_on_pause=self.pause_off.isChecked(),
                              test_info=test_context(p, test), control_input=self.control_input.text().strip(),
-                             **self._autosave_args(test))
+                             sync=p.sync, **self._autosave_args(test))
         settings = self._detection_settings(test)
         if settings.background == "frame" and bg is None:
             settings.background = "adaptive"
@@ -670,7 +670,7 @@ class SingleTestMixin:
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
                         outputs_off_on_pause=self.pause_off.isChecked(), test_info=test_context(p, test),
-                        control_input=self.control_input.text().strip(),
+                        control_input=self.control_input.text().strip(), sync=p.sync,
                         **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)

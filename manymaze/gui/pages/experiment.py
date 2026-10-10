@@ -21,6 +21,7 @@ from ...core.export import display_text
 from ...core.measures import AnalysisSettings
 from ...core.periods import ANCHORS
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
+from ...core.sync import sync_from
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
@@ -364,6 +365,40 @@ class ExperimentPage(Page):
                                        "procedures")
         pg.add(button_row(self.io_btn))
         pg.add(separator())
+        pg.section("Synchronisation")
+        pg.add(hint("Pulses on a digital output that let another recording system (electrophysiology, imaging, "
+                    "photometry) align its data with the test. Pulses due at the same moment are sent as one: with "
+                    "a pulse for every frame, there are as many pulses as frames. The Arduino firmware times each "
+                    "pulse's width on the board; LabJack and National Instruments devices use their digital line."))
+        f = property_form()
+        self.sync_on = QCheckBox("Send synchronisation pulses in live tests")
+        self.sync_out = QComboBox()
+        self.sync_out.setMinimumWidth(320)
+        self.sync_out.setToolTip("A digital output of an I/O device (Set up I/O devices…)")
+        self.sync_checks = {}
+        boxes = QVBoxLayout()
+        boxes.setSpacing(2)
+        for key, text in (("test_start", "When the test starts"), ("test_end", "When the test ends"),
+                          ("per_frame", "For every captured frame (while the test runs or is paused)"),
+                          ("per_position", "For every position stored in the track")):
+            cb = QCheckBox(text)
+            cb.toggled.connect(self._store_sync)
+            self.sync_checks[key] = cb
+            boxes.addWidget(cb)
+        self.sync_width = QDoubleSpinBox()
+        self.sync_width.setRange(0.001, 1000.0)
+        self.sync_width.setDecimals(3)
+        self.sync_width.setSuffix(" ms")
+        self.sync_width.setToolTip("How long each pulse lasts")
+        f.addRow(self.sync_on)
+        f.addRow("Output", self.sync_out)
+        f.addRow("Send a pulse", boxes)
+        f.addRow("Pulse width", self.sync_width)
+        pg.add(f)
+        self.sync_on.toggled.connect(self._store_sync)
+        self.sync_out.currentIndexChanged.connect(self._store_sync)
+        self.sync_width.valueChanged.connect(self._store_sync)
+        pg.add(separator())
         pg.section("Touch screen")
         f = property_form()
         self.ts_lbl = QLabel()
@@ -574,9 +609,48 @@ class ExperimentPage(Page):
         self.project.settings_extra["mode"] = self.mode.currentData()
         self.main.mark_dirty()
 
+    def _load_sync(self, p):
+        """The synchronisation element of the Hardware page (Project.sync)."""
+        s = sync_from(p.sync if p is not None else None)
+        with loading(self):
+            self.sync_out.clear()
+            for d in (p.io_devices if p is not None else []):
+                for c in d.get("channels") or []:
+                    if c.get("kind", "input") == "output" and c.get("name"):
+                        self.sync_out.addItem(f"{d.get('name', '?')}/{c['name']}", (d.get("name", ""), c["name"]))
+            want = (s["device"], s["channel"])
+            i = next((k for k in range(self.sync_out.count()) if self.sync_out.itemData(k) == want or
+                      not s["device"] and self.sync_out.itemData(k)[1] == s["channel"]), -1)
+            if i < 0 and s["channel"]:
+                self.sync_out.addItem(f"{'/'.join(x for x in want if x)} (not configured)", want)
+                i = self.sync_out.count() - 1
+            self.sync_out.setCurrentIndex(max(i, 0) if self.sync_out.count() else -1)  # default: the first output
+            self.sync_on.setChecked(s["enabled"])
+            for k, cb in self.sync_checks.items():
+                cb.setChecked(s[k])
+            self.sync_width.setValue(s["width_ms"])
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        on = self.sync_on.isChecked()
+        for w in [self.sync_out, self.sync_width, *self.sync_checks.values()]:
+            w.setEnabled(on)
+
+    def _store_sync(self, *_):
+        self._sync_enabled()
+        p = self.project
+        if self._loading or p is None:
+            return
+        dev, ch = self.sync_out.currentData() or ("", "")
+        p.sync = sync_from({"enabled": self.sync_on.isChecked(), "device": dev, "channel": ch,
+                            "width_ms": self.sync_width.value(),
+                            **{k: cb.isChecked() for k, cb in self.sync_checks.items()}})
+        self.main.mark_dirty()
+
     def _update_hardware(self):
         p = self.project
         self.io_list.clear()
+        self._load_sync(p)
         if p is None:
             self.hw_lbl.setText("")
             self.ts_lbl.setText("")
