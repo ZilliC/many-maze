@@ -7,10 +7,12 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QInputDialog,
-                               QLabel, QLineEdit, QMenu, QProgressBar, QPushButton, QStackedWidget, QTableView,
-                               QTreeWidget, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
+                               QTableView, QTreeWidget, QVBoxLayout, QWidget)
 
+from ....core.apparatus import unique_name
 from ....core.project import OPTIONAL_INFO_COLUMNS, result_columns
+from ....core.reports import default_report, find_report, set_default
 from ... import ribbon, theme
 from ...icons import icon
 from ...ribbon import RibbonHost
@@ -55,6 +57,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         # columns unticked in the measure chooser (kept while the project is open); rarely needed information
         # columns start unticked
         self.hidden: set[str] = set(OPTIONAL_INFO_COLUMNS)
+        self.report_name: str | None = None  # the saved results report shown (Project.reports), if any
+        self._report_pending: dict | None = None  # a report to apply once its rows are delivered
+        self._known_cols: set[str] = set()  # columns seen since the report was applied (new ones follow it)
         self._names = _names(None)
         self._frames: dict[int, object] = {}
         self._detail: dict | None = None
@@ -87,6 +92,10 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.stage_combo = self._ribbon_combo(140)
         self.stage_combo.setToolTip("Show only the tests of this stage")
         self.stage_combo.currentIndexChanged.connect(self._apply_filters)
+        self.reports_combo = self._ribbon_combo(150)
+        self.reports_combo.setToolTip("The saved results report shown: its measures, information columns, time "
+                                      "periods and filters (Report ▸ Save as… saves what the spreadsheet shows)")
+        self.reports_combo.currentIndexChanged.connect(self._report_chosen)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setMaximumWidth(180)
@@ -237,6 +246,18 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.save_act.setMenu(m)
         self.report_act = A("HTML report", "report", self.html_report,
                             "Create a report with the results, statistics, track plots, heat maps and charts")
+        self.reports_act = A("Report", "list", None, "Save what the spreadsheet shows (measures, information "
+                             "columns, time periods and filters) as a named report, kept in the experiment")
+        m = QMenu(self)
+        self.new_report_act = m.addAction(icon("new"), "New report…", lambda: self.new_report())
+        self.save_report_act = m.addAction(icon("save"), "Save report", lambda: self.save_report())
+        self.save_report_as_act = m.addAction(icon("save_as"), "Save report as…", lambda: self.save_report_as())
+        self.delete_report_act = m.addAction(icon("delete"), "Delete report", lambda: self.delete_report())
+        m.addSeparator()
+        self.default_report_act = m.addAction("Default report (shown when the experiment is opened)")
+        self.default_report_act.setCheckable(True)
+        self.default_report_act.triggered.connect(self.set_default_report)
+        self.reports_act.setMenu(m)
         self.select_act = A("Select data", "select_data", self.chooser.setVisible,
                             "Choose the measures shown in the spreadsheet", checkable=True)
         self.view_sheet_act = A("View spreadsheet", "view_table", lambda: self.set_view("spreadsheet"),
@@ -288,6 +309,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
                 ("Spreadsheet", [(self.print_act, "large"), (self.save_act, "large"), (self.report_act, "large")]),
                 ("Actions", [(self.select_act, "large"), (self.view_sheet_act, "large"), (self.clear_act, "small"),
                              (self.segment_act, "small"), (self.recalc_act, "small")]),
+                ("Report", [host([self.reports_combo]), (self.reports_act, "large")]),
                 ("Filter", [host(["Treatment", self.group_combo], ["Stage", self.stage_combo])]),
                 ("Time periods", [host([self.seg_check], [self.period_combo])])]
 
@@ -379,9 +401,14 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._detail = None
         self._detail_key = None
         self._names = _names(project)
+        # the experiment's default report is shown once its results are delivered (on_show)
+        rep = default_report(project.reports) if project is not None else None
+        self.report_name, self._report_pending, self._known_cols = (rep["name"] if rep else None), rep, set()
+        self._sync_report_combo()
         self.seg_check.blockSignals(True)
-        self.seg_check.setChecked(False)
+        self.seg_check.setChecked(bool(rep and rep["segmented"]))
         self.seg_check.blockSignals(False)
+        self.period_combo.setEnabled(self.seg_check.isChecked())
         self.segmented = False
         self.model.set_data([], [])
         self.tree.clear()
@@ -466,6 +493,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._detail_key = None
         self._names = _names(self.project)
         self._fill_filter_combos()
+        self._follow_report()
         self._build_tree()
         self._update_columns()
         if not rows:
@@ -645,6 +673,8 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
         if self.seg_check.isChecked():
             self.seg_check.setChecked(False)
+        self.report_name, self._report_pending = None, None  # everything shown: no saved report
+        self._sync_report_combo()
         self._build_tree()
         self._update_columns()
         self.main.status("Spreadsheet settings cleared")
@@ -668,6 +698,181 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         else:
             self.reload()
         self.main.status(f"Segment length: {seconds:g} s" if seconds > 0 else "Time segments switched off")
+
+    # ------------------------------------------------------------------ saved reports
+    def current_report(self) -> dict | None:
+        """The saved report shown (Project.reports), or None."""
+        p = self.project
+        return find_report(p.reports, self.report_name) if p is not None and self.report_name else None
+
+    def report_settings(self) -> dict:
+        """What the spreadsheet shows, as a report (see core/reports.py) without its name: the measures and
+        information columns ticked, whether time periods are shown and the rows chosen in the filters (every
+        measure and the usual information columns while there are no results yet)."""
+        seg = self.seg_check.isChecked()
+        out = {"measures": None, "info_columns": None, "segmented": seg,
+               "period": (self.period_combo.currentData() or "") if seg else "",
+               "treatment": self.group_combo.currentData() or "", "stage": self.stage_combo.currentData() or ""}
+        if self.rows:
+            cols = set(self.all_columns())
+            out["measures"] = self.visible_measures()
+            out["info_columns"] = [c for c in info_columns(self.project) if c in cols and c not in self.hidden]
+        return out
+
+    def _sync_report_combo(self):
+        """List the experiment's reports in the ribbon combo (the default one marked) and select the one shown."""
+        p = self.project
+        self.reports_combo.blockSignals(True)
+        self.reports_combo.clear()
+        self.reports_combo.addItem("- None -", None)
+        for r in p.reports if p is not None else []:
+            self.reports_combo.addItem(f"{r['name']} (default)" if r.get("default") else r["name"], r["name"])
+        self.reports_combo.setCurrentIndex(max(0, self.reports_combo.findData(self.report_name)))
+        self.reports_combo.blockSignals(False)
+        rep = self.current_report()
+        for a in (self.save_report_act, self.delete_report_act, self.default_report_act):
+            a.setEnabled(rep is not None)
+        self.save_report_as_act.setEnabled(p is not None)
+        self.new_report_act.setEnabled(p is not None)
+        self.default_report_act.setChecked(bool(rep and rep.get("default")))
+
+    def _report_chosen(self, _i=None):
+        self.show_report(self.reports_combo.currentData())
+
+    def show_report(self, name: str | None):
+        """Show a saved report: its measures, information columns, time periods and filters (None: no report; the
+        spreadsheet keeps what it shows)."""
+        rep = find_report(self.project.reports, name) if self.project is not None and name else None
+        self.report_name, self._report_pending = (rep["name"] if rep else None), rep
+        self._sync_report_combo()
+        if rep is None:
+            return
+        changed = self.seg_check.isChecked() != rep["segmented"]
+        self.seg_check.blockSignals(True)
+        self.seg_check.setChecked(rep["segmented"])
+        self.seg_check.blockSignals(False)
+        self.period_combo.setEnabled(rep["segmented"])
+        if changed or not self.rows:
+            self.reload()  # applied when the rows arrive (_rows_loaded)
+        else:
+            self._follow_report()
+            self._build_tree()
+            self._update_columns()
+        self.main.status(f"Report “{rep['name']}”")
+
+    def _follow_report(self):
+        """With freshly delivered rows: apply a report waiting for them; else hide the measures that appeared since
+        (e.g. a new zone's) when the report shown lists its measures."""
+        cols = set(self.all_columns())
+        new, self._known_cols = cols - self._known_cols, cols | self._known_cols
+        rep, pending = self.current_report(), self._report_pending
+        if pending is not None and self.rows:
+            self._report_pending = None
+            self._known_cols = set(cols)
+            self._apply_report(pending)
+        elif rep is not None and rep.get("measures") is not None:
+            keep = set(rep["measures"])
+            self.hidden.update(c for c in self.measure_columns() if c in new and c not in keep)
+
+    def _apply_report(self, rep: dict):
+        measures = self.measure_columns()
+        self.hidden.difference_update(measures)
+        if rep.get("measures") is not None:
+            keep = set(rep["measures"])
+            self.hidden.update(c for c in measures if c not in keep)
+        info = info_columns(self.project)
+        self.hidden.difference_update(info)
+        if rep.get("info_columns") is not None:
+            keep = set(rep["info_columns"])
+            self.hidden.update(c for c in info if c not in keep)
+        else:
+            self.hidden.update(OPTIONAL_INFO_COLUMNS)
+        for combo, key in ((self.group_combo, "treatment"), (self.stage_combo, "stage"),
+                           (self.period_combo, "period")):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(rep.get(key) or None)))
+            combo.blockSignals(False)
+        self._apply_filters()
+
+    def _ask_report_name(self, title: str, default: str) -> str | None:
+        name, ok = QInputDialog.getText(self, title, "Name of the report", text=default)
+        name = name.strip() if ok else ""
+        return name or None
+
+    def new_report(self, name: str | None = None):
+        """A new report showing every measure and the usual information columns (whole tests, no filter)."""
+        p = self.project
+        if p is None:
+            return None
+        if name is None:
+            name = self._ask_report_name("New report", unique_name(f"Report {len(p.reports) + 1}",
+                                                                   [r["name"] for r in p.reports]))
+            if name is None:
+                return None
+        name = unique_name(name, [r["name"] for r in p.reports])
+        p.reports.append({"name": name, "measures": None, "info_columns": None, "segmented": False, "period": "",
+                          "treatment": "", "stage": "", "default": False})
+        self.main.mark_dirty()
+        self.show_report(name)
+        return name
+
+    def save_report(self):
+        """Save what the spreadsheet shows into the report shown (Save as… without one)."""
+        rep = self.current_report()
+        if rep is None:
+            return self.save_report_as()
+        rep.update(self.report_settings())
+        self.main.mark_dirty()
+        self.main.status(f"Report “{rep['name']}” saved")
+        return rep["name"]
+
+    def save_report_as(self, name: str | None = None, confirm: bool = True):
+        """Save what the spreadsheet shows as a new report (or replace the report of that name)."""
+        p = self.project
+        if p is None:
+            return None
+        if name is None:
+            cur = self.current_report()
+            name = self._ask_report_name("Save report as", unique_name(
+                f"{cur['name']} copy" if cur else f"Report {len(p.reports) + 1}", [r["name"] for r in p.reports]))
+            if name is None:
+                return None
+        rep = find_report(p.reports, name)
+        if rep is not None and confirm and QMessageBox.question(
+                self, "Save report as", f"Replace the report “{name}”?") != QMessageBox.Yes:
+            return None
+        if rep is None:
+            rep = {"name": name, "default": False}
+            p.reports.append(rep)
+        rep.update(self.report_settings())
+        self.report_name = name
+        self.main.mark_dirty()
+        self._sync_report_combo()
+        self.main.status(f"Report “{name}” saved")
+        return name
+
+    def delete_report(self, confirm: bool = True):
+        p, rep = self.project, self.current_report()
+        if rep is None:
+            return False
+        if confirm and QMessageBox.question(self, "Delete report", f"Delete the report “{rep['name']}”? (The "
+                                            "spreadsheet keeps showing what it shows.)") != QMessageBox.Yes:
+            return False
+        p.reports.remove(rep)
+        self.report_name = None
+        self.main.mark_dirty()
+        self._sync_report_combo()
+        return True
+
+    def set_default_report(self, on: bool = True):
+        """Make the report shown the one the Data page shows when the experiment is opened (on=False: none)."""
+        rep = self.current_report()
+        if rep is None:
+            return
+        set_default(self.project.reports, rep["name"] if on else None)
+        self.main.mark_dirty()
+        self._sync_report_combo()
+        self.main.status(f"“{rep['name']}” is the default report" if on else "No default report")
 
     def _table_menu(self, pos):
         m = QMenu(self)

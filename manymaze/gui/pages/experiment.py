@@ -20,7 +20,7 @@ from ...core.ioconfig import PRESET_KEY
 from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
 from ...core.export import display_text
 from ...core.measures import AnalysisSettings
-from ...core.periods import ANCHORS
+from ...core.periods import ANCHORS, END_ANCHORS, TARGET_KEY, check_periods
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
@@ -61,9 +61,14 @@ PERIOD_COLS = [("label", "Time period", "text", None), ("start", "Starts at (s)"
                ("end", "Ends at (s)", "number", None)]
 EVENT_PERIOD_COLS = [("label", "Time period", "text", None),
                      ("anchor", "The period starts at", "choice", list(ANCHORS.items())),
-                     ("target", "Zone / key / input", "text", None), ("offset_s", "Offset (s)", "number", None),
-                     ("duration_s", "Duration (s)", "number", None), ("occurrence", "Occurrence", "int", None)]
-_TARGET_KEY = {"first_entry": "zone", "first_exit": "zone", "mark": "behaviour", "input": "channel"}
+                     ("target", "Zone / key / input / calculation", "text", None),
+                     ("offset_s", "Offset (s)", "number", None), ("duration_s", "Duration (s)", "number", None),
+                     ("occurrence", "Occurrence", "int", None),
+                     ("end_anchor", "The period ends", "choice", list(END_ANCHORS.items())),
+                     ("end_target", "Ends at zone / key / input / calculation", "text", None),
+                     ("end_offset_s", "End offset (s)", "number", None),
+                     ("end_occurrence", "End occurrence", "int", None)]
+_TARGET_KEY = {k: v for k, v in TARGET_KEY.items() if k in ANCHORS}
 
 
 class ExperimentPage(Page):
@@ -304,12 +309,16 @@ class ExperimentPage(Page):
                           small_button("Remove", "delete", slot=self.periods.remove_current)))
 
         pg.section("Time periods based on a time marker")
-        pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box. "
-                    "Duration 0 = until the end of the test. Occurrence: 1 = first, 2 = second…, 0 = one period "
-                    "for every occurrence. Periods whose event never happens are left out."))
-        self.ev_periods = RecordTable(EVENT_PERIOD_COLS, stretch=(0, 2))
+        pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box — "
+                    "or starting at the time (s) given by a calculation. Occurrence: 1 = first, 2 = second…, 0 = one "
+                    "period for every occurrence. Periods whose event never happens are left out. The period lasts "
+                    "its duration (0 = until the end of the test) or ends at an event (its occurrence after the "
+                    "start: 1 = the first) or at a calculation's time; when that never happens, it ends at the end "
+                    "of the test and its results say so (Warnings)."))
+        self.ev_periods = RecordTable(EVENT_PERIOD_COLS, stretch=(0, 2, 7))
         self.ev_periods.setColumnWidth(1, 230)
-        for c in (3, 4, 5):
+        self.ev_periods.setColumnWidth(6, 230)
+        for c in (3, 4, 5, 8, 9):
             self.ev_periods.setColumnWidth(c, 100)
         self.ev_periods.setMinimumHeight(130)
         self.ev_periods.setMaximumHeight(190)
@@ -476,6 +485,8 @@ class ExperimentPage(Page):
             self._show_key()
         elif key == "calculations":
             self._show_calculation()
+        elif key == "analysis" and self.project is not None:
+            self._show_event_period_problems([])  # (the calculations may have changed)
 
     # ================================================================== loading
     def set_project(self, project):
@@ -518,10 +529,9 @@ class ExperimentPage(Page):
         self.confirm_id.setChecked(wf.confirm_id_enabled(p))
         self.crit.set_records(self._criterion_row(c) for c in p.training_criteria)
         self.periods.set_records({"label": lbl, "start": a, "end": b} for lbl, a, b in p.analysis.custom_periods)
-        self.ev_periods.set_records({**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), "")}
-                                    for d in p.analysis.event_periods)
+        self.ev_periods.set_records(self._event_period_record(d) for d in p.analysis.event_periods)
         self.periods_lbl.hide()
-        self.ev_periods_lbl.hide()
+        self._show_event_period_problems([])
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
         self._fill_calculations()
@@ -743,7 +753,7 @@ class ExperimentPage(Page):
         rows = self._calculation_rows()
         reserved = info_columns(p) + [ERROR_COLUMN, "Warnings"]
         measures = [m for m in self._calc_measures or [] if m not in reserved] if rows else None
-        errs = check_calculation(c, measures, p.calculations, reserved)
+        errs = check_calculation(c, measures, p.calculations, reserved, p.analysis.event_periods)
         text = "The results are worked out when they are shown on the Data page."
         row = next((r for r in rows or [] if ERROR_COLUMN not in r), None)
         if not errs and row is not None:
@@ -762,11 +772,10 @@ class ExperimentPage(Page):
             return
         old = p.calculations[r].column
         p.calculations[r] = new
-        # renamed: the other formulas follow (unless the old name is a measure's: theirs may mean the measure)
-        if new.column and old and new.column != old and old not in (self._calc_measures or ()):
-            for c in p.calculations:
-                if c is not new:
-                    c.formula = c.formula.replace("{" + old + "}", "{" + new.column + "}")
+        # renamed: the other formulas (unless the old name is a measure's: theirs may mean the measure), the time
+        # periods it defines and the training criteria on it follow
+        if new.column and old and new.column != old:
+            p.rename_calculation(old, new.column, formulas=old not in (self._calc_measures or ()), skip=new)
         self.calc_list.item(r).setText(new.column or "(no name)")
         self.main.mark_dirty()
         self._check_calculation()
@@ -801,10 +810,11 @@ class ExperimentPage(Page):
         c, p = self.current_calculation(), self.project
         if c is None:
             return
-        users = [x.column for x in p.calculations if x is not c and "{" + c.column + "}" in x.formula]
+        users = p.calculation_users(c.column) if c.column else []
         msg = f"Delete the calculation “{c.column or c.name}”?"
         if users:
-            msg += "\n\nIts result is used by: " + ", ".join(users) + " (their results will be blank)."
+            msg += ("\n\nIts result is used by: " + ", ".join(users) + " (their results will be blank, the time "
+                    "periods it defines left out).")
         if confirm and QMessageBox.question(self, "Delete calculation", msg) != QMessageBox.Yes:
             return
         p.calculations.remove(c)
@@ -1171,8 +1181,19 @@ class ExperimentPage(Page):
             zone = p.apparatus[0].zones[-1].name
         n = self.ev_periods.rowCount() + 1
         self.ev_periods.add_record({"label": f"Event period {n}", "anchor": "first_exit", "target": zone,
-                                    "offset_s": 0, "duration_s": 30, "occurrence": 1})
+                                    "offset_s": 0, "duration_s": 30, "occurrence": 1, "end_anchor": "duration",
+                                    "end_offset_s": 0, "end_occurrence": 1})
         self._store_event_periods()
+
+    @staticmethod
+    def _event_period_record(d: dict) -> dict:
+        """A stored event-anchored period as a row of the table (its start's and end's zone / key / input /
+        calculation in one column each)."""
+        end = d.get("end") if isinstance(d.get("end"), dict) else {}
+        ea = end.get("anchor") or "duration"
+        return {**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), ""), "end_anchor": ea,
+                "end_target": end.get(TARGET_KEY.get(ea, "zone"), ""), "end_offset_s": end.get("offset_s", 0),
+                "end_occurrence": end.get("occurrence", 1)}
 
     def _store_event_periods(self, *_):
         if self._loading or self.project is None:
@@ -1185,10 +1206,27 @@ class ExperimentPage(Page):
             target = d.pop("target")
             if d["anchor"] in _TARGET_KEY:
                 d[_TARGET_KEY[d["anchor"]]] = target
+            ea, et = d.pop("end_anchor") or "duration", d.pop("end_target")
+            eo, en = d.pop("end_offset_s"), d.pop("end_occurrence")
+            if ea != "duration":  # ends at an event or a calculation's time (an empty offset / occurrence: 0 / 1)
+                d["end"] = {"anchor": ea, TARGET_KEY.get(ea, "zone"): et, "offset_s": eo or 0.0,
+                            "occurrence": max(1, en or 1)}
             out.append({**d, "label": d["label"] or f"Event period {r + 1}"})
         self.project.analysis.event_periods = out
-        self._show_rejected(self.ev_periods_lbl, bad, "the offset, duration and occurrence must be numbers")
+        self._show_event_period_problems(bad)
         self.main.mark_dirty()
+
+    def _show_event_period_problems(self, bad: list[str]):
+        """The periods not stored (numbers missing) and those whose calculation cannot define them (unknown, worked
+        out from other trials, circular reference: they are left out or end at the end of the test)."""
+        p = self.project
+        self._show_rejected(self.ev_periods_lbl, bad, "the offset, duration and occurrence must be numbers")
+        problems = check_periods(p.analysis.event_periods, p.calculations,
+                                 info_columns(p) + [ERROR_COLUMN]) if p is not None else []
+        if problems:
+            text = "\n".join(f"“{label}”: {msg}" for label, msg in problems)
+            self.ev_periods_lbl.setText((self.ev_periods_lbl.text() + "\n" if bad else "") + text)
+            self.ev_periods_lbl.setVisible(True)
 
     @staticmethod
     def _show_rejected(lbl: QLabel, labels: list[str], why: str):

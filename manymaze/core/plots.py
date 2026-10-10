@@ -22,7 +22,7 @@ from . import charts  # noqa: E402
 from .apparatus import Apparatus  # noqa: E402
 from .pauses import period_frames, to_recording_time  # noqa: E402
 from .project import Behaviour  # noqa: E402
-from .stats import descriptive, error_value, stars  # noqa: E402
+from .stats import ALPHA, descriptive, error_value, stars  # noqa: E402
 from .track import Track  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -589,8 +589,9 @@ def _draw_dist(ax, pos, v, c, kind, error, width, points, seed=0):
 
 def group_plot(groups: dict, measure: str, colors: dict | None = None, kind: str = "bar", posthoc=None,
                p_value: float | None = None, size=(4.2, 3.6), error: str = "sem", points: bool = True,
-               ref_value: float | None = None) -> Figure:
-    """Column (mean ± SEM/SD/CI), point, box or violin graph per group with individual points."""
+               ref_value: float | None = None, alpha: float = ALPHA) -> Figure:
+    """Column (mean ± SEM/SD/CI), point, box or violin graph per group with individual points; the differences
+    significant at the level alpha are marked with brackets and stars."""
     fig = Figure(figsize=size, dpi=100)
     ax = fig.add_subplot(111)
     names = list(groups)
@@ -615,15 +616,15 @@ def group_plot(groups: dict, measure: str, colors: dict | None = None, kind: str
     if posthoc:
         level = top + step
         for ph in posthoc:
-            if ph.get("p", 1) >= 0.05 or ph["a"] not in names or ph["b"] not in names:
+            if ph.get("p", 1) >= alpha or ph["a"] not in names or ph["b"] not in names:
                 continue
             i, j = names.index(ph["a"]), names.index(ph["b"])
             ax.plot([i, i, j, j], [level, level + step / 3, level + step / 3, level], color="black", lw=0.8)
-            ax.text((i + j) / 2, level + step / 3, stars(ph["p"]), ha="center", va="bottom", fontsize=8)
+            ax.text((i + j) / 2, level + step / 3, stars(ph["p"], alpha), ha="center", va="bottom", fontsize=8)
             level += step * 1.3
-    elif p_value is not None and len(names) == 2 and p_value < 0.05:
+    elif p_value is not None and len(names) == 2 and p_value < alpha:
         ax.plot([0, 0, 1, 1], [top + step, top + 1.33 * step, top + 1.33 * step, top + step], color="black", lw=0.8)
-        ax.text(0.5, top + 1.33 * step, stars(p_value), ha="center", va="bottom", fontsize=8)
+        ax.text(0.5, top + 1.33 * step, stars(p_value, alpha), ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
     return fig
 

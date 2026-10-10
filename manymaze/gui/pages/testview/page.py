@@ -120,6 +120,9 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                             "Interpolate the positions in the time range")
         self.a_del_range = act("Delete range", "delete", lambda: self.delete_range(),
                                "Delete the positions in the time range")
+        self.a_jumps = act("Remove jumps", "eraser", lambda: self.remove_jumps(),
+                           "Remove the jumps of the track (positions the animal could not have reached that the "
+                           "track comes back from) with this test's detection settings, and fill them like gaps")
         self.undo_btn = act("Undo", "undo", self.undo_edit, "Undo the last track edit")
 
         # ---- test panel: toolbar, title, video, time slider ----------------------------------------
@@ -302,7 +305,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                 ("View", [(self.chk_zones, "small"), (self.chk_animal, "small"), (self.chk_trail, "small"),
                           (self.chk_preview, "small")]),
                 ("Track editing", [self.mark_btn, (self.a_interp, "small"), (self.a_del_range, "small"),
-                                   (self.undo_btn, "small")])]
+                                   (self.undo_btn, "small"), (self.a_jumps, "small")])]
 
     def play(self):
         self.player.play()

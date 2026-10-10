@@ -1518,7 +1518,7 @@ class LiveSession(_Scoring):
         contrast = self.tracker.animal_contrast() if self.tracker is not None else ""
         if contrast:
             tr.meta["animal_contrast"] = contrast
-        return postprocess(tr, self.settings)
+        return postprocess(tr, self.settings, self.apparatus.scale if self.apparatus is not None else 1.0)
 
 
 def _safety_loop(ref, period: float):

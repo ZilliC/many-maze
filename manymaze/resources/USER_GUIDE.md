@@ -103,7 +103,8 @@ everything without a camera.
   *Radio*; *Event* for instantaneous events — see §6). Old wording: *state* with a duration, e.g. grooming; *point*
   for instantaneous events, e.g. defecation).
 * **Analysis ▸ Time periods** – named time windows (e.g. *Tone 1: 120–150 s*) that override regular time bins;
-  ideal for fear-conditioning CS periods.
+  ideal for fear-conditioning CS periods. *Time periods based on a time marker* start at an event (or a
+  calculation's time) and end after a duration, at another event or at a calculation's time (§9, *Time periods*).
 * **Animal tracking** (detection settings) – defaults for all tests (each test can override them, see §5). *Body parts from*
   chooses how head, body centre and tail base are found: from the animal's shape (fast, no model) or with the
   **pose model** (deep learning, see §5.1).
@@ -245,7 +246,9 @@ interest is the *novel object* (novel object recognition) and the *social stimul
 * **Test start**: set the start to the current video time.
 * **Manual scoring**: press a behaviour's key during playback to start/stop a state behaviour (or add a point
   event) at the current time. Space = play/pause, ←/→ = frame step (Shift = 1 s).
-* **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges.
+* **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges, or
+  **Remove jumps** (Track editing): the jumps of a tracked test are removed with its detection settings (*Remove
+  jumps faster than*, below) and filled like gaps, without tracking again; *Undo* reverts it.
 * **Results / plots** for the test: track plot, occupancy heat map, speed and freezing trace.
 
 A test without a video that ran with the I/O devices (an *Input/output only* test, §7) opens with its **I/O log**
@@ -278,7 +281,15 @@ when no range is set. *Undo* reverts the swap.
    The **whole-body outline** (a simplified polygon of the animal's blob, up to 24 points) is stored too and drawn
    in the test view, live images and exported videos (*Record the animal's whole-body outline*, on by default;
    tracks from older versions simply have no outline).
-6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
+6. **Jumps are removed** (when *Remove jumps faster than* is set, *Animal tracking ▸ Jumps*): a position the animal
+   could not have reached from its last good one at that speed (cm/s when the apparatus is calibrated, else pixels
+   per second) is a jump — a reflection, a shadow or another object detected for a moment — when the track comes
+   back (to less than half the jump's distance, at a plausible speed) within *… when the track comes back within*
+   seconds (0.5 by default). Its frames become missing. A genuine fast run does not come back to where it started,
+   so it is kept; choose a limit well above the animal's top speed (e.g. 150 cm/s for a mouse, 300 cm/s for a rat).
+   The number removed is the *Jumps removed* information column. Off (0) by default, so tracks made before keep
+   their positions.
+7. Gaps up to *Fill gaps in the track of up to* seconds are filled (jumps included); optional smoothing.
 
 ### Tracking by colour
 
@@ -431,7 +442,9 @@ experiment…** takes a name off the list (tests keep their experimenter).
 On the Protocol tab (*Training criteria*) add, per stage, a condition on a result measure, e.g.
 *Training: Escape latency (s) < 10 on 3 consecutive trials; retire after 10 trials*:
 
-- **Measure** — any column of the results (or a procedure result variable), whole-test value.
+- **Measure** — any column of the results (or a procedure result variable), whole-test value; also a
+  calculation's result (e.g. a discrimination index, or `count_trials` across the animal's trials), by its column
+  name, e.g. `Discrimination index` or `Open arms (%)`.
 - **Op / Value / Consecutive** — the condition and the number of consecutive trials on which it must hold.
 - **When met** — *Stage completed*: the animal's remaining trials of the stage are skipped and new schedules do not
   include the stage again for it; *Report only*.
@@ -657,8 +670,8 @@ do the *test is waiting to start* procedures, pausing (the test clock stops), th
 shows the inputs and the I/O device states instead of the animal. When the test ends it is saved without a track
 (status *scored*, its duration the time its clock ran) and its results come from the I/O log: the input, output,
 encoder and analogue measures of *I/O results*, the scored keys and the procedures' result variables, also per
-time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark or an
-input). The Review page shows its I/O log as a timeline and a list (§5).
+time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark, an
+input or a calculation's time, also for their end). The Review page shows its I/O log as a timeline and a list (§5).
 
 Procedures that need the animal cannot run without a camera: arming is refused, with the list of the statements
 concerned, when a procedure waits for or reacts to a zone or animal event (*Animal enters zone*, *Freezing
@@ -1554,6 +1567,7 @@ unticked):
 | Animal lighter / darker | Whether the animal is lighter or darker than the apparatus: the detection *contrast* setting, or with *auto* what tracking found in most frames. Blank for colour tracking. |
 | Animal length | The animal's median body length (nose–tail, or from its area), in the apparatus unit (cm when calibrated). |
 | Frames tracked (%) | Percentage of the test's frames in which the animal was detected. |
+| Jumps removed | The jumps removed from the track by tracking or by Review's *Remove jumps* (blank when jump removal was off; see *How tracking works*). |
 | Source video file | The video a test was tracked from. |
 | Recorded video file | The video recorded during a live test. |
 | Video time at test start (s) | Where in the video the test starts (0 for recordings). |
@@ -1564,12 +1578,56 @@ unticked):
 *Day of week*, *Time of day*, *User* and *Animal lighter / darker* can also be used to group results in Statistics.
 In the *one row per animal* export, *Treatment code* and *Animal notes* are kept when they are shown.
 
+### Results reports
+
+A **report** is a named selection of the spreadsheet, kept in the experiment: the measures and information columns
+ticked in *Select data*, whether the time periods are shown (and which one) and the *Treatment* / *Stage* filters.
+Keep one per question, e.g. *Anxiety* (open-arm measures, whole tests) and *Habituation* (distance per 1-minute
+bin). The **Report** group of the ribbon lists them; choosing one shows it, *- None -* leaves the spreadsheet as it
+is. **Report ▾** offers:
+
+- **New report…** — a report showing every measure (whole tests, no filter); tick what it needs, then *Save report*.
+- **Save report** — keep what the spreadsheet shows in the report shown (changes are not kept until you save).
+- **Save report as…** — keep it as a new report (a report of the same name is replaced).
+- **Delete report**.
+- **Default report** — the report shown when the experiment is opened (without one the Data page opens with every
+  measure, as before).
+
+A report that lists its measures keeps showing only those: measures that appear later (a new zone, a new
+calculation) are not added to it. *Clear settings* shows everything again and leaves the report. The exports, the
+copied and printed spreadsheet and the HTML report contain what the report shows; their file names include the
+report's name, and the HTML report names it. From the command line, `manymaze project DIR results --report NAME -o
+FILE` exports a report (with `--wide`, one row per animal) and `manymaze project DIR report --report NAME` makes its
+HTML report. A new experiment based on this one's protocol gets its reports.
+
 ### Time periods
 
-Besides regular time bins and custom periods, **event-anchored periods**: anchored on test start, first entry to /
-exit from a zone, a manual mark, or an input switching on; with offset, duration (0 = to the end) and occurrence
-(1 = first, 0 = every occurrence). Example: *the 30 s after the animal first left the start box*. Paused time is
-excluded from all times and distances.
+Besides regular time bins and custom periods, **event-anchored periods** (*Protocol ▸ Analysis ▸ Time periods
+based on a time marker*, one row each):
+
+- **The period starts at** test start, an entry into / exit from a zone, a manual mark (key), an input switching on,
+  or the **time given by a calculation** (its whole-test result, in seconds from the start of the test; ANY-maze's
+  *time periods defined by a calculation*) — plus an *Offset*. *Occurrence* picks which event (1 = first, 2 =
+  second…, 0 = one period for every occurrence). Periods whose start never happens are left out.
+- **The period ends** *after the duration* (*Duration*, 0 = at the end of the test), or at an event — an entry into /
+  exit from a zone, a mark, an input — or at a calculation's time, plus an *End offset*. *End occurrence* counts the
+  events after the period's start event and start (1 = the first one after it), so *from each tone to the next* or
+  *from the exit from the start box until the goal box is reached* are one row each.
+
+Examples: *the 30 s after the animal first left the start box*; *from the first entry into the open arm until the
+animal leaves it* (start: entry into, end: exit from, the same zone; occurrence 0 gives one period per visit);
+*from the platform's latency onwards* (a calculation `{Platform: latency to first entry (s)}`). As in ANY-maze, **a
+period whose end never happens** (the event does not occur, the calculation's result is blank) **ends at the end of
+the test**, and its results say so in the *Warnings* column (*Back: the end of the period (entry into Start box) did
+not happen; it ends at the end of the test*).
+
+A calculation that defines a period must be worked out from the test's own results — not from other trials
+(`mean_trials` …) or information columns — and must not use that period itself with `result_for_period`, directly or
+through other calculations (that would be circular). Both are reported in red under the table, and the circular
+reference also on the calculation's property page; such a period is left out (or ends at the end of the test). A
+calculation may use, with `result_for_period({m}, 'name')`, a period defined by another calculation: it is worked
+out after that one. Renaming a calculation updates the periods that use it; deleting one names them. The protocol
+report describes every period in words. Paused time is excluded from all times and distances.
 
 ### Calculations
 
@@ -1601,8 +1659,9 @@ A formula whose values are blank (a measure missing in a test, a division by zer
 `is_undefined({m})` tests for it. Unlike ANY-maze, which works a formula out strictly from left to right, the usual
 precedence applies (`2 + 3 * 4` is 14). The property page shows mistakes as you type, and the result for the first
 test. The results are listed under **Calculation results** in *Select data*, exported, compared in Statistics and
-printed in the protocol report; renaming a calculation updates the formulas that use it, and a new experiment based
-on this one's protocol gets its calculations.
+printed in the protocol report; a time period can start or end at a calculation's result (*Time periods*) and a
+training criterion can use one (§6); renaming a calculation updates the formulas, time periods and criteria that
+use it, and a new experiment based on this one's protocol gets its calculations.
 
 ### Track plots (Results ▸ Data ▸ Track plots)
 
@@ -1853,6 +1912,17 @@ values can be shown or hidden.
 
 **Copy summary**, **Save figure…** and **Copy figure** work on every tab.
 
+**Significance level.** *Options ▸ Select the significance level (α)* (0.05 by default) decides what is marked
+significant: the result shown in green, *ns* (not significant) or the stars — * below the level, ** p < 0.01, ***
+p < 0.001 — in the tables and summaries, the brackets drawn between groups on the graphs and the assumption checks
+reported as failed (non-normal, unequal variances, slopes that differ). A level other than 0.05 is named under the
+analysis' title and in its summary. The p-values themselves do not change; the confidence intervals stay 95 %.
+
+**Saved settings.** The page's settings (measure, factors, time period, filter, test, post-hoc test, graph, the
+significance level …) are kept in the experiment and shown again when it is opened (settings that no longer apply,
+e.g. a measure that is gone, are left at their defaults). The statistics of the HTML report use the same
+significance level, and a new experiment based on this one's protocol gets the settings.
+
 #### Supported procedures (47: 35 tests and 12 post-hoc tests)
 
 | Category | Procedures |
@@ -1876,7 +1946,8 @@ manymaze track video.mp4 --template epm --bbox 100,40,520,520 --size-cm 75 -o re
 manymaze project ~/exp.mmaze track        # batch-track untracked tests in parallel (--workers N)
 manymaze project ~/exp.mmaze results -o results.xlsx --bins   # also .csv .tsv .slk (SYLK) .dbf (dBase) .xml
 manymaze project ~/exp.mmaze results --wide -o by_animal.xlsx   # one row per animal
-manymaze project ~/exp.mmaze report -o report.html
+manymaze project ~/exp.mmaze results --report Anxiety -o anxiety.csv   # a results report saved on the Data page
+manymaze project ~/exp.mmaze report -o report.html    # (--report NAME: that report's tests and measures)
 manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
 manymaze project ~/exp.mmaze protocol -o protocol.html
 manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file
