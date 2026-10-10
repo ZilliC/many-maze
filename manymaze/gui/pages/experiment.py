@@ -170,8 +170,13 @@ class ExperimentPage(Page):
         self.confirm_id = QCheckBox("Confirm the animal's ID before each test")
         self.confirm_id.setToolTip("Scan the barcode / microchip or type the ID; a mismatch blocks the test")
         self.confirm_id.toggled.connect(self._store_workflow)
+        self.weigh_first = QCheckBox("Weigh the animal before each live test (when a balance is connected)")
+        self.weigh_first.setToolTip("A live test is armed only once its animal has a weight of today: the Weigh "
+                                    "dialog opens for it. Needs a balance among the I/O devices.")
+        self.weigh_first.toggled.connect(self._store_weigh)
         pg.add(self.blind)
         pg.add(self.confirm_id)
+        pg.add(self.weigh_first)
         pg.body.addSpacing(10)
         self.summary_lbl = hint("")
         pg.add(self.summary_lbl)
@@ -593,6 +598,7 @@ class ExperimentPage(Page):
         self._validate_behaviours()
         self.blind.setChecked(p.blind)
         self.confirm_id.setChecked(wf.confirm_id_enabled(p))
+        self.weigh_first.setChecked(bool(p.require_weight_before_test))
         self.crit.set_records(self._criterion_row(c) for c in p.training_criteria)
         self.periods.set_records({"label": lbl, "start": a, "end": b} for lbl, a, b in p.analysis.custom_periods)
         self.ev_periods.set_records({**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), "")}
@@ -1300,6 +1306,12 @@ class ExperimentPage(Page):
         if self._loading or self.project is None:
             return
         self.project.settings_extra["confirm_id"] = self.confirm_id.isChecked()
+        self.main.mark_dirty()
+
+    def _store_weigh(self, on: bool):
+        if self._loading or self.project is None:
+            return
+        self.project.require_weight_before_test = bool(on)
         self.main.mark_dirty()
 
     # ================================================================== training criteria, time periods

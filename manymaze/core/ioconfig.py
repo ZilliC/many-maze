@@ -34,7 +34,11 @@ DIGITAL_INPUT_KINDS = ("input", "pir", "status")  # on / off
 VALUE_KINDS = ("analog", "encoder", "sensor")  # a number
 OUTPUT_KINDS = ("output", "pwm")
 CONTROL_KINDS = ("thermostat", "odour", "pump")  # driven by their own actions (set temperature, odour, pump)
-SENSOR_TYPES = {"weight": "g", "light": "lux", "temperature": "°C", "humidity": "%", "generic": ""}
+# sensor types and their units: sound level (a sound level meter's analogue output, A-weighted), ultrasound (a
+# bat / USV detector's peak frequency and its level)
+SENSOR_TYPES = {"weight": "g", "light": "lux", "temperature": "°C", "humidity": "%", "sound": "dBA",
+                "ultrasound": "kHz", "ultrasound_level": "dB", "generic": ""}
+DECIBEL_SENSORS = ("sound", "ultrasound_level")  # levels in dB: their equivalent level (Leq) is also reported
 # where a sensor channel's readings come from: an analogue pin, an HX711 load-cell amplifier or a DHT22
 SENSOR_INTERFACES = ("analog", "hx711", "dht22")
 # derived status channels "<channel>.<suffix>" that drivers and controllers report, and the procedure event each

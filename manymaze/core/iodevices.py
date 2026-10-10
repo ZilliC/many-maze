@@ -1539,6 +1539,15 @@ class DeviceManager:
         """Input changes since the last call: [(device, channel, kind, value)] (of subscriber `sub` if given)."""
         return [c[:4] for c in self.read_inputs_ex(sub)]
 
+    def input_value(self, device: str, channel: str):
+        """An input's value now (e.g. a test's start switch): the device is read first, its changes still reach
+        every subscriber; None for an unknown device."""
+        d = self.devices.get(device)
+        if d is None:
+            return None
+        self._poll_device(d)
+        return d.inputs.get(channel)
+
     def all_off(self):
         with self._lock:
             self._sched = []
@@ -1709,6 +1718,14 @@ class DeviceView:
 
     def read_inputs(self) -> list[tuple[str, str, str, float]]:
         return [c[:4] for c in self.read_inputs_ex()]
+
+    def input_value(self, device: str, channel: str):
+        """An input of this test's box (or of a private simulated device) now (see DeviceManager.input_value)."""
+        name = self._map(device)
+        if self.alias is not None and name == self.alias:
+            return self.manager.input_value(name, channel)
+        d = self.device(name, create=False)
+        return d.inputs.get(channel) if d is not None else None
 
     def all_off(self):
         for d in self._own():

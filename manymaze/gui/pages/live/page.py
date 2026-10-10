@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QInputDialog, QMenu, QMessa
 
 from ....core import autosave
 from ....core import camsources
-from ....core import security
+from ....core import scales, security
 from ....core.camera import CameraView
 from ....core.camhw import CameraHardware
 from ....core.live import LiveSession, ObservationSession
@@ -53,6 +53,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._loading = False
         self.grabber: FrameGrabber | None = None
         self._scan_worker: Worker | None = None
+        self.scale_reader = scales.read_weight  # weighing before a test (cfg, timeout=, stable=); replaced in tests
         self.session: LiveSession | None = None
         self.test = None
         self._new_test = False
@@ -802,6 +803,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.start_keys.setText(", ".join(d.get("start_keys", DEFAULT_START_KEYS)))
             self.stop_keys.setText(", ".join(d.get("stop_keys", DEFAULT_STOP_KEYS)))
             self.control_input.setText(str(d.get("control_input", "")))
+            self.start_input.setText(str(d.get("start_input", "")))
+            self.start_delay.setValue(float(self.project.start_switch_delay_s or 0.0) if self.project else 0.0)
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
             self.split_min.setValue(float(d.get("split_minutes", 0.0)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
@@ -819,6 +822,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                "record_overlay": self.record_overlay.isChecked(), "lost_warning_s": self.lost_warn.value(),
                "split_minutes": self.split_min.value(), "schedule_at": self.sched_time.time().toString("HH:mm"),
                "schedule_daily": self.sched_daily.isChecked(), "control_input": self.control_input.text().strip()}
+        if self.start_input.text().strip() or "start_input" in self._live_settings():
+            new["start_input"] = self.start_input.text().strip()
         d = self._live_settings()
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
             new["pause_outputs_off"] = self.pause_off.isChecked()
@@ -832,6 +837,15 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         sched = self.start_mode.currentData() == "scheduled"
         self.sched_time.setEnabled(sched)
         self.sched_daily.setEnabled(sched)
+        self.start_input.setEnabled(self.start_mode.currentData() == "input")
+
+    def _store_start_delay(self, value: float):
+        """The delay after the start switch is part of the protocol (Project.start_switch_delay_s)."""
+        p = self.project
+        if self._loading or p is None or abs(float(p.start_switch_delay_s or 0) - value) < 1e-9:
+            return
+        p.start_switch_delay_s = float(value)
+        self.main.mark_dirty()
 
     # ================================================================== periodic UI work
     def _tick(self):

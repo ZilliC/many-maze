@@ -119,6 +119,10 @@ everything without a camera.
   so the animal must be stiller to count as freezing (+25 halves the threshold); lower lets it move a little more
   (−25 doubles it). Tests with fewer than 50 motion samples use the manual
   thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
+* **Testing** – blind testing (§6), confirming the animal's ID and **weighing the animal before each live test**
+  (§7, *Starting and ending a test*).
+* **Hardware** – the I/O devices, the **Synchronisation** element (pulses for other recording systems, §8) and the
+  touch screen.
 * **Calculations** – results worked out from other results with a formula, e.g. a discrimination index (see §9,
   *Calculations*).
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
@@ -525,11 +529,18 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
     animal area, or touching the arena edge) to appear and leave again, then for the animal to be detected. The
     image shows *WAITING FOR EXPERIMENTER*, *WAITING FOR HAND TO LEAVE*, then *WAITING FOR ANIMAL*.
   - *On a start key (keyboard / remote)* — armed tests wait until a start key is pressed.
+  - *On a start switch (an input)* — armed tests wait until the **Start switch** input (`[device/]channel`, e.g.
+    `box/start`: a push button or a TTL from another system) closes. A switch already closed when the test is armed
+    must open and close again. With several tests at once each test watches the switch of its own box.
   - *At a clock time* — the test starts at the **Start time** (HH:MM). With **every day** (several-tests mode)
     the tests start every day at that time; finished rows are re-armed automatically as new tests (trial + 1).
 - **Start keys / Stop keys** — default *Space, PageDown, F5* to start (or resume) and *B, PageUp* to stop and save.
   USB presentation remotes act as keyboards, so their buttons work as remote controls. Keys used for scoring
   behaviours are never used as start / stop keys.
+- **Delay after the start switch** — after a start key, a remote or the start switch input, the test starts this
+  many seconds later (e.g. to put the animal in and step away; *WAITING* shows *starting* meanwhile and the log
+  says when it will start). The **Start** button and *Start now* start at once, also during the delay, and clock-time
+  starts are not delayed. It is saved with the protocol (`start_switch_delay_s`).
 - **Arm / Start test** arms the test; while it waits the button becomes **Start now**.
 - **Pause** stops the test clock: no tracking data, no recording and no procedure timing while paused. **Resume**
   (or a start key) continues where it stopped. Pauses are saved with the test (`pauses`; the length of each pause
@@ -570,6 +581,12 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
 
 If the experiment requires animal ID confirmation, the ID (or a scanned barcode / microchip) is asked before each
 test starts.
+
+**Weigh the animal before each live test** (Protocol tab, *Testing*; needs a balance among the I/O devices): arming a
+test of an animal that has no weight of today opens the *Weigh* dialog for it (*Read scale* or type the weight,
+*Record*); the test is armed only once the weight is recorded (in the animal's *Weight (g)* column and weight
+history, as *Animals ▸ Weigh*). An animal already weighed today is not asked again. Tests started at a clock time
+are not blocked (nobody is there to weigh the animal): the log notes that it was not weighed.
 
 ### Several tests at once
 
@@ -1156,7 +1173,10 @@ samples with its own time stamps). `filter=lowpass` with `cutoff_hz` (and `order
 (`cutoff_hz`), `filter=bandpass` (`low_hz`, `high_hz`) apply a Butterworth filter to each sample as it arrives;
 `filter=average` with `window` (samples) or `window_ms` a moving average. Filtered channels report every sample.
 
-**Sensors** (kind *Sensor*): `sensor=weight|light|temperature|humidity|generic`, `units`, and where the readings
+**Sensors** (kind *Sensor*): `sensor=weight|light|temperature|humidity|sound|ultrasound|ultrasound_level|generic`
+(*sound*: a sound level meter's analogue output in dBA; *ultrasound*: an ultrasonic vocalisation / bat detector's
+peak frequency in kHz, and *ultrasound_level* its level in dB — two channels when the detector gives both), `units`,
+and where the readings
 come from — `interface=analog` (an analogue pin: `scale`, `offset`), `interface=hx711` (a load cell through an
 HX711 amplifier: *Pin* = DOUT, *Pin B* = SCK, `scale` grams per count, `offset`) or `interface=dht22` (a DHT22
 temperature / humidity sensor: two channels on the same pin, one with `sensor=temperature`, one with
@@ -1299,6 +1319,9 @@ latencies of things that never happen follow *When an event never occurs, its la
 * **movement detectors** — movements, time moving / not moving, latency to first movement, mean movement;
 * **sensors** — initial and final value, mean (the average of the readings, as ANY-maze), maximum, minimum, change,
   time out of the alert range and times out of range; weight sensors also give the **intake** (initial − final);
+  sound-level and ultrasound-level sensors (dB) also give the **equivalent level (Leq)**, 10 · log10 of the mean of
+  10^(L/10) over the readings — the level of the average sound energy, which a loud moment raises more than the mean
+  of the decibels does;
 * **syringe pumps** — volume infused and withdrawn (ml; from the pump's own counters when it reports them, otherwise
   from the rates and times), infusions, withdrawals, time pumping, latency to first start, stalls;
 * **temperature controllers** — time on, mean target, mean set-point, time at target, latency to target;

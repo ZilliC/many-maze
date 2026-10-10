@@ -303,15 +303,16 @@ class LiveGroup:
         return img
 
     # ------------------------------------------------------------------ control
-    def start(self, entry: LiveEntry):
-        """Start now (waiting), resume (paused) or continue a test waiting for its end."""
+    def start(self, entry: LiveEntry, switch: bool = False):
+        """Start now (waiting), resume (paused) or continue a test waiting for its end; ``switch``: by the start
+        switch (a start key or remote): the test starts after the delay after the start switch."""
         s = entry.session
         if s is None:
             return
         if getattr(s, "waiting_end", False):
             s.continue_test()
         elif s.state == "waiting":
-            s.request_start()
+            s.request_start(switch=True) if switch else s.request_start()
         elif s.state == "paused":
             s.resume()
 
@@ -331,9 +332,9 @@ class LiveGroup:
             entry.aborted = True
         s.finish()
 
-    def start_all(self):
+    def start_all(self, switch: bool = False):
         for e in self.entries:
-            self.start(e)
+            self.start(e, switch)
 
     def pause_all(self):
         for e in self.entries:
@@ -352,7 +353,7 @@ class LiveGroup:
         k = key.strip().lower()
         if k in (x.lower() for x in self.start_keys) and any(
                 e.state in ("waiting", "paused") or getattr(e.session, "waiting_end", False) for e in self.entries):
-            self.start_all()
+            self.start_all(switch=True)
             return "start"
         if k in (x.lower() for x in self.stop_keys) and any(e.state in ("running", "paused") for e in self.entries):
             self.stop_all()
