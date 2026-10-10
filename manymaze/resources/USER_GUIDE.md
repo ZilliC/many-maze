@@ -118,6 +118,22 @@ everything without a camera.
   thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
 * **Calculations** – results worked out from other results with a formula, e.g. a discrimination index (see §9,
   *Calculations*).
+* **Analysis ▸ Activity ▸ The animal is active when** – *it is mobile, or doing a behaviour that counts as
+  activity* (ANY-maze's definition, the default of new experiments; tick *This behaviour counts as activity* on a
+  key's page, e.g. grooming), *it is doing a behaviour that counts as activity* (ANY-maze when immobility is not
+  detected) or *its pixels change* (the motion reaches *The animal is active when movement reaches*; experiments
+  made before the option keep it). See §9, *Measures*.
+* **Analysis ▸ Zones ▸ An average of nothing is** – *left blank* (ANY-maze; new experiments), *zero* (ANY-maze's
+  *Use zero as the result for undefined averages*) or *as before* (experiments made before the option: 0 for the
+  mean visit, investigation bout and rear in a zone, blank for the others). It applies to the mean visit,
+  investigation bout, speed in a zone and while investigating, distance (and head distance) to the border when
+  inside, rear in a zone, and a sequence's mean duration, distance and speed when there was nothing to average.
+* **Analysis ▸ Heading error** – how the *initial heading* of the initial heading errors is found (ANY-maze's
+  *Heading error* options): from the first position to the position after the animal has been **mobile for** N s
+  (default 1 s), or to the first position **further away than** N units; positions while the animal is immobile
+  are ignored either way.
+* **Analysis ▸ Movement ▸ Partial rotation angle** – ANY-maze's partial rotations: turns of at least this angle
+  (default 90°) that completed no rotation (§9).
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
   every measure, including the test duration, stops there.
@@ -147,7 +163,7 @@ from the real size you enter — or draw your own:
 | --- | --- |
 | Arena | the apparatus boundary; pixels outside are ignored by the tracker |
 | Rectangle / ellipse / polygon zone | areas for time, entries, latency, distance … |
-| Point of interest | objects, platform centre, cups — distance, time near, exploration |
+| Point of interest | objects, platform centre, cups — distance, time near, exploration; or a **heat-map point**, placed in each test at the hottest spot of a heat map (see below) |
 | Line | crossings in each direction |
 | Calibrate | draw a line of known length (cm) |
 | Zone groups | unions of zones minus excluded zones (e.g. *Open arms*, *Periphery = Arena − Centre*) |
@@ -159,6 +175,13 @@ apparatus (zones, points, lines, groups, sequences, grids and calibration) to a 
 chosen by the file type: the arena, the zones filled in their colours (hidden zones dashed), points and lines, with
 their names when *Show labels* is on, and the apparatus name and calibration in the corner; drawn over the
 background frame when a video frame is shown.
+
+**Heat-map points** (ANY-maze's points located by a heat map): in the point's properties choose *In each test,
+the hottest spot of the heat map of* the animal's position, where it froze, where it was immobile or where it
+reared. In each test the point is then at the centre of the hottest square of that heat map (the whole test's, as
+on the *Heat maps* view: squares of 1/60 of the apparatus' longer side, smoothed), and all its measures use that
+spot; its position on the map only shows where it is. Its results give the spot's *X* / *Y* and the *approximate
+time at point* (§9); without a spot (e.g. the animal never froze) they are blank.
 
 Several apparatus can share one video (e.g. four open fields filmed together) — tests that share a video and
 start time are tracked in a single pass.
@@ -338,6 +361,7 @@ Define keys on the **Protocol** tab (*Keys* element):
 | Type | **State** — the key toggles the behaviour on/off. **Hold** — the behaviour is scored while the key (or button) is held down. **Point** — an instantaneous event. |
 | Exclusive set | Behaviours with the same set name cannot overlap: starting one stops the others (e.g. *posture*: Freezing, Grooming, Rearing). |
 | Colour | Colour of the on-screen scoring button. |
+| Counts as activity | On the key's page: *This behaviour counts as activity*. As ANY-maze, the animal is then active while it does it (e.g. grooming), even when it is not mobile — *Time active*, active / inactive episodes, when *Analysis ▸ Activity* uses ANY-maze's definition. Keys with a duration only (not *Event* keys). |
 
 Problems (duplicate keys, unusable keys, more than 46 keys) are listed in red under the table.
 
@@ -849,6 +873,13 @@ of the animal. Together with the timed events above (time until the end, random 
 condition held for a time, a value changing within a time, a zone not entered for a time) they cover ANY-maze's
 event wizard.
 
+**Events as results.** *Record as the event* (a name, optional) notes each time the When's event happens during
+a test (with its event-wizard options; not before the test starts) in the I/O log, and the results then give
+ANY-maze's event measures: `Event <name>: count` (the number of events) and `Event <name>: latency (s)` (to the
+first; blank if it never happened in the test or period, whatever *When an event never occurs* says, as ANY-maze).
+As in ANY-maze, they report what was detected while the test ran and do not change if the procedure is edited
+afterwards.
+
 ### Actions
 
 Output actions name a device and a channel; leave the device empty to use whichever device has a channel of that
@@ -1106,7 +1137,8 @@ analogue input, sensor, rotary encoder, temperature controller, olfactometer, sy
 active-low hardware, and options such as `pullup=0`, `debounce_ms=20`, `counts_per_rev=1024`, `cm_per_rev=50`,
 `scale=0.0049`, `period_ms=50`, `deadband=2`, `max_v=10` (the voltage of an analogue output at full level, for
 *Set analogue output (V)*; default 5), and `role=shocker` / `role=speaker` / `role=light` to group an output's
-results with that device type.
+results with that device type. Digital inputs also take `index=<number>` (on/off input reversals and the RAPC
+doors, see *I/O results*) and `detector=<name>` with `timeout_s=<s>` (the beams of a movement detector).
 
 **Fast and filtered analogue inputs.** `period_ms=1` samples at 1 kHz (the Arduino firmware sends batches of
 samples with its own time stamps). `filter=lowpass` with `cutoff_hz` (and `order`, default 2), `filter=highpass`
@@ -1189,7 +1221,14 @@ latencies of things that never happen follow *When an event never occurs, its la
   is clipped to the period and is not a positive reversal (nor an activation) of that period. **On/off inputs:
   positive / negative reversals** (ANY-maze's): give two or more inputs the option `index=<number>`; as they are
   activated the indices rise or fall, and a change from falling to rising is a positive reversal, from rising to
-  falling a negative one (e.g. a rat running back and forth along a row of beams);
+  falling a negative one (e.g. a rat running back and forth along a row of beams). **RAPC** (ANY-maze's door
+  measures): with 12 inputs given the indices 1–12 — the doors, 1–3 leading out of the first chamber, 4–6 out of
+  the second, 7–9 out of the third, 10–12 out of the fourth — the last door opened in each chamber is its
+  unlatched door (a latched door still registers an opening when pushed). *RAPC: type 1 errors* counts the
+  openings of latched doors, *type 2 errors* the openings of an unlatched door before the last one (opened but
+  not gone through), and *door sequence* gives the unlatched door of each chamber (`1321`; `-` for a chamber in
+  which no door was opened). The errors count the openings in the test or period, the doors are those of the test.
+  (The radial arm place conditioning template's *Type 1 / 2 errors* are a different, track-based measure.);
 * **analogue inputs** — mean, minimum, maximum and the times of the maximum / minimum (as ANY-maze, over the samples
   in the test or period: their simple average; a period without a sample has the value held from before it); the
   **baseline** (the average of the samples in the first *Analogue inputs: baseline period* seconds of the test or
@@ -1227,11 +1266,18 @@ latencies of things that never happen follow *When an event never occurs, its la
   the time-weighted *mean level* (0–1). An output is a shocker when a shock action drove it, a speaker for the
   audio actions, a light for *Light on / off*; any output channel can also be given the option `role=shocker`,
   `role=speaker` or `role=light` in the I/O devices dialog;
-* **movement detectors** — movements, time moving / not moving, latency to first movement, mean movement;
+* **movement detectors** — movements, time moving / not moving, latency to first movement, mean movement. A PIR
+  channel is one detector (each activation a movement, on while it reports movement). A photobeam array is
+  several digital inputs given the same `detector=<name>` (`Movement detector <name>: …`): as ANY-maze, a beam
+  broken again before another beam is not a movement (an animal grooming in one place keeps breaking the same
+  beam), each counted break starts or extends a bout of movement lasting the detector's time-out (`timeout_s`,
+  default 1 s), and beams already broken when the test starts are not counted;
 * **sensors** — initial and final value, mean (the average of the readings, as ANY-maze), maximum, minimum, change,
   time out of the alert range and times out of range; weight sensors also give the **intake** (initial − final);
 * **syringe pumps** — volume infused and withdrawn (ml; from the pump's own counters when it reports them, otherwise
   from the rates and times), infusions, withdrawals, time pumping, latency to first start, stalls;
+* **procedure events** — `Event <name>: count` and `latency (s)` for the When statements given *Record as the
+  event* (§8, *Events as results*);
 * **temperature controllers** — time on, mean target, mean set-point, time at target, latency to target;
 * **odours** — for each odour: presentations, time presented, latency to first presentation; and the time with any
   odour for each olfactometer;
@@ -1246,11 +1292,20 @@ latencies of things that never happen follow *When an event never occurs, its la
   (count, latency to the first, activations per minute spent in the zone; *pellets dispensed* and the latency to
   the first for pellet dispensers), the latency to the first deactivation in the zone, the time the channel is on
   while the animal is in the zone and the longest / shortest stretch of it, the distance travelled in the zone
-  while a virtual switch is on, and for encoders the counts turned while the animal is in the zone and, with
-  *counts_per_rev*, the degrees each way, the rotations made while it was in the zone throughout, the distance
-  (wheels) and the maximum RPM in the zone — `lever in Centre: activations`, `Shocker shock in Dark: shocks`,
-  `wheel in Nest: total rotations`, …; sensors and recorded result variables also give the values recorded while
-  the animal was in the zone (`Sensor lux in Dark: mean`, `Variable: score in Dark (sum)`, …);
+  while a virtual switch is on — `lever in Centre: activations`, `Shocker shock in Dark: shocks`, …. For an
+  **investigation zone**, virtual switches (as keys) count while the animal *investigates* the zone instead of
+  while it is in it (ANY-maze 22.x); the other devices use the zone. **Encoders** in a zone: the counts turned
+  while the animal is in it, the time turning and the reversals in it (a reversal counts in the zone the animal is
+  in when the encoder turns back) and, with *counts_per_rev*, the degrees each way, the clockwise, anticlockwise,
+  total, half and quarter rotations made while it was in the zone throughout, the distance (wheels), the maximum
+  RPM, the minimum RPM (0 if the encoder stopped while the animal was in the zone) and the mean RPM (revolutions
+  turned in the zone / the time in it) and mean RPM while turning (/ the time turning in it) — `wheel in Nest:
+  total rotations`, …. **Analogue signals** in a zone: the mean / max / min of the samples taken while the animal
+  was in it, the times of that max / min (from the start of the test or period) and the integrals above / below
+  the test's (or period's) baseline over the time it spent in the zone after the baseline period. **Syringe
+  pumps** in a zone: the volumes infused / withdrawn while the animal was in it (`Pump p1 in Dark: volume infused
+  (ml)`). Sensors and recorded result variables also give the values recorded while the animal was in the zone
+  (`Sensor lux in Dark: mean`, `Variable: score in Dark (sum)`, …);
 * **touches** — activations per area (channel `touch <area>`);
 * **result variables** — the final value of each *Save as a test result* variable (`Variable: name`). A variable
   whose *Record the value* is *Every time it changes* or *Every time it is set* also logs each numeric value with
@@ -1313,8 +1368,8 @@ maps, group heat maps, results and statistics.
 * **Whole apparatus** (~45): duration, detection %, time not detected, time hidden / not hidden, distance, mean /
   max / mobile speed, mobile & immobile time / episodes / mean & longest episode, latency to immobility, freezing
   (time, %, episodes, latency, mean & longest), path efficiency and tortuosity, turn angle and angular velocity,
-  meander, body and path rotations (clockwise, anticlockwise and total), average X / Y position (as ANY-maze: each
-  position weighted by the time the animal stayed there, as a % of the apparatus width / height from its left /
+  meander, body and path rotations (clockwise, anticlockwise and total), partial rotations, average X / Y position
+  (as ANY-maze: each position weighted by the time the animal stayed there, as a % of the apparatus width / height from its left /
   top side; it can fall outside the apparatus, e.g. the middle of a zero maze), thigmotaxis, distance from wall and
   centre, time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the
   body as in ANY-maze — the direction from the centre to the head — or, without a tracked head, a tracked body
@@ -1326,16 +1381,31 @@ maps, group heat maps, results and statistics.
   animal was hidden to where it reappears; turns and rotations are found on the whole test, so the values of the
   time bins add up to the whole test's (a rotation counts in the bin in which it is completed). An animal that was
   never detected is neither immobile nor outside the arena. No zone exit, entry or grid crossing is counted across a
-  pause.
+  pause. The **absolute turn angle** sums the changes of the direction of travel between the frames in which the
+  animal moves faster than the mobility threshold (ANY-maze sums "all the positions" but without saying how it
+  ignores the jitter of a still animal; our choice); the **angular velocity** is, as ANY-maze defines it, the
+  absolute turn angle / the test duration (or the period's; before this version: / the time mobile).
+  **Partial rotations** (clockwise, anticlockwise, total; ANY-maze's calculation is not published, it is "still in
+  beta"): the turns of the body (the same orientation and reversal rule as the rotations: a turn ends when the
+  animal turns back by more than 90°) of at least the *Partial rotation angle* (default 90°) during which no
+  rotation was completed; each counts where the turn stopped.
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
   (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
-  twice its usual area — larger or smaller blobs are usually shadows, reflections or merges).
-* **Activity** (from the pixels that change between frames, separate from mobility, which comes from the centre's
-  speed): average freezing score (the mean motion, % of body, that freezing is detected from), time active /
-  inactive, active and inactive episodes, longest / shortest active and inactive episode. The animal is active when
-  its motion reaches *The animal is active when movement reaches*; inactive episodes shorter than *Shortest
-  inactive episode* count as active (Protocol ▸ Analysis ▸ Activity). Per zone: time active / inactive in the zone
-  and inactive episodes (an episode belongs to the zone it starts in).
+  twice its usual area — larger or smaller blobs are usually shadows, reflections or merges). ANY-maze's own
+  *Tracking quality* (Good / Poor) is not available: its reference only says that it weighs the untracked time,
+  long gaps more than short ones, against the test duration, without the formula, so it cannot be reproduced; use
+  the percentage, *Time not detected* and the track plots instead.
+* **Activity**: time active / inactive, active and inactive episodes, longest / shortest active and inactive
+  episode, and the average freezing score (the mean motion, % of body, that freezing is detected from). What
+  *active* means is set in Protocol ▸ Analysis ▸ Activity: as **ANY-maze** (new experiments), the animal is active
+  when it is mobile or doing a behaviour whose key *counts as activity* (e.g. grooming; while a Simple / Toggle /
+  Radio key is on), or — ANY-maze without immobility detection — only while doing such a behaviour; or from the
+  **pixels that change** between frames (experiments made before the option): active when the motion reaches
+  *The animal is active when movement reaches*, inactive episodes shorter than *Shortest inactive episode* counting
+  as active (this needs a motion value; the other two do not). As ANY-maze, the animal is taken to be inactive at
+  the start for the active episodes and active for the inactive ones, so a test starting still has an inactive
+  episode. Per zone: time active / inactive in the zone and inactive episodes (an episode belongs to the zone it
+  starts in).
 * **Head** (when the head is tracked): head distance (smoothed like the centre), head turn angle — absolute,
   clockwise and anticlockwise — the cumulative change of the head direction (as ANY-maze, the direction from the
   centre to the head). A jump of more than 90° between two frames is a head / tail swap of the tracker and is not
@@ -1359,12 +1429,17 @@ maps, group heat maps, results and statistics.
   the visit list include a visit under way at the start of the period (clipped to it); a **head entry** is the
   head going from outside the zone to inside it (a head that starts in the zone has not entered it); the
   **distance and path efficiency before the first entry** are blank if the animal never entered (the path
-  efficiency also when its route passed through a hidden zone); the **mean distance from the zone** is the
+  efficiency also when its route passed through a hidden zone); the **means of nothing** (no visit, no
+  investigation bout, never inside, no rear in the zone) follow *An average of nothing is* (blank or 0, see the
+  Protocol tab); the **mean distance from the zone** is the
   distance while outside weighted by the time spent at it, divided by the whole test or period (0 if the animal
   never leaves the zone), the **max** is 0 if it never left the zone and the **min** is 0 once it has been in it;
   **time facing the zone** is the time outside it with its orientation (centre → head) within *Oriented towards a
   zone / point within* (30°) of the direction to some point of the zone's border; **freezing episodes** in a zone
-  are the times the animal starts to freeze there:
+  are the times the animal starts to freeze there, and the **time freezing** in it the frames in which it is frozen
+  in the zone (ANY-maze adds "the duration of each bout of freezing … if the animal was in the zone while frozen",
+  not saying what happens to a bout that starts or ends in the zone; counting frames splits such a bout between
+  the zones):
   * **visit durations** – the duration of each visit, as a comma-separated list (text, so statistics skip it);
   * **investigation** (investigation zones): bouts, time, latency to the first investigation and to its end, *was
     first zone investigated*, longest / shortest / mean bout (time / bouts), list of bout durations, distance and
@@ -1378,11 +1453,18 @@ maps, group heat maps, results and statistics.
     zone, as ANY-maze);
   * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
     increasing, outside it), time moving towards / away (mobile, outside, direction of travel within ("less than")
-    the *exploration facing angle* of the direction to the zone centre, or of the opposite direction);
+    the *exploration facing angle* of the direction to the zone centre, or of the opposite direction). ANY-maze
+    says *outside* only for getting closer / further away; moving towards / away counts only outside the zone too
+    (our choice: inside, the heading to the zone's centre says little about approaching the zone);
   * **heading error**: *initial heading error* (absolute, 0–180°) and *signed initial heading error* (positive =
-    the zone is to the animal's right, negative = to its left), as ANY-maze — the direction from the first position
-    to the position 1 s later against the direction to the zone centre (blank if the animal starts in the zone) —
-    and the mean absolute heading error while moving outside;
+    the zone is to the animal's right, negative = to its left), as ANY-maze — the initial heading (Protocol ▸
+    Analysis ▸ Heading error: from the first position to the position after the animal has been mobile for 1 s, or
+    to the first one further away than a distance; positions while immobile ignored) against the direction to the
+    zone centre (blank if the animal starts in the zone or never moves far enough) — and the mean absolute heading
+    error while moving outside: the average over the frames in which the animal moves (frames are equally long, so
+    it is weighted by time). ANY-maze divides the time-weighted sum by the whole test duration while leaving out
+    the immobile positions, which would make an animal that rests often look better oriented, and for points it
+    divides by the number of positions; we use the average over the positions used, for zones and points alike;
   * **time oriented towards the zone centre when inside** (the orientation within *Oriented towards … within* of
     the direction from the head to the zone centre);
   * **absolute turn angle** and **absolute head turn angle** while in the zone (a head turn counts in the zone the
@@ -1414,9 +1496,12 @@ maps, group heat maps, results and statistics.
   than the mobility threshold). **Initial heading error**: the angle between the direction from
   the first position to the position about 1 s later and the direction to the point (0–180°, as the water maze's);
   **mean absolute heading error**: the mean angle between the direction of travel and the direction to the point
-  over the frames the animal is mobile. **X / Y**: the point's coordinates (in units, from the top-left of the
-  image). **Approximate time at point**: the time (from the start of the test or period) at which the animal was
-  closest to the point.
+  over the frames the animal is mobile (the initial heading as for zones: Protocol ▸ Analysis ▸ Heading error).
+  **X / Y**: the point's coordinates (in units, from the top-left of the image); for a **heat-map point** the
+  hottest spot of the test (§3). **Approximate time at point** (as ANY-maze, from the heat map): the time spent
+  at the point's location in the test or period — the heat map's value there, each position counting by its
+  closeness (fully on the spot, 0.6 at 1.5 squares); before this version it was the moment the animal was closest
+  to the point.
 * **Lines**: crossings in each direction, latency.
 * **Per other animal**: mean / min / max distance, contact time and count, nose-to-nose and nose-to-body contacts,
   time and episodes following, approaches / approached by.
@@ -1428,7 +1513,9 @@ maps, group heat maps, results and statistics.
   per zone (*Split the scored behaviours by zone*): count, latency, rate (per minute spent in the zone), distance
   before the first press and, for state / hold keys, duration, mean / longest / shortest bout (the longest /
   shortest stretch pressed while in the zone), latency to the first release in the zone and the list of the
-  presses that started in the zone (a press or release counts in the zone the animal is in at that moment).
+  presses that started in the zone (a press or release counts in the zone the animal is in at that moment). As
+  ANY-maze, in an **investigation zone** the keys count while the animal *investigates* the zone (head near it,
+  outside it, facing it), not while it is in it, and the rate is per minute spent investigating.
 * **I/O** measures (inputs, outputs, shockers, speakers, lights, encoders, analogue signals, virtual switches, OPAD)
   and **result variables** (`Variable: name`, and their recorded values) from procedures — see *I/O results*; they
   have their own *I/O* category in the measure chooser.
