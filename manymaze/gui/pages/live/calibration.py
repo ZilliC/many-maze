@@ -8,7 +8,7 @@ import math
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
                                QGroupBox, QLabel, QRadioButton, QVBoxLayout)
 
-from ....core.apparatus import POSITION_KEY, position_args
+from ....core.apparatus import DISTANCE_UNITS, POSITION_KEY, position_args
 from ....core.live import LiveSession
 from ...widgets import error_box, hint
 
@@ -32,11 +32,15 @@ class LiveCalibrationDialog(QDialog):
         grp = QButtonGroup(self)
         grp.addButton(self.by_line)
         grp.addButton(self.by_ppc)
+        # the length in the experiment's distance unit (the calibration itself is in px per cm)
+        unit = getattr(app, "distance_unit", "cm") if app is not None else "cm"
+        self.per_cm = DISTANCE_UNITS[unit]
         self.length = QDoubleSpinBox()
-        self.length.setRange(0.01, 100000)
-        self.length.setDecimals(2)
-        self.length.setSuffix(" cm")
-        self.length.setValue(app.calibration_length_cm if app is not None and app.calibration_length_cm else 10.0)
+        self.length.setRange(0.001, 1e6)
+        self.length.setDecimals(3 if unit == "m" else 2)
+        self.length.setSuffix(f" {unit}")
+        cm = app.calibration_length_cm if app is not None and app.calibration_length_cm else 10.0
+        self.length.setValue(cm * self.per_cm)
         self.ppc = QDoubleSpinBox()
         self.ppc.setRange(0.001, 100000)
         self.ppc.setDecimals(4)
@@ -64,7 +68,8 @@ class LiveCalibrationDialog(QDialog):
         """set_calibration keyword arguments."""
         line = getattr(self.app, "calibration_line", None)
         if self.by_line.isChecked() and self.line_px:
-            return {"px_per_cm": self.line_px / self.length.value(), "line": line, "length_cm": self.length.value()}
+            cm = self.length.value() / self.per_cm
+            return {"px_per_cm": self.line_px / cm, "line": line, "length_cm": cm}
         return {"px_per_cm": self.ppc.value(), "line": None, "length_cm": None}
 
 

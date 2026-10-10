@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .apparatus import Apparatus
-from .freezing import thresholds as freeze_thresholds
+from .apparatus import Apparatus, to_report_units
+from .freezing import immobility_from_motion, thresholds as freeze_thresholds
 from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy, occupancy_map
@@ -46,6 +46,11 @@ class AnalysisSettings:
     speed_smoothing_s: float = 0.2  # positions are smoothed over this window before distance/speed
     mobility_threshold: float = 2.0  # speed (units/s) below which the animal is immobile
     min_immobile_s: float = 2.0  # immobile episodes shorter than this count as mobile
+    immobility_mode: str = "speed"  # "speed" (above) | "motion": forced swim / tail suspension (freezing.py)
+    fst_threshold_pct: float = 2.0  # motion mode: mobile (struggling) while the struggle index (% of body) reaches this
+    min_fst_immobile_s: float = 1.0  # motion mode: immobile spells shorter than this count as mobile
+    fst_three_state: bool = False  # forced swim: the struggle split into climbing and swimming
+    fst_climbing_pct: float = 8.0  # … climbing while the struggle index reaches this
     freeze_on_pct: float = 2.0  # motion (% of body area changing) below which freezing starts
     freeze_off_pct: float = 3.0  # motion above which freezing ends (hysteresis)
     min_freeze_s: float = 1.0
@@ -92,6 +97,11 @@ class AnalysisSettings:
     arena_quadrants: bool = False  # time in each quadrant of the arena (NE, SE, SW, NW)
     behaviour_by_zone: bool = False  # manually scored behaviours split by zone
     paired_chamber: str = "Chamber A"  # conditioned place preference: drug-paired chamber
+    barnes_strategy_method: str = "simple"  # Barnes maze search strategy: "simple" | "classic" | "unmc"
+    barnes_target_region: int = 2  # holes either side of the escape hole in its target region (direct strategy)
+    barnes_serial_visits: int = 3  # consecutive hole visits that start a serial strategy
+    barnes_serial_skip: int = 1  # holes the animal may skip during a serial strategy
+    barnes_centre_zone: str = "Centre"  # entering it breaks a serial strategy (and a direct one)
     io_baseline_s: float = 10.0  # analogue inputs: baseline = the first io_baseline_s seconds of each period
     io_deviation_sd: float = 2.0  # analogue inputs: a deviation is more than this many baseline SDs from it
     opad_contact: str = ""  # operant plantar assay: digital input of the paw contact with the thermal plate
@@ -141,6 +151,7 @@ class Kinematics:
     scale: float
     unit: str
     breaks: np.ndarray | None = None  # frames that follow a pause
+    struggle: np.ndarray | None = None  # immobility_mode "motion": the struggle index (freezing.struggle_index)
 
     def slice(self, sl: slice, t0: float, duration: float) -> "Kinematics":
         """The frames sl, as a period starting at t0 that lasts `duration`."""
@@ -206,6 +217,10 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     else:
         motion_pct = np.full(len(t), np.nan)
         freezing = np.zeros(len(t), bool)
+    struggle = None
+    if s.immobility_mode == "motion" and np.isfinite(motion_pct).any():
+        # forced swim / tail suspension: mobile while the animal struggles, wherever its centre goes
+        mobile, struggle = immobility_from_motion(motion_pct, t, dur, track.dt, s, breaks)
     heading = np.full(len(t), np.nan)
     if len(t) > 1:
         heading[1:] = np.degrees(np.arctan2(np.diff(uy), np.diff(ux)))
@@ -217,7 +232,7 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     if duration is None:
         duration = float(dur.sum())
     return Kinematics(t, dur, x, y, ux, uy, step, speed, mobile, freezing, motion_pct, heading, t0, duration,
-                      scale, unit, breaks)
+                      scale, unit, breaks, struggle)
 
 
 def _head_direction(tr: Track) -> np.ndarray:
@@ -1810,12 +1825,14 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
             res[f"Variable: {name}"] = _r(float(v))
         except (TypeError, ValueError):
             res[f"Variable: {name}"] = str(v)
+    if s.immobility_mode == "motion" and P.k.struggle is None:
+        warnings.append("No pixel-change data: immobility comes from the speed of the animal")
     if not P.app.px_per_cm:
         warnings.insert(0, "Apparatus not calibrated: distances, speeds and distance thresholds (mobility, "
                            "thigmotaxis, contact, ...) are in pixels")
     if warnings:
         res["Warnings"] = "; ".join(warnings)
-    return res
+    return to_report_units(res, P.app.report_unit)  # distances in the apparatus's unit (mm / m; cm as computed)
 
 
 def _io_track(p: _Period, io_devices) -> dict:

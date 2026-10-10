@@ -27,7 +27,7 @@ from typing import Callable
 
 import numpy as np
 
-from .apparatus import Apparatus, from_known
+from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_unit
 from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
@@ -36,6 +36,7 @@ from .measures import (AnalysisSettings, add_warning, all_periods, analyse, anal
 from .periods import Period, calculation_columns, no_end_warning, uses_calculations
 from .reports import find_report, report_columns, report_rows, reports_from
 from .session import END_ZONE
+from .template_measures import FST_TEMPLATES
 from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
@@ -452,6 +453,8 @@ class Project:
             settings_extra=d.get("settings_extra", {}),
             created=d.get("created", ""),
         )
+        if p.protocol in FST_TEMPLATES and "immobility_mode" not in (d.get("analysis") or {}):
+            p.analysis.immobility_mode = "motion"  # forced swim / tail suspension saved before the motion mode
         p.path = pdir
         try:
             p.file_version = int(d.get("version", FORMAT_VERSION))
@@ -531,6 +534,43 @@ class Project:
             self.stages.append(name)
         return name
 
+    @property
+    def distance_unit(self) -> str:
+        """The unit distances are reported in ("mm" | "cm" | "m"): that of the first apparatus, "cm" without one."""
+        return self.apparatus[0].distance_unit if self.apparatus else "cm"
+
+    def set_distance_unit(self, unit: str):
+        """Report distances and speeds in `unit` for every apparatus of the experiment (ANY-maze: one unit for the
+        protocol). The calibration and the distance settings stay in centimetres. The measures named in the
+        calculations' formulas, the training criteria and the measure filter follow ("Total distance (cm)" becomes
+        "Total distance (m)")."""
+        if unit not in DISTANCE_UNITS:
+            raise ValueError(f"Unknown distance unit: {unit}")
+        old = self.distance_unit
+        for a in self.apparatus:
+            a.distance_unit = unit
+        if old == unit:
+            return
+        for c in self.calculations:
+            c.formula = re.sub(r"\{([^{}]*)\}", lambda m: "{" + rename_unit(m.group(1), old, unit) + "}", c.formula)
+        for c in self.training_criteria:
+            for d in (c, c.get("variability") if isinstance(c, dict) else None):
+                if isinstance(d, dict) and isinstance(d.get("measure"), str):
+                    d["measure"] = rename_unit(d["measure"], old, unit)
+        self.analysis.measure_filter = [rename_unit(m, old, unit) if isinstance(m, str) else m
+                                        for m in self.analysis.measure_filter]
+
+    def set_protocol(self, key: str):
+        """Make this a protocol of a type of test (templates.TEMPLATES key). The forced swim and tail suspension
+        tests detect immobility from the struggle in the image (AnalysisSettings.immobility_mode "motion", as ANY-maze's
+        Forced swim / Tail suspension mode); leaving them goes back to immobility from the speed."""
+        was = self.protocol in FST_TEMPLATES
+        self.protocol = key
+        if key in FST_TEMPLATES:
+            self.analysis.immobility_mode = "motion"
+        elif was and self.analysis.immobility_mode == "motion":
+            self.analysis.immobility_mode = "speed"
+
     def rename_stage(self, old: str, new: str) -> int:
         """A stage was renamed: its tests, training criteria and the animals' completed stages follow (stages are
         linked by name). Returns the number of tests moved."""
@@ -571,9 +611,12 @@ class Project:
                         if x.get(k) == old:
                             x[k] = new
         for c in self.training_criteria:
-            m = c.get("measure", "") if isinstance(c, dict) else ""
-            if m.startswith(old + ":") or m.startswith(old + " in "):
-                c["measure"] = new + m[len(old):]
+            if not isinstance(c, dict):
+                continue
+            for d in (c, c.get("variability")):  # the criterion's measure and its acceptable variability's
+                m = d.get("measure", "") if isinstance(d, dict) else ""
+                if m.startswith(old + ":") or m.startswith(old + " in "):
+                    d["measure"] = new + m[len(old):]
         return n
 
     def rename_calculation(self, old: str, new: str, formulas: bool = True, skip: Calculation | None = None):

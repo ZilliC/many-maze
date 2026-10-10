@@ -172,7 +172,7 @@ def _series_for(track: Track, app, color_by: str, settings=None):
 
         k = kinematics(track, app, settings or AnalysisSettings())
         win = max(1, int(round(0.2 / max(track.dt, 1e-6))))
-        return moving_average(k.speed, win), f"speed ({app.unit if app else 'px'}/s)"
+        return moving_average(k.speed, win) * app.report_factor, f"speed ({app.report_unit}/s)"
     v = charts.compute(track, app, [color_by], settings)[color_by]
     return v, charts.param_info(app, color_by, track).label
 
@@ -485,14 +485,14 @@ def speed_trace(track: Track, app: Apparatus, freezing: np.ndarray | None = None
     k = kinematics(track, app, AnalysisSettings())
     fig = Figure(figsize=size, dpi=100)
     ax = fig.add_subplot(111)
-    ax.plot(k.t, k.speed, lw=0.7, color="#2563eb")
+    ax.plot(k.t, k.speed * app.report_factor, lw=0.7, color="#2563eb")
     fr = k.freezing if freezing is None else freezing
     if fr is not None and fr.any():
         ax.fill_between(k.t, 0, 1, where=fr, transform=ax.get_xaxis_transform(), color="#f97316", alpha=0.25,
                         label="freezing")
         ax.legend(fontsize=7, loc="upper right")
     ax.set_xlabel("time (s)")
-    ax.set_ylabel(f"speed ({app.unit}/s)")
+    ax.set_ylabel(f"speed ({app.report_unit}/s)")
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig

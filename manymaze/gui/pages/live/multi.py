@@ -364,7 +364,7 @@ class MultiTestMixin:
                     with s.lock:
                         zones = stats.current_zones() if stats.detected else []
                         rows = stats.rows() if p.stack.currentIndex() == 2 else None
-                        dist, unit = stats.distance, stats.unit
+                        dist, unit = stats.distance * stats.factor, stats.unit
                     inner = [z for z in zones if z != "Arena"] or zones
                     p.vals["zone"].setText(", ".join(inner) if inner else ("—" if stats.detected else
                                                                            "not detected"))

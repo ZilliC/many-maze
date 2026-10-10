@@ -765,7 +765,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         src = f"{len(self.tracks)} track{'s' if len(self.tracks) > 1 else ''}" if self.tracks else \
             "the I/O log" if has_io_log(t) else "manual scoring"
         self.results_lbl.setText(f"<b>{len(measures)}</b> measures from {src} · unit: "
-                                 f"{self._app().unit if self._app() else 'px'}")
+                                 f"{self._app().report_unit if self._app() else 'px'}")
 
     def _filter_results(self, *_):
         words = self.results_filter.text().lower().split()

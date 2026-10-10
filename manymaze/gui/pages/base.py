@@ -8,6 +8,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QSpinBox,
                                QVBoxLayout, QWidget)
 
+from ...core.freezing import IMMOBILITY_MODES
+from ...core.template_measures import BARNES_METHODS
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -124,6 +126,24 @@ ANALYSIS_SPEC = [
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_immobile_s", "Shortest immobility episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("immobility_mode", "Detect immobility", "choice", list(IMMOBILITY_MODES.items()),
+     "From the speed: immobile while the animal's centre moves slower than the threshold above. Forced swim / "
+     "tail suspension (ANY-maze's mode for these tests): immobile once the animal has stopped struggling, from "
+     "the quick movements in the image; its position is not used, so drifting in the water, swinging on the tail "
+     "and the small movements that keep the head above water do not make it mobile. Set by the Forced swim and "
+     "Tail suspension types of test."),
+    ("fst_threshold_pct", "The animal struggles when its struggle index reaches (% of body)", "float",
+     (0.0, 100.0, 0.1, 2),
+     "The struggle index is the quick part of the pixel change (% of the animal's area) averaged over a second; "
+     "see the Struggle index chart of a test to choose this. Higher: stronger movements are needed to count as "
+     "struggling, so more immobility."),
+    ("min_fst_immobile_s", "Shortest immobile period (s)", "float", (0.0, 60.0, 0.1, 2),
+     "The animal is immobile once it has not struggled for this long; shorter pauses count as struggling."),
+    ("fst_three_state", "Forced swim: split the struggle into climbing and swimming", "bool", None,
+     "Adds time, %, episodes and latency of climbing and swimming to the forced swim test's results."),
+    ("fst_climbing_pct", "Climbing when the struggle index reaches (% of body)", "float", (0.0, 100.0, 0.5, 2),
+     "The most vigorous struggle (forepaws scrabbling at the wall) is climbing; the rest of the struggle is "
+     "swimming."),
     ("freeze_threshold_mode", "Freezing thresholds", "choice",
      [("manual", "Set manually (below)"), ("auto", "Automatic, from the motion of each test")],
      "Automatic: the start / end thresholds are derived from the distribution of the motion index of each test "
@@ -207,6 +227,20 @@ ANALYSIS_SPEC = [
      "Water maze corridor from the release point to the platform. 0 = 20 cm."),
     ("paired_chamber", "Drug-paired chamber (place preference)", "text", None,
      "Conditioned place preference: drug-paired chamber."),
+    ("barnes_strategy_method", "Barnes maze search strategy", "choice", list(BARNES_METHODS.items()),
+     "Simple: Direct with at most two holes visited before the escape hole, Serial when most moves are to the "
+     "next hole. ANY-maze (as revised in ANY-maze 7.54, after Gawel et al. 2018): the overall strategy, the "
+     "primary strategy up to the first visit to the escape hole, and the reference, working and perseverative "
+     "errors. UNMC method (University of Nebraska Medical Center): every strategy used in turn, with the time "
+     "using each."),
+    ("barnes_target_region", "Target region: holes either side of the escape hole", "int", (0, 13, 1),
+     "The Direct strategy goes to the escape hole visiting only holes of this region on the way."),
+    ("barnes_serial_visits", "A serial strategy starts after (consecutive hole visits)", "int", (2, 28, 1),
+     "e.g. 3: visiting holes 6, 7 and 8 starts it (from hole 6)."),
+    ("barnes_serial_skip", "Holes the animal may skip in a serial strategy", "int", (0, 13, 1),
+     "e.g. 1: visiting holes 9, 11 and 12 is still serial."),
+    ("barnes_centre_zone", "Centre zone of the Barnes maze", "text", None,
+     "Entering it breaks a serial strategy (ANY-maze method) and rules out a Direct one."),
     ("bin_length_s", "Split each test into time bins of (s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
      "0 = no time bins."),
     ("novel_object", "The novel object is the point named", "text", None, "Name of the point that is the novel object."),
@@ -240,8 +274,14 @@ DETECTION_SECTIONS = [
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
 ]
 
+# the forced swim / tail suspension settings, also shown on the Protocol page for those types of test
+FST_SECTION = "Forced swim / tail suspension"
+FST_FIELDS = ["immobility_mode", "fst_threshold_pct", "min_fst_immobile_s", "fst_three_state", "fst_climbing_pct"]
+FST_SPEC = [s for s in ANALYSIS_SPEC if s[0] in FST_FIELDS]
+
 ANALYSIS_SECTIONS = [
     ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s", "partial_rotation_deg"]),
+    (FST_SECTION, FST_FIELDS),
     ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
                   "min_freeze_s"]),
     ("Activity", ["activity_definition", "activity_threshold_pct", "min_inactive_s"]),
@@ -252,6 +292,8 @@ ANALYSIS_SECTIONS = [
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "orientation_deg", "grid_cells",
                                 "contact_distance", "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
+    ("Barnes maze strategy", ["barnes_strategy_method", "barnes_target_region", "barnes_serial_visits",
+                              "barnes_serial_skip", "barnes_centre_zone"]),
     ("I/O measures", ["io_baseline_s", "io_deviation_sd", "opad_contact", "opad_lick", "opad_temperature",
                       "opad_temperatures", "opad_tolerance"]),
     ("Test end", ["end_zone", "end_zone_s"]),

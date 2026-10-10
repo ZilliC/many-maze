@@ -10,7 +10,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QSpinBox,
                                QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ...core import ioconfig, pose
@@ -22,14 +22,15 @@ from ...core.export import display_text
 from ...core.measures import AnalysisSettings
 from ...core.periods import ANCHORS, END_ANCHORS, TARGET_KEY, check_periods
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
+from ...core.template_measures import FST_TEMPLATES
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
 from ._results_cache import cached_rows, get_rows, info_columns
-from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, Page, SettingsForm,
-                   property_form)
+from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
+                   FST_SPEC, Page, SettingsForm, property_form)
 from .protocol_pages import CalculationEditor, ElementPage, KeyEditor, small_button
 from .results.dialogs import MeasurePickerDialog, measure_groups
 from .results.table import _names
@@ -52,11 +53,19 @@ FORM_WIDTH = 900  # property pages with only settings stay at a readable width
 
 # record tables (see RecordTable): training criteria, time periods, event-anchored time periods
 CRITERIA_COLS = [("stage", "Stage", "text_choice", None),  # options: the stages, given by the page
-                 ("measure", "Measure", "text", None), ("op", "Is", "choice", [(o, o) for o in ("<", "<=", ">", ">=")]),
+                 ("measure", "Measure", "text", None),
+                 ("op", "Is", "choice", [(o, o) for o in ("<", "<=", ">", ">=")] + [("any", "any")]),
                  ("value", "Value", "number", None),
                  ("consecutive_trials", "Consecutive trials", "spin", (1, wf.MAX_TRIALS)),
                  ("action_met", "When met", "choice", MET_ACTIONS),
-                 ("after", "Retire after", "spin", (0, wf.MAX_TRIALS, "never", " trials"))]
+                 ("after", "Retire after", "spin", (0, wf.MAX_TRIALS, "never", " trials")),
+                 ("min_trials", "Minimum trials", "spin", (0, wf.MAX_TRIALS, "none", "")),
+                 # the acceptable variability (hidden: edited in the Variability row under the table)
+                 ("var_stat", "Variability", "choice", [("", "none")] + list(wf.VARIABILITY_STATS.items())),
+                 ("var_measure", "Variability of", "text", None),
+                 ("var_trials", "Variability over", "spin", (2, wf.MAX_TRIALS)),
+                 ("var_max", "Variability at most", "number", None)]
+_VAR_COLS = {c[0]: i for i, c in enumerate(CRITERIA_COLS) if c[0].startswith("var_")}
 PERIOD_COLS = [("label", "Time period", "text", None), ("start", "Starts at (s)", "number", None),
                ("end", "Ends at (s)", "number", None)]
 EVENT_PERIOD_COLS = [("label", "Time period", "text", None),
@@ -173,6 +182,20 @@ class ExperimentPage(Page):
         pg.add(f)
         pg.add(separator())
 
+        # forced swim / tail suspension: shown for those types of test (the same settings are under Analysis)
+        self.fst_box = QWidget()
+        lay = QVBoxLayout(self.fst_box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.fst_form = SettingsForm(FST_SPEC, sections=[(FST_SECTION, FST_FIELDS)])
+        self.fst_form.changed.connect(self._fst_changed)
+        lay.addWidget(self.fst_form)
+        lay.addWidget(hint("As ANY-maze's Forced swim / Tail suspension mode: the animal is immobile once it has "
+                           "stopped struggling, judged from the quick movements in the image, wherever it is. "
+                           "Film it from the side; the Struggle index chart of a test helps to set the threshold."))
+        lay.addWidget(separator())
+        self.fst_box.hide()
+        pg.add(self.fst_box)
+
         pg.section("Testing")
         self.blind = QCheckBox("Blind testing — hide the treatments (shown as codes) while testing and scoring")
         self.blind.setToolTip("Hide treatment groups (shown as codes) while testing and scoring")
@@ -224,23 +247,58 @@ class ExperimentPage(Page):
         pg.add(self.stages_lbl)
         pg.add(separator())
 
-        pg.section("Training criteria")
-        pg.add(hint("A stage is completed when a result measure meets the condition on N consecutive trials; "
-                    "animals that have not met it after the given number of trials can be retired. Apply the "
-                    "criteria on the Animals page."))
+        pg.section("Training criteria (stage end rules)")
+        pg.add(hint("A stage is completed when a result measure meets the condition on N consecutive trials (Is "
+                    "“any”: any value), once the animal has done the minimum number of trials and, with an "
+                    "acceptable variability, when the measure varies little enough over its last trials. Animals "
+                    "that have not met it after the given number of trials can be retired. Apply the criteria on "
+                    "the Animals page."))
         cols = [c if c[0] != "stage" else c[:3] + (lambda: self.project.stages if self.project else [],)
                 for c in CRITERIA_COLS]
         self.crit = RecordTable(cols, stretch=(1,))
-        for c, wd in ((0, 140), (2, 60), (3, 80), (4, 130), (5, 250), (6, 110)):
+        for c, wd in ((0, 140), (2, 64), (3, 80), (4, 130), (5, 250), (6, 110), (7, 110)):
             self.crit.setColumnWidth(c, wd)
+        for c in _VAR_COLS.values():
+            self.crit.setColumnHidden(c, True)
         self.crit.horizontalHeaderItem(6).setToolTip("Retire animals that have not met the criterion after this many "
                                                      "trials of the stage")
+        self.crit.horizontalHeaderItem(7).setToolTip("The stage cannot end before the animal has done this many "
+                                                     "trials of it, even when the condition is met earlier")
         self.crit.setMinimumHeight(170)
         self.crit.edited.connect(self._store_criteria)
+        self.crit.currentCellChanged.connect(lambda *_: self._show_variability())
         pg.add(self.crit)
+        # the selected criterion's acceptable variability (ANY-maze 7.30)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.var_stat = QComboBox()
+        self.var_stat.addItem("No variability rule", "")
+        for k, label in wf.VARIABILITY_STATS.items():
+            self.var_stat.addItem(label, k)
+        self.var_stat.setToolTip("Variability (%): ANY-maze's ((highest − lowest) / (highest + lowest)) × 100 over "
+                                 "the trials; SD: their standard deviation; CV (%): the SD as a % of their mean")
+        self.var_measure = QLineEdit()
+        self.var_measure.setPlaceholderText("the criterion's measure")
+        self.var_measure.setMinimumWidth(200)
+        self.var_trials = QSpinBox()
+        self.var_trials.setRange(2, wf.MAX_TRIALS)
+        self.var_trials.setSuffix(" trials")
+        self.var_max = QDoubleSpinBox()
+        self.var_max.setRange(0.0, 1e6)
+        self.var_max.setDecimals(3)
+        for w in (QLabel("Acceptable variability:"), self.var_stat, QLabel("of"), self.var_measure,
+                  QLabel("over the last"), self.var_trials, QLabel("is at most"), self.var_max):
+            row.addWidget(w)
+        row.addStretch()
+        self.var_stat.currentIndexChanged.connect(self._variability_edited)
+        self.var_measure.editingFinished.connect(self._variability_edited)
+        self.var_trials.valueChanged.connect(self._variability_edited)
+        self.var_max.valueChanged.connect(self._variability_edited)
+        pg.add(row)
         pg.add(button_row(small_button("Add criterion", "add", slot=self._add_criterion),
                           small_button("Remove", "delete", slot=self.crit.remove_current)))
         pg.finish()
+        self._show_variability()
 
     def _build_keys(self):
         pg = self._element_page("keys", "Keys", "Keys are the behaviours you score by hand: press the key (or click "
@@ -291,6 +349,7 @@ class ExperimentPage(Page):
         self.an_form = SettingsForm(ANALYSIS_SPEC, sections=ANALYSIS_SECTIONS)
         self.an_form.setMaximumWidth(FORM_WIDTH - 56)
         self.an_form.changed.connect(self.main.mark_dirty)
+        self.an_form.changed.connect(self._analysis_changed)
         pg.add(self.an_form)
 
         pg.section("Time periods")
@@ -534,6 +593,8 @@ class ExperimentPage(Page):
         self._show_event_period_problems([])
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
+        self.fst_form.load(p.analysis)
+        self._update_fst()
         self._fill_calculations()
 
     def _update_summary(self):
@@ -546,6 +607,19 @@ class ExperimentPage(Page):
                  f"{len(p.behaviours)} key{'s' if len(p.behaviours) != 1 else ''}",
                  f"{procs} procedure{'s' if procs != 1 else ''}"]
         self.summary_lbl.setText("This protocol has " + ", ".join(parts) + ".")
+
+    def _update_fst(self):
+        """The forced swim / tail suspension settings are shown for those types of test."""
+        self.fst_box.setVisible(self.protocol.currentData() in FST_TEMPLATES)
+
+    def _fst_changed(self):
+        if self.project is not None:
+            self.an_form.load(self.project.analysis)
+        self.main.mark_dirty()
+
+    def _analysis_changed(self):
+        if self.project is not None:
+            self.fst_form.load(self.project.analysis)
 
     def _update_mode(self):
         mode = self.mode.currentData()
@@ -886,7 +960,7 @@ class ExperimentPage(Page):
                 self, "Apply template", f"Make this a {t.title} protocol with tests of {t.default_duration_s:g} s? "
                 "Existing results are recalculated with the new protocol type.") != QMessageBox.Yes:
             return
-        p.protocol = key
+        p.set_protocol(key)
         p.test_duration_s = float(t.default_duration_s)
         self.on_show()
         self.main.mark_dirty()
@@ -948,7 +1022,11 @@ class ExperimentPage(Page):
         p = self.project
         p.name = self.name.text().strip() or p.name
         p.description = self.desc.toPlainText()
-        p.protocol = self.protocol.currentData()
+        if p.protocol != self.protocol.currentData():  # the forced swim / tail suspension immobility follows
+            p.set_protocol(self.protocol.currentData())
+            self.an_form.load(p.analysis)
+            self.fst_form.load(p.analysis)
+            self._update_fst()
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
         self._follow_stage_renames(p)
@@ -1157,9 +1235,11 @@ class ExperimentPage(Page):
     @staticmethod
     def _criterion_row(c: dict) -> dict:
         c = wf.normalize_criterion(c)
-        fail = c["action_fail"]
+        fail, var = c["action_fail"], c["variability"] or {}
         return {**c, "action_met": "complete_stage" if c["action_met"] == "advance" else c["action_met"],
-                "after": fail["after_trials"] if fail["action"] == "retire" else 0}
+                "after": fail["after_trials"] if fail["action"] == "retire" else 0,
+                "var_stat": var.get("stat", ""), "var_measure": var.get("measure", ""),
+                "var_trials": var.get("trials", c["consecutive_trials"]), "var_max": var.get("max", 10.0)}
 
     def _add_criterion(self):
         if self.project is None:
@@ -1175,9 +1255,39 @@ class ExperimentPage(Page):
         self.project.training_criteria = [
             {"stage": c["stage"], "measure": c["measure"], "op": c["op"], "value": c["value"] or 0.0,
              "consecutive_trials": c["consecutive_trials"], "action_met": c["action_met"],
-             "action_fail": {"after_trials": c["after"], "action": "retire" if c["after"] else "none"}}
+             "action_fail": {"after_trials": c["after"], "action": "retire" if c["after"] else "none"},
+             "min_trials": c["min_trials"],
+             "variability": {"stat": c["var_stat"], "measure": c["var_measure"], "trials": c["var_trials"],
+                             "max": c["var_max"] or 0.0} if c["var_stat"] else None}
             for c in self.crit.records()]
         self.main.mark_dirty()
+
+    def _show_variability(self):
+        """The Variability row shows the selected criterion's acceptable variability."""
+        r = self.crit.currentRow()
+        rec = self.crit.records()[r] if 0 <= r < self.crit.rowCount() else None
+        with loading(self):
+            self.var_stat.setCurrentIndex(max(0, self.var_stat.findData(rec["var_stat"] if rec else "")))
+            self.var_measure.setText(rec["var_measure"] if rec else "")
+            self.var_trials.setValue(int(rec["var_trials"] or 2) if rec else 3)
+            self.var_max.setValue(float(rec["var_max"] or 0.0) if rec else 10.0)
+        self.var_stat.setEnabled(rec is not None)
+        on = rec is not None and bool(rec["var_stat"])
+        for w in (self.var_measure, self.var_trials, self.var_max):
+            w.setEnabled(on)
+
+    def _variability_edited(self, *_):
+        """Store the Variability row into the selected criterion (its hidden cells, so the row keeps it)."""
+        r = self.crit.currentRow()
+        if self._loading or not 0 <= r < self.crit.rowCount():
+            return
+        t, cols = self.crit, _VAR_COLS
+        t.cellWidget(r, cols["var_stat"]).setCurrentIndex(max(0, t.cellWidget(r, cols["var_stat"]).findData(
+            self.var_stat.currentData())))
+        t.item(r, cols["var_measure"]).setText(self.var_measure.text().strip())
+        t.cellWidget(r, cols["var_trials"]).setValue(self.var_trials.value())
+        t.item(r, cols["var_max"]).setText(f"{self.var_max.value():g}")
+        self._show_variability()
 
     def _add_event_period(self):
         zone = ""

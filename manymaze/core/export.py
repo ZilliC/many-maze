@@ -618,11 +618,13 @@ def protocol_report(project: Project, path) -> Path:
         cal = (f"{app.px_per_cm:.3f} px/cm" + (f" (line of {app.calibration_length_cm:g} cm)"
                                                  if app.calibration_length_cm else "")) if app.px_per_cm else \
             "not calibrated (results in pixels)"
+        if app.report_unit not in ("cm", "px"):
+            cal += f"; distances reported in {app.report_unit}"
         out.append(table(("Item", "Value"), [("Template", app.template), ("Calibration", cal),
                                              ("Arena", app.arena.to_dict()["type"] if app.arena else "—")]))
         if app.zones:
-            out.append(table(("Zone", "Shape", f"Area ({app.unit}²)", "Entry rule", "Options"), [
-                (z.name, z.shape.to_dict()["type"], round(z.shape.area() * app.scale ** 2, 2),
+            out.append(table(("Zone", "Shape", f"Area ({app.report_unit}²)", "Entry rule", "Options"), [
+                (z.name, z.shape.to_dict()["type"], round(z.shape.area() * (app.scale * app.report_factor) ** 2, 2),
                  ENTRY_RULE_TEXT.get(z.entry_rule, z.entry_rule),
                  ", ".join(x for x, on in (("hidden", z.hidden), ("moveable", z.moveable),
                                            (f"investigate {z.investigation_distance_cm:g} cm",
@@ -746,7 +748,7 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
             p = out_dir / f"{stem}.{ext}"
             with atomic_write(p, newline="") as f:
                 f.write(_one_line(f"# Test {t.id}, animal {aid}, stage {t.stage}, trial {t.trial}, "
-                                  f"unit {app.unit if app else 'px'} (raw columns in pixels)") + "\n")
+                                  f"unit {app.report_unit if app else 'px'} (raw columns in pixels)") + "\n")
                 w = csv.writer(f, delimiter=delimiter)
                 w.writerow(cols)
                 M = np.column_stack(arrays) if arrays and len(tr) else np.zeros((0, len(cols)))
@@ -865,7 +867,7 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
             w("  <apparatus-list>\n")
             for a in project.apparatus:
                 fs = a.frame_size or (None, None)
-                w(f"    <apparatus{_attrs(name=a.name, template=a.template, unit=a.unit, px_per_cm=a.px_per_cm, frame_width=fs[0], frame_height=fs[1])}>\n")
+                w(f"    <apparatus{_attrs(name=a.name, template=a.template, unit=a.report_unit, px_per_cm=a.px_per_cm, frame_width=fs[0], frame_height=fs[1])}>\n")
                 w(_shape_xml("arena", a.arena.to_dict() if a.arena else None, "      "))
                 for z in a.zones:
                     w(f"      <zone{_attrs(name=z.name, color=z.color)}>\n")
