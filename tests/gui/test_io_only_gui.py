@@ -62,7 +62,7 @@ def test_run_a_test_without_a_camera(win):
     p = win.project
     page = win.goto("LivePage")
     assert page.io_only and page.src_box.isHidden() and page.det_box.isHidden()
-    assert not page.mode_acts["multi"].isEnabled() and not page.camera_act.isEnabled()
+    assert page.mode_acts["multi"].isEnabled() and not page.camera_act.isEnabled()  # (several: chambers)
     assert page.single_panel.view.message.startswith("Input/output only")
     page.start_mode.setCurrentIndex(page.start_mode.findData("on_detection"))  # (no camera: starts at once)
     page.animal.setCurrentText("R1")
