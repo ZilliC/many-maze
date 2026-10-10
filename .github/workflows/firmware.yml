@@ -1,0 +1,41 @@
+name: Firmware
+
+# Compiles the I/O firmware (firmware/manymaze_io) with arduino-cli for AVR and SAMD boards, so a change to the
+# sketch that no longer builds on one of them (or no longer fits the Uno's 2 KB of RAM) is caught at once.
+on:
+  push:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+jobs:
+  compile:
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - { fqbn: "arduino:avr:uno", core: "arduino:avr" }
+          - { fqbn: "arduino:avr:mega", core: "arduino:avr" }
+          - { fqbn: "arduino:samd:arduino_zero_native", core: "arduino:samd" }
+          - { fqbn: "arduino:samd:mkrzero", core: "arduino:samd" }
+    name: ${{ matrix.board.fqbn }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install the board core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install "${{ matrix.board.core }}"
+      - name: Compile the sketch
+        run: |
+          set -o pipefail
+          arduino-cli compile --fqbn "${{ matrix.board.fqbn }}" --warnings default firmware/manymaze_io \
+            | tee compile.txt
+          echo "### ${{ matrix.board.fqbn }}" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^(Sketch uses|Global variables use)" compile.txt >> "$GITHUB_STEP_SUMMARY" || true
