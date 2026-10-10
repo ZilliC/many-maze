@@ -302,6 +302,8 @@ def barnes_maze(x, y, w, h, diameter_cm=122.0, n_holes=20, hole_diameter_cm=5.0,
     cx, cy, r = x + w / 2, y + h / 2, min(w, h) / 2
     s = 2 * r / diameter_cm
     app.arena = circle(cx, cy, r)
+    # the start area: entering it breaks a serial search strategy (AnalysisSettings.barnes_centre_zone)
+    app.zones.append(Zone("Centre", circle(cx, cy, r * 0.3), "#cbd5e1"))
     rr = r * hole_ring_fraction - hole_diameter_cm * s
     names = []
     for i in range(n_holes):
@@ -377,11 +379,21 @@ def fear_conditioning(x, y, w, h, width_cm=30.0) -> Apparatus:
 
 
 def forced_swim(x, y, w, h, diameter_cm=20.0) -> Apparatus:
-    app = Apparatus(name="Forced swim / tail suspension", template="forced_swim")
+    """Forced swim (Porsolt) cylinder. ANY-maze films it from the side; drawn here as the water-filled area."""
+    app = Apparatus(name="Forced swim test", template="forced_swim")
     cx, cy = x + w / 2, y + h / 2
     app.arena = Ellipse(cx, cy, w / 2, h / 2)
     app.zones.append(Zone("Cylinder", Ellipse(cx, cy, w / 2, h / 2), "#64748b"))
     _calibrate_width(app, w, diameter_cm)
+    return app
+
+
+def tail_suspension(x, y, w, h, width_cm=20.0) -> Apparatus:
+    """Tail suspension compartment seen from the front: the area the hanging animal can reach."""
+    app = Apparatus(name="Tail suspension test", template="tail_suspension")
+    app.arena = rect(x, y, w, h)
+    app.zones.append(Zone("Compartment", rect(x, y, w, h), "#64748b"))
+    _calibrate_width(app, w, width_cm)
     return app
 
 
@@ -596,8 +608,12 @@ TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
                  {"width_cm": 60.0, "cup_radius_cm": 5.0, "interaction_cm": 3.0}, 600),
     TemplateInfo("fear_conditioning", "Fear conditioning / freezing", fear_conditioning,
                  "Single chamber; freezing analysis based on pixel change.", {"width_cm": 30.0}, 300),
-    TemplateInfo("forced_swim", "Forced swim / tail suspension", forced_swim,
-                 "Immobility analysis (Porsolt / tail suspension).", {"diameter_cm": 20.0}, 360),
+    TemplateInfo("forced_swim", "Forced swim test (Porsolt)", forced_swim,
+                 "Cylinder of water; immobility from the struggle in the image, optionally split into climbing and "
+                 "swimming.", {"diameter_cm": 20.0}, 360),
+    TemplateInfo("tail_suspension", "Tail suspension test", tail_suspension,
+                 "The animal hangs by its tail; immobility from the struggle in the image (swinging is ignored).",
+                 {"width_cm": 20.0}, 360),
     TemplateInfo("novel_tank", "Novel tank diving test (fish)", novel_tank,
                  "Side view of a tank divided into top, middle and bottom layers; latency to top, bottom "
                  "dwelling, erratic movements.", {"width_cm": 20.0, "n_layers": 3}, 360),

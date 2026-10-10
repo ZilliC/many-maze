@@ -8,6 +8,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QSpinBox,
                                QVBoxLayout, QWidget)
 
+from ...core.freezing import IMMOBILITY_MODES
+from ...core.template_measures import BARNES_METHODS
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -101,6 +103,14 @@ DETECTION_SPEC = [
     ("motion_threshold", "A pixel is moving when it changes by (grey levels)", "int", (1, 255, 1),
      "Pixel change counted as movement for freezing / immobility."),
     ("max_gap_s", "Fill gaps in the track of up to (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("max_jump_speed", "Remove jumps faster than (units/s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
+     "A position the animal could not have reached at this speed (cm/s when the apparatus is calibrated, else "
+     "pixels/s) is a jump — a reflection, a shadow or another object detected for a moment — when the track comes "
+     "back within the time below: it is removed and filled like a gap. A real fast run does not come back and is "
+     "kept. Choose well above the animal's top speed, e.g. 150 cm/s for a mouse. The number removed is the "
+     "information column Jumps removed. 0 = off."),
+    ("max_jump_s", "… when the track comes back within (s)", "float", (0.0, 10.0, 0.1, 2),
+     "The longest jump: a track that stays away longer is kept (the animal really went there)."),
     ("smoothing", "Smooth positions over (frames, 0 = off)", "int", (0, 51, 1),
      "Moving average applied to positions. 0 = off."),
     ("frame_step", "Analyse every Nth frame", "int", (1, 50, 1), "Speed up tracking of high frame-rate video."),
@@ -116,6 +126,24 @@ ANALYSIS_SPEC = [
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_immobile_s", "Shortest immobility episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("immobility_mode", "Detect immobility", "choice", list(IMMOBILITY_MODES.items()),
+     "From the speed: immobile while the animal's centre moves slower than the threshold above. Forced swim / "
+     "tail suspension (ANY-maze's mode for these tests): immobile once the animal has stopped struggling, from "
+     "the quick movements in the image; its position is not used, so drifting in the water, swinging on the tail "
+     "and the small movements that keep the head above water do not make it mobile. Set by the Forced swim and "
+     "Tail suspension types of test."),
+    ("fst_threshold_pct", "The animal struggles when its struggle index reaches (% of body)", "float",
+     (0.0, 100.0, 0.1, 2),
+     "The struggle index is the quick part of the pixel change (% of the animal's area) averaged over a second; "
+     "see the Struggle index chart of a test to choose this. Higher: stronger movements are needed to count as "
+     "struggling, so more immobility."),
+    ("min_fst_immobile_s", "Shortest immobile period (s)", "float", (0.0, 60.0, 0.1, 2),
+     "The animal is immobile once it has not struggled for this long; shorter pauses count as struggling."),
+    ("fst_three_state", "Forced swim: split the struggle into climbing and swimming", "bool", None,
+     "Adds time, %, episodes and latency of climbing and swimming to the forced swim test's results."),
+    ("fst_climbing_pct", "Climbing when the struggle index reaches (% of body)", "float", (0.0, 100.0, 0.5, 2),
+     "The most vigorous struggle (forepaws scrabbling at the wall) is climbing; the rest of the struggle is "
+     "swimming."),
     ("freeze_threshold_mode", "Freezing thresholds", "choice",
      [("manual", "Set manually (below)"), ("auto", "Automatic, from the motion of each test")],
      "Automatic: the start / end thresholds are derived from the distribution of the motion index of each test "
@@ -128,12 +156,23 @@ ANALYSIS_SPEC = [
      "Pixel change, as a % of the animal's area, under which freezing begins."),
     ("freeze_off_pct", "Freezing ends when movement rises above (% of body)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_freeze_s", "Shortest freezing episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("activity_definition", "The animal is active when", "choice",
+     [("mobile_or_keys", "It is mobile, or doing a behaviour that counts as activity (ANY-maze)"),
+      ("keys", "It is doing a behaviour that counts as activity (ANY-maze without mobility)"),
+      ("pixel_change", "Its pixels change (movement threshold below)")],
+     "ANY-maze: active = mobile (Movement settings) or doing a behaviour whose key counts as activity (tick it on "
+     "the key's page, e.g. grooming). Pixel change: the pixels that change between frames, as a % of the "
+     "animal's area, reach the threshold below - an animal grooming in place is active but immobile "
+     "(experiments made before this option)."),
     ("activity_threshold_pct", "The animal is active when movement reaches (% of body)", "float",
      (0.0, 1000.0, 0.5, 2),
-     "Activity comes from the pixels that change between frames (as a % of the animal's area), not from its "
-     "speed: an animal grooming in place is active but immobile."),
+     "Pixel-change activity only: activity comes from the pixels that change between frames (as a % of the "
+     "animal's area), not from its speed: an animal grooming in place is active but immobile."),
     ("min_inactive_s", "Shortest inactive episode (s)", "float", (0.0, 60.0, 0.1, 2),
-     "Inactive episodes shorter than this count as active."),
+     "Pixel-change activity only: inactive episodes shorter than this count as active."),
+    ("partial_rotation_deg", "Partial rotation angle (°)", "float", (0.0, 359.0, 15.0, 0),
+     "ANY-maze's partial rotations: turns of the body (one way, from one reversal to the next) of at least this "
+     "angle during which no full rotation was completed. 0 = none."),
     ("rearing", "Detect rearing automatically", "bool", None,
      "Rears are detected from the animal's shape: seen from above, an animal standing on its hind legs looks "
      "smaller and shorter. Adds rear count, time, latency and durations, overall and per zone."),
@@ -154,6 +193,18 @@ ANALYSIS_SPEC = [
     ("count_initial_entry", "Count starting the test in a zone as an entry", "bool", None, ""),
     ("latency_if_never", "When an event never occurs, its latency is", "choice",
      [("duration", "The test duration"), ("blank", "Left blank")], ""),
+    ("undefined_averages", "An average of nothing is", "choice",
+     [("blank", "Left blank (ANY-maze)"), ("zero", "Zero (ANY-maze's “Use zero for undefined averages”)"),
+      ("", "As before (0 for visits, investigation bouts and rears in a zone, else blank)")],
+     "The mean visit, investigation bout, speed in the zone and while investigating, distance to the border, rear "
+     "in a zone, and a sequence's mean duration, distance and speed when there was nothing to average (e.g. no "
+     "visit). Experiments made before this option keep their earlier results."),
+    ("heading_error_by", "Initial heading: the first position to the position", "choice",
+     [("time", "After the animal has been mobile for (s)"), ("distance", "First further away than (units)")],
+     "ANY-maze's Heading error options, for the initial heading error to a zone or point (and the water maze's): "
+     "positions while the animal is immobile are ignored."),
+    ("heading_error_time_s", "… mobile for (s)", "float", (0.0, 600.0, 0.5, 2), ""),
+    ("heading_error_distance", "… further away than (units)", "float", (0.0, 10000.0, 1.0, 2), ""),
     ("thigmotaxis_distance", "Thigmotaxis band next to the wall (units)", "float", (0.0, 1000.0, 0.5, 2),
      "Distance from the arena wall counted as thigmotaxis. 0 = 25 % of the arena half-width."),
     ("exploration_facing_deg", "Exploring means facing the object within (°)", "float", (0.0, 180.0, 5.0, 1),
@@ -176,6 +227,20 @@ ANALYSIS_SPEC = [
      "Water maze corridor from the release point to the platform. 0 = 20 cm."),
     ("paired_chamber", "Drug-paired chamber (place preference)", "text", None,
      "Conditioned place preference: drug-paired chamber."),
+    ("barnes_strategy_method", "Barnes maze search strategy", "choice", list(BARNES_METHODS.items()),
+     "Simple: Direct with at most two holes visited before the escape hole, Serial when most moves are to the "
+     "next hole. ANY-maze (as revised in ANY-maze 7.54, after Gawel et al. 2018): the overall strategy, the "
+     "primary strategy up to the first visit to the escape hole, and the reference, working and perseverative "
+     "errors. UNMC method (University of Nebraska Medical Center): every strategy used in turn, with the time "
+     "using each."),
+    ("barnes_target_region", "Target region: holes either side of the escape hole", "int", (0, 13, 1),
+     "The Direct strategy goes to the escape hole visiting only holes of this region on the way."),
+    ("barnes_serial_visits", "A serial strategy starts after (consecutive hole visits)", "int", (2, 28, 1),
+     "e.g. 3: visiting holes 6, 7 and 8 starts it (from hole 6)."),
+    ("barnes_serial_skip", "Holes the animal may skip in a serial strategy", "int", (0, 13, 1),
+     "e.g. 1: visiting holes 9, 11 and 12 is still serial."),
+    ("barnes_centre_zone", "Centre zone of the Barnes maze", "text", None,
+     "Entering it breaks a serial strategy (ANY-maze method) and rules out a Direct one."),
     ("bin_length_s", "Split each test into time bins of (s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
      "0 = no time bins."),
     ("novel_object", "The novel object is the point named", "text", None, "Name of the point that is the novel object."),
@@ -205,20 +270,30 @@ DETECTION_SECTIONS = [
     ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
     ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
+    ("Jumps", ["max_jump_speed", "max_jump_s"]),  # removed before the gaps are filled (Tracking quality)
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
 ]
 
+# the forced swim / tail suspension settings, also shown on the Protocol page for those types of test
+FST_SECTION = "Forced swim / tail suspension"
+FST_FIELDS = ["immobility_mode", "fst_threshold_pct", "min_fst_immobile_s", "fst_three_state", "fst_climbing_pct"]
+FST_SPEC = [s for s in ANALYSIS_SPEC if s[0] in FST_FIELDS]
+
 ANALYSIS_SECTIONS = [
-    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s"]),
+    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s", "partial_rotation_deg"]),
+    (FST_SECTION, FST_FIELDS),
     ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
                   "min_freeze_s"]),
-    ("Activity", ["activity_threshold_pct", "min_inactive_s"]),
+    ("Activity", ["activity_definition", "activity_threshold_pct", "min_inactive_s"]),
     ("Rearing", ["rearing", "rear_area_pct", "rear_length_pct", "min_rear_s"]),
     ("Zones", ["zone_body_part", "body_proportion_pct", "hidden_zone_margin", "entry_min_duration_s",
-               "count_initial_entry", "latency_if_never"]),
+               "count_initial_entry", "latency_if_never", "undefined_averages"]),
+    ("Heading error", ["heading_error_by", "heading_error_time_s", "heading_error_distance"]),
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "orientation_deg", "grid_cells",
                                 "contact_distance", "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
+    ("Barnes maze strategy", ["barnes_strategy_method", "barnes_target_region", "barnes_serial_visits",
+                              "barnes_serial_skip", "barnes_centre_zone"]),
     ("I/O measures", ["io_baseline_s", "io_deviation_sd", "opad_contact", "opad_lick", "opad_temperature",
                       "opad_temperatures", "opad_tolerance"]),
     ("Test end", ["end_zone", "end_zone_s"]),

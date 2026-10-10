@@ -777,15 +777,22 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         return True
 
     def _update_io_only(self):
-        """The protocol's I/O only mode: no camera source, detection or several camera tests; a note instead of
-        the camera image."""
+        """The protocol's I/O only mode: no camera source or detection; a note instead of the camera image, and
+        Several tests runs test panels without a camera (one per I/O device, e.g. operant chambers side by
+        side)."""
         io = self.io_only
         mode = self.mode
         self.src_box.setVisible(mode == "single" and not io)
         self.det_box.setVisible(mode != "observe" and not io)
-        self.mode_acts["multi"].setEnabled(not io or mode == "multi")
-        self.mode_acts["multi"].setToolTip("I/O only: one test at a time (Several tests needs cameras)" if io else
-                                           dict((k, tip) for k, _t, _i, tip in MODE_ACTIONS)["multi"])
+        self.mode_acts["multi"].setToolTip(
+            "Input/output only: several tests at once, each with its own I/O device (e.g. operant chambers side "
+            "by side)" if io else dict((k, tip) for k, _t, _i, tip in MODE_ACTIONS)["multi"])
+        self.sess_table.horizontalHeaderItem(0).setText("I/O device" if io else "Source")
+        self.panels_hint.setText(
+            "Each row is a test panel without a camera: the I/O device (chamber) it uses, an optional apparatus "
+            "and the animal, stage and trial tested. Add and remove panels with the ribbon." if io else
+            "Each row is a test panel: the camera or video it uses, its apparatus and the animal, stage and trial "
+            "tested. Add and remove panels with the ribbon.")
         if io and mode == "single" and self.grabber is None:
             self.single_panel.view.set_message("Input/output only: the test runs with the I/O devices and the "
                                                "procedures, without a camera (see the Monitor tab).")

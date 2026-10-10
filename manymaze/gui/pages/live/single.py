@@ -408,7 +408,7 @@ class SingleTestMixin:
         return {"session": s, "state": state, "elapsed": s.elapsed if state != "waiting" else 0.0,
                 "duration": s.duration_s, "events": len(s.events), "fired": list(s.engine.fired),
                 "outputs": list(s.outputs.log) if s.outputs is not None else [], "proc_log": list(s.log),
-                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance,
+                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance * s.stats.factor,
                 "unit": s.stats.unit}
 
     @property
@@ -444,7 +444,7 @@ class SingleTestMixin:
                     self._preview_tracker = self._make_preview_tracker(frame, app)
                 dets, _fg = self._preview_tracker.process(frame) if self._preview_tracker else ([], None)
                 d = dets[0] if dets else None
-                info = {"state": "preview", "distance": 0.0, "unit": app.unit if app else "px"}
+                info = {"state": "preview", "distance": 0.0, "unit": app.report_unit if app else "px"}
             info["detected"] = bool(d is not None and d.detected)
             zones = []
             if s is not None and s.state in ("running", "paused"):
@@ -644,9 +644,11 @@ class SingleTestMixin:
     def _make_session(self, test, app, bg, size, fps: float, outputs, devices, name: str, entry=None,
                       on_stimulus=None) -> LiveSession:
         """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
-        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
+        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery.
+        In an Input/output only protocol (with several tests: a test panel without a camera) an IOSession."""
         p = self.project
-        if self.io_only:  # no camera: the I/O devices and the procedures on the computer's clock
+        io = self.io_only if entry is None else entry.source_key is None
+        if io:  # no camera: the I/O devices and the procedures on the computer's clock
             mode = self._session_mode()
             if mode in ("on_detection", "experimenter_leaves"):
                 self._log("I/O only: the test starts as soon as it is armed (no camera to detect the animal).",

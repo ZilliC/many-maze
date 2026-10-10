@@ -28,14 +28,17 @@ from typing import Callable
 
 import numpy as np
 
-from .apparatus import Apparatus, from_known
+from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_unit
 from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
-from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, analyse_segmented,
+from .measures import (AnalysisSettings, add_warning, all_periods, analyse, analyse_period, analyse_segmented,
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
+from .periods import Period, calculation_columns, no_end_warning, uses_calculations
+from .reports import find_report, report_columns, report_rows, reports_from
 from .security import SECURITY_DEFAULTS, ExperimentKey, PasswordRequired, loads as _loads, security_from, users_from
 from .session import END_ZONE
+from .template_measures import FST_TEMPLATES
 from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
@@ -50,12 +53,13 @@ FORMAT_VERSION = 1
 # columns of a results row that describe the test rather than measure it (animal fields are added to these)
 INFO_COLUMNS = ["Test", "Animal", "Group", "Treatment code", "Sex", "Animal notes", "Stage", "Trial", "Apparatus",
                 "Test date", "Day of week", "Test time", "Time of day", "User", "Test notes", "Reason for test end",
-                "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Source video file",
+                "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Jumps removed", "Source video file",
                 "Recorded video file", "Video time at test start (s)", "Moveable zone positions", "Period",
                 "Segment of test"]
 # information columns not shown in the results table until ticked in its column chooser (rarely needed)
 OPTIONAL_INFO_COLUMNS = ["Treatment code", "Animal notes", "Time of day", "Reason for test end",
-                         "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Source video file",
+                         "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Jumps removed",
+                         "Source video file",
                          "Recorded video file", "Video time at test start (s)", "Moveable zone positions",
                          "Segment of test"]
 # ANY-maze "time of day" of a live test: (first hour, name), the name of the last band whose hour has passed
@@ -107,7 +111,9 @@ class Behaviour:
     """A manually scored behaviour.
 
     kind = "state" (key toggles it on/off), "hold" (scored while the key is held down) or "point" (instantaneous).
-    Behaviours sharing a non-empty ``group`` are mutually exclusive: starting one stops the others.
+    Behaviours sharing a non-empty ``group`` are mutually exclusive: starting one stops the others. activity: doing
+    it counts as activity (ANY-maze: the animal is active when mobile or doing such a behaviour; state and hold keys,
+    see AnalysisSettings.activity_definition).
     """
 
     name: str
@@ -115,6 +121,7 @@ class Behaviour:
     kind: str = "state"
     group: str = ""
     color: str = ""
+    activity: bool = False
 
     @classmethod
     def from_dict(cls, d):
@@ -174,7 +181,7 @@ class Project:
     # first frame with the animal alone after the experimenter's hand left the image, see autostart.py)
     start_mode: str = "manual"
     detection: DetectionSettings = field(default_factory=DetectionSettings)
-    analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
+    analysis: AnalysisSettings = field(default_factory=AnalysisSettings.for_new_experiment)  # from_dict: as saved
     apparatus: list[Apparatus] = field(default_factory=list)
     animals: list[Animal] = field(default_factory=list)
     groups: list[Group] = field(default_factory=list)
@@ -187,6 +194,8 @@ class Project:
     variables: dict = field(default_factory=dict)  # procedure variables kept between tests
     training_criteria: list = field(default_factory=list)  # per-stage criteria (see project workflow)
     calculations: list[Calculation] = field(default_factory=list)  # results from other results (calculations.py)
+    reports: list = field(default_factory=list)  # saved results reports of the Data page (reports.py)
+    statistics: dict = field(default_factory=dict)  # the Statistics page's settings (factors, test, alpha …)
     blind: bool = False  # hide group / treatment while testing and scoring
     experimenters: list = field(default_factory=list)  # user names offered as the current user / test experimenter
     users: list = field(default_factory=list)  # roles and password hashes of experimenters (see security.py)
@@ -451,6 +460,8 @@ class Project:
             "variables": self.variables,
             "training_criteria": self.training_criteria,
             "calculations": [c.to_dict() for c in self.calculations],
+            "reports": self.reports,
+            "statistics": self.statistics,
             "blind": self.blind,
             "experimenters": self.experimenters,
             "users": [dict(u) for u in self.users],
@@ -513,6 +524,8 @@ class Project:
             variables=d.get("variables", {}),
             training_criteria=d.get("training_criteria", []),
             calculations=calculations_from(d.get("calculations")),
+            reports=reports_from(d.get("reports")),
+            statistics=dict(d["statistics"]) if isinstance(d.get("statistics"), dict) else {},
             blind=d.get("blind", False),
             experimenters=[str(u) for u in d.get("experimenters", []) if str(u).strip()],
             users=users_from(d.get("users")),
@@ -524,6 +537,8 @@ class Project:
             settings_extra=d.get("settings_extra", {}),
             created=d.get("created", ""),
         )
+        if p.protocol in FST_TEMPLATES and "immobility_mode" not in (d.get("analysis") or {}):
+            p.analysis.immobility_mode = "motion"  # forced swim / tail suspension saved before the motion mode
         p.path = pdir
         try:
             p.file_version = int(d.get("version", FORMAT_VERSION))
@@ -603,6 +618,43 @@ class Project:
             self.stages.append(name)
         return name
 
+    @property
+    def distance_unit(self) -> str:
+        """The unit distances are reported in ("mm" | "cm" | "m"): that of the first apparatus, "cm" without one."""
+        return self.apparatus[0].distance_unit if self.apparatus else "cm"
+
+    def set_distance_unit(self, unit: str):
+        """Report distances and speeds in `unit` for every apparatus of the experiment (ANY-maze: one unit for the
+        protocol). The calibration and the distance settings stay in centimetres. The measures named in the
+        calculations' formulas, the training criteria and the measure filter follow ("Total distance (cm)" becomes
+        "Total distance (m)")."""
+        if unit not in DISTANCE_UNITS:
+            raise ValueError(f"Unknown distance unit: {unit}")
+        old = self.distance_unit
+        for a in self.apparatus:
+            a.distance_unit = unit
+        if old == unit:
+            return
+        for c in self.calculations:
+            c.formula = re.sub(r"\{([^{}]*)\}", lambda m: "{" + rename_unit(m.group(1), old, unit) + "}", c.formula)
+        for c in self.training_criteria:
+            for d in (c, c.get("variability") if isinstance(c, dict) else None):
+                if isinstance(d, dict) and isinstance(d.get("measure"), str):
+                    d["measure"] = rename_unit(d["measure"], old, unit)
+        self.analysis.measure_filter = [rename_unit(m, old, unit) if isinstance(m, str) else m
+                                        for m in self.analysis.measure_filter]
+
+    def set_protocol(self, key: str):
+        """Make this a protocol of a type of test (templates.TEMPLATES key). The forced swim and tail suspension
+        tests detect immobility from the struggle in the image (AnalysisSettings.immobility_mode "motion", as ANY-maze's
+        Forced swim / Tail suspension mode); leaving them goes back to immobility from the speed."""
+        was = self.protocol in FST_TEMPLATES
+        self.protocol = key
+        if key in FST_TEMPLATES:
+            self.analysis.immobility_mode = "motion"
+        elif was and self.analysis.immobility_mode == "motion":
+            self.analysis.immobility_mode = "speed"
+
     def rename_stage(self, old: str, new: str) -> int:
         """A stage was renamed: its tests, training criteria and the animals' completed stages follow (stages are
         linked by name). Returns the number of tests moved."""
@@ -637,15 +689,46 @@ class Project:
                 if e.get("behaviour") == old:
                     e["behaviour"], n = new, n + 1
         for d in self.analysis.event_periods:
-            if isinstance(d, dict) and d.get("anchor") == "mark":
-                for k in ("behaviour", "mark"):
-                    if d.get(k) == old:
-                        d[k] = new
+            for x in (d, d.get("end") if isinstance(d, dict) else None):  # the period's start and its end
+                if isinstance(x, dict) and x.get("anchor") == "mark":
+                    for k in ("behaviour", "mark"):
+                        if x.get(k) == old:
+                            x[k] = new
         for c in self.training_criteria:
-            m = c.get("measure", "") if isinstance(c, dict) else ""
-            if m.startswith(old + ":") or m.startswith(old + " in "):
-                c["measure"] = new + m[len(old):]
+            if not isinstance(c, dict):
+                continue
+            for d in (c, c.get("variability")):  # the criterion's measure and its acceptable variability's
+                m = d.get("measure", "") if isinstance(d, dict) else ""
+                if m.startswith(old + ":") or m.startswith(old + " in "):
+                    d["measure"] = new + m[len(old):]
         return n
+
+    def rename_calculation(self, old: str, new: str, formulas: bool = True, skip: Calculation | None = None):
+        """A calculation's results column was renamed: the formulas of the other calculations (but `skip`; not with
+        formulas=False), the time periods it starts or ends and the training criteria on it follow."""
+        if not old or not new or old == new:
+            return
+        if formulas:
+            for c in self.calculations:
+                if c is not skip:
+                    c.formula = c.formula.replace("{" + old + "}", "{" + new + "}")
+        for d in self.analysis.event_periods:
+            for x in (d, d.get("end") if isinstance(d, dict) else None):
+                if isinstance(x, dict) and x.get("anchor") == "calculation" and x.get("calculation") == old:
+                    x["calculation"] = new
+        for c in self.training_criteria:
+            if isinstance(c, dict) and c.get("measure") == old:
+                c["measure"] = new
+
+    def calculation_users(self, column: str) -> list[str]:
+        """What uses a calculation's results: other calculations, time periods and training criteria (as text)."""
+        out = [f"calculation “{c.column}”" for c in self.calculations
+               if c.column != column and "{" + column + "}" in c.formula]
+        out += [f"time period “{d.get('label', '')}”" for d in self.analysis.event_periods
+                if isinstance(d, dict) and column in calculation_columns(d)]
+        out += [f"training criterion of {('stage “' + c.get('stage') + '”') if c.get('stage') else 'any stage'}"
+                for c in self.training_criteria if isinstance(c, dict) and c.get("measure") == column]
+        return out
 
     def ensure_animal(self, aid: str, group: str = "") -> Animal:
         a = self.get_animal(aid)
@@ -793,9 +876,15 @@ class Project:
 
     def test_periods(self, test: Test, track: Track, app: Apparatus | None = None) -> list[tuple[str, float, float]]:
         """The time bins, custom and event-anchored periods of a test, in test time (as the segmented results).
-        app: the test's apparatus without its per-test zone positions (default: the test's)."""
-        return all_periods(track, app or self.get_apparatus(test.apparatus), self.analysis_for(test), None,
-                           test.events, self.analysis_io_events(test), test.zone_overrides, test.pauses)
+        app: the test's apparatus without its per-test zone positions (default: the test's). Periods defined by
+        calculations analyse the track for their results."""
+        app = app or self.get_apparatus(test.apparatus)
+        s = self.analysis_for(test)
+        calc = None
+        if uses_calculations(s.event_periods) and app is not None:
+            calc = analyse(track, app, s, **self._analysis_kw(test, [track], 0, self.calculation_steps()))
+        return all_periods(track, app, s, None, test.events, self.analysis_io_events(test), test.zone_overrides,
+                           test.pauses, calc=calc)
 
     def analysis_io_events(self, test: Test) -> list:
         """The I/O log the analysis sees: the test's own (Test.io_events) and the time series of the analysis
@@ -820,7 +909,7 @@ class Project:
                 "Apparatus": test.apparatus, "Test date": "", "Day of week": "", "Test time": "", "Time of day": "",
                 "User": test.experimenter or "", "Test notes": test.notes or "",
                 "Reason for test end": test.end_reason or "", "Animal lighter / darker": "", "Animal length": "",
-                "Frames tracked (%)": "", "Source video file": "", "Recorded video file": "",
+                "Frames tracked (%)": "", "Jumps removed": "", "Source video file": "", "Recorded video file": "",
                 "Video time at test start (s)": "", "Moveable zone positions": moveable_zone_text(test.zone_overrides)}
         try:
             when = _dt.datetime.fromisoformat(test.recorded_at) if test.recorded_at else None
@@ -859,8 +948,8 @@ class Project:
     def track_info(self, test: Test, track: Track, app: Apparatus | None = None) -> dict:
         """Information columns taken from a test's track: whether the animal is lighter or darker than the apparatus
         (as detected; else the detection setting), its body length (apparatus units), the percentage of frames in
-        which it was detected, the video times, and "Animal reached the end zone" when the analysis ended the test
-        there (AnalysisSettings.end_zone)."""
+        which it was detected, the jumps removed, the video times, and "Animal reached the end zone" when the analysis
+        ended the test there (AnalysisSettings.end_zone)."""
         from .measures import body_length, end_of_test
         from .pauses import drop_pauses
 
@@ -876,6 +965,10 @@ class Project:
             L = body_length(track, app.scale if app is not None else 1.0)
             out["Animal length"] = round(float(L), 2) if math.isfinite(L) else ""
             out["Frames tracked (%)"] = round(100.0 * float(np.count_nonzero(track.detected)) / n, 2)
+        try:  # positions removed as jumps by tracking or in Review (blank when jump removal was off)
+            out["Jumps removed"] = int(float(track.meta["jumps_removed"]))
+        except (KeyError, TypeError, ValueError):
+            pass
         if track.meta.get("source") == "live" or test.end_reason:  # recorded live (the video, if any, is its recording)
             out.update({"Source video file": "", "Recorded video file": self.abs_path(test.video) if test.video else "",
                         "Video time at test start (s)": 0.0 if test.video else ""})
@@ -935,12 +1028,14 @@ class Project:
         plug-ins, not only scored keys."""
         return bool(test.io_events or test.result_variables or test.extra_series or test.extra_measures)
 
-    def _untracked_periods(self, test: Test) -> list[tuple[str, float, float]]:
+    def _untracked_periods(self, test: Test, calc: dict | None = None) -> list[Period]:
+        """The time periods of a test without a track (calc: its whole-test results, for periods defined by
+        calculations)."""
         dur, s = self._scored_duration(test), self.analysis_for(test)
         if not self._io_only(test):
-            return time_periods(dur, s)
-        return io_only_periods(dur, s, test.events, self.analysis_io_events(test),
-                               self.get_apparatus(test.apparatus), test.pauses)
+            return [Period(label, a, b) for label, a, b in time_periods(dur, s)]
+        return io_only_periods(dur, s, test.events, self.analysis_io_events(test), self.get_apparatus(test.apparatus),
+                               test.pauses, calc=calc, resolved=True)
 
     def _untracked_measures(self, test: Test, t_range=None) -> dict | None:
         """Measures of a test without a track, whole or for a period (None: the test ended before it)."""
@@ -954,11 +1049,11 @@ class Project:
                                 test.events, self.behaviours, test.result_variables, t_range, test.pauses,
                                 test.extra_measures)
 
-    def _scored_period(self, test: Test, spec) -> dict | None:
+    def _scored_period(self, test: Test, spec, calc: dict | None = None) -> dict | None:
         """result_for_period() of a test without a track: its measures for a part of the test (a time period's
-        name: the test's time periods)."""
+        name: the test's time periods; calc: its whole-test results, for periods defined by calculations)."""
         if isinstance(spec, str):
-            spec = {label: (a, b) for label, a, b in self._untracked_periods(test)}.get(spec)
+            spec = next(((p.t0, p.t1) for p in self._untracked_periods(test, calc) if p.label == spec), None)
             if spec is None:
                 return None
         return self._untracked_measures(test, tuple(spec))
@@ -966,20 +1061,30 @@ class Project:
     def _untracked_rows(self, test: Test, segmented: bool, steps=None) -> list[dict]:
         """Results of a test without a track: keys scored by hand (TakeNote; whole test) or the I/O log (I/O only
         mode; with its time periods when segmented)."""
-        parts = [("Whole test", None)]
-        if segmented and self._io_only(test):
-            parts += [(label, (a, b)) for label, a, b in self._untracked_periods(test)]
-        rows = []
-        for k, (label, rng) in enumerate(parts):
-            res = self._untracked_measures(test, rng)
+        whole: dict = {}  # the whole test's results as they are worked out (for periods defined by calculations)
+
+        def period(spec):
+            return self._scored_period(test, spec, whole)
+
+        row = self.test_info(test)
+        row.update({"Period": "Whole test", "Segment of test": ""})
+        row.update(self._untracked_measures(test))
+        if steps:
+            row.update(evaluate_test(steps, row, period, view=whole))
+        rows = [row]
+        if not (segmented and self._io_only(test)):
+            return rows
+        defs = self.analysis_for(test).event_periods
+        for k, per in enumerate(self._untracked_periods(test, whole), 1):
+            res = self._untracked_measures(test, (per.t0, per.t1))
             if res is None:
                 continue
             row = self.test_info(test)
-            row["Period"] = label
-            row["Segment of test"] = "" if rng is None else k  # ANY-maze "segment of test": 1, 2, …
-            row.update(res)
+            row["Period"] = per.label
+            row["Segment of test"] = k  # ANY-maze "segment of test": 1, 2, …
+            row.update(add_warning(res, no_end_warning(per, defs)))
             if steps:
-                row.update(evaluate_test(steps, row, lambda spec: self._scored_period(test, spec)))
+                row.update(evaluate_test(steps, row, period))
             rows.append(row)
         return rows
 
@@ -1023,7 +1128,8 @@ class Project:
         if not self.calculations:
             return []
         info = set(INFO_COLUMNS) | set(self.animal_fields) | {ERROR_COLUMN}
-        return plan([c for c in self.calculations if c.column and c.column not in info | {"Warnings"}], info)
+        return plan([c for c in self.calculations if c.column and c.column not in info | {"Warnings"}], info,
+                    self.analysis.event_periods)
 
     def _deferred_calculations(self, rows: list[dict], segmented: bool, steps) -> None:
         """Work out the deferred calculations of result rows in place: with the information columns and, for the
@@ -1050,15 +1156,20 @@ class Project:
             groups.setdefault((str(r.get("Animal")), r.get("Period")), []).append(
                 (r.get("Stage", ""), r.get("Trial", 1), r))
         trials = {k: Trials(v, self.stages) for k, v in groups.items()}
+        # the whole-test row of each test and animal: the time periods defined by calculations use its results
+        whole = {(r.get("Test"), str(r.get("Animal"))): r for r in every
+                 if r.get("Period", "Whole test") == "Whole test"}
         cache: dict = {}
         for s in todo:
             for r in every:
-                r[s.calc.column] = evaluate_calc(s.calc, r, lambda spec, r=r: self._calc_period(r, spec, cache),
+                w = whole.get((r.get("Test"), str(r.get("Animal"))))
+                r[s.calc.column] = evaluate_calc(s.calc, r, lambda spec, r=r, w=w: self._calc_period(r, spec, cache, w),
                                                  trials.get((str(r.get("Animal")), r.get("Period"))))
 
-    def _calc_period(self, row: dict, spec, cache: dict) -> dict | None:
+    def _calc_period(self, row: dict, spec, cache: dict, whole: dict | None = None) -> dict | None:
         """result_for_period() of a results row in the deferred calculations: its test analysed for part of the
-        test (cached per test, animal and period)."""
+        test (cached per test, animal and period; whole: the test's whole-test row, for periods defined by
+        calculations)."""
         key = (row.get("Test"), str(row.get("Animal")), spec)
         if key not in cache:
             cache[key] = None
@@ -1066,13 +1177,13 @@ class Project:
             if test is not None:
                 tracks = self.load_tracks(test)
                 if not tracks:
-                    cache[key] = self._scored_period(test, spec) if self.has_results(test) else None
+                    cache[key] = self._scored_period(test, spec, whole) if self.has_results(test) else None
                 else:
                     ids = [test.animal_id] + list(test.extra_animals)
                     i = ids.index(row.get("Animal")) if row.get("Animal") in ids else 0
                     if i < len(tracks):
                         cache[key] = analyse_period(tracks[i], self.get_apparatus(test.apparatus),
-                                                    self.analysis_for(test), spec,
+                                                    self.analysis_for(test), spec, calc_values=whole,
                                                     **self._analysis_kw(test, tracks, i))
         return cache[key]
 
@@ -1097,6 +1208,19 @@ class Project:
         self._deferred_calculations(rows, segmented, steps)
         return rows
 
+    def info_columns(self) -> list[str]:
+        """The information columns of the results: INFO_COLUMNS, then the animal columns."""
+        return INFO_COLUMNS + [f for f in self.animal_fields if f not in INFO_COLUMNS]
+
+    def report_table(self, name: str, progress: Callable[[float], None] | None = None
+                     ) -> tuple[list[dict], list[str]]:
+        """The rows and columns of the saved results report called `name` (see reports.py), as the Data page shows
+        them; KeyError if the experiment has no such report."""
+        rep = find_report(self.reports, name)
+        if rep is None:
+            raise KeyError(name)
+        rows = report_rows(rep, self.results(segmented=rep["segmented"], progress=progress))
+        return rows, report_columns(rep, rows, self.info_columns(), OPTIONAL_INFO_COLUMNS)
 
     def error_row(self, test: Test, error: Exception) -> dict:
         """A results row noting that a test could not be analysed (its information columns and the error)."""

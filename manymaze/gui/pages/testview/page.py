@@ -12,7 +12,7 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QColor, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFrame, QGraphicsItem, QGraphicsTextItem,
                                QGraphicsView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPushButton,
-                               QSplitter, QTableWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
+                               QSplitter, QStackedWidget, QTableWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from ....core import workflow as wf
 from ....core.batch import track_tests
@@ -25,6 +25,7 @@ from ...widgets import PlotCanvas, VideoPlayer, Worker, error_box, run_with_prog
 from ..base import Page
 from .common import _num_item, _ro_item
 from .detection import DetectionMixin
+from .iolog import IOLogReview, has_io_log
 from .overlay import OverlayMixin
 from .scoring import ObservationClock, ScoringMixin
 from .track_edit import TrackEditMixin
@@ -38,7 +39,8 @@ STATUS_COLORS = {"tracked": "#16a34a", "scored": "#0891b2", "pending": "#d97706"
 class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, Page):
     """Review and score one test, laid out like an ANY-maze test panel: a small toolbar, the title line
     ("Open field: Animal C1, Day 1 trial 1 - 0:09"), the video on a light background and the time slider, with
-    Results / Plots / Scoring / Detection / Track editing tabs on the right."""
+    Results / Plots / Scoring / Detection / Track editing tabs on the right.  A test without a video that ran with
+    the I/O devices (Input/output only mode) shows its I/O log and events instead of the video."""
 
     title = "Test view"
 
@@ -118,6 +120,9 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                             "Interpolate the positions in the time range")
         self.a_del_range = act("Delete range", "delete", lambda: self.delete_range(),
                                "Delete the positions in the time range")
+        self.a_jumps = act("Remove jumps", "eraser", lambda: self.remove_jumps(),
+                           "Remove the jumps of the track (positions the animal could not have reached that the "
+                           "track comes back from) with this test's detection settings, and fill them like gaps")
         self.undo_btn = act("Undo", "undo", self.undo_edit, "Undo the last track edit")
 
         # ---- test panel: toolbar, title, video, time slider ----------------------------------------
@@ -235,7 +240,12 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         ll.setSpacing(4)
         ll.addWidget(head)
         self.player.layout().setContentsMargins(8, 0, 8, 0)
-        ll.addWidget(self.player, 1)
+        # a test without a video run with the I/O devices (Input/output only mode): its I/O log instead
+        self.io_review = IOLogReview()
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.player)
+        self.view_stack.addWidget(self.io_review)
+        ll.addWidget(self.view_stack, 1)
         ll.addLayout(timing)
         ll.addLayout(pos_row)
 
@@ -295,7 +305,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                 ("View", [(self.chk_zones, "small"), (self.chk_animal, "small"), (self.chk_trail, "small"),
                           (self.chk_preview, "small")]),
                 ("Track editing", [self.mark_btn, (self.a_interp, "small"), (self.a_del_range, "small"),
-                                   (self.undo_btn, "small")])]
+                                   (self.undo_btn, "small"), (self.a_jumps, "small")])]
 
     def play(self):
         self.player.play()
@@ -386,6 +396,16 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._clear_views()
         self._enable(False)
 
+    def _show_io_review(self):
+        """The I/O log instead of the video for a test without a video run with the I/O devices; else the video."""
+        t = self.test
+        if t is not None and self.project is not None and not t.video and has_io_log(t):
+            self.io_review.show_test(self.project, t)
+            self.view_stack.setCurrentWidget(self.io_review)
+        else:
+            self.io_review.clear()
+            self.view_stack.setCurrentWidget(self.player)
+
     def on_show(self):
         p = self.project
         if p is None:
@@ -418,6 +438,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._update_info()
         self._update_clock_ui()
         self._enable(True)
+        self._show_io_review()
         self._mark_stale("results", "plots")
         self._refresh_frame()
 
@@ -517,6 +538,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
             self.player.current_frame = None
             self.pos_lbl.setText("")
             self._placeholder("No video for this test" if not path else f"Video not found:\n{path}")
+        self._show_io_review()
         self._enable(True)
         self._update_info()
         self._update_clock_ui()
@@ -563,6 +585,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.pad.set_behaviours([])
         self._load_notes()
         self.clock_box.hide()
+        self._show_io_review()
         self._placeholder("No test selected")
 
     def _placeholder(self, text: str):
@@ -708,7 +731,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         if p is None or t is None:
             return
         rows = []
-        if self.tracks or (t.events and p.behaviours):
+        if self.tracks or p.has_results(t):  # a track, keys scored by hand, or an I/O log
             try:
                 rows = p.analyse_test(t)
             except Exception as e:
@@ -739,9 +762,10 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
             for j, r in enumerate(rows):
                 tbl.setItem(i, j + 1, _num_item(r.get(m)))
         self._filter_results()
-        src = "manual scoring" if not self.tracks else f"{len(self.tracks)} track{'s' if len(self.tracks) > 1 else ''}"
+        src = f"{len(self.tracks)} track{'s' if len(self.tracks) > 1 else ''}" if self.tracks else \
+            "the I/O log" if has_io_log(t) else "manual scoring"
         self.results_lbl.setText(f"<b>{len(measures)}</b> measures from {src} · unit: "
-                                 f"{self._app().unit if self._app() else 'px'}")
+                                 f"{self._app().report_unit if self._app() else 'px'}")
 
     def _filter_results(self, *_):
         words = self.results_filter.text().lower().split()

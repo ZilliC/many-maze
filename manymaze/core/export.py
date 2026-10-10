@@ -17,7 +17,7 @@ import numpy as np
 from .. import __version__
 from .atomicfile import atomic_write, write_text_atomic
 from .apparatus import CALIBRATION_KEY, ENTRY_RULES as ENTRY_RULE_TEXT, POSITION_KEY, position_args
-from .ioconfig import is_secret
+from .ioconfig import OPERANT_PRESETS, PRESET_KEY, is_secret
 from .project import ERROR_COLUMN, INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
 
@@ -485,7 +485,7 @@ def event_log_rows(project: Project, test) -> list[dict]:
             rows.append({"Time (s)": float(e["t_end"]), "Animal": test.animal_id, "Event": "Key off",
                          "Detail": name})
     for e in test.io_events or []:
-        kind = {"input": "Input", "variable": "Variable"}.get(e.get("kind"), "Output")
+        kind = {"input": "Input", "variable": "Variable", "event": "Procedure event"}.get(e.get("kind"), "Output")
         ch = ":".join(str(x) for x in (e.get("device"), e.get("channel")) if x not in (None, ""))
         rows.append({"Time (s)": float(e.get("t", 0.0)), "Animal": test.animal_id, "Event": kind,
                      "Detail": f"{ch} = {value_text(e.get('value'))}"})
@@ -551,10 +551,11 @@ def trial_means(rows: list[dict], measures: list[str], keep: tuple[str, ...] = (
 
 def protocol_report(project: Project, path) -> Path:
     """Self-contained HTML description of the protocol (ANY-maze protocol report): experiment, stages, keys,
-    apparatus maps with every zone / point / line / group / sequence, animal tracking and analysis settings,
-    calculations, procedures, I/O devices and training criteria."""
+    apparatus maps with every zone / point / line / group / sequence, animal tracking and analysis settings, time
+    periods, calculations, procedures, I/O devices and training criteria."""
     from . import plots
     from .measures import AnalysisSettings
+    from .periods import describe_period
     from .procedures import describe_statement, normalize_procedures
     from .tracking import DetectionSettings
     from .workflow import criterion_text
@@ -581,8 +582,13 @@ def protocol_report(project: Project, path) -> Path:
     if p.description:
         out.append(f"<p>{html.escape(p.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}.</p>")
+    mode = p.settings_extra.get("mode", "tracking")
+    preset = OPERANT_PRESETS.get(p.settings_extra.get(PRESET_KEY) or "", {}).get("label")
     out.append("<h2>Protocol</h2>" + table(("Item", "Value"), [
-        ("Protocol", p.protocol), ("Test duration (s)", p.test_duration_s or "until the end of the video"),
+        ("Protocol", p.protocol),
+        ("Mode", {"takenote": "TakeNote", "io_only": "Input/output only"}.get(mode, "Video tracking")),
+        *([("Operant chambers", preset)] if preset else []),
+        ("Test duration (s)", p.test_duration_s or "until the end of the video"),
         ("Test starts", {"on_detection": "when the animal is first detected",
                          "experimenter_leaves": "when the experimenter's hand has left the image"}.get(
             p.start_mode, "at the test's start time")),
@@ -612,11 +618,13 @@ def protocol_report(project: Project, path) -> Path:
         cal = (f"{app.px_per_cm:.3f} px/cm" + (f" (line of {app.calibration_length_cm:g} cm)"
                                                  if app.calibration_length_cm else "")) if app.px_per_cm else \
             "not calibrated (results in pixels)"
+        if app.report_unit not in ("cm", "px"):
+            cal += f"; distances reported in {app.report_unit}"
         out.append(table(("Item", "Value"), [("Template", app.template), ("Calibration", cal),
                                              ("Arena", app.arena.to_dict()["type"] if app.arena else "—")]))
         if app.zones:
-            out.append(table(("Zone", "Shape", f"Area ({app.unit}²)", "Entry rule", "Options"), [
-                (z.name, z.shape.to_dict()["type"], round(z.shape.area() * app.scale ** 2, 2),
+            out.append(table(("Zone", "Shape", f"Area ({app.report_unit}²)", "Entry rule", "Options"), [
+                (z.name, z.shape.to_dict()["type"], round(z.shape.area() * (app.scale * app.report_factor) ** 2, 2),
                  ENTRY_RULE_TEXT.get(z.entry_rule, z.entry_rule),
                  ", ".join(x for x, on in (("hidden", z.hidden), ("moveable", z.moveable),
                                            (f"investigate {z.investigation_distance_cm:g} cm",
@@ -645,6 +653,12 @@ def protocol_report(project: Project, path) -> Path:
         out.append("</div>")
     out.append("<h2>Animal tracking</h2>" + settings(p.detection, DetectionSettings()))
     out.append("<h2>Analysis</h2>" + settings(p.analysis, AnalysisSettings()))
+    periods = [(str(c[0]), f"From {float(c[1]):g} s to {float(c[2]):g} s") for c in p.analysis.custom_periods
+               if isinstance(c, (list, tuple)) and len(c) == 3]
+    periods += [(str(d.get("label") or f"Period {i + 1}"), describe_period(d))
+                for i, d in enumerate(p.analysis.event_periods) if isinstance(d, dict)]
+    if periods:
+        out.append("<h2>Time periods</h2>" + table(("Time period", "Definition"), periods))
     if p.calculations:
         out.append("<h2>Calculations</h2>" + table(("Calculation", "Formula", "Decimal places", "Graph Y axis",
                                                      "Named values"), [
@@ -749,7 +763,7 @@ def export_raw_data(project: Project, out_dir, tests=None, parameters: list[str]
             p = out_dir / f"{stem}.{ext}"
             with atomic_write(p, newline="") as f:
                 f.write(_one_line(f"# Test {t.id}, animal {aid}, stage {t.stage}, trial {t.trial}, "
-                                  f"unit {app.unit if app else 'px'} (raw columns in pixels)") + "\n")
+                                  f"unit {app.report_unit if app else 'px'} (raw columns in pixels)") + "\n")
                 w = csv.writer(f, delimiter=delimiter)
                 w.writerow(cols)
                 M = np.column_stack(arrays) if arrays and len(tr) else np.zeros((0, len(cols)))
@@ -868,7 +882,7 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
             w("  <apparatus-list>\n")
             for a in project.apparatus:
                 fs = a.frame_size or (None, None)
-                w(f"    <apparatus{_attrs(name=a.name, template=a.template, unit=a.unit, px_per_cm=a.px_per_cm, frame_width=fs[0], frame_height=fs[1])}>\n")
+                w(f"    <apparatus{_attrs(name=a.name, template=a.template, unit=a.report_unit, px_per_cm=a.px_per_cm, frame_width=fs[0], frame_height=fs[1])}>\n")
                 w(_shape_xml("arena", a.arena.to_dict() if a.arena else None, "      "))
                 for z in a.zones:
                     w(f"      <zone{_attrs(name=z.name, color=z.color)}>\n")
@@ -1028,11 +1042,13 @@ def _img(png: bytes, width=320) -> str:
 
 def html_report(project: Project, path, tests=None, include_plots: bool = True, measures: list[str] | None = None,
                 stats_measures: list[str] | None = None, heatmap_norm: str = "auto",
-                chart_parameters: list[str] | None = None, color_by: str = "time", rows: list[dict] | None = None
-                ) -> Path:
+                chart_parameters: list[str] | None = None, color_by: str = "time", rows: list[dict] | None = None,
+                report: str = "") -> Path:
     """Self-contained HTML report: summary, per-test track plots/heat maps (+ optional charts of per-frame
     parameters), group heat maps on a common scale, results and statistics (compared between treatments as the
-    Statistics page does). rows: the results to tabulate and compare (default: the whole-test results of `tests`)."""
+    Statistics page does, at its significance level). rows: the results to tabulate and compare (default: the
+    whole-test results of `tests`); report: the name of the saved results report they come from (named in the
+    report)."""
     from . import analyses, plots
 
     tests = tests if tests is not None else [t for t in project.tests
@@ -1065,6 +1081,8 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     out.append(f"<p>{html.escape(project.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}. "
                f"{len(tests)} tests, {len(project.animals)} animals.</p>")
+    if report:
+        out.append(f"<p>Results report: <b>{html.escape(report)}</b></p>")
     beh = project.behaviours
     if include_plots and tests:
         out.append("<h2>Tracks</h2><div class='grid'>")
@@ -1108,8 +1126,9 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         out.append("<h2>Problems</h2><ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in errors) + "</ul>")
     if stats_measures and rows:
         out.append("<h2>Statistics</h2>")
+        alpha = analyses.significance_level(project)  # the Statistics page's significance level
         for m in stats_measures:
-            a = analyses.compare(project, [r for r in rows if not r.get(ERROR_COLUMN)], m, "Group")
+            a = analyses.compare(project, [r for r in rows if not r.get(ERROR_COLUMN)], m, "Group", alpha=alpha)
             if len(a.result["groups"]) < 2:
                 continue
             out.append(f"<div class='card'>{_img(plots.fig_to_png(a.figure), 360)}"

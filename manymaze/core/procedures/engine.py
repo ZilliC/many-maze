@@ -1244,6 +1244,9 @@ class ProcedureEngine(Actions, LiveState):
             return
         if not self._when_ok(h, t_occ):
             return
+        name = str(h.st.get("record_as") or "").strip()
+        if name and self.started:  # recorded as an event measure (ANY-maze's legacy events, 21.x)
+            self._log_io(t_occ, "procedure", name, "event", 1, "event")
         if h.threads:
             if h.mode == "ignore":
                 return

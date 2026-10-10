@@ -13,13 +13,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
-from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
 from ....core import plots, security, templates
-from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, load_apparatus_file,
-                                make_grid, remove_grid, save_apparatus_file, unique_name)
+from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
+                                load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
 from ....core.templates import PALETTE, TEMPLATES
 from ... import theme
@@ -27,7 +27,7 @@ from ...icons import icon
 from ...widgets import error_box, hint, loading, separator
 from ..base import Page
 from .background import BackgroundController
-from .dialogs import GridDialog, TemplateDialog
+from .dialogs import CalibrationDialog, GridDialog, TemplateDialog
 from .editor_view import EditorView
 from .panel import MAP_KINDS, PropertyPanel
 from .tool_icons import ARENA_HINTS, HINTS, TOOLS, tool_icon
@@ -264,9 +264,17 @@ class ApparatusPage(Page):
         self.btn_cal_clear = QPushButton("Clear")
         self.btn_cal_clear.setToolTip("Clear the calibration (results in pixels)")
         self.btn_cal_clear.clicked.connect(self.clear_calibration)
+        self.unit_combo = QComboBox()
+        for u in DISTANCE_UNITS:
+            self.unit_combo.addItem(f"Results in {u}", u)
+        self.unit_combo.setToolTip("The unit distances and speeds are reported in, for every apparatus of the "
+                                   "experiment (measure names, charts and exports follow it). The calibration and "
+                                   "the distance settings stay in centimetres.")
+        self.unit_combo.currentIndexChanged.connect(lambda _i: self._unit_chosen())
         row = footer_row("Calibration")
         row.addWidget(self.cal_label, 1)
         row.addWidget(self.ppc_spin)
+        row.addWidget(self.unit_combo)
         row.addWidget(self.btn_cal)
         row.addWidget(self.btn_cal_clear)
         self.bg.add_controls(footer_row("Background"))
@@ -380,7 +388,8 @@ class ApparatusPage(Page):
 
     def add_apparatus(self, name: str | None = None) -> Apparatus:
         cur = self.app
-        app = Apparatus(name=unique_name(name or f"Apparatus {len(self.project.apparatus) + 1}", self._names()))
+        app = Apparatus(name=unique_name(name or f"Apparatus {len(self.project.apparatus) + 1}", self._names()),
+                        distance_unit=self.project.distance_unit)
         app.frame_size = (cur.frame_size if cur else None) or self.bg.real_frame_size()
         self.bg.inherit(cur, app)
         self.project.apparatus.append(app)
@@ -428,8 +437,10 @@ class ApparatusPage(Page):
             names = None if item == "All" else [item]
         if names is not None:
             apps = [a for a in apps if a.name in names]
+        unit = self.project.distance_unit
         for a in apps:
             a.name = unique_name(a.name, self._names())
+            a.distance_unit = unit  # one unit for the experiment
             self.project.apparatus.append(a)
         if apps:
             self.main.mark_dirty()
@@ -571,16 +582,21 @@ class ApparatusPage(Page):
             if app.px_per_cm:
                 extra = ""
                 if app.calibration_line and app.calibration_length_cm:
-                    extra = f"ruler on a {app.calibration_length_cm:g} cm line"
+                    extra = f"ruler on a {app.length_text(app.calibration_length_cm)} line"
                 elif app.calibration_length_cm:
-                    extra = f"template, {app.calibration_length_cm:g} cm wide"
+                    extra = f"template, {app.length_text(app.calibration_length_cm)} wide"
                 self.cal_label.setText(f"1 cm = {app.px_per_cm:.2f} px"
                                        + (f" <span style='color:{theme.MUTED}'>· {extra}</span>" if extra else ""))
                 self.ppc_spin.setValue(app.px_per_cm)
+                if app.report_unit != "cm":
+                    self.cal_label.setText(self.cal_label.text() + f" <span style='color:{theme.MUTED}'>· "
+                                           f"results in {app.report_unit}</span>")
             else:
                 self.cal_label.setText("<span style='color:#c2410c'>Not calibrated</span> "
                                        f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
                 self.ppc_spin.setValue(0)
+            self.unit_combo.setCurrentIndex(max(0, self.unit_combo.findData(app.distance_unit)))
+            self.unit_combo.setEnabled(bool(app.px_per_cm))
 
     # ================================================================ map
     def _rebuild_map(self, keep_selection: bool = True):
@@ -767,25 +783,42 @@ class ApparatusPage(Page):
         self.set_tool("select")
         self.main.status("Arena boundary set")
 
-    def calibrate_from_line(self, x1, y1, x2, y2, length_cm: float | None = None) -> bool:
+    def calibrate_from_line(self, x1, y1, x2, y2, length_cm: float | None = None, unit: str | None = None) -> bool:
+        """Calibrate the apparatus with a ruler line whose real length is `length_cm` (asked for, in mm, cm or m,
+        when not given). The unit chosen in the dialog (or `unit`) becomes the unit the results are reported in."""
         app = self.app
         px = math.hypot(x2 - x1, y2 - y1)
         if app is None or px < 1:
             return False
         if length_cm is None:
-            length_cm, ok = QInputDialog.getDouble(
-                self, "Calibrate", f"The line is {px:.1f} px long.\nWhat is its real length (cm)?",
-                app.calibration_length_cm or 10.0, 0.01, 1e6, 2)
-            if not ok:
+            dlg = CalibrationDialog(px, app.calibration_length_cm or 10.0, unit or self.project.distance_unit, self)
+            if dlg.exec() != QDialog.Accepted:
                 return False
+            length_cm, unit = dlg.length_cm(), dlg.unit()
         try:
             with self._edit():
                 app.calibrate(float(x1), float(y1), float(x2), float(y2), float(length_cm))
         except ValueError as e:
             QMessageBox.warning(self, "Calibrate", str(e))
             return False
+        if unit and unit != self.project.distance_unit:
+            self.set_distance_unit(unit)
         self.main.status(f"Calibrated: 1 cm = {app.px_per_cm:.2f} px")
         return True
+
+    def set_distance_unit(self, unit: str):
+        """Report distances in `unit` for every apparatus of the experiment."""
+        if self.project is None or unit == self.project.distance_unit and \
+                all(a.distance_unit == unit for a in self.project.apparatus):
+            return
+        self.project.set_distance_unit(unit)
+        self.main.mark_dirty()
+        self.refresh_info()
+        self.main.status(f"Distances are reported in {unit} (speeds in {unit}/s) for every apparatus.")
+
+    def _unit_chosen(self):
+        if not self._loading and self.unit_combo.currentData():
+            self.set_distance_unit(self.unit_combo.currentData())
 
     def set_px_per_cm(self, v: float):
         app = self.app
@@ -1116,9 +1149,9 @@ class ApparatusPage(Page):
         prefix = (name + " ") if multi and name and name != TEMPLATES[key].title and not replace else ""
         if replace and cur is not None:
             self.push_undo()
-        first = None
+        first, unit = None, self.project.distance_unit
         for i, a in enumerate(built):
-            a.frame_size = fs
+            a.frame_size, a.distance_unit = fs, unit
             a.name = prefix + a.name
             if i == 0 and replace and cur is not None:
                 self._replace(cur, a)

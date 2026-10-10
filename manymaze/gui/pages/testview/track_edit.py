@@ -63,6 +63,14 @@ class TrackEditMixin:
         rl.addWidget(self.range_lbl)
         rl.addLayout(r2)
         lay.addWidget(rg)
+        jb = QGroupBox("Jumps")
+        jl = QHBoxLayout(jb)
+        jl.addWidget(self._tool(self.a_jumps))
+        jh = QLabel("Positions the animal could not have reached (Detection: Remove jumps faster than)")
+        jh.setWordWrap(True)
+        jh.setStyleSheet("color:#475569;")
+        jl.addWidget(jh, 1)
+        lay.addWidget(jb)
         sw = QGroupBox("Swap identities")
         swl = QHBoxLayout(sw)
         self.swap_with = QComboBox()
@@ -316,6 +324,35 @@ class TrackEditMixin:
         tr.detected[idx] = False
         self._save_tracks(f"Interpolated {len(idx)} samples.")
         return True
+
+    def remove_jumps(self) -> int | None:
+        """Remove the jumps of the edited animal's track with this test's detection settings (Remove jumps faster
+        than …, as tracking does), then fill the gaps they leave; undoable. Returns the number removed."""
+        ai = self._edit_index()
+        if self.test is None or ai >= len(self.tracks):
+            return None
+        s = self.project.detection_for(self.test)
+        if not s.max_jump_speed or s.max_jump_speed <= 0:
+            self.edit_lbl.setText("Set “Remove jumps faster than” in the Detection tab (or in Protocol ▸ Animal "
+                                  "tracking) first.")
+            return None
+        app = self.project.apparatus_of(self.test)
+        tr = self.tracks[ai].copy()
+        n = tr.remove_jumps(s.max_jump_speed, s.max_jump_s, app.scale if app is not None else 1.0)
+        if not n:
+            self.edit_lbl.setText("No jumps found.")
+            return 0
+        try:
+            done = int(float(tr.meta.get("jumps_removed", 0) or 0))
+        except (TypeError, ValueError):
+            done = 0
+        tr.meta["jumps_removed"] = done + n
+        if s.max_gap_s and s.max_gap_s > 0:
+            tr = tr.interpolate(s.max_gap_s)
+        self._push_undo(ai)
+        self.tracks[ai] = tr
+        self._save_tracks(f"Removed {n} jump{'s' if n != 1 else ''}.")
+        return n
 
     def delete_range(self):
         ai = self._edit_index()
