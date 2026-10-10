@@ -36,7 +36,7 @@ can start right away — **Protocol → Experiment → Test → Results**.
 
 *File ▸ New experiment…* asks for a name, a folder and a **protocol** (open field, elevated plus maze, Morris
 water maze, Barnes maze, Y/T/radial maze, novel object recognition, light/dark box, three-chamber sociability,
-fear conditioning, forced swim / tail suspension, or custom). The experiment is saved as a folder
+fear conditioning, forced swim, tail suspension, or custom). The experiment is saved as a folder
 `Name.mmaze/` containing `project.json`, `tracks/`, `recordings/` and `exports/`. Videos are referenced by
 relative path when they live inside the experiment folder, so the folder can be moved or shared. Videos stored
 elsewhere are referenced by relative path *and* by their absolute path, so they are still found when the experiment
@@ -116,6 +116,57 @@ everything without a camera.
   so the animal must be stiller to count as freezing (+25 halves the threshold); lower lets it move a little more
   (−25 doubles it). Tests with fewer than 50 motion samples use the manual
   thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
+* **Forced swim / tail suspension** (shown on the Protocol page when the type of test is *Forced swim test* or
+  *Tail suspension test*; the same settings are under *Analysis*) – as ANY-maze's Forced swim / Tail suspension
+  mode, immobility comes from the struggle seen in the image rather than from the animal's speed (*Detect
+  immobility*: *From the speed* or *Forced swim / tail suspension*; choosing one of these types of test selects the
+  second, choosing another type goes back to the first). The **struggle index** is the quick part of the pixel
+  change (% of the animal's area, the motion freezing is detected from): the slow pixel change of an animal drifting
+  in the water or swinging on its tail is taken out (each frame minus the average of the ~0.12 s around it) and the
+  rest is averaged over a second, so the small paddles that keep the head above water do not count either. The
+  animal's position is not used at all. It **struggles** (is mobile) while the index reaches *The animal struggles
+  when its struggle index reaches* (default 2 %), and is **immobile** once it has not struggled for the *Shortest
+  immobile period* (default 1 s). All the immobility measures (time immobile, immobile episodes, latency to first
+  immobility, episode durations…) and the *Mobile* / *Immobile* chart states follow, and the forced swim and tail
+  suspension apparatus add *Time immobile (%)*. With *Forced swim: split the struggle into climbing and swimming*
+  the most vigorous struggle (index at or above *Climbing when…*, default 8 %; bouts shorter than a second join the
+  bout around them) is **climbing**, the rest **swimming**: time (s and %), episodes and latency of each. ANY-maze
+  itself has no climbing / swimming split, and the split here is by the strength of the movement only. Film the
+  animal from the side, at 15 frames/s or more, and look at the *Struggle index* chart of a few tests (Results ▸
+  Charts) to set the thresholds. Live tests use the same index over the last second (so a change shows about half a
+  second later). Tracks without pixel-change data (imported tracks) fall back on the speed, with a warning.
+  Experiments of these types made with older versions open with this mode; their former *Immobility (s)*,
+  *Immobility (%)* and *Latency to immobility (s)* columns (renamed freezing measures) are no longer reported.
+* **Analysis ▸ Barnes maze strategy** – how the *Search strategy* of the Barnes maze is worked out. *Simple* (the
+  default, as in earlier versions): Direct with at most two holes visited before the escape hole, Serial when at
+  least 60 % of the moves before it are to the next hole, else Random. *ANY-maze (Gawel et al. 2018)*: ANY-maze's
+  Barnes maze strategy analysis as revised in ANY-maze 7.54 — **Direct** goes to the escape hole visiting only holes
+  of its *target region* (the escape hole and *N holes either side*, default 2) without going back into the centre;
+  **Serial** is one serial search from the first hole visited: every move to one of the next holes either way
+  (*Holes the animal may skip*, default 1; reversals allowed, so 1, 2, 3, 2, 1 — or a first move the wrong way —
+  is still serial), at least *N consecutive hole visits* (default 3), entering the centre always breaks it;
+  **Random** is anything else, including an animal that never finds the escape hole. The *Search strategy* is then
+  the overall strategy (the whole test) and *Primary strategy* the one up to the first visit to the escape hole, with
+  ANY-maze's *Total / Primary reference errors* (visits to other holes), *working errors* (such visits to a hole
+  already visited), *perseverative errors* (the same hole again) and the *Hole deviation score* (holes between the
+  first hole visited and the escape hole). *UNMC method* (University of Nebraska Medical Center, as ANY-maze): the
+  strategies used one after another, the analysis starting again whenever the animal finds the escape hole —
+  *Initial strategy used* (also the *Search strategy*), *List of strategies used* and, for Direct, Serial and
+  Random, the *number times used*, *latency* and *time using* (Direct also its *errors*, visits to the other holes of
+  the target region). Serial searches started again at once (1, 2, 3, then 14, 15, 16) are one; the Random strategy
+  that follows a serial one starts when the animal entered the centre, if it did. Holes are numbered round the maze
+  (*Hole 1* … *Hole N*), visits are their zone entries (by the head when it is tracked) and the centre is the zone
+  named in *Centre zone* (the Barnes maze template now draws one); without numbered holes the simple method is
+  used.
+* **Distance units** – results are reported in **mm, cm or m** (ANY-maze 7.36): choose the unit in the calibration
+  dialog (the ruler's length can be typed in mm, cm or m) or with *Results in* next to the calibration on the
+  Apparatus page. The unit applies to every apparatus of the experiment; measure names and values (*Total distance
+  (m)*, *Mean speed (m/s)*, *Meander (deg/m)*…), the charts, the live statistics and the exports follow it, and the
+  names in calculations, training criteria and the measure filter are changed with it. The calibration and every
+  distance *setting* (mobility threshold, thigmotaxis band, contact distances, investigation distance, point radius,
+  distances in procedures) stay in **centimetres**, so changing the unit never changes a result. The default is cm,
+  which gives exactly the names and values of earlier versions; an apparatus that is not calibrated reports pixels.
+  Calculations use the values as reported (ANY-maze's always use metres).
 * **Calculations** – results worked out from other results with a formula, e.g. a discrimination index (see §9,
   *Calculations*).
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
@@ -149,7 +200,7 @@ from the real size you enter — or draw your own:
 | Rectangle / ellipse / polygon zone | areas for time, entries, latency, distance … |
 | Point of interest | objects, platform centre, cups — distance, time near, exploration |
 | Line | crossings in each direction |
-| Calibrate | draw a line of known length (cm) |
+| Calibrate | draw a line of known length (in mm, cm or m: the unit the results are reported in, see §1) |
 | Zone groups | unions of zones minus excluded zones (e.g. *Open arms*, *Periphery = Arena − Centre*) |
 
 **Import… / Export…** (Apparatus group) copy apparatus maps between experiments: *Import…* reads the apparatus
@@ -422,14 +473,28 @@ On the Protocol tab (*Training criteria*) add, per stage, a condition on a resul
 *Training: Escape latency (s) < 10 on 3 consecutive trials; retire after 10 trials*:
 
 - **Measure** — any column of the results (or a procedure result variable), whole-test value.
-- **Op / Value / Consecutive** — the condition and the number of consecutive trials on which it must hold.
+- **Op / Value / Consecutive** — the condition and the number of consecutive trials on which it must hold. *Is
+  any* accepts any value (for a criterion based only on the variability below).
 - **When met** — *Stage completed*: the animal's remaining trials of the stage are skipped and new schedules do not
   include the stage again for it; *Report only*.
 - **Retire after** — animals that have not met the criterion after this many trials are retired.
+- **Minimum trials** (ANY-maze 7.30's stage end rules) — the stage cannot end before the animal has done this many
+  trials of it, even when the condition is met earlier (*none* = no minimum).
+- **Acceptable variability** (the row under the table, for the selected criterion; ANY-maze 7.30) — the stage ends
+  only when the measure (or another one, typed in *of*) varies little enough over the animal's last N trials:
+  *Variability (%)* is ANY-maze's ((highest − lowest) / (highest + lowest)) × 100 (25, 24 and 27 give 5.9 %), *SD*
+  the standard deviation (n − 1) and *CV (%)* the SD as a percentage of the mean. A missing value in those trials
+  is not acceptable. By default N is the number of consecutive trials, as in ANY-maze, where the variability is
+  checked over those trials; it may be set to any number from 2.
+
+The condition, the minimum number of trials and the variability must all hold on the same trial: e.g. *Lever
+presses ≥ 20 on 3 consecutive trials, after at least 10 trials, variability over the last 3 trials ≤ 10 %*.
+Criteria saved by older versions keep working (no minimum, no variability).
 
 On the Experiment tab press **Training criteria…** to see, for every animal, the trials done, the trial at which the
-criterion was met and the outcome; **Apply** completes stages and retires failing animals (their pending tests are
-skipped). To end a stage for one animal without a criterion, use **End stage for animal** in the Test schedule.
+criterion was met, the last variability worked out and the outcome; **Apply** completes stages and retires failing
+animals (their pending tests are skipped). To end a stage for one animal without a criterion, use **End stage for
+animal** in the Test schedule.
 
 ### Animals: retirement and dose calculation
 
@@ -504,7 +569,8 @@ Set these in **Setup ▸ Start and end** (they apply to every mode):
   reached the end zone* when the analysis ends the test in an end zone (*Analysis ▸ Test end*; this also applies to
   tests tracked from a video, which otherwise have no reason).
 - **Adjust calibration** (ribbon ▸ Session) changes the scale of the running test — of the selected panel with
-  several tests — by typing the real length of the apparatus's calibration line or the number of pixels per cm.
+  several tests — by typing the real length of the apparatus's calibration line (in the experiment's distance
+  unit) or the number of pixels per cm.
   Live distances and speeds use it at once (the distance so far is converted, positions being tracked in pixels),
   and it is saved with the test (`zone_overrides["@calibration"]`, shown in the XML export), so the test's results
   are calculated with it; the apparatus map and the other tests keep their calibration. The change is noted in the
@@ -1443,11 +1509,11 @@ maps, group heat maps, results and statistics.
 | Radial arm place conditioning (RAPC) | type 1 errors, type 2 errors, total errors, door sequence, total arm entries, baited arms visited, correct entries before first error, entries to visit all baited arms |
 | T maze | first choice, choice latency, arm alternations |
 | Morris water maze | escape latency, found platform, path length to platform, platform crossings (vs other positions), mean / cumulative distance to platform (Gallagher proximity), initial heading error, target / opposite quadrant time %, wall hugging, search strategy |
-| Barnes maze | primary latency, primary errors, primary path length, total errors, escape-hole visits, hole sequence, search strategy (direct / serial / random) |
+| Barnes maze | primary latency, primary errors, primary path length, total errors, escape-hole visits, hole sequence, search strategy (direct / serial / random; with ANY-maze's method also primary strategy, reference / working / perseverative errors and hole deviation score, with the UNMC method the strategies used in turn — §1, *Barnes maze strategy*) |
 | Novel object | novel / familiar exploration, total exploration, discrimination index, recognition index |
 | Light/dark box | latency to enter dark, transitions, time in light % |
 | Three-chamber | social / object interaction, sociability index, social chamber preference index |
-| Forced swim / tail suspension | immobility time, %, latency |
+| Forced swim test, tail suspension test | time immobile (s, %), immobile episodes, latency to first immobility, episode durations, from the struggle in the image; forced swim optionally time / % / episodes / latency of climbing and swimming (§1, *Forced swim / tail suspension*) |
 | Several animals | mean inter-animal distance, time in contact |
 | Manual scoring | per behaviour: count, duration, duration %, latency, mean bout (state) or count, latency, rate (point) |
 
