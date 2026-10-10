@@ -213,8 +213,8 @@ def _report_table(p, name):
         return p.report_table(name)
     except KeyError:
         names = ", ".join(f"“{r['name']}”" for r in p.reports) or "none"
-        sys.exit(f"The experiment has no results report called “{name}” (saved reports: {names}). Reports are saved "
-                 f"on the Data page (Report ▸ Save as…).")
+        sys.exit(f"The experiment has no results report called “{name}” (saved reports: {names}). Reports are "
+                 f"saved on the Data page (Report ▸ Save as…).")
 
 
 def _export_report(p, a, out):

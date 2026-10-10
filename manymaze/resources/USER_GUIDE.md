@@ -101,7 +101,8 @@ everything without a camera.
   *Radio*; *Event* for instantaneous events — see §6). Old wording: *state* with a duration, e.g. grooming; *point*
   for instantaneous events, e.g. defecation).
 * **Analysis ▸ Time periods** – named time windows (e.g. *Tone 1: 120–150 s*) that override regular time bins;
-  ideal for fear-conditioning CS periods.
+  ideal for fear-conditioning CS periods. *Time periods based on a time marker* start at an event (or a
+  calculation's time) and end after a duration, at another event or at a calculation's time (§9, *Time periods*).
 * **Animal tracking** (detection settings) – defaults for all tests (each test can override them, see §5). *Body parts from*
   chooses how head, body centre and tail base are found: from the animal's shape (fast, no model) or with the
   **pose model** (deep learning, see §5.1).
@@ -421,7 +422,9 @@ experiment…** takes a name off the list (tests keep their experimenter).
 On the Protocol tab (*Training criteria*) add, per stage, a condition on a result measure, e.g.
 *Training: Escape latency (s) < 10 on 3 consecutive trials; retire after 10 trials*:
 
-- **Measure** — any column of the results (or a procedure result variable), whole-test value.
+- **Measure** — any column of the results (or a procedure result variable), whole-test value; also a
+  calculation's result (e.g. a discrimination index, or `count_trials` across the animal's trials), by its column
+  name, e.g. `Discrimination index` or `Open arms (%)`.
 - **Op / Value / Consecutive** — the condition and the number of consecutive trials on which it must hold.
 - **When met** — *Stage completed*: the animal's remaining trials of the stage are skipped and new schedules do not
   include the stage again for it; *Report only*.
@@ -647,8 +650,9 @@ do the *test is waiting to start* procedures, pausing (the test clock stops), th
 shows the inputs and the I/O device states instead of the animal. When the test ends it is saved without a track
 (status *scored*, its duration the time its clock ran) and its results come from the I/O log: the input, output,
 encoder and analogue measures of *I/O results*, the scored keys and the procedures' result variables, also per
-time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark or an
-input). One I/O-only test runs at a time; *Several tests* needs cameras.
+time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark, an
+input or a calculation's time, also for their end). One I/O-only test runs at a time; *Several tests* needs
+cameras.
 
 ### Procedures
 
@@ -1529,10 +1533,32 @@ HTML report. A new experiment based on this one's protocol gets its reports.
 
 ### Time periods
 
-Besides regular time bins and custom periods, **event-anchored periods**: anchored on test start, first entry to /
-exit from a zone, a manual mark, or an input switching on; with offset, duration (0 = to the end) and occurrence
-(1 = first, 0 = every occurrence). Example: *the 30 s after the animal first left the start box*. Paused time is
-excluded from all times and distances.
+Besides regular time bins and custom periods, **event-anchored periods** (*Protocol ▸ Analysis ▸ Time periods
+based on a time marker*, one row each):
+
+- **The period starts at** test start, an entry into / exit from a zone, a manual mark (key), an input switching on,
+  or the **time given by a calculation** (its whole-test result, in seconds from the start of the test; ANY-maze's
+  *time periods defined by a calculation*) — plus an *Offset*. *Occurrence* picks which event (1 = first, 2 =
+  second…, 0 = one period for every occurrence). Periods whose start never happens are left out.
+- **The period ends** *after the duration* (*Duration*, 0 = at the end of the test), or at an event — an entry into /
+  exit from a zone, a mark, an input — or at a calculation's time, plus an *End offset*. *End occurrence* counts the
+  events after the period's start event and start (1 = the first one after it), so *from each tone to the next* or
+  *from the exit from the start box until the goal box is reached* are one row each.
+
+Examples: *the 30 s after the animal first left the start box*; *from the first entry into the open arm until the
+animal leaves it* (start: entry into, end: exit from, the same zone; occurrence 0 gives one period per visit);
+*from the platform's latency onwards* (a calculation `{Platform: latency to first entry (s)}`). As in ANY-maze, **a
+period whose end never happens** (the event does not occur, the calculation's result is blank) **ends at the end of
+the test**, and its results say so in the *Warnings* column (*Back: the end of the period (entry into Start box) did
+not happen; it ends at the end of the test*).
+
+A calculation that defines a period must be worked out from the test's own results — not from other trials
+(`mean_trials` …) or information columns — and must not use that period itself with `result_for_period`, directly or
+through other calculations (that would be circular). Both are reported in red under the table, and the circular
+reference also on the calculation's property page; such a period is left out (or ends at the end of the test). A
+calculation may use, with `result_for_period({m}, 'name')`, a period defined by another calculation: it is worked
+out after that one. Renaming a calculation updates the periods that use it; deleting one names them. The protocol
+report describes every period in words. Paused time is excluded from all times and distances.
 
 ### Calculations
 
@@ -1564,8 +1590,9 @@ A formula whose values are blank (a measure missing in a test, a division by zer
 `is_undefined({m})` tests for it. Unlike ANY-maze, which works a formula out strictly from left to right, the usual
 precedence applies (`2 + 3 * 4` is 14). The property page shows mistakes as you type, and the result for the first
 test. The results are listed under **Calculation results** in *Select data*, exported, compared in Statistics and
-printed in the protocol report; renaming a calculation updates the formulas that use it, and a new experiment based
-on this one's protocol gets its calculations.
+printed in the protocol report; a time period can start or end at a calculation's result (*Time periods*) and a
+training criterion can use one (§6); renaming a calculation updates the formulas, time periods and criteria that
+use it, and a new experiment based on this one's protocol gets its calculations.
 
 ### Track plots (Results ▸ Data ▸ Track plots)
 

@@ -31,8 +31,9 @@ from .apparatus import Apparatus, from_known
 from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
-from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, analyse_segmented,
+from .measures import (AnalysisSettings, add_warning, all_periods, analyse, analyse_period, analyse_segmented,
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
+from .periods import Period, calculation_columns, no_end_warning, uses_calculations
 from .reports import find_report, report_columns, report_rows, reports_from
 from .session import END_ZONE
 from .templates import apply_overrides
@@ -560,15 +561,43 @@ class Project:
                 if e.get("behaviour") == old:
                     e["behaviour"], n = new, n + 1
         for d in self.analysis.event_periods:
-            if isinstance(d, dict) and d.get("anchor") == "mark":
-                for k in ("behaviour", "mark"):
-                    if d.get(k) == old:
-                        d[k] = new
+            for x in (d, d.get("end") if isinstance(d, dict) else None):  # the period's start and its end
+                if isinstance(x, dict) and x.get("anchor") == "mark":
+                    for k in ("behaviour", "mark"):
+                        if x.get(k) == old:
+                            x[k] = new
         for c in self.training_criteria:
             m = c.get("measure", "") if isinstance(c, dict) else ""
             if m.startswith(old + ":") or m.startswith(old + " in "):
                 c["measure"] = new + m[len(old):]
         return n
+
+    def rename_calculation(self, old: str, new: str, formulas: bool = True, skip: Calculation | None = None):
+        """A calculation's results column was renamed: the formulas of the other calculations (but `skip`; not with
+        formulas=False), the time periods it starts or ends and the training criteria on it follow."""
+        if not old or not new or old == new:
+            return
+        if formulas:
+            for c in self.calculations:
+                if c is not skip:
+                    c.formula = c.formula.replace("{" + old + "}", "{" + new + "}")
+        for d in self.analysis.event_periods:
+            for x in (d, d.get("end") if isinstance(d, dict) else None):
+                if isinstance(x, dict) and x.get("anchor") == "calculation" and x.get("calculation") == old:
+                    x["calculation"] = new
+        for c in self.training_criteria:
+            if isinstance(c, dict) and c.get("measure") == old:
+                c["measure"] = new
+
+    def calculation_users(self, column: str) -> list[str]:
+        """What uses a calculation's results: other calculations, time periods and training criteria (as text)."""
+        out = [f"calculation “{c.column}”" for c in self.calculations
+               if c.column != column and "{" + column + "}" in c.formula]
+        out += [f"time period “{d.get('label', '')}”" for d in self.analysis.event_periods
+                if isinstance(d, dict) and column in calculation_columns(d)]
+        out += [f"training criterion of {('stage “' + c.get('stage') + '”') if c.get('stage') else 'any stage'}"
+                for c in self.training_criteria if isinstance(c, dict) and c.get("measure") == column]
+        return out
 
     def ensure_animal(self, aid: str, group: str = "") -> Animal:
         a = self.get_animal(aid)
@@ -716,9 +745,15 @@ class Project:
 
     def test_periods(self, test: Test, track: Track, app: Apparatus | None = None) -> list[tuple[str, float, float]]:
         """The time bins, custom and event-anchored periods of a test, in test time (as the segmented results).
-        app: the test's apparatus without its per-test zone positions (default: the test's)."""
-        return all_periods(track, app or self.get_apparatus(test.apparatus), self.analysis_for(test), None,
-                           test.events, test.io_events, test.zone_overrides, test.pauses)
+        app: the test's apparatus without its per-test zone positions (default: the test's). Periods defined by
+        calculations analyse the track for their results."""
+        app = app or self.get_apparatus(test.apparatus)
+        s = self.analysis_for(test)
+        calc = None
+        if uses_calculations(s.event_periods) and app is not None:
+            calc = analyse(track, app, s, **self._analysis_kw(test, [track], 0, self.calculation_steps()))
+        return all_periods(track, app, s, None, test.events, test.io_events, test.zone_overrides, test.pauses,
+                           calc=calc)
 
     def test_info(self, test: Test, animal_id: str | None = None) -> dict:
         """The information columns of a results row (INFO_COLUMNS and the animal fields). The columns that come
@@ -847,11 +882,14 @@ class Project:
         """A test without a track analysed from its I/O log (ANY-maze's I/O only mode), not only scored keys."""
         return bool(test.io_events or test.result_variables)
 
-    def _untracked_periods(self, test: Test) -> list[tuple[str, float, float]]:
+    def _untracked_periods(self, test: Test, calc: dict | None = None) -> list[Period]:
+        """The time periods of a test without a track (calc: its whole-test results, for periods defined by
+        calculations)."""
         dur, s = self._scored_duration(test), self.analysis_for(test)
         if not self._io_only(test):
-            return time_periods(dur, s)
-        return io_only_periods(dur, s, test.events, test.io_events, self.get_apparatus(test.apparatus), test.pauses)
+            return [Period(label, a, b) for label, a, b in time_periods(dur, s)]
+        return io_only_periods(dur, s, test.events, test.io_events, self.get_apparatus(test.apparatus), test.pauses,
+                               calc=calc, resolved=True)
 
     def _untracked_measures(self, test: Test, t_range=None) -> dict | None:
         """Measures of a test without a track, whole or for a period (None: the test ended before it)."""
@@ -864,11 +902,11 @@ class Project:
         return io_only_measures(dur, self.analysis_for(test), test.io_events, self.io_devices or None, test.events,
                                 self.behaviours, test.result_variables, t_range, test.pauses)
 
-    def _scored_period(self, test: Test, spec) -> dict | None:
+    def _scored_period(self, test: Test, spec, calc: dict | None = None) -> dict | None:
         """result_for_period() of a test without a track: its measures for a part of the test (a time period's
-        name: the test's time periods)."""
+        name: the test's time periods; calc: its whole-test results, for periods defined by calculations)."""
         if isinstance(spec, str):
-            spec = {label: (a, b) for label, a, b in self._untracked_periods(test)}.get(spec)
+            spec = next(((p.t0, p.t1) for p in self._untracked_periods(test, calc) if p.label == spec), None)
             if spec is None:
                 return None
         return self._untracked_measures(test, tuple(spec))
@@ -876,20 +914,30 @@ class Project:
     def _untracked_rows(self, test: Test, segmented: bool, steps=None) -> list[dict]:
         """Results of a test without a track: keys scored by hand (TakeNote; whole test) or the I/O log (I/O only
         mode; with its time periods when segmented)."""
-        parts = [("Whole test", None)]
-        if segmented and self._io_only(test):
-            parts += [(label, (a, b)) for label, a, b in self._untracked_periods(test)]
-        rows = []
-        for k, (label, rng) in enumerate(parts):
-            res = self._untracked_measures(test, rng)
+        whole: dict = {}  # the whole test's results as they are worked out (for periods defined by calculations)
+
+        def period(spec):
+            return self._scored_period(test, spec, whole)
+
+        row = self.test_info(test)
+        row.update({"Period": "Whole test", "Segment of test": ""})
+        row.update(self._untracked_measures(test))
+        if steps:
+            row.update(evaluate_test(steps, row, period, view=whole))
+        rows = [row]
+        if not (segmented and self._io_only(test)):
+            return rows
+        defs = self.analysis_for(test).event_periods
+        for k, per in enumerate(self._untracked_periods(test, whole), 1):
+            res = self._untracked_measures(test, (per.t0, per.t1))
             if res is None:
                 continue
             row = self.test_info(test)
-            row["Period"] = label
-            row["Segment of test"] = "" if rng is None else k  # ANY-maze "segment of test": 1, 2, …
-            row.update(res)
+            row["Period"] = per.label
+            row["Segment of test"] = k  # ANY-maze "segment of test": 1, 2, …
+            row.update(add_warning(res, no_end_warning(per, defs)))
             if steps:
-                row.update(evaluate_test(steps, row, lambda spec: self._scored_period(test, spec)))
+                row.update(evaluate_test(steps, row, period))
             rows.append(row)
         return rows
 
@@ -933,7 +981,8 @@ class Project:
         if not self.calculations:
             return []
         info = set(INFO_COLUMNS) | set(self.animal_fields) | {ERROR_COLUMN}
-        return plan([c for c in self.calculations if c.column and c.column not in info | {"Warnings"}], info)
+        return plan([c for c in self.calculations if c.column and c.column not in info | {"Warnings"}], info,
+                    self.analysis.event_periods)
 
     def _deferred_calculations(self, rows: list[dict], segmented: bool, steps) -> None:
         """Work out the deferred calculations of result rows in place: with the information columns and, for the
@@ -960,15 +1009,20 @@ class Project:
             groups.setdefault((str(r.get("Animal")), r.get("Period")), []).append(
                 (r.get("Stage", ""), r.get("Trial", 1), r))
         trials = {k: Trials(v, self.stages) for k, v in groups.items()}
+        # the whole-test row of each test and animal: the time periods defined by calculations use its results
+        whole = {(r.get("Test"), str(r.get("Animal"))): r for r in every
+                 if r.get("Period", "Whole test") == "Whole test"}
         cache: dict = {}
         for s in todo:
             for r in every:
-                r[s.calc.column] = evaluate_calc(s.calc, r, lambda spec, r=r: self._calc_period(r, spec, cache),
+                w = whole.get((r.get("Test"), str(r.get("Animal"))))
+                r[s.calc.column] = evaluate_calc(s.calc, r, lambda spec, r=r, w=w: self._calc_period(r, spec, cache, w),
                                                  trials.get((str(r.get("Animal")), r.get("Period"))))
 
-    def _calc_period(self, row: dict, spec, cache: dict) -> dict | None:
+    def _calc_period(self, row: dict, spec, cache: dict, whole: dict | None = None) -> dict | None:
         """result_for_period() of a results row in the deferred calculations: its test analysed for part of the
-        test (cached per test, animal and period)."""
+        test (cached per test, animal and period; whole: the test's whole-test row, for periods defined by
+        calculations)."""
         key = (row.get("Test"), str(row.get("Animal")), spec)
         if key not in cache:
             cache[key] = None
@@ -976,13 +1030,13 @@ class Project:
             if test is not None:
                 tracks = self.load_tracks(test)
                 if not tracks:
-                    cache[key] = self._scored_period(test, spec) if self.has_results(test) else None
+                    cache[key] = self._scored_period(test, spec, whole) if self.has_results(test) else None
                 else:
                     ids = [test.animal_id] + list(test.extra_animals)
                     i = ids.index(row.get("Animal")) if row.get("Animal") in ids else 0
                     if i < len(tracks):
                         cache[key] = analyse_period(tracks[i], self.get_apparatus(test.apparatus),
-                                                    self.analysis_for(test), spec,
+                                                    self.analysis_for(test), spec, calc_values=whole,
                                                     **self._analysis_kw(test, tracks, i))
         return cache[key]
 

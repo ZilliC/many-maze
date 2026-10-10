@@ -551,10 +551,11 @@ def trial_means(rows: list[dict], measures: list[str], keep: tuple[str, ...] = (
 
 def protocol_report(project: Project, path) -> Path:
     """Self-contained HTML description of the protocol (ANY-maze protocol report): experiment, stages, keys,
-    apparatus maps with every zone / point / line / group / sequence, animal tracking and analysis settings,
-    calculations, procedures, I/O devices and training criteria."""
+    apparatus maps with every zone / point / line / group / sequence, animal tracking and analysis settings, time
+    periods, calculations, procedures, I/O devices and training criteria."""
     from . import plots
     from .measures import AnalysisSettings
+    from .periods import describe_period
     from .procedures import describe_statement, normalize_procedures
     from .tracking import DetectionSettings
     from .workflow import criterion_text
@@ -645,6 +646,12 @@ def protocol_report(project: Project, path) -> Path:
         out.append("</div>")
     out.append("<h2>Animal tracking</h2>" + settings(p.detection, DetectionSettings()))
     out.append("<h2>Analysis</h2>" + settings(p.analysis, AnalysisSettings()))
+    periods = [(str(c[0]), f"From {float(c[1]):g} s to {float(c[2]):g} s") for c in p.analysis.custom_periods
+               if isinstance(c, (list, tuple)) and len(c) == 3]
+    periods += [(str(d.get("label") or f"Period {i + 1}"), describe_period(d))
+                for i, d in enumerate(p.analysis.event_periods) if isinstance(d, dict)]
+    if periods:
+        out.append("<h2>Time periods</h2>" + table(("Time period", "Definition"), periods))
     if p.calculations:
         out.append("<h2>Calculations</h2>" + table(("Calculation", "Formula", "Decimal places", "Graph Y axis",
                                                      "Named values"), [

@@ -364,20 +364,62 @@ def _results(P: _Prepared, t_range, behaviours=None, result_variables=None, io_d
     """The measures of the whole test (t_range None) or of a period, then the calculations; filtered last
     (AnalysisSettings.measure_filter keeps the calculations, which may use any measure)."""
     res = _measures(P, t_range, behaviours, result_variables, io_devices)
+    steps = None
     if calculations:
-        from .calculations import evaluate_test
+        from .calculations import evaluate_test, plan
+
+        steps = plan(calculations, periods=P.s.event_periods)  # (plan() steps given are used as they are)
+        P.cache["calc_args"] = (behaviours, result_variables, io_devices, steps)
+        # the whole test's results, filled as they are worked out: time periods defined by calculations use them
+        view = None
+        if t_range is None:
+            view = P.cache["calc_view"] = {}
 
         def period(spec):
             return _calc_period(P, spec, behaviours, result_variables, io_devices)
 
-        res.update(evaluate_test(calculations, res, period))
+        res.update(evaluate_test(steps, res, period, view=view))
     if P.s.measure_filter:
         keep = set(P.s.measure_filter) | {"Test duration (s)", "Warnings"}
-        if calculations:
-            from .calculations import plan
-
-            keep |= {st.calc.column for st in plan(calculations)}
+        if steps:
+            keep |= {st.calc.column for st in steps}
         res = OrderedDict((key, v) for key, v in res.items() if key in keep)
+    return res
+
+
+def _calc_values(P: _Prepared) -> dict | None:
+    """The whole test's results with its calculations (for the time periods they define): those being worked out,
+    else worked out now (analyse() of a period only, analyse_period); None without calculations."""
+    if "calc_view" not in P.cache and "calc_args" in P.cache:
+        _results(P, None, *P.cache["calc_args"])
+    return P.cache.get("calc_view")
+
+
+def _periods(P: _Prepared) -> list:
+    """The time bins / custom periods, then the event-anchored periods of a prepared test (periods.Period, in test
+    time), their calculation anchors from the whole test's results."""
+    from .periods import Period, calculation_columns, calculation_value, resolve_periods
+
+    tr = P.clean
+    dur = tr.t[-1] + tr.dt if len(tr) else 0
+    defs = P.s.event_periods or []
+    cols = sorted(set().union(*(calculation_columns(p) for p in defs if isinstance(p, dict))))
+    calc = _calc_values(P) if cols else None
+    key = ("periods",) + tuple(calculation_value(calc, c) for c in cols)
+
+    def make():
+        out = [Period(label, a, b) for label, a, b in time_periods(dur, P.s)]
+        if defs:
+            out += resolve_periods(defs, dur, tr, P.app, P.s, P.events, P.io_events, memb=P.memb, calc=calc)
+        return out
+
+    return P.cached(key, make)
+
+
+def add_warning(res: dict, text: str) -> dict:
+    """Add a note to the Warnings column of a results row."""
+    if text:
+        res["Warnings"] = "; ".join(x for x in (res.get("Warnings"), text) if x)
     return res
 
 
@@ -386,12 +428,7 @@ def _calc_period(P: _Prepared, spec, behaviours, result_variables, io_devices) -
     or the name of a time period (time bins, custom and event-anchored periods); None if the test ended before the
     period starts or no period has that name. Cached on the prepared test."""
     if isinstance(spec, str):
-        def bounds():
-            tr = P.clean
-            dur = tr.t[-1] + tr.dt if len(tr) else 0
-            return {label: (a, b) for label, a, b in all_periods(tr, P.app, P.s, dur, P.events, P.io_events)}
-
-        spec = P.cached("calc_periods", bounds).get(spec)
+        spec = next(((p.t0, p.t1) for p in _periods(P) if p.label == spec), None)
         if spec is None:
             return None
     a, b = float(spec[0]), float(spec[1])
@@ -1999,20 +2036,31 @@ def analyse_segmented(track: Track, app: Apparatus, s: AnalysisSettings, **kw) -
     rest = dict(behaviours=kw.get("behaviours"), result_variables=kw.get("result_variables"),
                 io_devices=kw.get("io_devices"), calculations=kw.get("calculations"))
     out = [("Whole test", _results(P, None, **rest))]
-    tr = P.clean
-    dur = tr.t[-1] + tr.dt if len(tr) else 0
-    # periods in test time, from the pause-free track and test-time events
-    for label, a, b in all_periods(tr, P.app, s, dur, P.events, P.io_events):
-        out.append((label, _results(P, (a, b), **rest)))
+    # periods in test time, from the pause-free track and test-time events (and the whole test's calculations)
+    from .periods import no_end_warning
+
+    for per in _periods(P):
+        res = _results(P, (per.t0, per.t1), **rest)
+        out.append((per.label, add_warning(res, no_end_warning(per, s.event_periods))))
     return out
 
 
-def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, **kw) -> dict | None:
+def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, calc_values: dict | None = None,
+                   **kw) -> dict | None:
     """The measures of part of a test as a calculation's result_for_period() sees them: spec (from_s, to_s) in test
-    time or the name of a time period; None if the test ended before it (keywords as analyse())."""
+    time or the name of a time period; None if the test ended before it (keywords as analyse()). calc_values: the
+    whole test's results with its calculations, for time periods defined by calculations (default: worked out with
+    the `calculations` keyword)."""
     P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
                  kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"))
-    return _calc_period(P, spec, kw.get("behaviours"), kw.get("result_variables"), kw.get("io_devices"))
+    args = (kw.get("behaviours"), kw.get("result_variables"), kw.get("io_devices"))
+    if calc_values is not None:
+        P.cache["calc_view"] = calc_values
+    elif kw.get("calculations"):
+        from .calculations import plan
+
+        P.cache["calc_args"] = args + (plan(kw["calculations"], periods=s.event_periods),)
+    return _calc_period(P, spec, *args)
 
 
 def io_only_measures(duration: float, s: AnalysisSettings | None = None, io_events: list | None = None,
@@ -2046,29 +2094,32 @@ def io_only_measures(duration: float, s: AnalysisSettings | None = None, io_even
 
 
 def io_only_periods(duration: float, s: AnalysisSettings, events=None, io_events=None, app=None,
-                    pauses=None) -> list[tuple[str, float, float]]:
+                    pauses=None, calc=None, resolved: bool = False) -> list:
     """The time periods of a test without a track: time bins / custom periods, then the event-anchored periods
-    that need no track (test start, a key mark, an input switching on)."""
-    out = time_periods(duration, s)
-    if s.event_periods:
-        from .periods import event_periods
+    that need no track (test start, a key mark, an input switching on, a calculation's time; calc: the whole test's
+    results). (label, t0, t1) each, or periods.Period (with the no-end flag) when resolved."""
+    from .periods import Period, resolve_periods
 
-        out += event_periods(s.event_periods, duration, None, app, s, shift_events(events, pauses),
-                             shift_events(io_events, pauses))
-    return out
+    out = [Period(label, a, b) for label, a, b in time_periods(duration, s)]
+    if s.event_periods:
+        out += resolve_periods(s.event_periods, duration, None, app, s, shift_events(events, pauses),
+                               shift_events(io_events, pauses), calc=calc)
+    return out if resolved else [(x.label, x.t0, x.t1) for x in out]
 
 
 def all_periods(track: Track, app: Apparatus, s: AnalysisSettings, duration: float | None = None, events=None,
-                io_events=None, zone_overrides=None, pauses=None) -> list[tuple[str, float, float]]:
-    """Time bins / custom periods followed by event-anchored periods, in test time (pauses removed, as analyse())."""
+                io_events=None, zone_overrides=None, pauses=None, calc=None, resolved: bool = False) -> list:
+    """Time bins / custom periods followed by event-anchored periods, in test time (pauses removed, as analyse()).
+    calc: the whole test's results with its calculations ({column: value}), for periods defined by calculations.
+    (label, t0, t1) each, or periods.Period (with the no-end flag) when resolved."""
+    from .periods import Period, resolve_periods
+
     track = drop_pauses(track, pauses)[0]
     events, io_events = shift_events(events, pauses), shift_events(io_events, pauses)
     if duration is None:
         duration = track.t[-1] + track.dt if len(track) else 0
-    out = time_periods(duration, s)
+    out = [Period(label, a, b) for label, a, b in time_periods(duration, s)]
     if s.event_periods:
-        from .periods import event_periods
-
-        out += event_periods(s.event_periods, duration, track, apply_overrides(app, zone_overrides), s, events,
-                             io_events)
-    return out
+        out += resolve_periods(s.event_periods, duration, track, apply_overrides(app, zone_overrides), s, events,
+                               io_events, calc=calc)
+    return out if resolved else [(x.label, x.t0, x.t1) for x in out]
