@@ -786,15 +786,16 @@ def compute_doses(project: Project, animals: list[Animal] | None = None, write: 
 
 # ---------------------------------------------------------------------------- protocol copy
 # settings_extra entries that belong to the protocol (others, e.g. blind codes and completed stages, are data)
-PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose")
+PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose", "operant_preset")
 
 
 def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Project:
     """Give ``dst`` the protocol of ``src`` (ANY-maze: new experiment based on another one's protocol).
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
-    calculations, procedures, I/O devices, training criteria, blind testing and animal ID options, the animal
-    columns and the experimenters (users); I/O device passwords and tokens are not copied (enter them again);
+    calculations, results reports, statistics settings, procedures, I/O devices, training criteria, blind testing and
+    animal ID options, the animal columns and the experimenters (users); I/O device passwords and tokens are not
+    copied (enter them again);
     with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
@@ -808,6 +809,8 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.detection = DetectionSettings.from_dict(src.detection.to_dict())
     dst.analysis = AnalysisSettings.from_dict(_copy.deepcopy(src.analysis.to_dict()))
     dst.calculations = calculations_from(c.to_dict() for c in src.calculations)
+    dst.reports = _copy.deepcopy(src.reports)
+    dst.statistics = _copy.deepcopy(src.statistics)
     dst.apparatus = [a.copy() for a in src.apparatus]
     dst.behaviours = [Behaviour.from_dict(asdict(b)) for b in src.behaviours]
     dst.stages = list(src.stages)

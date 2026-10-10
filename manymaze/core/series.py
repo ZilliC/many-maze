@@ -104,15 +104,52 @@ def count_rotations(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[int
 def rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[np.ndarray, np.ndarray]:
     """The rotations count_rotations() counts, as (index in angle_deg of the sample completing each rotation,
     +1 clockwise / -1 anticlockwise) - so that the rotations of a whole test can be shared out between periods."""
+    return _rotation_walk(angle_deg, reset_deg)[:2]
+
+
+def partial_rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0,
+                            partial_deg: float = 90.0) -> tuple[np.ndarray, np.ndarray]:
+    """ANY-maze's partial rotations: the turns of the orientation in one direction (from one reversal to the next -
+    turning back by more than reset_deg, as for rotations - or to the start / end of the series) of at least
+    partial_deg during which no rotation was completed, as (index in angle_deg of the sample where each turn stopped,
+    +1 clockwise / -1 anticlockwise)."""
+    return _rotation_walk(angle_deg, reset_deg, partial_deg)[2:]
+
+
+def _rotation_walk(angle_deg, reset_deg, partial_deg=0.0) -> tuple[np.ndarray, ...]:
+    """(rotation samples, signs, partial rotation samples, signs): see rotation_events / partial_rotation_events."""
     a = np.asarray(angle_deg, float)
     idx = np.flatnonzero(np.isfinite(a))
     if len(idx) < 2:
-        return np.zeros(0, int), np.zeros(0, int)
+        return (np.zeros(0, int),) * 4
     u = np.degrees(np.unwrap(np.radians(a[idx])))
-    at, sign = [], []
+    at, sign, p_at, p_sign = [], [], [], []
     ref = u[0]
     hi = lo = u[0]
+    # turns, for the partial rotations: d the direction (0 until the orientation has moved by more than reset_deg),
+    # start the extreme it started from, ext the furthest it has gone, full: a rotation was completed in it
+    d, start, ext, ext_i, full = 0, u[0], u[0], 0, False
+    thi = tlo = u[0]
+    thi_i = tlo_i = 0
+
+    def end_turn():
+        if partial_deg > 0 and not full and abs(ext - start) >= partial_deg - 1e-9:
+            p_at.append(idx[ext_i])
+            p_sign.append(d)
+
     for i, v in enumerate(u[1:], 1):
+        if d == 0:
+            if v > thi:
+                thi, thi_i = v, i
+            if v < tlo:
+                tlo, tlo_i = v, i
+            if thi - tlo > reset_deg:  # the first turn: from the earlier extreme to the later one
+                d, start, ext, ext_i = (1, tlo, thi, thi_i) if thi_i > tlo_i else (-1, thi, tlo, tlo_i)
+        elif d * (v - ext) > 0:
+            ext, ext_i = v, i
+        elif d * (ext - v) > reset_deg:  # a reversal: v is the furthest the new turn has gone
+            end_turn()
+            d, start, ext, ext_i, full = -d, ext, v, i, False
         hi = max(hi, v)
         lo = min(lo, v)
         if v - ref >= 360:
@@ -120,15 +157,46 @@ def rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[np.
             sign.append(1)
             ref = v
             hi = lo = v
+            full = True
         elif ref - v >= 360:
             at.append(idx[i])
             sign.append(-1)
             ref = v
             hi = lo = v
+            full = True
         elif hi - v > reset_deg and hi > ref:
             ref = v
             hi = lo = v
         elif v - lo > reset_deg and lo < ref:
             ref = v
             hi = lo = v
-    return np.asarray(at, int), np.asarray(sign, int)
+    if d:
+        end_turn()
+    elif partial_deg > 0 and thi - tlo >= partial_deg - 1e-9:  # a single turn of no more than reset_deg
+        p_at.append(idx[max(thi_i, tlo_i)])
+        p_sign.append(1 if thi_i > tlo_i else -1)
+    return np.asarray(at, int), np.asarray(sign, int), np.asarray(p_at, int), np.asarray(p_sign, int)
+
+
+def initial_heading_frames(t: np.ndarray, dur: np.ndarray, x: np.ndarray, y: np.ndarray, mobile: np.ndarray,
+                           by: str = "time", time_s: float = 1.0, distance: float = 0.0) -> tuple[int, int] | None:
+    """The animal's initial heading as ANY-maze's Heading error options define it: (first position, end position)
+    frames of the vector from the first position to the first position after the animal has been mobile for time_s
+    (by "time"), or to the first position more than `distance` (in the units of x / y) from it (by "distance").
+    Positions while the animal is immobile are ignored. Without enough mobility for the time, the last mobile
+    position; None when there is none (or, by distance, when the animal never gets that far)."""
+    ok = np.flatnonzero(np.isfinite(x) & np.isfinite(y))
+    if len(ok) < 3:
+        return None
+    i0 = int(ok[0])
+    mob = ok[(ok > i0) & np.asarray(mobile, bool)[ok]]
+    if not len(mob):
+        return None
+    if by == "distance":
+        far = mob[np.hypot(x[mob] - x[i0], y[mob] - y[i0]) > max(float(distance), 0.0)]
+        return (i0, int(far[0])) if len(far) else None
+    # mobile time elapsed since the first position when each frame starts
+    m_dur = np.where(np.asarray(mobile, bool), dur, 0.0)
+    elapsed = np.concatenate([[0.0], np.cumsum(m_dur[i0:])])[mob - i0]
+    j = np.flatnonzero(elapsed >= float(time_s) - 1e-9)
+    return i0, int(mob[j[0]] if len(j) else mob[-1])

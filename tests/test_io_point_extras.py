@@ -60,7 +60,8 @@ def test_point_extras():
     tr = make_track(pts, head_offset=(10, 0))
     r = analyse(tr, app, S)
     assert r["P: X (cm)"] == 30.0 and r["P: Y (cm)"] == 10.0
-    assert r["P: approximate time at point (s)"] == pytest.approx(1.96)  # the first frame on the point
+    # ANY-maze 4.19, p. 93: the time spent at the point, from the heat map (2 s still on it, and the way in and out)
+    assert 2.0 < r["P: approximate time at point (s)"] < 2.6
     assert r["P: initial heading error (deg)"] == 0.0
     # moving towards for 2 s, then perpendicular-ish away: mean |error| between 0 and 180
     assert 0 < r["P: mean absolute heading error (deg)"] < 180
@@ -70,9 +71,9 @@ def test_point_extras():
     assert r["P: max head distance (cm)"] == pytest.approx(math.hypot(1, 20), abs=0.05)
     assert r["P: time head moving towards (s)"] == pytest.approx(2.0, abs=0.2)
     assert r["P: time head moving away (s)"] == pytest.approx(2.0, abs=0.2)
-    # a period: the closest approach is relative to the period start
+    # a period: the time at the point in the period (1 of the 2 s still on it)
     seg = dict(analyse_segmented(tr, app, AnalysisSettings(**{**S.to_dict(), "bin_length_s": 3.0})))
-    assert seg["3-6 s"]["P: approximate time at point (s)"] == pytest.approx(0.0, abs=0.05)
+    assert 1.0 < seg["3-6 s"]["P: approximate time at point (s)"] < 1.5
     # no head: no head measures
     r = analyse(make_track(pts), app, S)
     assert "P: mean head distance (cm)" not in r and "P: initial heading error (deg)" in r

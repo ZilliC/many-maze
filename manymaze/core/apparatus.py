@@ -151,20 +151,33 @@ class Zone:
 
 @dataclass
 class PointOfInterest:
-    """A point (e.g. an object in novel object recognition, or a hidden platform centre)."""
+    """A point (e.g. an object in novel object recognition, or a hidden platform centre).
+
+    heatmap: "" - the point is where the protocol puts it; else ANY-maze's point located by a heat map: in each test
+    it is the hottest spot of the heat map of the animal's position ("time"), or of its position while "freezing",
+    "immobile" or "rearing" (HEATMAP_POINTS); x / y then only place it on the map."""
 
     name: str
     x: float
     y: float
     radius_cm: float = 2.0  # used for "near point" / object-exploration measures
     color: str = "#f59e0b"
+    heatmap: str = ""
 
     def to_dict(self):
-        return {"name": self.name, "x": self.x, "y": self.y, "radius_cm": self.radius_cm, "color": self.color}
+        d = {"name": self.name, "x": self.x, "y": self.y, "radius_cm": self.radius_cm, "color": self.color}
+        if self.heatmap:
+            d["heatmap"] = self.heatmap
+        return d
 
     @classmethod
     def from_dict(cls, d):
         return from_known(cls, d)
+
+
+# what a heat-map point is located by: {PointOfInterest.heatmap: description}
+HEATMAP_POINTS = {"time": "the animal's position", "freezing": "where it froze", "immobile": "where it was immobile",
+                  "rearing": "where it reared"}
 
 
 @dataclass

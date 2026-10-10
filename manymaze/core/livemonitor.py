@@ -1,6 +1,6 @@
 """What the real-time monitor shows besides the zone statistics (live.LiveStats): statistics of the apparatus's
-points, of its zone sequences and of the I/O inputs, and live charts of any per-frame parameter of core.charts
-(computed from the track recorded so far)."""
+points, of its zone sequences and of the I/O inputs (also as the text of a test panel without a camera), and live
+charts of any per-frame parameter of core.charts (computed from the track recorded so far)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import numpy as np
 
 from . import charts
 from .apparatus import Apparatus
+from .ioconfig import DIGITAL_INPUT_KINDS, INPUT_KINDS
 from .sequences import find_sequences, other_zones
 from .track import Track
 
@@ -127,6 +128,27 @@ def input_rows(io_events, now: float) -> list[tuple[str, str, int, float, float 
             on += max(0.0, now - since)
         out.append((label, "on" if state else "off", n, on, first))
     return out
+
+
+def io_panel_lines(status, inputs=()) -> list[str]:
+    """What a test panel without a camera (I/O only mode) shows in place of the image: a line of its inputs and a
+    line of its outputs, each channel with its state (ON / off, or its value) and the inputs' activations so far.
+    status: the rows (device, channel, kind, value) of the test's devices (DeviceManager / DeviceView.status());
+    inputs: input_rows() of the test, for the activations."""
+    counts = {row[0]: row[2] for row in inputs or ()}
+    rows = [r for r in status or () if r[2] != "status" and "." not in str(r[1])]  # not the derived channels
+    several = len({r[0] for r in rows}) > 1
+    ins, outs = [], []
+    for dev, ch, kind, v in rows:
+        label = f"{dev}/{ch}" if several else str(ch)
+        if kind in DIGITAL_INPUT_KINDS or kind == "output":
+            txt = "ON" if v else "off"
+        else:
+            txt = f"{v:.4g}" if isinstance(v, (int, float)) else str(v)
+        if kind in DIGITAL_INPUT_KINDS:
+            txt += f" ({counts.get(label, counts.get(ch, 0))}×)"
+        (ins if kind in INPUT_KINDS else outs).append(f"{label} {txt}")
+    return [f"{what}: " + " · ".join(items) for what, items in (("Inputs", ins), ("Outputs", outs)) if items]
 
 
 # ====================================================================== charts

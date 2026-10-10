@@ -103,6 +103,14 @@ DETECTION_SPEC = [
     ("motion_threshold", "A pixel is moving when it changes by (grey levels)", "int", (1, 255, 1),
      "Pixel change counted as movement for freezing / immobility."),
     ("max_gap_s", "Fill gaps in the track of up to (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("max_jump_speed", "Remove jumps faster than (units/s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
+     "A position the animal could not have reached at this speed (cm/s when the apparatus is calibrated, else "
+     "pixels/s) is a jump — a reflection, a shadow or another object detected for a moment — when the track comes "
+     "back within the time below: it is removed and filled like a gap. A real fast run does not come back and is "
+     "kept. Choose well above the animal's top speed, e.g. 150 cm/s for a mouse. The number removed is the "
+     "information column Jumps removed. 0 = off."),
+    ("max_jump_s", "… when the track comes back within (s)", "float", (0.0, 10.0, 0.1, 2),
+     "The longest jump: a track that stays away longer is kept (the animal really went there)."),
     ("smoothing", "Smooth positions over (frames, 0 = off)", "int", (0, 51, 1),
      "Moving average applied to positions. 0 = off."),
     ("frame_step", "Analyse every Nth frame", "int", (1, 50, 1), "Speed up tracking of high frame-rate video."),
@@ -148,12 +156,23 @@ ANALYSIS_SPEC = [
      "Pixel change, as a % of the animal's area, under which freezing begins."),
     ("freeze_off_pct", "Freezing ends when movement rises above (% of body)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_freeze_s", "Shortest freezing episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("activity_definition", "The animal is active when", "choice",
+     [("mobile_or_keys", "It is mobile, or doing a behaviour that counts as activity (ANY-maze)"),
+      ("keys", "It is doing a behaviour that counts as activity (ANY-maze without mobility)"),
+      ("pixel_change", "Its pixels change (movement threshold below)")],
+     "ANY-maze: active = mobile (Movement settings) or doing a behaviour whose key counts as activity (tick it on "
+     "the key's page, e.g. grooming). Pixel change: the pixels that change between frames, as a % of the "
+     "animal's area, reach the threshold below - an animal grooming in place is active but immobile "
+     "(experiments made before this option)."),
     ("activity_threshold_pct", "The animal is active when movement reaches (% of body)", "float",
      (0.0, 1000.0, 0.5, 2),
-     "Activity comes from the pixels that change between frames (as a % of the animal's area), not from its "
-     "speed: an animal grooming in place is active but immobile."),
+     "Pixel-change activity only: activity comes from the pixels that change between frames (as a % of the "
+     "animal's area), not from its speed: an animal grooming in place is active but immobile."),
     ("min_inactive_s", "Shortest inactive episode (s)", "float", (0.0, 60.0, 0.1, 2),
-     "Inactive episodes shorter than this count as active."),
+     "Pixel-change activity only: inactive episodes shorter than this count as active."),
+    ("partial_rotation_deg", "Partial rotation angle (°)", "float", (0.0, 359.0, 15.0, 0),
+     "ANY-maze's partial rotations: turns of the body (one way, from one reversal to the next) of at least this "
+     "angle during which no full rotation was completed. 0 = none."),
     ("rearing", "Detect rearing automatically", "bool", None,
      "Rears are detected from the animal's shape: seen from above, an animal standing on its hind legs looks "
      "smaller and shorter. Adds rear count, time, latency and durations, overall and per zone."),
@@ -174,6 +193,18 @@ ANALYSIS_SPEC = [
     ("count_initial_entry", "Count starting the test in a zone as an entry", "bool", None, ""),
     ("latency_if_never", "When an event never occurs, its latency is", "choice",
      [("duration", "The test duration"), ("blank", "Left blank")], ""),
+    ("undefined_averages", "An average of nothing is", "choice",
+     [("blank", "Left blank (ANY-maze)"), ("zero", "Zero (ANY-maze's “Use zero for undefined averages”)"),
+      ("", "As before (0 for visits, investigation bouts and rears in a zone, else blank)")],
+     "The mean visit, investigation bout, speed in the zone and while investigating, distance to the border, rear "
+     "in a zone, and a sequence's mean duration, distance and speed when there was nothing to average (e.g. no "
+     "visit). Experiments made before this option keep their earlier results."),
+    ("heading_error_by", "Initial heading: the first position to the position", "choice",
+     [("time", "After the animal has been mobile for (s)"), ("distance", "First further away than (units)")],
+     "ANY-maze's Heading error options, for the initial heading error to a zone or point (and the water maze's): "
+     "positions while the animal is immobile are ignored."),
+    ("heading_error_time_s", "… mobile for (s)", "float", (0.0, 600.0, 0.5, 2), ""),
+    ("heading_error_distance", "… further away than (units)", "float", (0.0, 10000.0, 1.0, 2), ""),
     ("thigmotaxis_distance", "Thigmotaxis band next to the wall (units)", "float", (0.0, 1000.0, 0.5, 2),
      "Distance from the arena wall counted as thigmotaxis. 0 = 25 % of the arena half-width."),
     ("exploration_facing_deg", "Exploring means facing the object within (°)", "float", (0.0, 180.0, 5.0, 1),
@@ -239,6 +270,7 @@ DETECTION_SECTIONS = [
     ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
     ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
+    ("Jumps", ["max_jump_speed", "max_jump_s"]),  # removed before the gaps are filled (Tracking quality)
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
 ]
 
@@ -248,14 +280,15 @@ FST_FIELDS = ["immobility_mode", "fst_threshold_pct", "min_fst_immobile_s", "fst
 FST_SPEC = [s for s in ANALYSIS_SPEC if s[0] in FST_FIELDS]
 
 ANALYSIS_SECTIONS = [
-    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s"]),
+    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s", "partial_rotation_deg"]),
     (FST_SECTION, FST_FIELDS),
     ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
                   "min_freeze_s"]),
-    ("Activity", ["activity_threshold_pct", "min_inactive_s"]),
+    ("Activity", ["activity_definition", "activity_threshold_pct", "min_inactive_s"]),
     ("Rearing", ["rearing", "rear_area_pct", "rear_length_pct", "min_rear_s"]),
     ("Zones", ["zone_body_part", "body_proportion_pct", "hidden_zone_margin", "entry_min_duration_s",
-               "count_initial_entry", "latency_if_never"]),
+               "count_initial_entry", "latency_if_never", "undefined_averages"]),
+    ("Heading error", ["heading_error_by", "heading_error_time_s", "heading_error_distance"]),
     ("Test-specific measures", ["thigmotaxis_distance", "exploration_facing_deg", "orientation_deg", "grid_cells",
                                 "contact_distance", "nose_contact_distance", "follow_distance", "arena_quadrants", "behaviour_by_zone",
                                 "whishaw_width", "paired_chamber", "novel_object", "social_side"]),
