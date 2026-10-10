@@ -22,7 +22,7 @@ import numpy as np
 from .apparatus import CALIBRATION_KEY, POSITION_KEY, Apparatus, calibration_override, position_args
 from .autosave import Autosaver
 from .diskspace import free_mb as disk_free_mb, is_disk_full
-from .freezing import LiveThresholds
+from .freezing import LiveStruggle, LiveThresholds
 from .geometry import body_fraction_inside
 from .iolog import LiveIOLog
 from .livemonitor import LivePoints
@@ -387,6 +387,7 @@ class LiveStats:
         self.visits: list[list] = []  # [zone, t_in, t_out or None] in order: the live sequence statistics
         self._open_visit: dict[str, list] = {}
         self.points = LivePoints(apparatus)
+        self.struggle = LiveStruggle() if analysis.immobility_mode == "motion" else None  # forced swim / TST
 
     def set_scale(self, apparatus: Apparatus | None):
         """Use the apparatus calibration; the distance and speed so far (tracked in pixels) are converted to it."""
@@ -440,10 +441,15 @@ class LiveStats:
                 self.zone_time[n] += dt
         self.points.update(t, dt, d.x, d.y, bool(d.detected))
         self.freezing = bool(freezing)
-        if self.detected and self.speed < self.a.mobility_threshold:
+        if self.struggle is not None:  # forced swim / tail suspension: immobile once the struggle has stopped
+            still = self.detected and self.struggle.update(t, self.motion_pct) < self.a.fst_threshold_pct
+            min_s = self.a.min_fst_immobile_s
+        else:
+            still, min_s = self.detected and self.speed < self.a.mobility_threshold, self.a.min_immobile_s
+        if still:
             if self._slow_since is None:
                 self._slow_since = t
-            self.immobile = t - self._slow_since >= self.a.min_immobile_s
+            self.immobile = t - self._slow_since >= min_s
         else:
             self._slow_since = None
             self.immobile = False

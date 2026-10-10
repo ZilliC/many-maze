@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .apparatus import Apparatus
-from .freezing import thresholds as freeze_thresholds
+from .freezing import immobility_from_motion, thresholds as freeze_thresholds
 from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
@@ -46,6 +46,11 @@ class AnalysisSettings:
     speed_smoothing_s: float = 0.2  # positions are smoothed over this window before distance/speed
     mobility_threshold: float = 2.0  # speed (units/s) below which the animal is immobile
     min_immobile_s: float = 2.0  # immobile episodes shorter than this count as mobile
+    immobility_mode: str = "speed"  # "speed" (above) | "motion": forced swim / tail suspension (freezing.py)
+    fst_threshold_pct: float = 2.0  # motion mode: mobile (struggling) while the struggle index (% of body) reaches this
+    min_fst_immobile_s: float = 1.0  # motion mode: immobile spells shorter than this count as mobile
+    fst_three_state: bool = False  # forced swim: the struggle split into climbing and swimming
+    fst_climbing_pct: float = 8.0  # … climbing while the struggle index reaches this
     freeze_on_pct: float = 2.0  # motion (% of body area changing) below which freezing starts
     freeze_off_pct: float = 3.0  # motion above which freezing ends (hysteresis)
     min_freeze_s: float = 1.0
@@ -122,6 +127,7 @@ class Kinematics:
     scale: float
     unit: str
     breaks: np.ndarray | None = None  # frames that follow a pause
+    struggle: np.ndarray | None = None  # immobility_mode "motion": the struggle index (freezing.struggle_index)
 
     def slice(self, sl: slice, t0: float, duration: float) -> "Kinematics":
         """The frames sl, as a period starting at t0 that lasts `duration`."""
@@ -187,6 +193,10 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     else:
         motion_pct = np.full(len(t), np.nan)
         freezing = np.zeros(len(t), bool)
+    struggle = None
+    if s.immobility_mode == "motion" and np.isfinite(motion_pct).any():
+        # forced swim / tail suspension: mobile while the animal struggles, wherever its centre goes
+        mobile, struggle = immobility_from_motion(motion_pct, t, dur, track.dt, s, breaks)
     heading = np.full(len(t), np.nan)
     if len(t) > 1:
         heading[1:] = np.degrees(np.arctan2(np.diff(uy), np.diff(ux)))
@@ -198,7 +208,7 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     if duration is None:
         duration = float(dur.sum())
     return Kinematics(t, dur, x, y, ux, uy, step, speed, mobile, freezing, motion_pct, heading, t0, duration,
-                      scale, unit, breaks)
+                      scale, unit, breaks, struggle)
 
 
 def _head_direction(tr: Track) -> np.ndarray:
@@ -1644,6 +1654,8 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
             res[f"Variable: {name}"] = _r(float(v))
         except (TypeError, ValueError):
             res[f"Variable: {name}"] = str(v)
+    if s.immobility_mode == "motion" and P.k.struggle is None:
+        warnings.append("No pixel-change data: immobility comes from the speed of the animal")
     if not P.app.px_per_cm:
         warnings.insert(0, "Apparatus not calibrated: distances, speeds and distance thresholds (mobility, "
                            "thigmotaxis, contact, ...) are in pixels")

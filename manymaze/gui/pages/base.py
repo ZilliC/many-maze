@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QSpinBox,
                                QVBoxLayout, QWidget)
 
+from ...core.freezing import IMMOBILITY_MODES
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -116,6 +117,24 @@ ANALYSIS_SPEC = [
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
     ("min_immobile_s", "Shortest immobility episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("immobility_mode", "Detect immobility", "choice", list(IMMOBILITY_MODES.items()),
+     "From the speed: immobile while the animal's centre moves slower than the threshold above. Forced swim / "
+     "tail suspension (ANY-maze's mode for these tests): immobile once the animal has stopped struggling, from "
+     "the quick movements in the image; its position is not used, so drifting in the water, swinging on the tail "
+     "and the small movements that keep the head above water do not make it mobile. Set by the Forced swim and "
+     "Tail suspension types of test."),
+    ("fst_threshold_pct", "The animal struggles when its struggle index reaches (% of body)", "float",
+     (0.0, 100.0, 0.1, 2),
+     "The struggle index is the quick part of the pixel change (% of the animal's area) averaged over a second; "
+     "see the Struggle index chart of a test to choose this. Higher: stronger movements are needed to count as "
+     "struggling, so more immobility."),
+    ("min_fst_immobile_s", "Shortest immobile period (s)", "float", (0.0, 60.0, 0.1, 2),
+     "The animal is immobile once it has not struggled for this long; shorter pauses count as struggling."),
+    ("fst_three_state", "Forced swim: split the struggle into climbing and swimming", "bool", None,
+     "Adds time, %, episodes and latency of climbing and swimming to the forced swim test's results."),
+    ("fst_climbing_pct", "Climbing when the struggle index reaches (% of body)", "float", (0.0, 100.0, 0.5, 2),
+     "The most vigorous struggle (forepaws scrabbling at the wall) is climbing; the rest of the struggle is "
+     "swimming."),
     ("freeze_threshold_mode", "Freezing thresholds", "choice",
      [("manual", "Set manually (below)"), ("auto", "Automatic, from the motion of each test")],
      "Automatic: the start / end thresholds are derived from the distribution of the motion index of each test "
@@ -208,8 +227,14 @@ DETECTION_SECTIONS = [
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
 ]
 
+# the forced swim / tail suspension settings, also shown on the Protocol page for those types of test
+FST_SECTION = "Forced swim / tail suspension"
+FST_FIELDS = ["immobility_mode", "fst_threshold_pct", "min_fst_immobile_s", "fst_three_state", "fst_climbing_pct"]
+FST_SPEC = [s for s in ANALYSIS_SPEC if s[0] in FST_FIELDS]
+
 ANALYSIS_SECTIONS = [
     ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s"]),
+    (FST_SECTION, FST_FIELDS),
     ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
                   "min_freeze_s"]),
     ("Activity", ["activity_threshold_pct", "min_inactive_s"]),

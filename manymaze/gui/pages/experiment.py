@@ -21,14 +21,15 @@ from ...core.export import display_text
 from ...core.measures import AnalysisSettings
 from ...core.periods import ANCHORS
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
+from ...core.template_measures import FST_TEMPLATES
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
 from ._results_cache import cached_rows, get_rows, info_columns
-from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, Page, SettingsForm,
-                   property_form)
+from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
+                   FST_SPEC, Page, SettingsForm, property_form)
 from .protocol_pages import CalculationEditor, ElementPage, KeyEditor, small_button
 from .results.dialogs import MeasurePickerDialog, measure_groups
 from .results.table import _names
@@ -162,6 +163,20 @@ class ExperimentPage(Page):
         f.addRow("Tests start", self.start_mode)
         pg.add(f)
         pg.add(separator())
+
+        # forced swim / tail suspension: shown for those types of test (the same settings are under Analysis)
+        self.fst_box = QWidget()
+        lay = QVBoxLayout(self.fst_box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.fst_form = SettingsForm(FST_SPEC, sections=[(FST_SECTION, FST_FIELDS)])
+        self.fst_form.changed.connect(self._fst_changed)
+        lay.addWidget(self.fst_form)
+        lay.addWidget(hint("As ANY-maze's Forced swim / Tail suspension mode: the animal is immobile once it has "
+                           "stopped struggling, judged from the quick movements in the image, wherever it is. "
+                           "Film it from the side; the Struggle index chart of a test helps to set the threshold."))
+        lay.addWidget(separator())
+        self.fst_box.hide()
+        pg.add(self.fst_box)
 
         pg.section("Testing")
         self.blind = QCheckBox("Blind testing — hide the treatments (shown as codes) while testing and scoring")
@@ -316,6 +331,7 @@ class ExperimentPage(Page):
         self.an_form = SettingsForm(ANALYSIS_SPEC, sections=ANALYSIS_SECTIONS)
         self.an_form.setMaximumWidth(FORM_WIDTH - 56)
         self.an_form.changed.connect(self.main.mark_dirty)
+        self.an_form.changed.connect(self._analysis_changed)
         pg.add(self.an_form)
 
         pg.section("Time periods")
@@ -554,6 +570,8 @@ class ExperimentPage(Page):
         self.ev_periods_lbl.hide()
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
+        self.fst_form.load(p.analysis)
+        self._update_fst()
         self._fill_calculations()
 
     def _update_summary(self):
@@ -566,6 +584,19 @@ class ExperimentPage(Page):
                  f"{len(p.behaviours)} key{'s' if len(p.behaviours) != 1 else ''}",
                  f"{procs} procedure{'s' if procs != 1 else ''}"]
         self.summary_lbl.setText("This protocol has " + ", ".join(parts) + ".")
+
+    def _update_fst(self):
+        """The forced swim / tail suspension settings are shown for those types of test."""
+        self.fst_box.setVisible(self.protocol.currentData() in FST_TEMPLATES)
+
+    def _fst_changed(self):
+        if self.project is not None:
+            self.an_form.load(self.project.analysis)
+        self.main.mark_dirty()
+
+    def _analysis_changed(self):
+        if self.project is not None:
+            self.fst_form.load(self.project.analysis)
 
     def _update_mode(self):
         mode = self.mode.currentData()
@@ -853,7 +884,7 @@ class ExperimentPage(Page):
                 self, "Apply template", f"Make this a {t.title} protocol with tests of {t.default_duration_s:g} s? "
                 "Existing results are recalculated with the new protocol type.") != QMessageBox.Yes:
             return
-        p.protocol = key
+        p.set_protocol(key)
         p.test_duration_s = float(t.default_duration_s)
         self.on_show()
         self.main.mark_dirty()
@@ -913,7 +944,11 @@ class ExperimentPage(Page):
         p = self.project
         p.name = self.name.text().strip() or p.name
         p.description = self.desc.toPlainText()
-        p.protocol = self.protocol.currentData()
+        if p.protocol != self.protocol.currentData():  # the forced swim / tail suspension immobility follows
+            p.set_protocol(self.protocol.currentData())
+            self.an_form.load(p.analysis)
+            self.fst_form.load(p.analysis)
+            self._update_fst()
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
         self._follow_stage_renames(p)

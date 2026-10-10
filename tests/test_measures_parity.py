@@ -470,3 +470,134 @@ def test_result_variables_and_io_measures(monkeypatch):
     assert res["Variable: Rewards"] == 3.0 and res["Variable: Label"] == "x"
     res = analyse(tr, app, S)
     assert "lever: presses" not in res and len(calls) == 1
+
+
+# ------------------------------------------------------------------ forced swim / tail suspension
+FST = AnalysisSettings(immobility_mode="motion", speed_smoothing_s=0.2, mobility_threshold=2.0)
+AREA = 400.0  # px², so a motion of 4 px is 1 % of the body
+
+
+def _fst_motion(kind: str, seconds: float, rng) -> np.ndarray:
+    """Motion index (% of the body) of an animal that floats ("float": camera and water noise, and every 1.5 s a
+    0.2 s paddle that keeps its head above water), struggles ("swim": strong, irregular; "climb": stronger) or
+    swings on its tail ("swing": large but smooth, the pixel change of a pendulum at 1 Hz)."""
+    n = int(round(seconds * FPS))
+    t = np.arange(n) / FPS
+    noise = np.abs(rng.normal(0, 0.4, n))
+    if kind == "float":
+        m = noise.copy()
+        for k in range(0, n, int(1.5 * FPS)):
+            m[k:k + 5] += [2, 5, 6, 4, 2][:len(m[k:k + 5])]
+        return m
+    if kind == "swing":
+        return 15 * np.abs(np.sin(2 * np.pi * t)) + noise
+    level, spread = (15, 8) if kind == "swim" else (35, 15)
+    return np.clip(level + spread * rng.normal(0, 1, n), 0, None)
+
+
+def _fst_track(parts, app, drift=True, seed=3):
+    """A track made of (kind, seconds) parts; the animal drifts 6 cm across the cylinder (or stays put)."""
+    rng = np.random.default_rng(seed)
+    motion = np.concatenate([_fst_motion(k, s, rng) for k, s in parts])
+    n = len(motion)
+    x0, y0, x1, y1 = app.arena_or_bounds().bounds()
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    pts = line((cx - 30, cy), (cx + 30, cy), n) if drift else hold((cx, cy), n)
+    return make_track(pts, head=False, area=np.full(n, AREA), motion=motion * AREA / 100)
+
+
+def test_forced_swim_immobility_from_the_struggle():
+    app = templates.build("forced_swim", 0, 0, 200, 200)  # 10 px/cm: the drift is 60 px in the test
+    # floating and drifting, paddling now and then: immobile all along although its centre moves (speed above the
+    # mobility threshold below) and its motion keeps rising above the freezing threshold
+    tr = _fst_track([("float", 20)], app)
+    res = analyse(tr, app, FST)
+    assert res["Time immobile (s)"] == pytest.approx(20.0, abs=0.05) and res["Immobile episodes"] == 1
+    assert res["Time immobile (%)"] == pytest.approx(100.0, abs=0.3) and res["Latency to first immobility (s)"] == 0
+    assert "Immobility (s)" not in res and "Time climbing (s)" not in res  # no renamed freezing, no split
+    speed = analyse(tr, app, AnalysisSettings(speed_smoothing_s=0.2, mobility_threshold=0.1))
+    assert speed["Time immobile (s)"] < 1  # the speed-based immobility sees a moving animal
+    # a swimming animal is mobile wherever it is
+    res = analyse(_fst_track([("swim", 20)], app, drift=False), app, FST)
+    assert res["Time immobile (s)"] == 0 and res["Immobile episodes"] == 0 and res["Time mobile (s)"] > 19.9
+    # struggle, float, struggle, float: two immobile episodes, the first after 10 s
+    tr = _fst_track([("swim", 10), ("float", 10), ("climb", 5), ("float", 10)], app)
+    res = analyse(tr, app, FST)
+    assert res["Immobile episodes"] == 2
+    assert res["Latency to first immobility (s)"] == pytest.approx(10.0, abs=0.6)
+    assert res["Time immobile (s)"] == pytest.approx(20.0, abs=1.2)
+    assert res["Latency to last immobile episode (s)"] == pytest.approx(25.0, abs=0.6)
+    # the optional three-state split: climbing (the most vigorous struggle) and swimming
+    res = analyse(tr, app, AnalysisSettings(**{**FST.to_dict(), "fst_three_state": True}))
+    # (the second around a change of state, where the index passes through the swimming range, may go either way)
+    assert res["Time climbing (s)"] == pytest.approx(5.0, abs=1.5) and res["Climbing episodes"] == 1
+    assert res["Time swimming (s)"] == pytest.approx(10.0, abs=1.5)
+    assert res["Latency to first climbing (s)"] == pytest.approx(20.0, abs=0.8)
+    assert res["Latency to first swimming (s)"] == 0
+    total = res["Time climbing (s)"] + res["Time swimming (s)"] + res["Time immobile (s)"]
+    assert total == pytest.approx(res["Test duration (s)"], abs=0.05)
+    assert res["Time climbing (%)"] == pytest.approx(100 * res["Time climbing (s)"] / 35, abs=0.05)
+    # per time period: the split of each bin
+    rows = dict(analyse_segmented(tr, app, AnalysisSettings(**{**FST.to_dict(), "fst_three_state": True,
+                                                                 "bin_length_s": 15.0})))
+    assert rows["0-15 s"]["Time immobile (s)"] == pytest.approx(5.0, abs=0.6) and rows["0-15 s"]["Climbing episodes"] == 0
+    assert rows["15-30 s"]["Time climbing (s)"] == pytest.approx(5.0, abs=1.5)
+    assert rows["15-30 s"]["Climbing episodes"] == 1 and rows["30-35 s"]["Time climbing (s)"] == 0
+
+
+def test_tail_suspension_ignores_swinging():
+    app = templates.build("tail_suspension", 0, 0, 200, 300)
+    assert app.template == "tail_suspension" and templates.TEMPLATES["tail_suspension"].default_duration_s == 360
+    tr = _fst_track([("swing", 10), ("swim", 5), ("swing", 10)], app, drift=False)
+    res = analyse(tr, app, FST)
+    assert res["Immobile episodes"] == 2 and res["Time immobile (s)"] == pytest.approx(20.0, abs=1.2)
+    split = analyse(tr, app, AnalysisSettings(**{**FST.to_dict(), "fst_three_state": True}))
+    assert "Time climbing (s)" not in split and "Warnings" not in split  # the forced swim test only
+    # without pixel-change data the motion mode cannot work: immobility from the speed, with a warning
+    res = analyse(make_track(hold((100, 150), 100), head=False), app, FST)
+    assert res["Time immobile (s)"] == pytest.approx(4.0) and "No pixel-change data" in res["Warnings"]
+
+
+def test_forced_swim_protocol_and_live_immobility():
+    from manymaze.core.live import LiveStats
+    from manymaze.core.project import Project
+    from manymaze.core.tracking import Detection
+
+    # the forced swim / tail suspension types of test detect immobility from the struggle …
+    p = Project()
+    assert p.analysis.immobility_mode == "speed"
+    p.set_protocol("tail_suspension")
+    assert p.protocol == "tail_suspension" and p.analysis.immobility_mode == "motion"
+    p.set_protocol("forced_swim")
+    assert p.analysis.immobility_mode == "motion"
+    p.set_protocol("open_field")  # … and leaving them goes back to the speed
+    assert p.analysis.immobility_mode == "speed"
+    p.analysis.immobility_mode = "motion"  # chosen by hand for another test: kept
+    p.set_protocol("epm")
+    assert p.analysis.immobility_mode == "motion"
+    # experiments saved before the motion mode: forced swim ones get it, an explicit choice is kept
+    d = Project(protocol="forced_swim").to_dict()
+    del d["analysis"]["immobility_mode"]
+    assert Project.from_dict(d).analysis.immobility_mode == "motion"
+    d["analysis"]["immobility_mode"] = "speed"
+    assert Project.from_dict(d).analysis.immobility_mode == "speed"
+    d = Project(protocol="open_field").to_dict()
+    del d["analysis"]["immobility_mode"]
+    assert Project.from_dict(d).analysis.immobility_mode == "speed"
+    # live: immobile once the struggle has stopped for the shortest immobile period, wherever the animal goes
+    app = templates.build("forced_swim", 0, 0, 200, 200)
+    st = LiveStats(app, FPS, FST)
+    rng = np.random.default_rng(5)
+    motion = np.concatenate([_fst_motion("swim", 4, rng), _fst_motion("float", 4, rng)])
+    states = []
+    for i, m in enumerate(motion):
+        x = 70 + 0.6 * i  # drifting 1.5 cm/s
+        st.update(i / FPS, Detection(x, 100, area=AREA, motion=m * AREA / 100, detected=True), {}, False)
+        states.append(st.immobile)
+    assert not any(states[:100]) and all(states[-25:])
+    first = states.index(True) / FPS
+    assert 4.5 < first < 6.5  # the struggle stops at 4 s, then 1 s without struggle (trailing windows)
+    speed = LiveStats(app, FPS, AnalysisSettings(mobility_threshold=1.0, min_immobile_s=1.0))
+    for i, m in enumerate(motion):
+        speed.update(i / FPS, Detection(70 + 0.6 * i, 100, area=AREA, motion=m * AREA / 100, detected=True), {}, False)
+    assert not speed.immobile  # the speed-based immobility sees the drift

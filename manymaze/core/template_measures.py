@@ -13,6 +13,7 @@ from typing import Callable
 
 import numpy as np
 
+from .freezing import fst_states
 from .geometry import point_segment_distance
 from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs
 
@@ -464,11 +465,25 @@ def _activity_wheel(d: TemplateData):
 
 
 def _forced_swim(d: TemplateData):
-    res = d.res
-    if "Time freezing (s)" in res:
-        res["Immobility (s)"] = res["Time freezing (s)"]
-        res["Immobility (%)"] = res["Freezing (%)"]
-        res["Latency to immobility (s)"] = res["Latency to first freezing (s)"]
+    """Forced swim (Porsolt) and tail suspension tests. Time immobile, immobile episodes, latency to first immobility
+    and the immobile episode durations are the general measures, which come from the struggle seen in the image when
+    immobility_mode is "motion" (as the FST / TST templates set it; freezing.immobility_from_motion). Added here:
+    the time immobile as a % of the period and, in the forced swim test with the three-state split, the time
+    climbing and swimming (freezing.fst_states). An episode under way at the start of a later period is not one of
+    its episodes."""
+    res, k, s = d.res, d.k, d.s
+    T = k.duration
+    if "Time immobile (s)" in res:
+        res["Time immobile (%)"] = _r(100 * res["Time immobile (s)"] / T if T > 0 else math.nan, 2)
+    if d.app.template != "forced_swim" or not s.fst_three_state or k.struggle is None:
+        return
+    for name, m in zip(("climbing", "swimming"), fst_states(k.mobile, k.struggle, k.t, k.dur, s)):
+        ep = [r for r in runs(m) if r[0] > 0 or d.initial]
+        tm = float(k.dur[m].sum())
+        res[f"Time {name} (s)"] = _r(tm)
+        res[f"Time {name} (%)"] = _r(100 * tm / T if T > 0 else math.nan, 2)
+        res[f"{name.capitalize()} episodes"] = len(ep)
+        res[f"Latency to first {name} (s)"] = _r(float(k.t[ep[0][0]] - k.t0) if ep else d.never())
 
 
 TEMPLATE_MEASURES: dict[str, tuple[Callable[[TemplateData], None], ...]] = {
@@ -478,8 +493,11 @@ TEMPLATE_MEASURES: dict[str, tuple[Callable[[TemplateData], None], ...]] = {
     "water_maze": (_water_maze,), "barnes_maze": (_barnes_maze,),
     "light_dark": (_light_dark,), "three_chamber": (_three_chamber,), "novel_tank": (_novel_tank,), "cpp": (_cpp,),
     "hole_board": (_hole_board,), "thermal_gradient": (_thermal_gradient,), "activity_wheel": (_activity_wheel,),
-    "forced_swim": (_forced_swim,),
+    "forced_swim": (_forced_swim,), "tail_suspension": (_forced_swim,),
 }
+# apparatus templates (and protocol types) of the forced swim / tail suspension family: their protocols detect
+# immobility from the struggle in the image (AnalysisSettings.immobility_mode "motion")
+FST_TEMPLATES = ("forced_swim", "tail_suspension")
 
 
 def template_measures(d: TemplateData):

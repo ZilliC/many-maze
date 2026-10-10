@@ -34,6 +34,7 @@ from .ioconfig import is_secret
 from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, analyse_segmented,
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
 from .session import END_ZONE
+from .template_measures import FST_TEMPLATES
 from .templates import apply_overrides
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
@@ -440,6 +441,8 @@ class Project:
             settings_extra=d.get("settings_extra", {}),
             created=d.get("created", ""),
         )
+        if p.protocol in FST_TEMPLATES and "immobility_mode" not in (d.get("analysis") or {}):
+            p.analysis.immobility_mode = "motion"  # forced swim / tail suspension saved before the motion mode
         p.path = pdir
         try:
             p.file_version = int(d.get("version", FORMAT_VERSION))
@@ -518,6 +521,17 @@ class Project:
         if name and name not in self.stages:
             self.stages.append(name)
         return name
+
+    def set_protocol(self, key: str):
+        """Make this a protocol of a type of test (templates.TEMPLATES key). The forced swim and tail suspension
+        tests detect immobility from the struggle in the image (AnalysisSettings.immobility_mode "motion", as ANY-maze's
+        Forced swim / Tail suspension mode); leaving them goes back to immobility from the speed."""
+        was = self.protocol in FST_TEMPLATES
+        self.protocol = key
+        if key in FST_TEMPLATES:
+            self.analysis.immobility_mode = "motion"
+        elif was and self.analysis.immobility_mode == "motion":
+            self.analysis.immobility_mode = "speed"
 
     def rename_stage(self, old: str, new: str) -> int:
         """A stage was renamed: its tests, training criteria and the animals' completed stages follow (stages are

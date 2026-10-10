@@ -877,8 +877,8 @@ class MainWindow(QMainWindow):
             if QMessageBox.question(self, APP_NAME, f"{path} already exists. Open it instead?") == QMessageBox.Yes:
                 self.load_project(str(path), confirmed=True)
             return
-        p = Project(name=dlg.name.text().strip() or "Experiment", protocol=dlg.protocol.currentData(),
-                    test_duration_s=dlg.duration.value())
+        p = Project(name=dlg.name.text().strip() or "Experiment", test_duration_s=dlg.duration.value())
+        p.set_protocol(dlg.protocol.currentData())
         base = dlg.based_on.text().strip()
         if base:
             try:

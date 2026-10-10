@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .apparatus import Apparatus
+from .freezing import struggle_index
 from .project import Behaviour
 from .measures import AnalysisSettings, _angle_diff, _body_angle, _head_direction, kinematics, turn_series
 from .occupancy import occupancy, zone_visits
@@ -164,6 +165,9 @@ def _definitions(app: Apparatus, track: Track | None, behaviours, n_others: int)
     add("Freezing", "", STATE, "Freezing", lambda c: c.k.freezing.astype(float))
     add("Time freezing", "s", VALUE, "Freezing", lambda c: np.cumsum(np.where(c.k.freezing, c.k.dur, 0)))
     add("Freezing episodes", "", COUNT, "Freezing", lambda c: _episode_count(c.k.freezing))
+    # forced swim / tail suspension: what immobility is detected from in that mode (freezing.struggle_index)
+    add("Struggle index", "% body", VALUE, "Freezing",
+        lambda c: c.k.struggle if c.k.struggle is not None else struggle_index(c.k.motion_pct, c.tr.dt, c.k.breaks))
     # ---- direction / body -------------------------------------------------------------
     add("Movement direction", "deg", VALUE, "Direction", lambda c: c.k.heading)
     add("Turn rate", "deg/s", VALUE, "Direction", lambda c: _unwrapped_rate(c.k.t, c.k.heading))
