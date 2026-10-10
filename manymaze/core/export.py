@@ -1013,11 +1013,13 @@ def _img(png: bytes, width=320) -> str:
 
 def html_report(project: Project, path, tests=None, include_plots: bool = True, measures: list[str] | None = None,
                 stats_measures: list[str] | None = None, heatmap_norm: str = "auto",
-                chart_parameters: list[str] | None = None, color_by: str = "time", rows: list[dict] | None = None
-                ) -> Path:
+                chart_parameters: list[str] | None = None, color_by: str = "time", rows: list[dict] | None = None,
+                report: str = "") -> Path:
     """Self-contained HTML report: summary, per-test track plots/heat maps (+ optional charts of per-frame
     parameters), group heat maps on a common scale, results and statistics (compared between treatments as the
-    Statistics page does). rows: the results to tabulate and compare (default: the whole-test results of `tests`)."""
+    Statistics page does, at its significance level). rows: the results to tabulate and compare (default: the
+    whole-test results of `tests`); report: the name of the saved results report they come from (named in the
+    report)."""
     from . import analyses, plots
 
     tests = tests if tests is not None else [t for t in project.tests
@@ -1050,6 +1052,8 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     out.append(f"<p>{html.escape(project.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}. "
                f"{len(tests)} tests, {len(project.animals)} animals.</p>")
+    if report:
+        out.append(f"<p>Results report: <b>{html.escape(report)}</b></p>")
     beh = project.behaviours
     if include_plots and tests:
         out.append("<h2>Tracks</h2><div class='grid'>")
@@ -1093,8 +1097,9 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         out.append("<h2>Problems</h2><ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in errors) + "</ul>")
     if stats_measures and rows:
         out.append("<h2>Statistics</h2>")
+        alpha = analyses.significance_level(project)  # the Statistics page's significance level
         for m in stats_measures:
-            a = analyses.compare(project, [r for r in rows if not r.get(ERROR_COLUMN)], m, "Group")
+            a = analyses.compare(project, [r for r in rows if not r.get(ERROR_COLUMN)], m, "Group", alpha=alpha)
             if len(a.result["groups"]) < 2:
                 continue
             out.append(f"<div class='card'>{_img(plots.fig_to_png(a.figure), 360)}"

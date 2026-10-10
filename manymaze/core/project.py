@@ -33,6 +33,7 @@ from .calculations import Calculation, Trials, calculations_from, evaluate_calc,
 from .ioconfig import is_secret
 from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, analyse_segmented,
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
+from .reports import find_report, report_columns, report_rows, reports_from
 from .session import END_ZONE
 from .templates import apply_overrides
 from .track import Track
@@ -181,6 +182,8 @@ class Project:
     variables: dict = field(default_factory=dict)  # procedure variables kept between tests
     training_criteria: list = field(default_factory=list)  # per-stage criteria (see project workflow)
     calculations: list[Calculation] = field(default_factory=list)  # results from other results (calculations.py)
+    reports: list = field(default_factory=list)  # saved results reports of the Data page (reports.py)
+    statistics: dict = field(default_factory=dict)  # the Statistics page's settings (factors, test, alpha …)
     blind: bool = False  # hide group / treatment while testing and scoring
     experimenters: list = field(default_factory=list)  # user names offered as the current user / test experimenter
     settings_extra: dict = field(default_factory=dict)  # misc. UI / workflow settings
@@ -385,6 +388,8 @@ class Project:
             "variables": self.variables,
             "training_criteria": self.training_criteria,
             "calculations": [c.to_dict() for c in self.calculations],
+            "reports": self.reports,
+            "statistics": self.statistics,
             "blind": self.blind,
             "experimenters": self.experimenters,
             "settings_extra": self.settings_extra,
@@ -435,6 +440,8 @@ class Project:
             variables=d.get("variables", {}),
             training_criteria=d.get("training_criteria", []),
             calculations=calculations_from(d.get("calculations")),
+            reports=reports_from(d.get("reports")),
+            statistics=dict(d["statistics"]) if isinstance(d.get("statistics"), dict) else {},
             blind=d.get("blind", False),
             experimenters=[str(u) for u in d.get("experimenters", []) if str(u).strip()],
             settings_extra=d.get("settings_extra", {}),
@@ -1000,6 +1007,19 @@ class Project:
         self._deferred_calculations(rows, segmented, steps)
         return rows
 
+    def info_columns(self) -> list[str]:
+        """The information columns of the results: INFO_COLUMNS, then the animal columns."""
+        return INFO_COLUMNS + [f for f in self.animal_fields if f not in INFO_COLUMNS]
+
+    def report_table(self, name: str, progress: Callable[[float], None] | None = None
+                     ) -> tuple[list[dict], list[str]]:
+        """The rows and columns of the saved results report called `name` (see reports.py), as the Data page shows
+        them; KeyError if the experiment has no such report."""
+        rep = find_report(self.reports, name)
+        if rep is None:
+            raise KeyError(name)
+        rows = report_rows(rep, self.results(segmented=rep["segmented"], progress=progress))
+        return rows, report_columns(rep, rows, self.info_columns(), OPTIONAL_INFO_COLUMNS)
 
     def error_row(self, test: Test, error: Exception) -> dict:
         """A results row noting that a test could not be analysed (its information columns and the error)."""

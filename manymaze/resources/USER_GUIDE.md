@@ -1505,6 +1505,28 @@ unticked):
 *Day of week*, *Time of day*, *User* and *Animal lighter / darker* can also be used to group results in Statistics.
 In the *one row per animal* export, *Treatment code* and *Animal notes* are kept when they are shown.
 
+### Results reports
+
+A **report** is a named selection of the spreadsheet, kept in the experiment: the measures and information columns
+ticked in *Select data*, whether the time periods are shown (and which one) and the *Treatment* / *Stage* filters.
+Keep one per question, e.g. *Anxiety* (open-arm measures, whole tests) and *Habituation* (distance per 1-minute
+bin). The **Report** group of the ribbon lists them; choosing one shows it, *- None -* leaves the spreadsheet as it
+is. **Report ▾** offers:
+
+- **New report…** — a report showing every measure (whole tests, no filter); tick what it needs, then *Save report*.
+- **Save report** — keep what the spreadsheet shows in the report shown (changes are not kept until you save).
+- **Save report as…** — keep it as a new report (a report of the same name is replaced).
+- **Delete report**.
+- **Default report** — the report shown when the experiment is opened (without one the Data page opens with every
+  measure, as before).
+
+A report that lists its measures keeps showing only those: measures that appear later (a new zone, a new
+calculation) are not added to it. *Clear settings* shows everything again and leaves the report. The exports, the
+copied and printed spreadsheet and the HTML report contain what the report shows; their file names include the
+report's name, and the HTML report names it. From the command line, `manymaze project DIR results --report NAME -o
+FILE` exports a report (with `--wide`, one row per animal) and `manymaze project DIR report --report NAME` makes its
+HTML report. A new experiment based on this one's protocol gets its reports.
+
 ### Time periods
 
 Besides regular time bins and custom periods, **event-anchored periods**: anchored on test start, first entry to /
@@ -1794,6 +1816,17 @@ values can be shown or hidden.
 
 **Copy summary**, **Save figure…** and **Copy figure** work on every tab.
 
+**Significance level.** *Options ▸ Select the significance level (α)* (0.05 by default) decides what is marked
+significant: the result shown in green, *ns* (not significant) or the stars — * below the level, ** p < 0.01, ***
+p < 0.001 — in the tables and summaries, the brackets drawn between groups on the graphs and the assumption checks
+reported as failed (non-normal, unequal variances, slopes that differ). A level other than 0.05 is named under the
+analysis' title and in its summary. The p-values themselves do not change; the confidence intervals stay 95 %.
+
+**Saved settings.** The page's settings (measure, factors, time period, filter, test, post-hoc test, graph, the
+significance level …) are kept in the experiment and shown again when it is opened (settings that no longer apply,
+e.g. a measure that is gone, are left at their defaults). The statistics of the HTML report use the same
+significance level, and a new experiment based on this one's protocol gets the settings.
+
 #### Supported procedures (47: 35 tests and 12 post-hoc tests)
 
 | Category | Procedures |
@@ -1817,7 +1850,8 @@ manymaze track video.mp4 --template epm --bbox 100,40,520,520 --size-cm 75 -o re
 manymaze project ~/exp.mmaze track        # batch-track untracked tests in parallel (--workers N)
 manymaze project ~/exp.mmaze results -o results.xlsx --bins   # also .csv .tsv .slk (SYLK) .dbf (dBase) .xml
 manymaze project ~/exp.mmaze results --wide -o by_animal.xlsx   # one row per animal
-manymaze project ~/exp.mmaze report -o report.html
+manymaze project ~/exp.mmaze results --report Anxiety -o anxiety.csv   # a results report saved on the Data page
+manymaze project ~/exp.mmaze report -o report.html    # (--report NAME: that report's tests and measures)
 manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
 manymaze project ~/exp.mmaze protocol -o protocol.html
 manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file

@@ -7,7 +7,8 @@
     manymaze project DIR track [--all]
     manymaze project DIR relink --folder VIDEOS   # find moved videos by file name
     manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
-    manymaze project DIR report -o report.html
+    manymaze project DIR results --report NAME -o results.csv   # a results report saved on the Data page
+    manymaze project DIR report -o report.html [--report NAME]
     manymaze templates
 """
 
@@ -116,7 +117,9 @@ def cmd_project(a):
         from .core.export import export_results
 
         out = a.output or str(p.exports_dir() / ("results by animal.xlsx" if a.wide else "results.xlsx"))
-        if a.wide:
+        if a.report:
+            _export_report(p, a, out)
+        elif a.wide:
             from .core.export import wide_rows, write_table
             from .core.project import result_columns
 
@@ -181,7 +184,17 @@ def cmd_project(a):
         from .core.export import html_report
 
         out = a.output or str(p.exports_dir() / "report.html")
-        html_report(p, out)
+        if a.report:  # the tests, rows and measures of a saved results report
+            from .core.reports import find_report
+
+            rows, cols = _report_table(p, a.report)
+            if not find_report(p.reports, a.report)["period"]:  # as the Data page: one period, else whole tests
+                rows = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
+            info = set(p.info_columns())
+            tests = [t for t in (p.get_test(i) for i in dict.fromkeys(r.get("Test") for r in rows)) if t is not None]
+            html_report(p, out, tests=tests, measures=[c for c in cols if c not in info], rows=rows, report=a.report)
+        else:
+            html_report(p, out)
         print(f"Wrote {out}")
     elif a.action == "info":
         print(f"{p.name}: {len(p.tests)} tests, {len(p.animals)} animals, apparatus: "
@@ -192,6 +205,42 @@ def cmd_project(a):
         if missing:
             print(f"{len(missing)} test(s) with a missing video: {', '.join(str(t.id) for t in missing)} (find them "
                   f"with: manymaze project DIR relink --folder FOLDER)")
+
+
+def _report_table(p, name):
+    """The rows and columns of a saved results report; exit if the experiment has none of that name."""
+    try:
+        return p.report_table(name)
+    except KeyError:
+        names = ", ".join(f"“{r['name']}”" for r in p.reports) or "none"
+        sys.exit(f"The experiment has no results report called “{name}” (saved reports: {names}). Reports are saved "
+                 f"on the Data page (Report ▸ Save as…).")
+
+
+def _export_report(p, a, out):
+    """results --report NAME: the rows and columns of a saved results report (--wide: one row per animal)."""
+    from .core.export import results_workbook, wide_rows, write_table, write_xlsx
+    from .core.project import result_columns
+    from .core.reports import find_report
+
+    if a.column or a.bins:
+        sys.exit("--report sets the columns and the time periods: leave out --column and --bins")
+    if Path(out).suffix.lower() == ".xml":
+        sys.exit("--report writes a table: use .csv, .tsv, .txt, .xlsx, .slk or .dbf (the XML export is the whole "
+                 "experiment; leave --report out for it)")
+    rows, cols = _report_table(p, a.report)
+    try:
+        if a.wide:
+            info = set(p.info_columns())
+            wide = wide_rows(rows, [c for c in cols if c not in info])
+            write_table(wide, out, result_columns(wide), sheet="By animal")
+        elif out.lower().endswith(".xlsx"):
+            sheets, colmap = results_workbook(p, rows, cols, find_report(p.reports, a.report)["segmented"])
+            write_xlsx(sheets, out, colmap)
+        else:
+            write_table(rows, out, cols)
+    except ValueError as e:  # e.g. more columns than a dBase table can hold
+        sys.exit(str(e))
 
 
 def _change_project(p, a):
@@ -281,6 +330,9 @@ def main(argv=None):
     pr.add_argument("--column", action="append", metavar="MEASURE",
                     help="results: export only this measure (repeat for several; the information columns are kept; "
                          "with --wide: these measures only)")
+    pr.add_argument("--report", metavar="NAME",
+                    help="results / report: the columns, time periods and rows of the results report saved under "
+                         "this name on the Data page")
     pr.add_argument("--folder", help="relink: folder holding the moved videos (searched with its subfolders)")
     pr.add_argument("-o", "--output", help="output file; for results and events " + TABLE_OUTPUT_HELP)
     d = sub.add_parser("demo", help="create a demo project with synthetic videos")
