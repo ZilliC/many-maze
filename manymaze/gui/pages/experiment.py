@@ -611,7 +611,8 @@ class ExperimentPage(Page):
         while name in names:
             name = f"{b.name} copy {k}"
             k += 1
-        self._append_behaviour_row(Behaviour(name, wf.free_key(self.project.behaviours), b.kind, b.group, ""))
+        self._append_behaviour_row(Behaviour(name, wf.free_key(self.project.behaviours), b.kind, b.group, "",
+                                             b.activity))
         self.beh.setCurrentCell(self.beh.rowCount() - 1, 0)
         self._store_behaviours()
 
@@ -823,7 +824,8 @@ class ExperimentPage(Page):
         self._update_pose_box()
 
     def restore_analysis_defaults(self):
-        self._restore_defaults(self.project.analysis if self.project else None, AnalysisSettings(), ANALYSIS_SPEC,
+        self._restore_defaults(self.project.analysis if self.project else None,
+                               AnalysisSettings.for_new_experiment(), ANALYSIS_SPEC,
                                self.an_form, "analysis")
 
     def _restore_defaults(self, obj, default, spec, form, what):
@@ -906,7 +908,9 @@ class ExperimentPage(Page):
         r = self.beh.rowCount()
         self.beh.insertRow(r)
         self._key_names.insert(r, b.name)
-        self.beh.setItem(r, 0, QTableWidgetItem(b.name))
+        it = QTableWidgetItem(b.name)
+        it.setData(Qt.UserRole, bool(b.activity))  # counts as activity (the Key property page)
+        self.beh.setItem(r, 0, it)
         k = QTableWidgetItem(b.key.upper() if len(b.key) == 1 else b.key)
         k.setTextAlignment(Qt.AlignCenter)
         self.beh.setItem(r, 1, k)
@@ -986,7 +990,7 @@ class ExperimentPage(Page):
         kind = self.beh.cellWidget(r, 2).currentData() if self.beh.cellWidget(r, 2) else "state"
         group = self.beh.item(r, 3).text().strip() if self.beh.item(r, 3) else ""
         color = self.beh.cellWidget(r, 4).property("color") if self.beh.cellWidget(r, 4) else ""
-        return Behaviour(name, key, kind, group, color or "")
+        return Behaviour(name, key, kind, group, color or "", bool(self.beh.item(r, 0).data(Qt.UserRole)))
 
     def _store_behaviours(self, *_):
         if self._loading or self.project is None:
@@ -1031,7 +1035,7 @@ class ExperimentPage(Page):
         if b is None:
             self.key_editor.load(None)
         else:
-            self.key_editor.load(b.name, b.key, b.kind, b.group, b.color)
+            self.key_editor.load(b.name, b.key, b.kind, b.group, b.color, b.activity)
 
     def _key_edited(self, v: dict):
         r = self.beh.currentRow()
@@ -1040,6 +1044,7 @@ class ExperimentPage(Page):
         with loading(self):
             if v["name"]:
                 self.beh.item(r, 0).setText(v["name"])
+            self.beh.item(r, 0).setData(Qt.UserRole, bool(v.get("activity")))
             key = v["key"]
             self.beh.item(r, 1).setText(key.upper() if len(key) == 1 else key)
             self.beh.cellWidget(r, 2).setCurrentIndex(self._kind_index(v["kind"], v["group"]))

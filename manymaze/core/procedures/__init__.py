@@ -33,7 +33,9 @@ Statements (``"type"``)::
              top level only. mode: what happens when the event recurs while the handler is still running
              (ignore it — default, restart the handler, or run another copy in parallel).
              Event-wizard options: "times": n, "within": s (runs once the event happened n times within s
-             seconds), "trials": "1, 3-5, odd" (only in these trials; context["trial"]).
+             seconds), "trials": "1, 3-5, odd" (only in these trials; context["trial"]). "record_as": name (optional)
+             notes each time the event happens during the test in the I/O log (kind "event"), analysed as ANY-maze's
+             event measures (number of events, latency to the first).
     wait     {"mode": "seconds", "seconds": expr}
              {"mode": "until", "until": condition, "timeout": expr?}
              {"mode": "event", "event": name, <event parameters>, "or": [{"event": name, <parameters>}, ...]?,

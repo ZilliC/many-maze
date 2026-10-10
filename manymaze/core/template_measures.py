@@ -14,7 +14,7 @@ from typing import Callable
 import numpy as np
 
 from .geometry import point_segment_distance
-from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs
+from .series import count_rotations, drop_short_runs, ffill, initial_heading_frames, round_result as _r, runs
 
 
 @dataclass
@@ -198,12 +198,12 @@ def _water_maze(d: TemplateData):
         dist = np.hypot((k.x - pc.x) * k.scale, (k.y - pc.y) * k.scale)
         res[f"Mean distance to platform ({u})"] = _r(np.nanmean(dist), 2)
         res[f"Cumulative distance to platform ({u}·s)"] = _r(np.nansum(dist * dur), 1)
-        # initial heading error: direction from start to position after ~1 s vs direction to platform
-        ok = np.flatnonzero(np.isfinite(k.ux))
-        if len(ok) > 2:
-            i0 = ok[0]
-            j = np.searchsorted(t, t[i0] + 1.0)
-            j = min(max(j, i0 + 1), len(t) - 1)
+        # initial heading error: the initial heading (as the point's: the Heading error options) vs the direction
+        # to the platform
+        ij = initial_heading_frames(t, dur, k.ux, k.uy, k.mobile, s.heading_error_by, s.heading_error_time_s,
+                                    s.heading_error_distance)
+        if ij is not None:
+            i0, j = ij
             hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]
             tdx, tdy = pc.x - k.x[i0], pc.y - k.y[i0]
             if math.hypot(hdx, hdy) > 0 and math.hypot(tdx, tdy) > 0:

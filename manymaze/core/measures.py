@@ -29,8 +29,8 @@ from .iomeasures import io_measures, io_track_measures
 from .occupancy import occupancy
 from .pauses import drop_pauses, shift_events
 from .series import count_rotations  # noqa: F401 (re-exported)
-from .series import (drop_short_runs, ffill, rotation_events, round_result as _r, runs, seg_moving_average,
-                     segments)
+from .series import (drop_short_runs, ffill, initial_heading_frames, partial_rotation_events, rotation_events,
+                     round_result as _r, runs, seg_moving_average, segments)
 from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides
 from .track import Track
@@ -53,6 +53,10 @@ class AnalysisSettings:
     freeze_sensitivity: float = 50.0  # automatic thresholds: 0–100, higher = smaller movements end freezing
     activity_threshold_pct: float = 5.0  # motion (% of body area changing) at or above which the animal is active
     min_inactive_s: float = 0.5  # inactive episodes shorter than this count as active
+    # what "active" means: "pixel_change" (the motion above; experiments made before the option), "mobile_or_keys"
+    # (ANY-maze: mobile, or doing a behaviour whose key counts as activity) or "keys" (ANY-maze without immobility
+    # detection: only those behaviours) - see activity_frames
+    activity_definition: str = "pixel_change"
     rearing: bool = False  # detect rears automatically from the animal's shape (see rearing_mask)
     rear_area_pct: float = 75.0  # rearing: body area below this % of the animal's usual area …
     rear_length_pct: float = 80.0  # … and (head and tail tracked) body length below this % of its usual length
@@ -60,15 +64,24 @@ class AnalysisSettings:
     entry_min_duration_s: float = 0.0  # zone visits shorter than this are ignored
     count_initial_entry: bool = True  # an animal starting in a zone has entered it
     latency_if_never: str = "duration"  # "duration" (cap at test length) or "blank"
+    # an average of nothing (ANY-maze's "Use zero as the result for undefined averages"): "blank" | "zero"; "" in
+    # experiments made before the option: as mANY-MAZE gave them (see _undefined)
+    undefined_averages: str = ""
     zone_body_part: str = "centre"  # body part used for zone occupancy: centre | head | tail
     thigmotaxis_distance: float = 0.0  # units from the arena wall; 0 = 25 % of arena half-width
     rotation_reset_deg: float = 90.0
+    partial_rotation_deg: float = 90.0  # ANY-maze's partial rotation angle: turns of at least this without a rotation
     bin_length_s: float = 0.0  # time bins for segmented results; 0 = none
     custom_periods: list = field(default_factory=list)  # [[label, t0, t1], ...]
     novel_object: str = "Object B"  # for the novel object test
     social_side: str = "Left"  # three chamber: side holding the stranger animal
     exploration_facing_deg: float = 45.0
     orientation_deg: float = 30.0  # oriented towards a zone / point: the head direction within this angle of it
+    # initial heading (ANY-maze's Heading error options): "time" - the position after the animal has been mobile for
+    # heading_error_time_s - or "distance" - the first position more than heading_error_distance (units) away
+    heading_error_by: str = "time"
+    heading_error_time_s: float = 1.0
+    heading_error_distance: float = 5.0
     grid_cells: int = 4  # open field: N×N grid for line-crossing counts (0 = off)
     contact_distance: float = 0.0  # inter-animal contact distance (units); 0 = auto (1 body length)
     measure_filter: list = field(default_factory=list)  # optional list of measure names to keep
@@ -98,6 +111,12 @@ class AnalysisSettings:
     def from_dict(cls, d: dict | None) -> "AnalysisSettings":
         d = d or {}
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+    @classmethod
+    def for_new_experiment(cls) -> "AnalysisSettings":
+        """The settings of a new experiment: ANY-maze's definitions where the defaults keep those of experiments made
+        before an option existed (activity, undefined averages)."""
+        return cls(activity_definition="mobile_or_keys", undefined_averages="blank")
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +240,13 @@ def _orientation(P) -> tuple | None:
     return P.cached("orientation", make)
 
 
+def _undefined(s: AnalysisSettings, before: float) -> float:
+    """An average of nothing (no visit, bout, rear…): blank or 0 as ANY-maze's "Use zero as the result for undefined
+    averages" (s.undefined_averages "blank" / "zero"); in experiments made before the option, `before` - the value
+    mANY-MAZE gave (0 for the mean visit, investigation bout and rear in a zone, blank for the others)."""
+    return {"zero": 0.0, "blank": math.nan}.get(s.undefined_averages, before)
+
+
 def _mask(visits, n) -> np.ndarray:
     m = np.zeros(n, bool)
     for a, b in visits:
@@ -258,6 +284,7 @@ class _Prepared:
     events: list | None
     io_events: list | None
     others: list
+    behaviours: list | None = None  # Project.behaviours (the keys that count as activity)
     cache: dict = field(default_factory=dict)
 
     def cached(self, key, fn):
@@ -300,7 +327,7 @@ def end_of_test(track: Track, app: Apparatus, s: AnalysisSettings) -> float | No
 
 
 def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_events=None, other_tracks=None,
-             zone_overrides=None, pauses=None, duration=None) -> _Prepared:
+             zone_overrides=None, pauses=None, duration=None, behaviours=None) -> _Prepared:
     app = apply_overrides(app, zone_overrides)
     track, breaks = drop_pauses(track, pauses)
     events = shift_events(events, pauses)
@@ -320,7 +347,7 @@ def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_
     n = len(track)
     if n == 0:
         return _Prepared(track, clean, app, s, None, breaks, {}, None, {}, np.zeros(0, bool), events, io_events,
-                         others)
+                         others, behaviours)
     memb, head_memb, hidden = occupancy(track, app, s)
     hid_any = np.zeros(n, bool)
     for hm in hidden.values():
@@ -333,7 +360,8 @@ def _prepare(track: Track, app: Apparatus, s: AnalysisSettings, events=None, io_
     gaps = np.zeros(n, bool)  # frames where the animal is seen again after being hidden
     gaps[1:] = hid_any[:-1] & ~hid_any[1:]
     k = kinematics(track, app, s, t0=float(track.t[0]), duration=duration, breaks=breaks, gaps=gaps)
-    return _Prepared(track, clean, app, s, k, breaks, memb, head_memb, hidden, hid_any, events, io_events, others)
+    return _Prepared(track, clean, app, s, k, breaks, memb, head_memb, hidden, hid_any, events, io_events, others,
+                     behaviours)
 
 
 def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, events: list | None = None,
@@ -356,7 +384,7 @@ def analyse(track: Track, app: Apparatus, s: AnalysisSettings | None = None, eve
     episodes that start inside it.
     """
     s = s or AnalysisSettings()
-    P = _prepare(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration)
+    P = _prepare(track, app, s, events, io_events, other_tracks, zone_overrides, pauses, duration, behaviours)
     return _results(P, t_range, behaviours, result_variables, io_devices, calculations)
 
 
@@ -573,7 +601,8 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
     res["Absolute turn angle (deg)"] = _r(abs_turn, 1)
     res[f"Meander (deg/{u})"] = _r(abs_turn / total if total > 0 else math.nan)
     res["Mean turn angle (deg)"] = _r(dturn.mean() if len(dturn) else math.nan, 2)
-    res["Angular velocity (deg/s)"] = _r(abs_turn / t_mob if t_mob > 0 else math.nan, 2)
+    # as ANY-maze (2.37): the absolute turn angle / the test duration (or the period's)
+    res["Angular velocity (deg/s)"] = _r(abs_turn / p.T if p.T > 0 else math.nan, 2)
 
     def rotations(key):
         at, sign = T[key]
@@ -583,6 +612,11 @@ def _path_shape(res, p: _Period, total: float, t_mob: float):
     cw, acw = rotations("body_rot" if T["body"] else "path_rot")
     res["Rotations clockwise"], res["Rotations anticlockwise"] = cw, acw
     res["Total rotations"] = cw + acw
+    # ANY-maze's partial rotations (2.34-2.36): turns of at least the partial rotation angle that completed no
+    # rotation, in the period in which the turn stopped
+    cw, acw = rotations("body_partial" if T["body"] else "path_partial")
+    res["Partial rotations"] = cw + acw
+    res["Partial rotations clockwise"], res["Partial rotations anticlockwise"] = cw, acw
     if T["body"] and np.isfinite(k.heading).sum() > 2:
         # rotations of the direction of travel (the rotations above follow the body / head orientation)
         res["Path rotations clockwise"], res["Path rotations anticlockwise"] = rotations("path_rot")
@@ -619,18 +653,22 @@ def _turns(P: _Prepared) -> dict:
         h = K.heading
         turn, prev = turn_series(h, K.speed, s.mobility_threshold, cuts)
 
-        def rot(angle):
+        def rot(angle, events=rotation_events, **kw):
             at, sign = [], []
             for a, b in segments(n, cuts):
-                ia, sa = rotation_events(angle[a:b], s.rotation_reset_deg)
+                ia, sa = events(angle[a:b], s.rotation_reset_deg, **kw)
                 at.append(ia + a)
                 sign.append(sa)
             return np.concatenate(at), np.concatenate(sign)
+
+        def partial(angle):
+            return rot(angle, partial_rotation_events, partial_deg=float(s.partial_rotation_deg or 0.0))
         # body rotations follow the body (as ANY-maze: the vector from the centre to the head), else the tracked
         # body angle (e.g. an imported orientation); only without either do they follow the direction of travel
         angle = _body_angle(P.track)
-        return {"turn": turn, "prev": prev, "body": angle is not None, "path_rot": rot(h),
-                "body_rot": rot(angle) if angle is not None else None}
+        return {"turn": turn, "prev": prev, "body": angle is not None, "path_rot": rot(h), "path_partial": partial(h),
+                "body_rot": rot(angle) if angle is not None else None,
+                "body_partial": partial(angle) if angle is not None else None}
     return P.cached("turns", make)
 
 
@@ -705,8 +743,9 @@ def _zones(res, p: _Period):
         # first of them): the step into the zone is not counted, the step out of it is
         dz = float(k.step[np.r_[False, fm[:-1]][p.sl]].sum())
         res[f"{zn}: distance ({u})"] = _r(dz, 2)
-        res[f"{zn}: mean speed ({u}/s)"] = _r(dz / tz if tz > 0 else math.nan)
-        res[f"{zn}: mean visit (s)"] = _r(tz / len(visits) if visits else 0.0)  # time in the zone / entries
+        res[f"{zn}: mean speed ({u}/s)"] = _r(dz / tz if tz > 0 else _undefined(P.s, math.nan))
+        # time in the zone / entries
+        res[f"{zn}: mean visit (s)"] = _r(tz / len(visits) if visits else _undefined(P.s, 0.0))
         res[f"{zn}: time immobile (s)"] = _r(dur[vm & ~k.mobile].sum())
         if has_motion:
             res[f"{zn}: time freezing (s)"] = _r(dur[vm & k.freezing].sum())
@@ -739,8 +778,9 @@ def _zones(res, p: _Period):
         if has_motion:
             # as ANY-maze: the times the animal starts to freeze while in the zone
             res[f"{zn}: freezing episodes"] = sum(1 for a, _ in p.eps(K.freezing) if vm[a])
-            # pixel-change activity in the zone (see _activity); an inactive episode belongs to the zone it starts in
-            act_full = P.cached("active", lambda: activity_mask(P.k, P.s))
+        act_full = activity_frames(P)
+        if act_full is not None:
+            # activity in the zone (see _activity); an inactive episode belongs to the zone it starts in
             t_act = float(dur[vm & act_full[p.sl]].sum())
             res[f"{zn}: time active (s)"] = _r(t_act)
             res[f"{zn}: time inactive (s)"] = _r(tz - t_act)
@@ -1059,7 +1099,8 @@ def _zone_investigation(res, p: _Period, z):
     bclip = [float(dur[a:b].sum()) for a, b in runs(inv)]
     res[f"{zn}: longest investigation bout (s)"] = _r(max(bclip, default=0.0))
     res[f"{zn}: shortest investigation bout (s)"] = _r(min(bclip, default=0.0))
-    res[f"{zn}: mean investigation bout (s)"] = _r(ti / len(bd) if bd else 0.0)  # time investigating / bouts
+    # time investigating / bouts
+    res[f"{zn}: mean investigation bout (s)"] = _r(ti / len(bd) if bd else _undefined(P.s, 0.0))
     res[f"{zn}: investigation durations (s)"] = _list_text(bd)
     di = float(k.step[inv].sum())
     res[f"{zn}: distance while investigating ({u})"] = _r(di, 2)
@@ -1069,7 +1110,7 @@ def _zone_investigation(res, p: _Period, z):
     else:  # as ANY-maze: undefined if the animal never investigated the zone
         d_first = math.nan
     res[f"{zn}: distance before first investigation ({u})"] = _r(d_first, 2)
-    res[f"{zn}: mean speed while investigating ({u}/s)"] = _r(di / ti if ti > 0 else math.nan)
+    res[f"{zn}: mean speed while investigating ({u}/s)"] = _r(di / ti if ti > 0 else _undefined(P.s, math.nan))
     res[f"{zn}: time mobile while investigating (s)"] = _r(dur[inv & k.mobile].sum())
     res[f"{zn}: time immobile while investigating (s)"] = _r(dur[inv & ~k.mobile].sum())
     res[f"{zn}: immobile episodes while investigating"] = len(p.eps(inv_full & ~K.mobile))
@@ -1140,7 +1181,8 @@ def _zone_head(res, p: _Period, zn: str, z):
                                                                                         else math.nan), 2)
     res[f"{zn}: min head distance from zone ({u})"] = _r(0.0 if (h_in & seen).any() else mn, 2)
     mean, mx, mn = _stats3(h_edge[h_in & seen])
-    res[f"{zn}: mean head distance to border when inside ({u})"] = _r(mean, 2)
+    res[f"{zn}: mean head distance to border when inside ({u})"] = _r(mean if math.isfinite(mean)
+                                                                      else _undefined(P.s, math.nan), 2)
     res[f"{zn}: max head distance to border when inside ({u})"] = _r(mx, 2)
     res[f"{zn}: min head distance to border when inside ({u})"] = _r(mn, 2)
 
@@ -1154,7 +1196,7 @@ def _zone_border(res, p: _Period, z, vm: np.ndarray):
     _, mx, mn = _stats3(e[sel])
     t_in = float(p.dur[sel & np.isfinite(e)].sum())
     res[f"{zn}: mean distance to border when inside ({u})"] = _r(float((e * p.dur)[sel & np.isfinite(e)].sum())
-                                                                 / t_in if t_in > 0 else math.nan, 2)
+                                                                 / t_in if t_in > 0 else _undefined(P.s, math.nan), 2)
     res[f"{zn}: max distance to border when inside ({u})"] = _r(mx, 2)
     # as ANY-maze: 0 once the animal has left the zone (in the period)
     left = bool((vm[:-1] & ~vm[1:]).any())
@@ -1197,12 +1239,11 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
     moving = ae[out & k.mobile]
     res[f"{zn}: mean absolute heading error (deg)"] = _r(np.nanmean(moving) if np.isfinite(moving).any()
                                                          else math.nan, 1)
-    # initial heading error: direction from the first position to the position ~1 s later vs direction to the zone
+    # initial heading error: the initial heading (see _initial_heading) vs the direction to the zone centre
     signed = math.nan
-    ok = np.flatnonzero(np.isfinite(k.ux))
-    if len(ok) > 2:
-        i0 = ok[0]
-        j = min(max(int(np.searchsorted(p.t, p.t[i0] + 1.0)), i0 + 1), p.n - 1)
+    ij = _initial_heading(p)
+    if ij is not None:
+        i0, j = ij
         zx, zy = z.shape.centroid()
         hdx, hdy = k.ux[j] - k.ux[i0], k.uy[j] - k.uy[i0]
         tdx, tdy = zx * k.scale - k.ux[i0], zy * k.scale - k.uy[i0]
@@ -1221,6 +1262,15 @@ def _zone_heading(res, p: _Period, z, vm: np.ndarray):
                 return _angle_diff(np.arctan2(zy - hy, zx - hx), ang) <= s.orientation_deg
         towards = P.cached(("oriented", zn), orient)[p.sl]
         res[f"{zn}: time oriented towards zone centre when inside (s)"] = _r(dur[vm & ~p.hid_any & towards].sum())
+
+
+def _initial_heading(p: _Period) -> tuple[int, int] | None:
+    """(first position, end position) frames of the animal's initial heading in the period, as ANY-maze's Heading
+    error options (s.heading_error_by: after being mobile for heading_error_time_s, or the first position more than
+    heading_error_distance away; positions while immobile ignored - see series.initial_heading_frames)."""
+    s, k = p.P.s, p.k
+    return initial_heading_frames(k.t, k.dur, k.ux, k.uy, k.mobile, s.heading_error_by, s.heading_error_time_s,
+                                  s.heading_error_distance)
 
 
 def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray, fm: np.ndarray):
@@ -1332,14 +1382,13 @@ def _points(res, p: _Period):
 
 
 def _point_heading(res, p: _Period, pt):
-    """Heading error to a point: the initial one (direction from the first position to the position ~1 s later vs
-    the direction to the point, as the water maze's) and the mean absolute one over the frames the animal moves."""
+    """Heading error to a point: the initial one (the initial heading, see _initial_heading, vs the direction to the
+    point, as the water maze's) and the mean absolute one over the frames the animal moves."""
     k, name = p.k, pt.name
-    ok = np.flatnonzero(np.isfinite(k.ux))
     err = math.nan
-    if len(ok) > 2:
-        i0 = ok[0]
-        j = min(max(int(np.searchsorted(k.t, k.t[i0] + 1.0)), i0 + 1), len(k.t) - 1)
+    ij = _initial_heading(p)
+    if ij is not None:
+        i0, j = ij
         hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]
         tdx, tdy = pt.x - k.x[i0], pt.y - k.y[i0]
         if math.hypot(hdx, hdy) > 0 and math.hypot(tdx, tdy) > 0:
@@ -1413,7 +1462,8 @@ def _grids_and_sequences(res, p: _Period):
                 q, whole.seq([zn for zn in names if zn in P.memb]), names))
             att = [a for a in att if p.t0 - 1e-9 <= (a.end if a.completed else a.start) < t1 - 1e-9
                    or (p.whole and a.completed)]
-            res.update(sequence_measures(q, att, p.t0, p.T, s.latency_if_never, distance=travelled, unit=app.unit))
+            res.update(sequence_measures(q, att, p.t0, p.T, s.latency_if_never, distance=travelled, unit=app.unit,
+                                         undefined=_undefined(s, math.nan)))
 
 
 def _template(res, p: _Period):
@@ -1460,16 +1510,17 @@ def _quality_mask(P: _Prepared) -> np.ndarray:
 
 
 def _activity(res, p: _Period):
-    """Pixel-change activity (separate from mobility, which comes from the centre's speed) and the average freezing
-    score (the motion value that freezing is detected from)."""
+    """Activity (see activity_frames) and the average freezing score (the motion value that freezing is detected
+    from)."""
     k, dur, T = p.k, p.dur, p.T
     has = np.isfinite(k.motion_pct)
-    if not has.any():
+    if has.any():
+        t_has = float(dur[has].sum())
+        res["Average freezing score (% body)"] = _r(float((k.motion_pct[has] * dur[has]).sum()) / t_has
+                                                    if t_has > 0 else math.nan, 2)
+    act_full = activity_frames(p.P)
+    if act_full is None:
         return
-    act_full = p.P.cached("active", lambda: activity_mask(p.P.k, p.P.s))
-    t_has = float(dur[has].sum())
-    res["Average freezing score (% body)"] = _r(float((k.motion_pct[has] * dur[has]).sum()) / t_has
-                                                if t_has > 0 else math.nan, 2)
     t_act = float(dur[act_full[p.sl]].sum())
     res["Time active (s)"] = _r(t_act)
     res["Time inactive (s)"] = _r(T - t_act)
@@ -1478,6 +1529,27 @@ def _activity(res, p: _Period):
         res[f"{label.capitalize()} episodes"] = len(ep)
         res[f"Longest {label} episode (s)"] = _r(max(d, default=0.0))
         res[f"Shortest {label} episode (s)"] = _r(min(d, default=0.0))
+
+
+def activity_frames(P: _Prepared) -> np.ndarray | None:
+    """Whole test, per frame: is the animal active? As ANY-maze (s.activity_definition "mobile_or_keys"): mobile, or
+    doing a behaviour whose key counts as activity (Behaviour.activity: a state / hold key, while it is on); "keys"
+    (ANY-maze without immobility detection): only those behaviours; "pixel_change": activity_mask, None without a
+    motion value."""
+    def make():
+        s = P.s
+        if s.activity_definition in ("mobile_or_keys", "keys"):
+            t = P.k.t
+            keys = np.zeros(len(t), bool)
+            names = {b.name for b in P.behaviours or () if getattr(b, "activity", False) and b.kind != "point"}
+            end = float(t[-1]) + P.track.dt if len(t) else 0.0
+            for e in P.events or ():
+                if e.get("behaviour") in names:
+                    t1 = float(e["t_end"]) if e.get("t_end") is not None else end  # still on: until the end
+                    keys |= (t >= float(e["t"])) & (t < t1)
+            return keys | P.k.mobile if s.activity_definition == "mobile_or_keys" else keys
+        return activity_mask(P.k, s) if np.isfinite(P.k.motion_pct).any() else None
+    return P.cached("active", make)
 
 
 def activity_mask(k: Kinematics, s: AnalysisSettings) -> np.ndarray:
@@ -1582,7 +1654,9 @@ def _rear_results(res, p: _Period, eps, in_mask: np.ndarray, prefix: str = ""):
     leaving it."""
     t_rear = float(p.dur[in_mask].sum())
     d = [float(p.dur[a:b].sum()) for a, b in runs(in_mask)]
-    values = (len(eps), _r(t_rear), _r(p.lat(eps)), _r(t_rear / len(eps) if eps else 0.0),
+    # a zone's mean rear without a rear is an undefined average (ANY-maze 3.76; not the whole test's, 2.44)
+    none = _undefined(p.P.s, 0.0) if prefix else 0.0
+    values = (len(eps), _r(t_rear), _r(p.lat(eps)), _r(t_rear / len(eps) if eps else none),
               _r(max(d, default=0.0)), _r(min(d, default=0.0)))
     for name, v in zip(_REAR_NAMES, values):
         res[prefix + name if prefix else name[0].upper() + name[1:]] = v
@@ -1624,9 +1698,10 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
     for section in _SECTIONS:
         section(res, p)
     if behaviours:
-        res.update(behaviour_measures(P.events or [], behaviours, t0, t0 + T, zones=p.memb if s.behaviour_by_zone
-                                      else None, t=p.t, dur=p.dur, latency_if_never=s.latency_if_never,
-                                      step=p.k.step, unit=P.app.unit))
+        # as ANY-maze (6.x), an investigation zone's keys are scored while the animal investigates it
+        zones = {**p.memb, **_investigating(p)} if s.behaviour_by_zone else None
+        res.update(behaviour_measures(P.events or [], behaviours, t0, t0 + T, zones=zones, t=p.t, dur=p.dur,
+                                      latency_if_never=s.latency_if_never, step=p.k.step, unit=P.app.unit))
     if P.io_events:
         try:
             res.update(io_measures(P.io_events, T, (t0, t0 + T), io_devices, settings=s,
@@ -1654,13 +1729,19 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
 
 def _io_track(p: _Period, io_devices) -> dict:
     """I/O measures that need the track: virtual switches (distance), analogue inputs per zone visit and the other
-    devices per zone."""
+    devices per zone (virtual switches: while the animal investigates an investigation zone, as ANY-maze 22.x)."""
     P = p.P
     grid_cells = {c for g in P.app.grids for c in g.zones}
     visits = {zn: p.eps(P.visits_mask(zn, m), entries=True) for zn, m in P.memb.items() if zn not in grid_cells}
     zones = {zn: P.visits_mask(zn, m)[p.sl] for zn, m in P.memb.items() if zn not in grid_cells}
     return io_track_measures(P.io_events, p.t, p.dur, p.k.step, (p.t0, p.t0 + p.T), P.app.unit, visits, io_devices,
-                             P.s.latency_if_never, zones)
+                             P.s.latency_if_never, zones, settings=P.s, investigating=_investigating(p))
+
+
+def _investigating(p: _Period) -> dict:
+    """{investigation zone: per frame of the period, the animal investigates it} (see _investigation)."""
+    return {z.name: _investigation(p.P, z)[p.sl] for z in p.P.app.zones
+            if z.investigation_distance_cm > 0 and z.name in p.P.memb}
 
 
 def _point_arrays(P: _Prepared, p) -> dict:
@@ -1995,7 +2076,7 @@ def analyse_segmented(track: Track, app: Apparatus, s: AnalysisSettings, **kw) -
     kw = dict(kw)
     kw.pop("t_range", None)
     P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
-                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"))
+                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"), kw.get("behaviours"))
     rest = dict(behaviours=kw.get("behaviours"), result_variables=kw.get("result_variables"),
                 io_devices=kw.get("io_devices"), calculations=kw.get("calculations"))
     out = [("Whole test", _results(P, None, **rest))]
@@ -2011,7 +2092,7 @@ def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, **kw
     """The measures of part of a test as a calculation's result_for_period() sees them: spec (from_s, to_s) in test
     time or the name of a time period; None if the test ended before it (keywords as analyse())."""
     P = _prepare(track, app, s, kw.get("events"), kw.get("io_events"), kw.get("other_tracks"),
-                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"))
+                 kw.get("zone_overrides"), kw.get("pauses"), kw.get("duration"), kw.get("behaviours"))
     return _calc_period(P, spec, kw.get("behaviours"), kw.get("result_variables"), kw.get("io_devices"))
 
 
