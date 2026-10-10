@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .apparatus import Apparatus
+from .apparatus import Apparatus, unit_conversion
 from .freezing import struggle_index
 from .project import Behaviour
 from .measures import AnalysisSettings, _angle_diff, _body_angle, _head_direction, kinematics, turn_series
@@ -128,6 +128,9 @@ def _definitions(app: Apparatus, track: Track | None, behaviours, n_others: int)
     d: OrderedDict[str, tuple] = OrderedDict()
 
     def add(name, unit, kind, group, fn):
+        conv = unit_conversion(unit, app.report_unit)  # computed in cm, shown in the apparatus's unit
+        if conv:
+            unit, fn = conv[0], (lambda c, fn=fn, f=conv[1]: fn(c) * f)
         d[name] = (Param(name, unit, kind, group), fn)
 
     def cum(c, v):

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .apparatus import Apparatus
+from .apparatus import Apparatus, to_report_units
 from .freezing import immobility_from_motion, thresholds as freeze_thresholds
 from .geometry import point_segment_distance, segments_intersect
 from .iomeasures import io_measures, io_track_measures
@@ -1666,7 +1666,7 @@ def _period_results(P: _Prepared, i0: int, i1: int, t0: float, T: float, t_range
                            "thigmotaxis, contact, ...) are in pixels")
     if warnings:
         res["Warnings"] = "; ".join(warnings)
-    return res
+    return to_report_units(res, P.app.report_unit)  # distances in the apparatus's unit (mm / m; cm as computed)
 
 
 def _io_track(p: _Period, io_devices) -> dict:

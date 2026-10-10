@@ -133,7 +133,7 @@ def input_rows(io_events, now: float) -> list[tuple[str, str, int, float, float 
 def chart_parameters(apparatus: Apparatus | None, behaviours=None) -> list[tuple[str, str, str]]:
     """(key, label, unit) of everything the live chart can show: the fast parameters, then every parameter of
     core.charts for this apparatus (key "chart:<name>")."""
-    unit = apparatus.unit if apparatus is not None else "px"
+    unit = apparatus.report_unit if apparatus is not None else "px"
     out = [(k, lbl, u.format(u=unit)) for k, (lbl, u) in FAST_PARAMS.items()]
     if apparatus is not None:
         for p in charts.parameters(apparatus, None, behaviours):

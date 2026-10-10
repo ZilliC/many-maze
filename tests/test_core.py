@@ -392,3 +392,115 @@ def test_project_apparatus_of_and_test_periods():
     t.pauses = [[1.0, 2.0]]
     tr = make_track(np.full((125, 2), 200.0))  # 5 s, 1 s of it paused
     assert p.test_periods(t, tr) == [("0-2 s", 0, 2), ("2-4 s", 2, 4.0)]
+
+
+# --------------------------------------------------------------- distance units
+def _units_track():
+    # 2 s still, 50 px to the right in 1 s, 2 s still, 50 px back: 100 cm at 1 px/cm
+    pts = [(25, 50)] * 20 + [(25 + 50 * i / 10, 50) for i in range(1, 11)] + [(75, 50)] * 20 + \
+          [(75 - 50 * i / 10, 50) for i in range(1, 11)]
+    return make_track(pts, fps=10)
+
+
+def test_distance_units_in_the_results():
+    from manymaze.core.apparatus import DISTANCE_UNITS, to_report_units
+    from manymaze.core.calculations import Calculation
+
+    s = AnalysisSettings(speed_smoothing_s=0, mobility_threshold=5.0, bin_length_s=3.0)
+    tr = _units_track()
+    app = open_field_app()
+    cm = analyse(tr, app, s)
+    app.distance_unit = "cm"
+    assert list(analyse(tr, app, s).items()) == list(cm.items())  # cm: names and values exactly as before
+    assert cm["Total distance (cm)"] == pytest.approx(100.0)
+    for unit, f in DISTANCE_UNITS.items():
+        app.distance_unit = unit
+        res = analyse(tr, app, s)
+        assert res[f"Total distance ({unit})"] == pytest.approx(100.0 * f)
+        assert res[f"Mean speed ({unit}/s)"] == pytest.approx(cm["Mean speed (cm/s)"] * f)
+        assert res[f"Max speed ({unit}/s)"] == pytest.approx(cm["Max speed (cm/s)"] * f)
+        assert res[f"Left: distance ({unit})"] == pytest.approx(cm["Left: distance (cm)"] * f)
+        assert res[f"P: mean distance ({unit})"] == pytest.approx(cm["P: mean distance (cm)"] * f)
+        assert res[f"Meander (deg/{unit})"] == pytest.approx(cm["Meander (deg/cm)"] / f)
+        # the settings stay in cm: the same mobility, the same times and counts
+        assert res["Time mobile (s)"] == cm["Time mobile (s)"] and res["Left: entries"] == cm["Left: entries"]
+        assert len(res) == len(cm) and (unit == "cm") == ("Total distance (cm)" in res)
+    # time bins, and calculations naming the measures in the unit of the results
+    app.distance_unit = "m"
+    calc = Calculation("Distance per entry", "{Total distance (m)} / {Left: entries}", decimals=3)
+    rows = dict(analyse_segmented(tr, app, s, calculations=[calc]))
+    assert rows["0-3 s"]["Total distance (m)"] == pytest.approx(0.5, abs=0.01)
+    assert rows["Whole test"]["Distance per entry"] == pytest.approx(0.5)
+    # an uncalibrated apparatus reports pixels whatever the unit
+    app.px_per_cm = None
+    assert "Total distance (px)" in analyse(tr, app, s) and app.report_unit == "px" and app.report_factor == 1
+    assert to_report_units({"Body (cm²)": 2.0, "A (cm·s)": 3.0, "Text (cm)": "x", "N": 4}, "mm") == \
+        {"Body (mm²)": 200.0, "A (mm·s)": 30.0, "Text (mm)": "x", "N": 4}
+
+
+def test_distance_unit_stored_charts_and_exports(tmp_path):
+    from manymaze.core import charts, export
+    from manymaze.core.calculations import Calculation
+    from manymaze.core.project import Project
+
+    app = open_field_app()
+    assert "distance_unit" not in app.to_dict()  # cm: apparatus maps saved as before
+    app.distance_unit = "mm"
+    d = app.to_dict()
+    assert d["distance_unit"] == "mm" and Apparatus.from_dict(d).distance_unit == "mm"
+    assert app.copy().distance_unit == "mm" and app.with_overrides({"P": {"x": 1, "y": 2}}).distance_unit == "mm"
+    assert Apparatus.from_dict({**d, "distance_unit": "furlong"}).distance_unit == "cm"
+    assert app.length_text(12.5) == "125 mm"
+    # charts and the per-frame export follow the unit
+    tr = _units_track()
+    params = {p.name: p for p in charts.parameters(app, tr)}
+    assert params["Speed"].label == "Speed (mm/s)" and params["Body area"].unit == "mm²"
+    assert params["X position"].label == "X position (mm)" and params["Motion"].unit == "% body"
+    v = charts.compute(tr, app, ["X position", "Distance travelled"], AnalysisSettings(speed_smoothing_s=0))
+    assert v["X position"][0] == pytest.approx(250.0) and v["Distance travelled"][-1] == pytest.approx(1000.0)
+    # the experiment: one unit for every apparatus; formulas, criteria and the measure filter follow it
+    p = Project(name="units")
+    p.apparatus = [open_field_app(), open_field_app()]
+    p.calculations = [Calculation("Ratio", "{Total distance (cm)} / {Mean speed (cm/s)} + {Left: entries}")]
+    p.training_criteria = [{"stage": "", "measure": "Total distance (cm)", "op": ">", "value": 1,
+                            "variability": {"stat": "sd", "trials": 3, "max": 1, "measure": "Max speed (cm/s)"}}]
+    p.analysis.measure_filter = ["Total distance (cm)", "Left: entries"]
+    assert p.distance_unit == "cm"
+    p.set_distance_unit("m")
+    assert [a.distance_unit for a in p.apparatus] == ["m", "m"] and p.distance_unit == "m"
+    assert p.calculations[0].formula == "{Total distance (m)} / {Mean speed (m/s)} + {Left: entries}"
+    assert p.training_criteria[0]["measure"] == "Total distance (m)"
+    assert p.training_criteria[0]["variability"]["measure"] == "Max speed (m/s)"
+    assert p.analysis.measure_filter == ["Total distance (m)", "Left: entries"]
+    with pytest.raises(ValueError):
+        p.set_distance_unit("in")
+    q = Project.from_dict(p.to_dict())
+    assert q.distance_unit == "m"
+    # exports: the XML apparatus and the track files say which unit the values are in
+    p.path = tmp_path / "units.mmaze"
+    p.path.mkdir()
+    t = p.add_test("", "A1", apparatus=p.apparatus[0].name)
+    p.save_tracks(t, [tr])
+    raw = export.export_raw_data(p, tmp_path / "raw", parameters=["X position", "Speed"])
+    lines = raw[0].read_text().splitlines()
+    assert "unit m " in lines[0] and "X position (m)" in lines[1] and "Speed (m/s)" in lines[1]
+    xml = export.export_xml(p, tmp_path / "e.xml").read_text()
+    assert 'unit="m"' in xml
+
+
+def test_distance_unit_live():
+    from manymaze.core.live import LiveStats
+    from manymaze.core.livemonitor import chart_parameters
+    from manymaze.core.tracking import Detection
+
+    app = open_field_app()
+    app.distance_unit = "mm"
+    st = LiveStats(app, 10.0, AnalysisSettings(speed_smoothing_s=0.1, mobility_threshold=5.0))
+    for i in range(30):  # 2 px (2 cm) per frame at 10 frames/s: 20 cm/s
+        st.update(i / 10, Detection(10 + 2 * i, 50, area=50.0, motion=0.0, detected=True), {}, False)
+    assert st.unit == "mm" and st.factor == 10.0
+    assert st.distance == pytest.approx(58.0, abs=1.0) and not st.immobile  # cm, compared with the threshold
+    t, v = st.series("distance")
+    assert v[-1] == pytest.approx(st.distance * 10)  # shown in mm
+    keys = {k: u for k, _label, u in chart_parameters(app)}
+    assert keys["speed"] == "mm/s" and keys["distance"] == "mm" and keys["chart:X position"] == "mm"

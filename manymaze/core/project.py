@@ -27,7 +27,7 @@ from typing import Callable
 
 import numpy as np
 
-from .apparatus import Apparatus, from_known
+from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_unit
 from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
@@ -521,6 +521,32 @@ class Project:
         if name and name not in self.stages:
             self.stages.append(name)
         return name
+
+    @property
+    def distance_unit(self) -> str:
+        """The unit distances are reported in ("mm" | "cm" | "m"): that of the first apparatus, "cm" without one."""
+        return self.apparatus[0].distance_unit if self.apparatus else "cm"
+
+    def set_distance_unit(self, unit: str):
+        """Report distances and speeds in `unit` for every apparatus of the experiment (ANY-maze: one unit for the
+        protocol). The calibration and the distance settings stay in centimetres. The measures named in the
+        calculations' formulas, the training criteria and the measure filter follow ("Total distance (cm)" becomes
+        "Total distance (m)")."""
+        if unit not in DISTANCE_UNITS:
+            raise ValueError(f"Unknown distance unit: {unit}")
+        old = self.distance_unit
+        for a in self.apparatus:
+            a.distance_unit = unit
+        if old == unit:
+            return
+        for c in self.calculations:
+            c.formula = re.sub(r"\{([^{}]*)\}", lambda m: "{" + rename_unit(m.group(1), old, unit) + "}", c.formula)
+        for c in self.training_criteria:
+            for d in (c, c.get("variability") if isinstance(c, dict) else None):
+                if isinstance(d, dict) and isinstance(d.get("measure"), str):
+                    d["measure"] = rename_unit(d["measure"], old, unit)
+        self.analysis.measure_filter = [rename_unit(m, old, unit) if isinstance(m, str) else m
+                                        for m in self.analysis.measure_filter]
 
     def set_protocol(self, key: str):
         """Make this a protocol of a type of test (templates.TEMPLATES key). The forced swim and tail suspension

@@ -9,12 +9,13 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QDialog, QFileDialog, QInputDialog,
                                QMessageBox)
 
+from manymaze.core.apparatus import Apparatus
 from manymaze.core.demo import create_demo_project
 from manymaze.core.geometry import Ellipse, Polygon
 from manymaze.core.project import Project
 from manymaze.core.templates import TEMPLATES
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.pages.apparatus import TemplateDialog
+from manymaze.gui.pages.apparatus import CalibrationDialog, TemplateDialog
 from shots import shot_path
 
 app = QApplication.instance() or QApplication([])
@@ -289,7 +290,7 @@ def test_points_lines_arena_calibration_groups(page, monkeypatch):
     assert approx(bounds(a.arena), (40, 40, 360, 360)) and v.tool == "select"
 
     # calibrate with a line
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (20.0, True))
+    monkeypatch.setattr(CalibrationDialog, "exec", lambda dlg: (dlg.length.setValue(20.0), QDialog.Accepted)[1])
     page.btn_cal.click()
     assert v.tool == "calibrate"
     drag(v, (50, 380), (250, 380))
@@ -318,6 +319,35 @@ def test_points_lines_arena_calibration_groups(page, monkeypatch):
     # deleting a zone removes it from groups
     page.delete_item("zone", [z.name for z in a.zones].index("Corner 1"))
     assert g.zones == ["Arena"]
+
+
+def test_calibration_units(page, monkeypatch):
+    p, a = page.project, page.app
+    p.apparatus.append(Apparatus(name="Second", px_per_cm=4.0))
+    assert page.unit_combo.currentData() == "cm" and page.unit_combo.isEnabled()
+    # the calibration dialog: the ruler's length in mm, cm or m, which becomes the unit of the results
+    dlg = CalibrationDialog(200.0, 20.0, "cm")
+    assert dlg.length.value() == 20.0
+    dlg.units.setCurrentIndex(dlg.units.findData("mm"))
+    assert dlg.length.value() == pytest.approx(200.0) and dlg.length_cm() == pytest.approx(20.0)
+
+    def fake_exec(d):
+        d.units.setCurrentIndex(d.units.findData("mm"))
+        d.length.setValue(250.0)
+        return QDialog.Accepted
+    monkeypatch.setattr(CalibrationDialog, "exec", fake_exec)
+    assert page.calibrate_from_line(0, 0, 100, 0)
+    assert a.calibration_length_cm == pytest.approx(25.0) and a.px_per_cm == pytest.approx(4.0)
+    assert [x.distance_unit for x in p.apparatus] == ["mm", "mm"] and page.unit_combo.currentData() == "mm"
+    assert "250 mm line" in page.cal_label.text() and "results in mm" in page.cal_label.text()
+    rows = p.results(tests=[t for t in p.tests if t.apparatus == a.name][:1])
+    assert "Total distance (mm)" in rows[0] and "Total distance (cm)" not in rows[0]
+    # the unit alone, from the calibration row; a new apparatus gets the experiment's unit
+    page.unit_combo.setCurrentIndex(page.unit_combo.findData("m"))
+    assert p.distance_unit == "m" and all(x.distance_unit == "m" for x in p.apparatus)
+    assert page.add_apparatus().distance_unit == "m"
+    page.unit_combo.setCurrentIndex(page.unit_combo.findData("cm"))
+    assert all(x.distance_unit == "cm" for x in p.apparatus)
 
 
 def test_apparatus_list_and_background(page, monkeypatch, tmp_path):

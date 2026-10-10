@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,6 +23,61 @@ POSITION_KEY = "@position"
 # "calibration_length_cm"}. Applied after POSITION_KEY: it is the scale of the test's own video.
 CALIBRATION_KEY = "@calibration"
 OVERRIDE_KEYS = (POSITION_KEY, CALIBRATION_KEY)  # zone_overrides keys that are not zone / point names
+
+# The unit distances are reported in (ANY-maze 7.36 / 7.37: metres, centimetres or millimetres), per apparatus
+# (Apparatus.distance_unit): units per centimetre. The calibration (px_per_cm), the distance settings (mobility
+# threshold, thigmotaxis band, investigation distance, point radius …, procedures) and the analysis itself stay in
+# centimetres; the results, charts and exports are converted when they are reported (to_report_units). Uncalibrated
+# apparatus report pixels whatever the unit.
+DISTANCE_UNITS = {"mm": 10.0, "cm": 1.0, "m": 0.01}
+# units in centimetres at the end of a result name, and the power of the length in them
+_CM_UNITS = {"cm": 1, "cm/s": 1, "cm/s²": 1, "cm²": 2, "cm·s": 1, "deg/cm": -1}
+_UNIT_AT_END = re.compile(r"\((cm/s²|cm/s|cm²|cm·s|cm|deg/cm)\)$")
+
+
+_DISTANCE_UNIT_AT_END = re.compile(r"\((deg/)?(mm|cm|m)(/s²|/s|²|·s)?\)$")
+
+
+def rename_unit(name: str, old: str, new: str) -> str:
+    """A result name with its distance unit `old` changed to `new` ("Total distance (cm)" → "Total distance (m)",
+    "Meander (deg/cm)" → "Meander (deg/m)"); other names unchanged."""
+    m = _DISTANCE_UNIT_AT_END.search(name)
+    if m is None or m.group(2) != old or old == new or (m.group(1) and m.group(3)):
+        return name
+    return f"{name[:m.start(2)]}{new}{name[m.end(2):]}"
+
+
+def unit_conversion(unit_text: str, unit: str) -> tuple[str, float] | None:
+    """A unit in centimetres ("cm", "cm/s", "cm/s²", "cm²", "cm·s", "deg/cm") in another distance unit: (its text,
+    the factor its values are multiplied by), e.g. ("m/s", 0.01); None for other units, or unit "cm"."""
+    power = _CM_UNITS.get(unit_text)
+    if power is None or unit == "cm" or unit not in DISTANCE_UNITS:
+        return None
+    return unit_text.replace("cm", unit), DISTANCE_UNITS[unit] ** power
+
+
+def report_value(v, factor: float):
+    """A result value times a unit factor (text and missing values unchanged)."""
+    if factor == 1.0 or isinstance(v, bool) or not isinstance(v, (int, float, np.integer, np.floating)):
+        return v
+    x = float(v) * factor
+    return round(x, 9) if math.isfinite(x) else x
+
+
+def to_report_units(res: dict, unit: str) -> dict:
+    """Results {name: value} whose names end with a unit in centimetres ("Total distance (cm)", "Mean speed
+    (cm/s)", "Meander (deg/cm)" …) with that unit and their values in `unit` ("mm" | "m"); `res` itself with "cm",
+    "px" or nothing to convert (so names and values in cm are exactly as before)."""
+    if unit == "cm" or unit not in DISTANCE_UNITS:
+        return res
+    out = type(res)()
+    for name, v in res.items():
+        m = _UNIT_AT_END.search(name) if isinstance(name, str) else None
+        conv = unit_conversion(m.group(1), unit) if m else None
+        if conv:
+            name, v = f"{name[:m.start(1)]}{conv[0]})", report_value(v, conv[1])
+        out[name] = v
+    return out
 
 ENTRY_RULES = {
     "": "Default (analysis settings)",
@@ -217,6 +273,7 @@ class Apparatus:
     template: str = "custom"
     # Optional reference image (frame) size the coordinates refer to
     frame_size: tuple[int, int] | None = None  # (width, height)
+    distance_unit: str = "cm"  # the unit distances are reported in: "mm" | "cm" | "m" (DISTANCE_UNITS)
 
     # ---- calibration -------------------------------------------------
     def calibrate(self, x1, y1, x2, y2, length_cm: float):
@@ -235,6 +292,21 @@ class Apparatus:
     def scale(self) -> float:
         """Multiply pixels by this to obtain output units."""
         return 1.0 / self.px_per_cm if self.px_per_cm else 1.0
+
+    @property
+    def report_unit(self) -> str:
+        """The unit distances are reported in: distance_unit when calibrated, else "px"."""
+        return self.distance_unit if self.px_per_cm and self.distance_unit in DISTANCE_UNITS else self.unit
+
+    def length_text(self, cm: float) -> str:
+        """A length in centimetres (e.g. the calibration ruler's) as shown, in the distance unit: "200 mm"."""
+        u = self.distance_unit if self.distance_unit in DISTANCE_UNITS else "cm"
+        return f"{round(cm * DISTANCE_UNITS[u], 6):g} {u}"
+
+    @property
+    def report_factor(self) -> float:
+        """Reported units per unit of the analysis (cm, or px when not calibrated)."""
+        return DISTANCE_UNITS[self.report_unit] if self.px_per_cm and self.report_unit in DISTANCE_UNITS else 1.0
 
     # ---- lookup --------------------------------------------------------
     def zone(self, name: str) -> Zone | None:
@@ -428,6 +500,8 @@ class Apparatus:
             "calibration_length_cm": self.calibration_length_cm,
             "template": self.template,
             "frame_size": list(self.frame_size) if self.frame_size else None,
+            # only when not cm: apparatus maps in cm are saved as before
+            **({"distance_unit": self.distance_unit} if self.distance_unit != "cm" else {}),
         }
 
     @classmethod
@@ -446,6 +520,7 @@ class Apparatus:
             calibration_length_cm=d.get("calibration_length_cm"),
             template=d.get("template", "custom"),
             frame_size=tuple(d["frame_size"]) if d.get("frame_size") else None,
+            distance_unit=d.get("distance_unit") if d.get("distance_unit") in DISTANCE_UNITS else "cm",
         )
 
     def copy(self) -> "Apparatus":

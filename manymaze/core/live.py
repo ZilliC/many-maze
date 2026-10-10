@@ -397,7 +397,10 @@ class LiveStats:
             self.distance *= scale / old
             self.speed *= scale / old
         self.scale = scale
-        self.unit = apparatus.unit if apparatus else "px"
+        # distance and speed stay in cm (px) for the procedures and the mobility threshold, and are shown in the
+        # apparatus's distance unit: unit, factor (Apparatus.report_unit / report_factor)
+        self.unit = apparatus.report_unit if apparatus else "px"
+        self.factor = apparatus.report_factor if apparatus else 1.0
         if hasattr(self, "points"):
             self.points.set_apparatus(apparatus)
 
@@ -472,7 +475,8 @@ class LiveStats:
         h = list(self.history)
         t_end = h[-1][0]
         h = [r for r in h if r[0] >= t_end - window_s]
-        return np.array([r[0] for r in h]), np.array([r[col] for r in h])
+        v = np.array([r[col] for r in h])
+        return np.array([r[0] for r in h]), v * self.factor if col in (1, 2) else v
 
 
 # ====================================================================== scoring shared by both session kinds
