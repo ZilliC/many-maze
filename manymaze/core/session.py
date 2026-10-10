@@ -24,7 +24,8 @@ END_ZONE = "Animal reached the end zone"
 
 class Session:
     """The defaults of sessions without a camera, procedures or crash-recovery file.  (Every session also has an
-    ``apparatus``, None without a camera: a class default here would break LiveSession's dataclass fields.)"""
+    ``apparatus``, None without a camera: a class default here would break LiveSession's dataclass fields.)
+    I/O-only sessions (:class:`live.IOSession`) have procedures and devices but no camera."""
 
     name = ""
     duration_s = 0.0
@@ -34,6 +35,7 @@ class Session:
     stats = None  # live.LiveStats
     end_reason = ""  # why the test ended (END_* values), set by finish()
     calibration = None  # apparatus.calibration_override() when the calibration was adjusted during the test
+    io_only = False  # an I/O-only test (live.IOSession): no camera, the test's length is its own clock's
 
     @property
     def elapsed(self) -> float:
@@ -83,12 +85,12 @@ def save_live_test(project, test, session: Session, record_path: str | None = No
             return False
         project.save_tracks(test, [tr])
         test.status = "tracked"
-    else:
-        if not session.events:
+    else:  # observation only (scored events) or I/O only (the I/O log): a test without a track
+        if not session.events and not session.io_events and not session.result_variables:
             return False
         test.status = "scored"
-        if session.duration_s and session.elapsed < session.duration_s - 0.05:
-            test.duration_s = round(session.elapsed, 3)
+        if session.io_only or session.duration_s and session.elapsed < session.duration_s - 0.05:
+            test.duration_s = round(session.elapsed, 3)  # (I/O only: as long as its clock ran)
     record_path = recorded_video(record_path)
     if record_path:
         test.video = project.rel_path(record_path)

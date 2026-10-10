@@ -93,10 +93,11 @@ def mode_to_kind(mode: str, group: str) -> tuple[str, str]:
 
 # ---------------------------------------------------------------- test status
 def data_status(project: Project, test: Test) -> str:
-    """Status implied by the test's data: tracked > scored > pending."""
+    """Status implied by the test's data: tracked > scored (keys scored, or run with the I/O devices only) >
+    pending."""
     if project.has_track(test):
         return "tracked"
-    if test.events:
+    if test.events or test.io_events or test.result_variables:
         return "scored"
     return "pending"
 

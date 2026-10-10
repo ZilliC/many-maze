@@ -1004,6 +1004,11 @@ class LiveSession(_Scoring):
     def running(self) -> bool:
         return self.state == "running"
 
+    @property
+    def has_data(self) -> bool:
+        """The test recorded something worth saving (camera sessions: track rows)."""
+        return bool(self.cols["t"])
+
     def trail(self, n: int) -> list[tuple[float, float]]:
         with self.lock:
             if self.state not in ("running", "paused"):
@@ -1582,6 +1587,131 @@ def annotate_recording(frame: np.ndarray, t: float, labels: list[str] = ()) -> n
     return img
 
 
+
+
+# ====================================================================== I/O only (no camera)
+@dataclass
+class IOSession(LiveSession):
+    """A live test without a camera (ANY-maze's "Input/output only mode", e.g. operant chambers): the procedures
+    and the I/O devices run on the computer's clock. Everything else is a camera session's — start modes
+    (immediately, on a start key / remote / clock time: :meth:`request_start`), the "test is waiting to start"
+    procedures, pausing, the end by duration / procedure / user, continuation, scoring keys and crash recovery —
+    but there is no track, image or recording, and the procedures see no animal.
+
+    :meth:`start_clock` runs :meth:`tick` every ``tick_s`` seconds in a thread of its own (stopped when the test
+    ends); tests can call ``tick(t)`` themselves with a clock time instead. Saved as a test without a track
+    (session.save_live_test: the I/O log, events and result variables)."""
+
+    apparatus: Apparatus | None = None
+    settings: DetectionSettings = field(default_factory=DetectionSettings)
+    start_mode: str = "manual"
+    frame_timeout_s: float = 0.0  # the session runs its own clock: no safety thread
+    tick_s: float = 0.01  # how often the procedures run (s)
+    clock: object = time.monotonic
+
+    io_only = True
+
+    def __post_init__(self):
+        super().__post_init__()
+        self._t = 0.0  # test time (s): the elapsed time of the test
+        self._clock0: float | None = None
+        self._clock_thread: threading.Thread | None = None
+
+    @property
+    def elapsed(self) -> float:
+        return self._t
+
+    @property
+    def has_data(self) -> bool:
+        return self.t0 is not None  # the test started
+
+    def track(self):
+        return None
+
+    def trail(self, n: int) -> list[tuple[float, float]]:
+        return []
+
+    def tick(self, t: float | None = None):
+        """Run the procedures up to clock time t (s since the first tick; default: the session's clock)."""
+        if t is None:
+            now = self.clock()
+            if self._clock0 is None:
+                self._clock0 = now
+            t = now - self._clock0
+        self.process(None, float(t))
+
+    def start_clock(self):
+        """Tick in a thread of its own until the test ends (weakly referenced: it ends with the session)."""
+        if self._clock_thread is None and self.state != "finished":
+            self._clock_thread = threading.Thread(target=_io_loop, args=(weakref.ref(self), self.tick_s),
+                                                  name="io-session", daemon=True)
+            self._clock_thread.start()
+
+    def _process(self, frame, timestamp):
+        ts = float(timestamp)
+        self._last_ts = ts
+        if self.state == "finished":
+            return []
+        if self.state == "waiting":
+            if self._wait_ts0 is None:
+                self._wait_ts0 = ts
+            self._call_engine(self.engine.waiting_update, ts - self._wait_ts0, {})
+            self._check_start(ts, [], None)
+            if self.state != "running":
+                return []
+        if self.state == "paused":
+            self._call_engine(self.engine.paused_tick, time.monotonic() - self._pause_wall)
+            return []
+        if self._resume_pending:  # the test clock goes on from where it was paused
+            self._resume_pending = False
+            self.t0 = ts - self._pause_t
+            self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
+            self.pause_log.append({"t": round(self._pause_t, 3),
+                                   "duration_s": round(time.monotonic() - self._pause_wall, 3)})
+        t = max(self._t, ts - self.t0)
+        if self.duration_s and t >= self.duration_s:
+            t = float(self.duration_s)
+        self._t = t
+        self._update_engine(t, Detection(), {}, {}, False, False)
+        if self.state == "running" and self.waiting_end:
+            self._check_continuation(None)
+            if self.state == "finished":
+                return []
+        if self.duration_s and t >= self.duration_s and self.state != "finished":
+            self.finish(END_DURATION)
+        elif self._autosaver is not None and t - self._autosave_last >= self.autosave_s:
+            self._autosave_last = t
+            self._autosaver.request()
+        return []
+
+    def _cut_data(self, t_end: float):
+        super()._cut_data(t_end)
+        self._t = min(self._t, float(t_end))
+
+    def finish(self, reason: str = END_USER):
+        super().finish(reason)
+        if self._autosaver is not None and self.t0 is not None:
+            self._autosaver.request(force=True)  # (a camera session does this when it has track rows)
+
+    def autosave_snapshot(self) -> dict:
+        d = super().autosave_snapshot()
+        d["io_only"] = True
+        d["elapsed"] = round(self._t, 4)
+        return d
+
+
+def _io_loop(ref, period: float):
+    """The clock of an I/O-only session (weakly referenced: it ends with the session or the test)."""
+    while True:
+        s = ref()
+        if s is None or s.state == "finished":
+            return
+        try:
+            s.tick()
+        except Exception:  # pragma: no cover - reported by the session itself; never end the clock silently
+            pass
+        del s
+        time.sleep(period)
 
 
 # ====================================================================== observation only (no camera)

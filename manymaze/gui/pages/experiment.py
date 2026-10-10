@@ -39,7 +39,8 @@ ELEMENTS = [("protocol", "Protocol", "protocol"), ("tracking", "Animal tracking"
             ("analysis", "Analysis", "chart"), ("calculations", "Calculations", "calculator"),
             ("hardware", "Hardware", "plug")]
 MODES = [("tracking", "Video tracking — the animal is tracked and keys can be scored"),
-         ("takenote", "TakeNote — behaviours are scored by hand only (no tracking)")]
+         ("takenote", "TakeNote — behaviours are scored by hand only (no tracking)"),
+         ("io_only", "Input/output only — tests run with the I/O devices and procedures (no video)")]
 # key types of the keys table (the property page offers the full ANY-maze wording)
 KIND_LABELS = [("hold", "Simple"), ("state", "Toggle"), ("state", "Radio"), ("point", "Event")]
 BEH_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", "#ef4444", "#84cc16", "#f97316",
@@ -122,7 +123,8 @@ class ExperimentPage(Page):
         for v, text in MODES:
             self.mode.addItem(text, v)
         self.mode.setToolTip("TakeNote mode is for experiments scored by hand: tests are scored with keys while "
-                             "watching the video or the animal, without tracking.")
+                             "watching the video or the animal, without tracking. Input/output only (e.g. operant "
+                             "chambers) runs the tests with the I/O devices and the procedures, without a camera.")
         self.mode.currentIndexChanged.connect(self._store_mode)
         for w in (self.name, self.desc, self.protocol, self.mode):
             w.setMinimumWidth(320)
@@ -523,7 +525,12 @@ class ExperimentPage(Page):
         self.summary_lbl.setText("This protocol has " + ", ".join(parts) + ".")
 
     def _update_mode(self):
-        self.takenote_lbl.setVisible(self.mode.currentData() == "takenote")
+        mode = self.mode.currentData()
+        self.takenote_lbl.setText("This protocol uses Input/output only mode: tests run without a camera and these "
+                                  "settings are not used." if mode == "io_only" else
+                                  "This protocol uses TakeNote mode: tests are scored by hand and these settings "
+                                  "are only used if you track a test anyway.")
+        self.takenote_lbl.setVisible(mode in ("takenote", "io_only"))
 
     def _store_mode(self, *_):
         self._update_mode()

@@ -4,6 +4,7 @@ import/export, CLI")."""
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -442,6 +443,7 @@ def test_blind_group_column_shows_codes(tmp_path):
     sheets, _ = export.results_workbook(p, rows)
     assert {r["Group"] for r in sheets["Animals"]} == {codes["Saline"], codes["Drug"]}
     html = export.html_report(p, tmp_path / "r.html").read_text("utf-8")
+    html = re.sub(r"data:image/png;base64,[A-Za-z0-9+/=]*", "", html)  # base64 plots can spell "Drug" by chance
     assert "Saline" not in html and "Drug" not in html and codes["Drug"] in html
     p.blind = False
     assert {r["Group"] for r in p.results()} == {"Saline", "Drug"}

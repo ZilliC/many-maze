@@ -2015,6 +2015,49 @@ def analyse_period(track: Track, app: Apparatus, s: AnalysisSettings, spec, **kw
     return _calc_period(P, spec, kw.get("behaviours"), kw.get("result_variables"), kw.get("io_devices"))
 
 
+def io_only_measures(duration: float, s: AnalysisSettings | None = None, io_events: list | None = None,
+                     io_devices: list | None = None, events: list | None = None,
+                     behaviours: list[Behaviour] | None = None, result_variables: dict | None = None,
+                     t_range: tuple[float, float] | None = None, pauses: list | None = None
+                     ) -> "OrderedDict[str, object]":
+    """Measures of a test without a track (ANY-maze's I/O only mode): its duration, the scored keys, the I/O log
+    (iomeasures.io_measures) and the procedures' result variables, for the whole test or a period t_range (test
+    time; up to the end of the test)."""
+    s = s or AnalysisSettings()
+    events, io_events = shift_events(events, pauses), shift_events(io_events, pauses)
+    a, b = (0.0, float(duration)) if t_range is None else (float(t_range[0]), min(float(t_range[1]), duration))
+    T = max(0.0, b - a)
+    res: OrderedDict[str, object] = OrderedDict([("Test duration (s)", _r(T))])
+    if behaviours:
+        res.update(behaviour_measures(events or [], behaviours, a, a + T, latency_if_never=s.latency_if_never))
+    if io_events:
+        try:
+            res.update(io_measures(io_events, T, (a, a + T), io_devices, settings=s, test_end=float(duration),
+                                   whole=t_range is None))
+        except Exception as e:  # a malformed I/O log must not prevent the other measures
+            _log.exception("I/O measures failed")
+            res["Warnings"] = f"I/O measures could not be calculated ({e})"
+    for name, v in (result_variables or {}).items():
+        try:
+            res[f"Variable: {name}"] = _r(float(v))
+        except (TypeError, ValueError):
+            res[f"Variable: {name}"] = str(v)
+    return res
+
+
+def io_only_periods(duration: float, s: AnalysisSettings, events=None, io_events=None, app=None,
+                    pauses=None) -> list[tuple[str, float, float]]:
+    """The time periods of a test without a track: time bins / custom periods, then the event-anchored periods
+    that need no track (test start, a key mark, an input switching on)."""
+    out = time_periods(duration, s)
+    if s.event_periods:
+        from .periods import event_periods
+
+        out += event_periods(s.event_periods, duration, None, app, s, shift_events(events, pauses),
+                             shift_events(io_events, pauses))
+    return out
+
+
 def all_periods(track: Track, app: Apparatus, s: AnalysisSettings, duration: float | None = None, events=None,
                 io_events=None, zone_overrides=None, pauses=None) -> list[tuple[str, float, float]]:
     """Time bins / custom periods followed by event-anchored periods, in test time (pauses removed, as analyse())."""

@@ -596,6 +596,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             for pad in (self.obs_panel.pad, self.score_pad):
                 pad.set_behaviours(p.behaviours)
         self.score_pad.setVisible(bool(p.behaviours))
+        self._update_io_only()
         self._update_keys_label()
         self._update_single_title()
         self._update_buttons()
@@ -749,9 +750,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.mode_acts[mode].setChecked(True)
         self.left_stack.setCurrentIndex([m for m, _ in MODES].index(mode))
         self.panels_box.setVisible(mode == "multi")
-        self.src_box.setVisible(mode == "single")
         self.test_box.setVisible(mode != "multi")
-        self.det_box.setVisible(mode != "observe")
+        self._update_io_only()
         if mode == "multi":
             self._rebuild_session_table()
             self._mosaic_timer.start()
@@ -763,6 +763,22 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._refresh_monitor(force=True)
         self._refresh_explorer()
         return True
+
+    def _update_io_only(self):
+        """The protocol's I/O only mode: no camera source, detection or several camera tests; a note instead of
+        the camera image."""
+        io = self.io_only
+        mode = self.mode
+        self.src_box.setVisible(mode == "single" and not io)
+        self.det_box.setVisible(mode != "observe" and not io)
+        self.mode_acts["multi"].setEnabled(not io or mode == "multi")
+        self.mode_acts["multi"].setToolTip("I/O only: one test at a time (Several tests needs cameras)" if io else
+                                           dict((k, tip) for k, _t, _i, tip in MODE_ACTIONS)["multi"])
+        if io and mode == "single" and self.grabber is None:
+            self.single_panel.view.set_message("Input/output only: the test runs with the I/O devices and the "
+                                               "procedures, without a camera (see the Monitor tab).")
+        elif not io and self.single_panel.view.message.startswith("Input/output only"):
+            self.single_panel.view.set_message("")
 
     # ================================================================== settings persistence
     def _live_settings(self) -> dict:
@@ -824,6 +840,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                 self.obs_stop(save=True)
         if self.mode == "single":
             self.score_pad.set_active(list(self.session.open_states) if self.session is not None else [])
+            self._io_refresh()  # an I/O-only test: no frames to update the panel
         s = self.session
         if s is not None and self.mode == "single" and self.single_panel.stack.currentIndex() == 2:
             with s.lock:
@@ -925,8 +942,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.preview_btn.setChecked(self.grabber is not None)
         self.preview_btn.setToolTip("Turn the camera image off" if self.grabber is not None else
                                     "Show the camera image (preview)")
-        self.preview_btn.setEnabled(has and not armed)
-        self.single_panel.bg_btn.setEnabled(has and not armed)
+        io = self.io_only
+        self.preview_btn.setEnabled(has and not armed and not io)
+        self.single_panel.bg_btn.setEnabled(has and not armed and not io)
         self.single_panel.set_recording(st in ("running", "paused") and bool(self._record_path), self._record_path)
         self._update_undo_buttons()
         # ribbon: All apparatus
@@ -952,19 +970,19 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.resume_all_act.setEnabled(resume)
         self.stop_all_act.setEnabled(stop)
         # ribbon: Session
-        cams = mode != "observe"
+        cams = mode != "observe" and not io
         single_free = not (mode == "single" and armed)
         self.add_source_act.setEnabled(has and cams and single_free)
         self.add_panel_act.setEnabled(has and (mode == "multi" or not self.any_active()))
         e = self._selected_entry() if mode == "multi" else None
         self.remove_panel_act.setEnabled(e is not None and e.state not in ("waiting", "running", "paused"))
-        self.capture_bg_act.setEnabled(has and ((mode == "single" and not armed) or
-                                                (mode == "multi" and bool(self.group.runners))))
+        self.capture_bg_act.setEnabled(has and cams and ((mode == "single" and not armed) or
+                                                         (mode == "multi" and bool(self.group.runners))))
         self.cam_opts_act.setEnabled(has and cams and single_free and (mode == "single" or bool(self.group.sources)))
         on = (self.grabber is not None) if mode == "single" else bool(self.group.runners) if mode == "multi" else False
         self.camera_act.setChecked(on)
         self.camera_act.setEnabled(has and cams and single_free)
         self.next_test_act.setEnabled(has and mode != "multi" and not armed and (o is None or o.state == "finished"))
-        self.calibrate_act.setEnabled(has and mode != "observe" and self._calibration_target()[0] is not None)
+        self.calibrate_act.setEnabled(has and cams and self._calibration_target()[0] is not None)
         self.geometry_act.setEnabled(self.calibrate_act.isEnabled())
         self.obs_panel.show_session(self.obs, self.obs.duration_s if self.obs else 0.0)

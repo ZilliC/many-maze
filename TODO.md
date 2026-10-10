@@ -290,12 +290,64 @@ Definitions that differed were changed to ANY-maze's (tests/test_anymaze_definit
 - [ ] Event measures (21.x), heat-map points (4.17–4.19), movement-detector beam-repeat rule (11.1)
 - [ ] Investigation zones: use "investigating" rather than zone membership for zone-based I/O and key measures
 
-## 17. Plan 2026-10-09 (docs/PLAN-2026-10-09.md)
+---
 
-The plan and its checklist for this section were not in the repository when phase 2 was implemented; the items
-below are the ones done so far (to merge with the plan's list).
+## 17. Gaps found on 2026-10-09 (ANY-maze 7.68 feature pages, help and What's New; not in §1–16)
 
-- [x] Calculations (phase 2): results from other results with a formula, as ANY-maze's (name, decimal places,
-      units, graph Y axis range, named values; Count, Sum, Mean, Max, Min, ResultForTrial, ResultForLastTrial and
-      ResultForPeriod as `count_trials` … `result_for_period`); Protocol ▸ Calculations, *Calculation results* on
-      the Data page, exports, Statistics graphs, protocol report and protocol copy (`core/calculations.py`)
+Checked against the code on 2026-10-09; the latest ANY-maze is 7.68 (bug fixes), the last feature releases were
+7.54 and 7.60. The plan for the items below is in `docs/PLAN-2026-10-09.md`. The app is macOS only.
+
+High impact:
+- [x] Camera-free **I/O only / Operant** protocol mode (phase 1, #4): Protocol ▸ Mode *Input/output only*; Run tests
+      runs a test without a camera (`live.IOSession`: procedures and I/O devices on the computer's clock, start modes,
+      pre-test, pause, continuation, crash recovery), saved without a track and analysed from the I/O log (also per
+      time period) *(tested with the virtual devices only, untested on hardware)*
+- [ ] Several input/output only tests at once (operant chambers side by side): *Several tests* still needs a camera
+      per panel; operant chamber presets (levers, nose pokes, lights, feeder, house light)
+- [x] **Calculations** (phase 2, #3): results from other results with a formula, as ANY-maze's (name, decimal
+      places, units, graph Y axis range, named values; Count, Sum, Mean, Max, Min, ResultForTrial,
+      ResultForLastTrial and ResultForPeriod as `count_trials` … `result_for_period`); Protocol ▸ Calculations,
+      *Calculation results* on the Data page, exports, Statistics graphs, protocol report and protocol copy
+      (`core/calculations.py`)
+- [ ] Time periods defined by a calculation's result (ANY-maze T0625)
+
+Medium impact:
+- [ ] Saved **results reports** (named sets of selected measures / information columns / segmentation) and saved
+      Statistics settings in the protocol (*Select data* resets on open, gui/pages/results/page.py:376)
+- [ ] Time periods that end **at an event** (zone exit / entry, mark, input, calculation), not only a fixed duration
+      after the start event (core/periods.py:8)
+- [ ] Automatic **jump removal** (implausible position jumps dropped before interpolation; core/tracking.py:930)
+- [ ] Stage end rules: **minimum number of trials** and **acceptable variability** (SD / CV of the measure over the
+      last N trials) besides "value on N consecutive trials" (core/workflow.py:251)
+- [ ] **Lens distortion correction** (fish-eye / barrel) per camera and per video, with a checkerboard calibration or
+      a manual coefficient
+- [ ] **Forced swim / tail suspension mode** with its own immobility detection (motion-based, no translation
+      requirement) instead of renamed freezing measures (core/template_measures.py:466)
+- [ ] User **passwords and an administrator role**; administrator-only reveal of treatment codes
+      (gui/pages/animals.py:160); optional password on an experiment file
+- [ ] **Analysis plug-ins**: external per-frame or per-test data (heart rate, Spike2, photometry) merged into the
+      track and exposed as measures (today plug-ins are only called by procedures, core/procedures/plugins.py)
+- [ ] **Synchronisation element**: test start / end pulses, a pulse per captured frame, a pulse per stored position,
+      configured once in Hardware (today only the `sync_pulse` procedure action, core/procedures/catalog.py:208)
+
+Low impact:
+- [ ] Distance units **mm / cm / m** (today cm or px, core/apparatus.py:231)
+- [ ] Barnes maze **UNMC** strategy classification besides direct / serial / random (core/template_measures.py:312)
+- [ ] User-set **significance level** in Statistics
+- [ ] Camera montage of **more than two** sources (core/camera.py:94)
+- [ ] **Ignore lighting changes** detection option (global illumination normalised against the background model)
+- [ ] Animal presets: **hooded rat**, white animal on sawdust; a **rat pose model** (built-in model is mouse only)
+- [ ] **Dark theme** (light forced in gui/app.py:30)
+- [ ] **Terminology** customisation (rename zones / treatments / tests in the interface)
+- [ ] **Recorded video file names** from chosen fields (today `test_NNNN_animal`, gui/pages/live/common.py:56)
+- [ ] **Block the test until the animal is weighed** (balance connected)
+- [ ] **Delay after the start switch** before the test starts
+- [ ] **Sound-level sensor** type (dBA / ultrasound peak) with the other sensors (core/ioconfig.py:37)
+- [ ] Point placed at the **heat map's hottest spot**
+- [ ] **E-mail a report** from the Results page
+- [ ] **Downscale video files** before tracking; **video glitch detection** (duplicate / black frames)
+- [ ] Open ANY-maze **.szv** videos *(not possible: undocumented container)*
+
+Still open from earlier sections: §15 numerical agreement on a shared video, §16 definitions, and every item marked
+*(untested on hardware)* in §1 and §7. Distribution: no tagged release yet (version 0.1.0), and the signed /
+notarised build has not been run with a real Developer ID certificate.
