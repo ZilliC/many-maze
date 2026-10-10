@@ -163,6 +163,11 @@ background frame when a video frame is shown.
 Several apparatus can share one video (e.g. four open fields filmed together) — tests that share a video and
 start time are tracked in a single pass.
 
+**Lens correction…** (Background group) straightens the test videos of a wide-angle (fish-eye / barrel) lens before
+you draw the map on them: a barrel strength slider or a checkerboard calibration, for the tests that use the
+background video, the video tests of this apparatus or all video tests (see §7, *Lens distortion correction*). The
+background is then shown corrected (*lens corrected* in its caption).
+
 ### Zones and areas
 
 Each drawn zone is an *area*. **Zone groups** combine any number of areas (they need not touch) and can subtract
@@ -270,6 +275,28 @@ when no range is set. *Undo* reverts the swap.
    tracks from older versions simply have no outline).
 6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
 
+**Ignore lighting changes** (Detection settings): before each frame is compared with the background, its
+brightness is scaled so that the median grey level of the arena matches the background's — each arena of the image
+separately. Lights dimmed or switched on during a test, daylight changes and a camera adjusting its exposure are
+then not taken for the animal, and do not count as movement for freezing. Only changes of the whole arena are
+removed: **local shadows, reflections and a lamp lighting part of an arena are not**.
+
+**Animal presets** — *Set the detection up for* (first row of the detection settings, also on the Review page's
+Detection tab) sets the contrast, the body-size limits, the clean-up (blur, *Remove specks*, *Fill holes*, tail
+removal) and *Ignore lighting changes* for a kind of animal:
+
+| Preset | Animal is | Body size | Notes |
+| --- | --- | --- | --- |
+| Mouse | darker or lighter | 2–40 cm² | today's default clean-up |
+| Rat | darker or lighter | 8–300 cm² | more clean-up |
+| Hooded rat | darker or lighter | 8–300 cm² | the dark hood and the white body are one animal; a wider *Fill holes* joins them |
+| White animal on sawdust | lighter | 2–300 cm² | strong blur and clean-up against the bedding texture; ignores lighting changes |
+| Zebrafish | darker | 0.1–6 cm² | little clean-up, which would erase a thin fish |
+
+Sizes are converted to pixels with the apparatus calibration (the first calibrated apparatus in the protocol, the
+test's apparatus on the Review page); without a calibration the clean-up assumes 10 px/cm and the body-size limits
+are left as they are. A preset is a starting point: adjust the settings afterwards with the detection preview.
+
 ### Tracking by colour
 
 With a colour camera, *Detect the animal using: Its colour* finds the pixels of a chosen colour (*Colour of the
@@ -300,6 +327,16 @@ confidence* fall back to the shape estimate.
 * **Custom ONNX…** uses your own keypoint model (e.g. exported from DeepLabCut, SLEAP or MMPose): an `.onnx`
   file plus a `.json` beside it with `input_size`, `mean`/`std`, `output` (`"simcc"` or `"heatmap"`),
   `keypoints` and `parts` (`{"nose": …, "centre": …, "tail_base": …}`).
+* **Animal**: *Mouse* uses the built-in model. **Rats**: no pose model of rats filmed from above has been released
+  (checked in October 2026: DeepLabCut's SuperAnimal models are *TopViewMouse*, whose authors say it is not suitable
+  for other species, and *Quadruped*, for animals filmed from the side; SLEAP and MMPose ship none either). Choosing
+  *Rat* (or *Another animal*) says so and keeps the current model until you choose one of your own:
+  * **Convert DeepLabCut model…** — fine-tune SuperAnimal-TopViewMouse RTMPose-S on frames of your rats in
+    DeepLabCut 3 (or train an RTMPose model there), then choose its checkpoint (`snapshot-….pt`). The body part names
+    are read from the project's `pytorch_config.yaml` / `config.yaml` when found; choose which are the nose, body
+    centre and tail base, and the crop size it was trained on (256 × 256 by default). The converted model (`.onnx`
+    and `.json`) is stored in the models folder under `custom/` and used as a custom model.
+  * **Custom ONNX…** — any other model, as above.
 
 ### 5.2 Speed on Apple Silicon
 
@@ -577,7 +614,12 @@ towards.
 - **Region** — drag a rectangle on the camera image to capture only that part of it (or type x, y, w, h).
 - **Digital zoom** with **pan** left–right / up–down.
 - **Rotate** 90 / 180 / 270° and **flip** (mirror / upside down).
-- **Merge with** a second camera, side by side or one above the other, to film one apparatus with two cameras.
+- **Merge with** up to three more cameras (or video files) — *Merge with*, then *… and with* twice — to film one
+  apparatus, or several, with up to four cameras in one image (a montage). **Merged layout**: *Side by side (a
+  row)*, *One above the other (a column)* or *In a grid (two per row)*: 2 × 2 for three or four cameras, the empty
+  cell staying black. Smaller images are padded with black. Two-camera montages of older versions open as before.
+- **Lens correction…** — straightens the image of a wide-angle (fish-eye / barrel) lens; see *Lens distortion
+  correction* below.
 
 The options are saved per camera with the experiment. Draw the apparatus on the transformed image (the apparatus
 page shows what the camera delivers); changing the options later moves the image under the apparatus.
@@ -591,6 +633,31 @@ every time the camera opens. Values are in the camera's own units: driver units 
 camera driver used through OpenCV accepts almost none — so the dialog marks what the camera refused
 (**Not supported**) or changed (**camera used …**), and the session log lists the settings a camera did not accept
 when it opened.
+
+### Lens distortion correction
+
+Wide-angle and fish-eye lenses bend straight walls into curves near the edges of the image, so zones drawn there
+do not match the apparatus and distances there are wrong. **Lens correction…** (in *Camera options* for a camera,
+or **Apparatus ▸ Background ▸ Lens correction…** for the videos of tests) straightens the image first; the apparatus
+is then drawn on the corrected image and tests are tracked in it, so the rest of the experiment does not change.
+
+- **Barrel strength** — one slider (−100 to 100; negative values correct pincushion distortion), with a live
+  preview and straight guide lines: move it until the walls run along the lines. Enough for most wide-angle
+  lenses; strong fish-eye lenses need the checkerboard.
+- **Checkerboard calibration** — print a checkerboard (e.g. 10 × 7 squares, so 9 × 6 *inner corners* where four
+  squares meet), hold it flat under the camera and **Capture view** at least 8 times, with the board in different
+  places of the image (the corners too) and at different angles; or film it being moved around and use **Find views
+  in a video…**. **Calibrate** measures the lens (OpenCV `calibrateCamera`: focal length, optical centre, two radial
+  and two tangential coefficients) and shows the reprojection error (under 1 px is good).
+- **Keep the whole image (black corners)** — off, the corrected image is enlarged to fill the frame and its edges
+  are cut off; on, all of the original image is kept and black areas appear.
+
+The correction keeps the image size. A camera's correction is saved with its camera options, and each camera of a
+montage uses its own; recordings of a corrected camera are stored corrected (their tests need no further
+correction). For video files, the correction is saved with each test (*Apply to*: the tests that use the
+background video, the video tests of this apparatus, or all tests with a video) and used for tracking, the
+detection preview, the Review page video, the apparatus background, plots over the video frame and video export.
+Tests tracked before the correction was set must be checked (the apparatus map) and tracked again.
 
 ### Cameras: webcams, capture cards and industrial cameras
 
@@ -1831,3 +1898,6 @@ manymaze templates                        # list apparatus templates
 * Fix the camera above the centre of the apparatus; avoid zooming during an experiment.
 * Record the empty apparatus for a few seconds before placing the animal, or use median background.
 * For infrared recordings choose *Animal is lighter/darker* accordingly.
+* Start from an animal preset (*Set the detection up for*) and adjust with the detection preview.
+* Lights that change during a test: tick *Ignore lighting changes* (it does not remove local shadows).
+* A wide-angle lens: correct it (*Lens correction…*) before drawing the apparatus.
