@@ -50,12 +50,13 @@ FORMAT_VERSION = 1
 # columns of a results row that describe the test rather than measure it (animal fields are added to these)
 INFO_COLUMNS = ["Test", "Animal", "Group", "Treatment code", "Sex", "Animal notes", "Stage", "Trial", "Apparatus",
                 "Test date", "Day of week", "Test time", "Time of day", "User", "Test notes", "Reason for test end",
-                "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Source video file",
+                "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Jumps removed", "Source video file",
                 "Recorded video file", "Video time at test start (s)", "Moveable zone positions", "Period",
                 "Segment of test"]
 # information columns not shown in the results table until ticked in its column chooser (rarely needed)
 OPTIONAL_INFO_COLUMNS = ["Treatment code", "Animal notes", "Time of day", "Reason for test end",
-                         "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Source video file",
+                         "Animal lighter / darker", "Animal length", "Frames tracked (%)", "Jumps removed",
+                         "Source video file",
                          "Recorded video file", "Video time at test start (s)", "Moveable zone positions",
                          "Segment of test"]
 # ANY-maze "time of day" of a live test: (first hour, name), the name of the last band whose hour has passed
@@ -769,7 +770,7 @@ class Project:
                 "Apparatus": test.apparatus, "Test date": "", "Day of week": "", "Test time": "", "Time of day": "",
                 "User": test.experimenter or "", "Test notes": test.notes or "",
                 "Reason for test end": test.end_reason or "", "Animal lighter / darker": "", "Animal length": "",
-                "Frames tracked (%)": "", "Source video file": "", "Recorded video file": "",
+                "Frames tracked (%)": "", "Jumps removed": "", "Source video file": "", "Recorded video file": "",
                 "Video time at test start (s)": "", "Moveable zone positions": moveable_zone_text(test.zone_overrides)}
         try:
             when = _dt.datetime.fromisoformat(test.recorded_at) if test.recorded_at else None
@@ -808,8 +809,8 @@ class Project:
     def track_info(self, test: Test, track: Track, app: Apparatus | None = None) -> dict:
         """Information columns taken from a test's track: whether the animal is lighter or darker than the apparatus
         (as detected; else the detection setting), its body length (apparatus units), the percentage of frames in
-        which it was detected, the video times, and "Animal reached the end zone" when the analysis ended the test
-        there (AnalysisSettings.end_zone)."""
+        which it was detected, the jumps removed, the video times, and "Animal reached the end zone" when the analysis
+        ended the test there (AnalysisSettings.end_zone)."""
         from .measures import body_length, end_of_test
         from .pauses import drop_pauses
 
@@ -825,6 +826,10 @@ class Project:
             L = body_length(track, app.scale if app is not None else 1.0)
             out["Animal length"] = round(float(L), 2) if math.isfinite(L) else ""
             out["Frames tracked (%)"] = round(100.0 * float(np.count_nonzero(track.detected)) / n, 2)
+        try:  # positions removed as jumps by tracking or in Review (blank when jump removal was off)
+            out["Jumps removed"] = int(float(track.meta["jumps_removed"]))
+        except (KeyError, TypeError, ValueError):
+            pass
         if track.meta.get("source") == "live" or test.end_reason:  # recorded live (the video, if any, is its recording)
             out.update({"Source video file": "", "Recorded video file": self.abs_path(test.video) if test.video else "",
                         "Video time at test start (s)": 0.0 if test.video else ""})

@@ -296,8 +296,8 @@ class ExperimentPage(Page):
                           small_button("Remove", "delete", slot=self.periods.remove_current)))
 
         pg.section("Time periods based on a time marker")
-        pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box — or "
-                    "starting at the time (s) given by a calculation. Occurrence: 1 = first, 2 = second…, 0 = one "
+        pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box — "
+                    "or starting at the time (s) given by a calculation. Occurrence: 1 = first, 2 = second…, 0 = one "
                     "period for every occurrence. Periods whose event never happens are left out. The period lasts "
                     "its duration (0 = until the end of the test) or ends at an event (its occurrence after the "
                     "start: 1 = the first) or at a calculation's time; when that never happens, it ends at the end "

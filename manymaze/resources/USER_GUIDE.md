@@ -244,7 +244,9 @@ interest is the *novel object* (novel object recognition) and the *social stimul
 * **Test start**: set the start to the current video time.
 * **Manual scoring**: press a behaviour's key during playback to start/stop a state behaviour (or add a point
   event) at the current time. Space = play/pause, ←/→ = frame step (Shift = 1 s).
-* **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges.
+* **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges, or
+  **Remove jumps** (Track editing): the jumps of a tracked test are removed with its detection settings (*Remove
+  jumps faster than*, below) and filled like gaps, without tracking again; *Undo* reverts it.
 * **Results / plots** for the test: track plot, occupancy heat map, speed and freezing trace.
 
 ### Swapping identities (several animals)
@@ -269,7 +271,15 @@ when no range is set. *Undo* reverts the swap.
    The **whole-body outline** (a simplified polygon of the animal's blob, up to 24 points) is stored too and drawn
    in the test view, live images and exported videos (*Record the animal's whole-body outline*, on by default;
    tracks from older versions simply have no outline).
-6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
+6. **Jumps are removed** (when *Remove jumps faster than* is set, *Animal tracking ▸ Jumps*): a position the animal
+   could not have reached from its last good one at that speed (cm/s when the apparatus is calibrated, else pixels
+   per second) is a jump — a reflection, a shadow or another object detected for a moment — when the track comes
+   back (to less than half the jump's distance, at a plausible speed) within *… when the track comes back within*
+   seconds (0.5 by default). Its frames become missing. A genuine fast run does not come back to where it started,
+   so it is kept; choose a limit well above the animal's top speed (e.g. 150 cm/s for a mouse, 300 cm/s for a rat).
+   The number removed is the *Jumps removed* information column. Off (0) by default, so tracks made before keep
+   their positions.
+7. Gaps up to *Fill gaps in the track of up to* seconds are filled (jumps included); optional smoothing.
 
 ### Tracking by colour
 
@@ -1499,6 +1509,7 @@ unticked):
 | Animal lighter / darker | Whether the animal is lighter or darker than the apparatus: the detection *contrast* setting, or with *auto* what tracking found in most frames. Blank for colour tracking. |
 | Animal length | The animal's median body length (nose–tail, or from its area), in the apparatus unit (cm when calibrated). |
 | Frames tracked (%) | Percentage of the test's frames in which the animal was detected. |
+| Jumps removed | The jumps removed from the track by tracking or by Review's *Remove jumps* (blank when jump removal was off; see *How tracking works*). |
 | Source video file | The video a test was tracked from. |
 | Recorded video file | The video recorded during a live test. |
 | Video time at test start (s) | Where in the video the test starts (0 for recordings). |
