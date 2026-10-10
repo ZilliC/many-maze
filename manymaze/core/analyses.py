@@ -21,7 +21,7 @@ from matplotlib.figure import Figure
 
 from . import plots
 from . import stats as st
-from .stats import format_p, is_number, stars
+from .stats import ALPHA, format_p, is_number, stars
 
 WHOLE = "Whole test"
 NONE = "(none)"
@@ -88,9 +88,19 @@ def cell(v) -> str:
     return v if isinstance(v, str) else fmt(v)
 
 
-def p_text(p) -> str:
-    s = stars(p)
+def p_text(p, alpha: float = ALPHA) -> str:
+    s = stars(p, alpha)
     return f"{format_p(p)} {s}".strip() if s else format_p(p)
+
+
+def significance_level(project) -> float:
+    """The significance level set on the Statistics page (Project.statistics["alpha"]; 0.05 by default)."""
+    return st.significance_level((getattr(project, "statistics", None) or {}).get("alpha", ALPHA))
+
+
+def _alpha_note(alpha: float) -> str:
+    """How a significance level other than the usual 0.05 is mentioned under a title."""
+    return "" if alpha == ALPHA else f"α = {alpha:g}"
 
 
 def context(period: str | None = None, filt: tuple | None = None, factor: str | None = None) -> str:
@@ -186,9 +196,10 @@ def _desc_row(d: dict) -> list:
 def compare(project, rows: list[dict], measure: str, factor: str, method: str = "auto", parametric: bool = True,
             paired: bool = False, posthoc: str = "auto", control: str | None = None, mu: float = 0.0,
             plot: str = "bar", error: str = "sem", points: bool = True, period: str | None = None,
-            filt: tuple | None = None) -> Analysis | None:
+            filt: tuple | None = None, alpha: float = ALPHA) -> Analysis | None:
     """The measure compared between the levels of a factor (t-test / ANOVA / rank tests chosen automatically or
-    `method`), with post-hoc tests, assumption checks and a group graph; one-sample tests vs `mu`."""
+    `method`), with post-hoc tests, assumption checks and a group graph; one-sample tests vs `mu`. alpha: the
+    significance level of the "significant" marks (colour, stars, graph brackets, failed assumption checks)."""
     if not measure or not factor:
         return None
     paired = paired or method in st.PAIRED_METHODS
@@ -208,7 +219,7 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
     if gv:
         fig = plots.group_plot(gv, measure, group_colors(project, factor), kind=plot,
                                posthoc=None if one else res.get("posthoc"), p_value=None if one else res.get("p"),
-                               error=error, points=points, ref_value=res.get("mu") if one else None)
+                               error=error, points=points, ref_value=res.get("mu") if one else None, alpha=alpha)
         _y_range(project, measure, fig, [v for vs in gv.values() for v in vs])
     else:
         fig = plots.message_figure(f"No values of “{measure}”")
@@ -219,7 +230,7 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
         lines = []
         for g, r in res["one_sample"].items():
             sym = STAT_NAMES.get(r.get("test"), "stat")
-            lines.append(f"{escape(g)}: {sym} = {fmt(r.get('statistic'))}, {escape(p_text(r.get('p')))}, "
+            lines.append(f"{escape(g)}: {sym} = {fmt(r.get('statistic'))}, {escape(p_text(r.get('p'), alpha))}, "
                          f"d = {fmt(r.get('effect_size'))}")
         html += f"<div style='font-size:13px'>vs {res['mu']:g}<br>{'<br>'.join(lines)}</div>"
     else:
@@ -230,9 +241,9 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
         if res.get("df") is not None:
             parts.append(f"df = {fmt(res['df'], 2)}")
         parts.append(format_p(p))
-        colour = "#16a34a" if p == p and p < 0.05 else "#475569"
+        colour = "#16a34a" if p == p and p < alpha else "#475569"
         html += (f"<div style='font-size:14px'>{escape(', '.join(parts))} "
-                 f"<b style='color:{colour}'>{stars(p)}</b></div>")
+                 f"<b style='color:{colour}'>{stars(p, alpha)}</b></div>")
         if "p_gg" in res:
             html += f"<div>Greenhouse-Geisser ε = {res['epsilon_gg']:.3f}, {escape(format_p(res['p_gg']))}</div>"
         es = dict(res.get("effect_sizes") or {})
@@ -245,17 +256,18 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
     sub = _with(f"by {label(factor)}", context(period, filt, factor))
     if paired:
         sub += " · same animals at each level"
+    sub = _with(sub, _alpha_note(alpha))
     checks = []
     for g, v in gv.items():
         for name, pv in st.normality(v).items():
-            checks.append([f"{name} (normality)", g, fmt(pv), "non-normal" if pv < 0.05 else ""])
+            checks.append([f"{name} (normality)", g, fmt(pv), "non-normal" if pv < alpha else ""])
     for name, pv in st.variance_tests(gv).items():
-        checks.append([f"{name} (equal variances)", "all", fmt(pv), "unequal" if pv < 0.05 else ""])
+        checks.append([f"{name} (equal variances)", "all", fmt(pv), "unequal" if pv < alpha else ""])
     tables = [Table("Descriptive statistics", [label(factor)] + DESC_HEADERS,
                     [[g] + _desc_row(d) for g, d in res["descriptive"].items()]),
               Table("Post-hoc comparisons", ["Comparison", "Difference", "p", "", "Method"],
-                    [[f"{x['a']} vs {x['b']}", fmt(x.get("diff")), format_p(x["p"]), stars(x["p"]), x.get("test", "")]
-                     for x in res.get("posthoc") or []]),
+                    [[f"{x['a']} vs {x['b']}", fmt(x.get("diff")), format_p(x["p"]), stars(x["p"], alpha),
+                      x.get("test", "")] for x in res.get("posthoc") or []]),
               Table("Assumption checks", ["Check", "Group", "p", ""], checks)]
     # summary
     head = f"Compared by {factor}"
@@ -263,14 +275,16 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
         head += f", period: {period}"
     if filt is not None:
         head += f", only {filt[0]} = {filt[1]}"
+    if alpha != ALPHA:
+        head += f", significance level {alpha:g}"
     if one:
         lines = [measure, f"  {res['test']} vs {res['mu']:g}"]
         for g, r in res["one_sample"].items():
             lines.append(f"    {g}: n={r['descriptive']['n']}, statistic={r['statistic']:.3f}, "
-                         f"{format_p(r['p'])} {stars(r['p'])}")
+                         f"{format_p(r['p'])} {stars(r['p'], alpha)}")
         text = "\n".join(lines)
     else:
-        text = st.summary_text(res, measure)
+        text = st.summary_text(res, measure, alpha)
     check_lines = [f"    {c[0]} {c[1]}: {format_p(float(c[2])) if c[2] not in ('', '–') else 'n/a'}" for c in checks]
     summary = f"{head}\n{text}" + ("\n  Assumption checks:\n" + "\n".join(check_lines) if check_lines else "")
     return Analysis(measure, f"{sub} · N = {n_total}", html, tables, fig, summary, res)
@@ -279,16 +293,18 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
 # ---------------------------------------------------------------- two factors
 def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None = None, design: str = "between",
                plot: str = "line", error: str = "sem", points: bool = True, period: str | None = None,
-               filt: tuple | None = None) -> Analysis:
+               filt: tuple | None = None, alpha: float = ALPHA) -> Analysis:
     """The measure across the levels of `x` (stages, trials, periods), optionally by a 2nd factor: two-way /
-    mixed / rank-based ANOVA, or a repeated-measures ANOVA over `x` alone (design "mixed")."""
+    mixed / rank-based ANOVA, or a repeated-measures ANOVA over `x` alone (design "mixed"); effects significant at
+    the level alpha are starred."""
     if not measure or not x:
         return Analysis(figure=plots.message_figure("Needs stages, trials or time periods"))
     if x == "Period":
         rows = [r for r in rows if r.get("Period") != WHOLE]
     rows = [r for r in rows if is_number(r.get(measure))]
     by = by if by and by != NONE else None
-    sub = _with(f"by {label(x)}" + (f" and {label(by)}" if by else ""), context(period, filt, x))
+    sub = _with(_with(f"by {label(x)}" + (f" and {label(by)}" if by else ""), context(period, filt, x)),
+                _alpha_note(alpha))
     if by is None:
         rows = [{**r, "_all": "All"} for r in rows]
     if not rows:
@@ -338,9 +354,9 @@ def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None =
     h = any("H" in e for e in res["effects"])
     table = Table("Analysis of variance", ["Effect", "SS", "df", "H" if h else "F", "p", "", "p (GG)"],
                   [[" × ".join(label(f) for f in str(e["effect"]).split(" × ")), e["SS"], e["df"], e.get("H", e["F"]),
-                    format_p(e["p"]), stars(e["p"]), format_p(e["p_gg"]) if "p_gg" in e else ""]
+                    format_p(e["p"]), stars(e["p"], alpha), format_p(e["p_gg"]) if "p_gg" in e else ""]
                    for e in res["effects"]])
-    text = st.anova_text(res, measure)
+    text = st.anova_text(res, measure, alpha)
     if res.get("design", "between") == "between" and "df_residual" in res:
         text = text.replace("Two-way ANOVA", "two-way ANOVA", 1) + f"\n  residual df = {res['df_residual']}"
     return Analysis(measure, sub, f"<div style='font-size:16px'><b>{escape(title)}</b></div>{escape(desc)}{extra}",
@@ -349,9 +365,9 @@ def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None =
 
 # ---------------------------------------------------------------- correlation
 def correlate(project, rows: list[dict], mx: str, my: str, method: str = "pearson", by: str | None = None,
-              period: str | None = None, filt: tuple | None = None) -> Analysis | None:
+              period: str | None = None, filt: tuple | None = None, alpha: float = ALPHA) -> Analysis | None:
     """Correlation (Pearson / Spearman / Kendall) and linear regression of two measures; result["regression"]
-    holds the regression."""
+    holds the regression. alpha: the significance level of the stars."""
     if not mx or not my:
         return None
     rows = [r for r in rows if is_number(r.get(mx)) and is_number(r.get(my))]
@@ -392,16 +408,17 @@ def correlate(project, rows: list[dict], mx: str, my: str, method: str = "pearso
             eff = a["effects"][0]
             anc = (f"<br><b>ANCOVA</b> ({escape(label(by))} adjusted for {escape(mx)})"
                    f"<div>F({eff['df']}, {eff['df_error']}) = {eff['F']:.3f}, {escape(format_p(eff['p']))} "
-                   f"{stars(eff['p'])}</div>"
+                   f"{stars(eff['p'], alpha)}</div>"
                    + "".join(f"<div>{escape(label(lv))}: adjusted mean {d['adjusted_mean']:.4g} ± "
                              f"{d['adjusted_se']:.3g} SE</div>" for lv, d in a["adjusted_means"].items()))
             sl = a.get("slopes")
             if sl:
                 anc += (f"<div>Homogeneity of slopes: {escape(format_p(sl['p']))}"
-                        + (" — <span style='color:#dc2626'>slopes differ</span>" if sl["p"] < 0.05 else "")
+                        + (" — <span style='color:#dc2626'>slopes differ</span>" if sl["p"] < alpha else "")
                         + "</div>")
     html = (f"<div style='font-size:16px'><b>{name} = {fmt(r)}</b></div>"
-            f"<div style='font-size:14px'>{escape(p_text(p))}, n = {res.get('n', 0)}</div>{ci}<div>{strength}</div>"
+            f"<div style='font-size:14px'>{escape(p_text(p, alpha))}, n = {res.get('n', 0)}</div>{ci}"
+            f"<div>{strength}</div>"
             f"{reg}{anc}")
     name = {"pearson": "Pearson r", "spearman": "Spearman rho", "kendall": "Kendall tau"}[method]
     text = f"{mx} vs {my}: {name} = {res['r']:.3f}, {format_p(res['p'])}, n = {res['n']}"
@@ -409,9 +426,9 @@ def correlate(project, rows: list[dict], mx: str, my: str, method: str = "pearso
         text += (f"\n  Linear regression: slope = {g['slope']:.4g} (95% CI {g['slope_ci'][0]:.4g} to "
                  f"{g['slope_ci'][1]:.4g}), intercept = {g['intercept']:.4g}, R² = {g['r2']:.3f}, {format_p(g['p'])}")
     if "ancova" in res:
-        text += "\n" + st.ancova_text(res["ancova"], my)
-    return Analysis(f"{my} against {mx}", _with(f"N = {len(rows)}", context(period, filt)), html, [], fig, text,
-                    res)
+        text += "\n" + st.ancova_text(res["ancova"], my, alpha)
+    return Analysis(f"{my} against {mx}", _with(_with(f"N = {len(rows)}", context(period, filt)),
+                                                 _alpha_note(alpha)), html, [], fig, text, res)
 
 
 # ---------------------------------------------------------------- grouped descriptive statistics
@@ -442,8 +459,9 @@ def grouped(project, rows: list[dict], measure: str, factors: list[str], plot: s
 
 # ---------------------------------------------------------------- categorical
 def categorical(project, rows: list[dict], rf: str, cf: str, period: str | None = None,
-                filt: tuple | None = None) -> Analysis:
-    """Counts of a categorical result (or factor) `cf` per level of `rf`, with χ² / G / Fisher's exact tests."""
+                filt: tuple | None = None, alpha: float = ALPHA) -> Analysis:
+    """Counts of a categorical result (or factor) `cf` per level of `rf`, with χ² / G / Fisher's exact tests (stars
+    at the significance level alpha)."""
     if not rf or not cf:
         return Analysis(figure=plots.message_figure("No categorical results (e.g. search strategy) in this "
                                                     "experiment"))
@@ -458,13 +476,13 @@ def categorical(project, rows: list[dict], rf: str, cf: str, period: str | None 
     text = ""
     if res.get("p") == res.get("p"):
         html += (f"<div style='font-size:14px'>χ²({res['df']}) = {res['statistic']:.3f}, "
-                 f"{escape(p_text(res['p']))}</div><div>Cramér's V = {res['effect_size']:.3f}</div>")
+                 f"{escape(p_text(res['p'], alpha))}</div><div>Cramér's V = {res['effect_size']:.3f}</div>")
         if "g_test" in res:
             html += f"<div>G-test: G = {res['g_test']['statistic']:.3f}, {escape(format_p(res['g_test']['p']))}</div>"
         if "fisher" in res:
             odds = res["fisher"]["odds_ratio"]
             html += (f"<div>Fisher's exact test: odds ratio = {'∞' if odds == math.inf else fmt(odds)}, "
-                     f"{escape(p_text(res['fisher']['p']))}</div>")
+                     f"{escape(p_text(res['fisher']['p'], alpha))}</div>")
         if res.get("low_expected"):
             html += ("<div style='color:#b45309'>Some expected counts are below 5: prefer Fisher's exact test "
                      "(2 × 2) or pool categories.</div>")
@@ -477,8 +495,9 @@ def categorical(project, rows: list[dict], rf: str, cf: str, period: str | None 
         res["goodness_of_fit"] = gof
         if gof.get("p") == gof.get("p"):
             html += (f"<div>Goodness of fit (equal proportions of {escape(label(cf))}): "
-                     f"χ²({gof['df']}) = {gof['statistic']:.3f}, {escape(p_text(gof['p']))}</div>")
+                     f"χ²({gof['df']}) = {gof['statistic']:.3f}, {escape(p_text(gof['p'], alpha))}</div>")
             piece = (f"Chi-square goodness of fit (equal proportions): chi-square({gof['df']}) = "
                      f"{gof['statistic']:.3f}, {format_p(gof['p'])}")
             text = f"{text}\n  {piece}" if text else piece
-    return Analysis(f"{label(cf)} by {label(rf)}", context(period, filt), html, [table], fig, text, res)
+    return Analysis(f"{label(cf)} by {label(rf)}", _with(context(period, filt), _alpha_note(alpha)), html, [table],
+                    fig, text, res)

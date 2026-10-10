@@ -25,7 +25,7 @@ from ....core.project import INFO_COLUMNS
 from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_live_test
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
-from ...confirm_id import confirm_animal_id
+from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...io_devices_dialog import open_device_manager
 from ...live_widgets import CameraOptionsDialog, short_time
 from ...widgets import Worker, error_box, fmt_time
@@ -424,7 +424,7 @@ class SingleTestMixin:
         return {"session": s, "state": state, "elapsed": s.elapsed if state != "waiting" else 0.0,
                 "duration": s.duration_s, "events": len(s.events), "fired": list(s.engine.fired),
                 "outputs": list(s.outputs.log) if s.outputs is not None else [], "proc_log": list(s.log),
-                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance,
+                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance * s.stats.factor,
                 "unit": s.stats.unit}
 
     @property
@@ -460,7 +460,7 @@ class SingleTestMixin:
                     self._preview_tracker = self._make_preview_tracker(frame, app)
                 dets, _fg = self._preview_tracker.process(frame) if self._preview_tracker else ([], None)
                 d = dets[0] if dets else None
-                info = {"state": "preview", "distance": 0.0, "unit": app.unit if app else "px"}
+                info = {"state": "preview", "distance": 0.0, "unit": app.report_unit if app else "px"}
             info["detected"] = bool(d is not None and d.detected)
             zones = []
             if s is not None and s.state in ("running", "paused"):
@@ -653,16 +653,18 @@ class SingleTestMixin:
             path = autosave.path_for(p, test)
         except Exception:
             return {}
-        return {"autosave_path": path, "autosave_meta": {
+        return {"autosave_path": path, "autosave_key": p.file_key, "autosave_meta": {
             "test_id": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
             "trial": test.trial}}
 
     def _make_session(self, test, app, bg, size, fps: float, outputs, devices, name: str, entry=None,
                       on_stimulus=None) -> LiveSession:
         """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
-        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
+        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery.
+        In an Input/output only protocol (with several tests: a test panel without a camera) an IOSession."""
         p = self.project
-        if self.io_only:  # no camera: the I/O devices and the procedures on the computer's clock
+        io = self.io_only if entry is None else entry.source_key is None
+        if io:  # no camera: the I/O devices and the procedures on the computer's clock
             mode = self._session_mode()
             if mode in ("on_detection", "experimenter_leaves"):
                 self._log("I/O only: the test starts as soon as it is armed (no camera to detect the animal).",
@@ -673,7 +675,8 @@ class SingleTestMixin:
                              devices=devices, variables=p.variables, name=name, zone_overrides=test.zone_overrides,
                              on_stimulus=on_stimulus, outputs_off_on_pause=self.pause_off.isChecked(),
                              test_info=test_context(p, test), control_input=self.control_input.text().strip(),
-                             **self._autosave_args(test))
+                             sync=p.sync, start_input=self.start_input.text().strip(),
+                             start_delay_s=float(p.start_switch_delay_s or 0.0), **self._autosave_args(test))
         settings = self._detection_settings(test)
         if settings.background == "frame" and bg is None:
             settings.background = "adaptive"
@@ -686,8 +689,9 @@ class SingleTestMixin:
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
                         outputs_off_on_pause=self.pause_off.isChecked(), test_info=test_context(p, test),
-                        control_input=self.control_input.text().strip(),
-                        **self._autosave_args(test))
+                        control_input=self.control_input.text().strip(), sync=p.sync,
+                        start_input=self.start_input.text().strip(),
+                        start_delay_s=float(p.start_switch_delay_s or 0.0), **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)
         if s.record_path:  # room for the recording?
@@ -752,7 +756,7 @@ class SingleTestMixin:
             return False
         self.test = test
         self._new_test = new
-        if not confirm_animal_id(self, test):
+        if not confirm_animal_id(self, test) or not weigh_before_test(self, test, reader=self.scale_reader):
             self._discard_new_test()
             return False
         if self.io_only:

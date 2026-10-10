@@ -29,6 +29,7 @@ dependencies = [
   "av>=14",  # FFmpeg decoding/encoding (VideoToolbox hardware acceleration on macOS)
   "onnxruntime>=1.17",  # pose model inference (Core ML: Neural Engine / GPU on Apple Silicon)
   "onnx>=1.15",  # converting downloaded pose models
+  "cryptography>=42",  # experiments protected by a password (AES-GCM); imported only when one is opened
 ]
 
 [project.optional-dependencies]

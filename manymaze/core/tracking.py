@@ -52,6 +52,11 @@ class DetectionSettings:
     record_outline: bool = True  # store the animal's whole-body outline (a simplified polygon) in each frame
     motion_threshold: int = 20  # grey-level change counted as motion (freezing)
     max_gap_s: float = 1.0  # interpolate gaps up to this length
+    # jump removal (before the gaps are filled): positions implying a speed above max_jump_speed (apparatus units/s,
+    # cm/s when calibrated; 0 = off) from the last good one are removed when the track comes back within max_jump_s
+    # (a reflection or another object detected for a moment); real fast runs do not come back and are kept
+    max_jump_speed: float = 0.0
+    max_jump_s: float = 0.5
     smoothing: int = 0  # moving-average window (frames), 0 = off
     start_time_s: float = 0.0  # analyse from this time in the video
     duration_s: float = 0.0  # analyse this many seconds (0 = to end)
@@ -1027,8 +1032,13 @@ class ArenaJob:
     mask: np.ndarray | None = None
 
 
-def postprocess(track: Track, settings: DetectionSettings) -> Track:
+def postprocess(track: Track, settings: DetectionSettings, scale: float = 1.0) -> Track:
+    """A track as tracking stores it: jumps removed (settings.max_jump_speed; scale: the apparatus units per pixel,
+    Apparatus.scale; the number removed in meta["jumps_removed"]), gaps filled and positions smoothed."""
     out = track
+    if settings.max_jump_speed and settings.max_jump_speed > 0:
+        out = track.copy()
+        out.meta["jumps_removed"] = out.remove_jumps(settings.max_jump_speed, settings.max_jump_s, scale)
     if settings.max_gap_s and settings.max_gap_s > 0:
         out = out.interpolate(settings.max_gap_s)
     if settings.smoothing and settings.smoothing > 1:
@@ -1136,7 +1146,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             if est is not None:
                 tr.meta["pose_model"] = job.settings.pose_model
                 tr.meta["pose_device"] = est.provider
-            tracks.append(postprocess(tr, job.settings))
+            tracks.append(postprocess(tr, job.settings, job.apparatus.scale if job.apparatus is not None else 1.0))
         out.append(tracks)
     return out
 

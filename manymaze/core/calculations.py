@@ -29,6 +29,10 @@ usual operator precedence applies (``2 + 3 * 4`` is 14).
 Calculations are worked out by :func:`measures.analyse` for every test and time period (:func:`evaluate_test`);
 those that use the trial functions or information columns (directly or through another calculation) need the rest
 of the experiment and are worked out by ``Project.results`` (:func:`evaluate`, :class:`Trials`).
+
+A time period can start or end at the time (s) given by a calculation's whole-test result (ANY-maze T0625; see
+:mod:`.periods`): :func:`plan` then works out a calculation using that period by name after the calculations that
+define it, and reports a circular reference when the period needs the calculation's own result.
 """
 
 from __future__ import annotations
@@ -232,12 +236,14 @@ def parse(formula: str) -> _Parsed:
 
 
 def check_calculation(calc: Calculation, measures: Iterable[str] | None = None,
-                      calculations: list[Calculation] | None = None, reserved: Iterable[str] = ()) -> list[str]:
+                      calculations: list[Calculation] | None = None, reserved: Iterable[str] = (),
+                      periods: list | None = None) -> list[str]:
     """Edit-time problems of a calculation: its name (blank, used by another calculation or an information column),
     decimal places, units, Y axis range, named values and formula (syntax, functions, unknown names, circular
     references). measures: the measure columns of the current results, without the calculations' (unknown measures
     are reported); calculations: all the experiment's calculations (names and circular references); reserved: the
-    information columns."""
+    information columns; periods: the event-anchored time periods (a time period defined by this calculation's result
+    that its formula uses, directly or through other calculations, is a circular reference)."""
     errs = []
     col = calc.column
     if not calc.name.strip():
@@ -284,6 +290,20 @@ def check_calculation(calc: Calculation, measures: Iterable[str] | None = None,
         errs.append("the formula uses its own result")
     elif calculations and any(s.calc is calc and not s.ok for s in plan(calculations)):
         errs.append("circular reference: the calculations use each other's results")
+    elif periods and any(s.calc is calc and not s.ok for s in plan(calculations or [calc], periods=periods)):
+        from .periods import calculation_columns, fixed_period_name, period_names
+
+        used = [fixed_period_name(c[3]) for c in p.calls if c[1] == PERIOD_FUNCTION]
+        names = [str(d.get("label") or "") for d in periods if isinstance(d, dict) and calculation_columns(d)
+                 and any(n is not None and period_names(d, n) for n in used)]
+        if not in_loop(calculations or [calc], col, periods):
+            errs.append("it uses a calculation in a circular reference through a time period (its result is blank)")
+        elif names:
+            errs.append(f"circular reference: the time period “{names[0]}” is defined by this calculation's result "
+                        "(directly or through other calculations)")
+        else:
+            errs.append("circular reference: the formula uses (through other calculations) a time period defined "
+                        "by this calculation's result")
     return errs
 
 
@@ -296,20 +316,62 @@ class Step:
     ok: bool = True  # False: part of a circular reference (or using one), never worked out (NaN)
 
 
-def plan(calculations, info: Iterable[str] = ()) -> list[Step]:
-    """The calculations in an order in which they can be worked out (each after the calculations it uses), with
-    whether each is deferred to Project.results (it uses a trial function or one of the `info` columns, or a deferred
-    calculation); then, not ok, those in a circular reference. A second calculation with the column of another is
-    left out. Steps given instead of calculations are returned as they are."""
-    calculations = list(calculations or [])
-    if calculations and isinstance(calculations[0], Step):
-        return calculations
-    info = set(info)
+def _by_column(calculations) -> dict[str, tuple[int, Calculation]]:
+    """{results column: (position in the list, calculation)}, the first calculation of each column."""
     by_col: dict[str, tuple[int, Calculation]] = {}
     for i, c in enumerate(calculations):
         if c.column:
             by_col.setdefault(c.column, (i, c))
+    return by_col
+
+
+def _dependencies(by_col: dict, periods=None) -> dict[str, set[str]]:
+    """{column: the columns of the calculations it needs}: those in its formula and, with the time periods, those
+    defining a period it names in result_for_period()."""
     deps = {col: {r for r in parse(c.formula).references if r in by_col} for col, (_i, c) in by_col.items()}
+    if periods:
+        from .periods import fixed_period_name, period_calculation_deps, uses_calculations
+
+        if uses_calculations(periods):
+            defined_by = period_calculation_deps(periods)
+            for col, (_i, c) in by_col.items():
+                for _ph, fn, _m, args in parse(c.formula).calls:
+                    name = fixed_period_name(args) if fn == PERIOD_FUNCTION else None
+                    if name is not None:
+                        deps[col] |= {d for d in defined_by(name) if d in by_col}
+    return deps
+
+
+def in_loop(calculations, column: str, periods=None) -> bool:
+    """The calculation with this results column needs its own result (through other calculations and, with the
+    time periods, the periods defined by calculations)."""
+    deps = _dependencies(_by_column(list(calculations or [])), periods)
+    seen, todo = set(), list(deps.get(column, ()))
+    while todo:
+        c = todo.pop()
+        if c == column:
+            return True
+        if c not in seen:
+            seen.add(c)
+            todo += deps.get(c, ())
+    return False
+
+
+def plan(calculations, info: Iterable[str] = (), periods=None) -> list[Step]:
+    """The calculations in an order in which they can be worked out (each after the calculations it uses), with
+    whether each is deferred to Project.results (it uses a trial function or one of the `info` columns, or a deferred
+    calculation); then, not ok, those in a circular reference. A second calculation with the column of another is
+    left out. Steps given instead of calculations are returned as they are.
+
+    periods: the event-anchored time periods (AnalysisSettings.event_periods): a calculation using
+    result_for_period('name') of a period defined by calculations (periods.py) is worked out after them, and is in a
+    circular reference when the period needs its own result."""
+    calculations = list(calculations or [])
+    if calculations and isinstance(calculations[0], Step):
+        return calculations
+    info = set(info)
+    by_col = _by_column(calculations)
+    deps = _dependencies(by_col, periods)
     out, deferred = [], {}
     pending = list(by_col)
     while pending:
@@ -495,11 +557,16 @@ def evaluate_calc(calc: Calculation, row: dict, period: Callable | None = None, 
 
 
 def evaluate(steps, row: dict, period: Callable | None = None, trials: Trials | None = None,
-             deferred: bool | None = None) -> dict:
+             deferred: bool | None = None, view: dict | None = None) -> dict:
     """{column: result} of the calculations (a list of Calculation or of plan() steps) for a results row, each
     seeing the results of those before it, in the order of the experiment's list. deferred: None every step, False
-    the steps worked out per test (NaN for the deferred ones, worked out later), True only the deferred ones."""
-    view = dict(row)
+    the steps worked out per test (NaN for the deferred ones, worked out later), True only the deferred ones.
+    view: a dict given the row and each result as soon as it is worked out (default: a copy of the row), e.g. read
+    by a period callback whose time periods are defined by calculations worked out before."""
+    if view is None:
+        view = dict(row)
+    else:
+        view.update(row)
     got = {}
     for s in plan(steps):
         if deferred is not None and s.deferred != deferred:
@@ -512,10 +579,10 @@ def evaluate(steps, row: dict, period: Callable | None = None, trials: Trials | 
     return dict(got[i] for i in sorted(got))
 
 
-def evaluate_test(calculations, row: dict, period: Callable | None = None) -> dict:
+def evaluate_test(calculations, row: dict, period: Callable | None = None, view: dict | None = None) -> dict:
     """The calculations of a test's results row (measures.analyse): those that need only this test; NaN for the
-    deferred ones (Project.results works them out) and for those that cannot be worked out."""
-    return evaluate(calculations, row, period, deferred=False)
+    deferred ones (Project.results works them out) and for those that cannot be worked out (view: see evaluate)."""
+    return evaluate(calculations, row, period, deferred=False, view=view)
 
 
 def y_range(calculations: Iterable[Calculation], column: str) -> tuple[float | None, float | None] | None:

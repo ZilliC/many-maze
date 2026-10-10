@@ -159,10 +159,12 @@ def find_sequences(seq: Sequence, entries: list[tuple[str, float, float]], other
 
 
 def sequence_measures(seq: Sequence, attempts: list[Attempt], t0: float, T: float,
-                      latency_if_never: str = "duration", distance=None, unit: str = "cm") -> "OrderedDict[str, object]":
+                      latency_if_never: str = "duration", distance=None, unit: str = "cm",
+                      undefined: float = math.nan) -> "OrderedDict[str, object]":
     """Measures for one sequence (prefixed with its name). distance: optional function (t_a, t_b) -> distance
     travelled between two times, for the distance travelled during each completed sequence (from the entry into
-    its first step to its completion) and the mean speed during the sequences."""
+    its first step to its completion) and the mean speed during the sequences. undefined: the mean duration,
+    distance and speed without a sequence (ANY-maze's "Use zero as the result for undefined averages": 0)."""
     n = seq.name
     done = [a for a in attempts if a.completed]
     failed = [a for a in attempts if not a.completed]
@@ -181,7 +183,7 @@ def sequence_measures(seq: Sequence, attempts: list[Attempt], t0: float, T: floa
     out[f"{n}: latency to first (s)"] = r(done[0].end - t0 if done else never)
     out[f"{n}: latency to start of first (s)"] = r(max(0.0, done[0].start - t0) if done else never)
     out[f"{n}: first duration (s)"] = r(durs[0] if len(durs) else math.nan)
-    out[f"{n}: mean duration (s)"] = r(durs.mean() if len(durs) else math.nan)
+    out[f"{n}: mean duration (s)"] = r(durs.mean() if len(durs) else undefined)
     out[f"{n}: min duration (s)"] = r(durs.min() if len(durs) else math.nan)
     out[f"{n}: max duration (s)"] = r(durs.max() if len(durs) else math.nan)
     gaps = [b.start - a.end for a, b in zip(done, done[1:])]
@@ -193,9 +195,9 @@ def sequence_measures(seq: Sequence, attempts: list[Attempt], t0: float, T: floa
     if distance is not None:
         dist = np.array([distance(a.start, a.end) for a in done], float)
         out[f"{n}: total distance in sequences ({unit})"] = r(dist.sum() if len(dist) else 0.0, 2)
-        out[f"{n}: mean distance ({unit})"] = r(dist.mean() if len(dist) else math.nan, 2)
+        out[f"{n}: mean distance ({unit})"] = r(dist.mean() if len(dist) else undefined, 2)
         out[f"{n}: max distance ({unit})"] = r(dist.max() if len(dist) else math.nan, 2)
         out[f"{n}: min distance ({unit})"] = r(dist.min() if len(dist) else math.nan, 2)
         t_seq = durs.sum() if len(durs) else 0.0
-        out[f"{n}: mean speed during sequences ({unit}/s)"] = r(dist.sum() / t_seq if t_seq > 0 else math.nan)
+        out[f"{n}: mean speed during sequences ({unit}/s)"] = r(dist.sum() / t_seq if t_seq > 0 else undefined)
     return out

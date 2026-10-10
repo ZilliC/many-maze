@@ -128,6 +128,8 @@ def describe_statement(st: dict) -> str:
                                                     else ""))
         if st.get("trials") not in (None, ""):
             extra.append(f"trials {st['trials']}")
+        if str(st.get("record_as") or "").strip():
+            extra.append(f"recorded as “{str(st['record_as']).strip()}”")
         return f"When {describe_event(st)}" + (f"  [{', '.join(extra)}]" if extra else "")
     if t == "wait":
         mode = wait_mode(st)

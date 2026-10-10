@@ -7,10 +7,12 @@
 // 1.2: the banner is printed at start-up (the computer notices a reset and configures the board again), long
 // pulses and trains (period over 60 s) are timed in milliseconds, "P pin level max_ms", deadband -1 (every
 // sample), over-long lines are refused, DHT22 / HX711 reads no longer mask the interrupts for milliseconds.
+// 1.3: "SYNC pin width_us" (synchronisation pulses: the end of the pulse is timed by a Timer1 interrupt on AVR
+// boards, so its width does not depend on what the loop is doing; "SYNC" alone repeats the last one).
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#define FW_VERSION "1.2"
+#define FW_VERSION "1.3"
 #ifndef BOARD_NAME
 #define BOARD_NAME "arduino"
 #endif
@@ -65,6 +67,11 @@ void err(const char *msg) {
   Serial.println(msg);
 }
 
+void err(const __FlashStringHelper *msg) {  // a message kept in flash: err(F("..."))
+  Serial.print(F("ERR "));
+  Serial.println(msg);
+}
+
 DOut *findOut(int pin) {
   for (uint8_t i = 0; i < nOut; i++)
     if (outs[i].pin == pin) return &outs[i];
@@ -77,7 +84,11 @@ void writeOut(DOut *o, uint8_t on) {
   digitalWrite(o->pin, ((on ? 1 : 0) ^ o->invert) ? HIGH : LOW);
 }
 
+void stopSync(int pin, uint8_t only = 0);
+bool timer1Pin(int8_t pin);
+
 void writePwm(DOut *o, int v) {
+  if (timer1Pin(o->pin)) stopSync(-1, 2);  // a synchronisation pulse has borrowed Timer1: give it back first
   v = constrain(v, 0, 255);
   o->on = v > 0;
   if (!o->on) o->timed = 0;
@@ -90,12 +101,118 @@ void printId() {
   Serial.println(F(BOARD_NAME));
 }
 
+// ---- synchronisation pulses (SYNC, 1.3) ----
+// The pin goes on as soon as the command is read; on AVR boards the end of the pulse is timed by Timer1's
+// compare-A interrupt, so the width is exact whatever the loop is doing (a sensor being read, a long report). Timer1
+// is borrowed only for the pulse and given back as the Arduino core set it up (PWM on its pins, 9 and 10 on an Uno,
+// works between pulses); while a PWM output on a Timer1 pin is on, and on other boards, the loop times the pulse
+// in microseconds instead.
+#if defined(__AVR__) && defined(TCCR1A) && defined(TIMSK1) && defined(OCIE1A)
+#define SYNC_TIMER 1
+#endif
+const unsigned long SYNC_MAX_US = 1000000UL;
+int8_t syncPin = -1;  // the last SYNC's pin and width ("SYNC" alone repeats them)
+unsigned long syncWidth = 0;
+volatile uint8_t syncOn = 0;  // a pulse is on: 1 ended by the loop, 2 by Timer1
+unsigned long syncStart = 0;  // micros() when a pulse ended by the loop began
+
+#ifdef SYNC_TIMER
+volatile uint8_t *syncReg = 0;
+uint8_t syncMask = 0, syncOffHigh = 0, t1a, t1b;  // the pin's port bit; Timer1 as the Arduino core set it up
+uint16_t t1ocr;
+
+inline void syncEnd() {  // (interrupts off) the pin off, Timer1 given back
+  if (syncOffHigh) *syncReg |= syncMask;
+  else *syncReg &= ~syncMask;
+  TCCR1B = 0;
+  TIMSK1 &= ~_BV(OCIE1A);
+  TCCR1A = t1a;
+  OCR1A = t1ocr;
+  TCNT1 = 0;
+  TCCR1B = t1b;
+  syncOn = 0;
+}
+
+ISR(TIMER1_COMPA_vect) { syncEnd(); }  // the end of a synchronisation pulse
+#endif
+
+// the pin's PWM comes from Timer1 (AVR boards)
+bool timer1Pin(int8_t pin) {
+#ifdef SYNC_TIMER
+  uint8_t t = digitalPinToTimer(pin);
+  return t == TIMER1A || t == TIMER1B || t == TIMER1C;
+#else
+  (void)pin;
+  return false;
+#endif
+}
+
+// end a synchronisation pulse at once (pin -1: whichever; only 2: only one timed by Timer1): its output goes off
+void stopSync(int pin, uint8_t only) {
+  if (!syncOn || (pin >= 0 && pin != syncPin) || (only && syncOn != only)) return;
+#ifdef SYNC_TIMER
+  if (syncOn == 2) {
+    uint8_t sreg = SREG;
+    cli();
+    if (syncOn == 2) syncEnd();
+    SREG = sreg;
+    return;
+  }
+#endif
+  syncOn = 0;
+  DOut *o = findOut(syncPin);
+  if (o) writeOut(o, 0);
+}
+
 void stopTrain(int pin) {
   for (uint8_t i = 0; i < MAX_TRAIN; i++)
     if (trains[i].active && trains[i].pin == pin) trains[i].active = 0;
+  stopSync(pin);
+}
+
+// a pulse of syncWidth on the output: on at once, ended by Timer1's compare interrupt when the timer is free
+void syncPulse(DOut *o) {
+  stopTrain(o->pin);
+  o->timed = 0;
+  o->pwm = 0;
+#ifdef SYNC_TIMER
+  bool busy = false;  // a PWM output on a Timer1 pin is on
+  for (uint8_t i = 0; i < nOut; i++)
+    if (outs[i].pwm && outs[i].on && timer1Pin(outs[i].pin)) busy = true;
+  unsigned long cycles = syncWidth * (F_CPU / 1000000UL);
+  // the smallest prescaler (8, 64, 256, 1024: CS1 values 2..5) whose 16-bit count holds the width
+  for (uint8_t k = 0; k < 4 && !busy; k++) {
+    unsigned long ticks = cycles >> (k == 0 ? 3 : k == 1 ? 6 : 2 * k + 4);
+    if (ticks > 65536UL) continue;
+    syncReg = portOutputRegister(digitalPinToPort(o->pin));
+    syncMask = digitalPinToBitMask(o->pin);
+    syncOffHigh = o->invert;
+    uint8_t sreg = SREG;
+    cli();
+    t1a = TCCR1A;
+    t1b = TCCR1B;
+    t1ocr = OCR1A;
+    TCCR1B = 0;
+    TCCR1A = 0;
+    TCNT1 = 0;
+    OCR1A = ticks ? (uint16_t)(ticks - 1) : 0;
+    TIFR1 = _BV(OCF1A);
+    TIMSK1 |= _BV(OCIE1A);
+    if (o->invert) *syncReg &= ~syncMask;  // on
+    else *syncReg |= syncMask;
+    TCCR1B = _BV(WGM12) | (k + 2);  // CTC: the compare match ends the pulse
+    syncOn = 2;
+    SREG = sreg;
+    return;
+  }
+#endif
+  writeOut(o, 1);  // other boards, or Timer1 busy: the loop ends the pulse
+  syncStart = micros();
+  syncOn = 1;
 }
 
 void allOff() {
+  stopSync(-1);
   for (uint8_t i = 0; i < MAX_TRAIN; i++) trains[i].active = 0;
   for (uint8_t i = 0; i < nOut; i++) {
     if (outs[i].pwm) writePwm(&outs[i], 0);
@@ -219,6 +336,8 @@ void clearConfig() {
       detachInterrupt(digitalPinToInterrupt(encs[i].pb));
     }
   nIn = nOut = nAn = nEnc = nHx = nDht = 0;
+  syncPin = -1;
+  syncWidth = 0;
   wdMs = 0;
 }
 
@@ -398,6 +517,19 @@ void command(char *line) {
       wdMs = a1;
       wdFired = false;
       break;
+    case 'S': {  // SYNC pin width_us   (SYNC alone: the last pin and width again)
+      char *w = argv[0];
+      if (w[1] != 'Y' || w[2] != 'N' || w[3] != 'C' || w[4]) { err("unknown command"); break; }
+      stopSync(-1);  // (before the pin changes)
+      if (argc >= 3) {
+        syncPin = a1;
+        syncWidth = a2 < 1 ? 1 : a2 > (long)SYNC_MAX_US ? SYNC_MAX_US : (unsigned long)a2;
+      }
+      DOut *o = syncPin >= 0 ? findOut(syncPin) : 0;
+      if (!o) { err(F("SYNC: not an output")); break; }
+      syncPulse(o);
+      break;
+    }
     default:
       err("unknown command");
   }
@@ -454,6 +586,8 @@ void loop() {
       t.done++;
     }
   }
+  // a synchronisation pulse timed by the loop (no free timer)
+  if (syncOn == 1 && us - syncStart >= syncWidth) stopSync(-1);
   // outputs with a maximum on-time (e.g. shock safety cut-off), digital or PWM
   for (uint8_t i = 0; i < nOut; i++)
     if (outs[i].timed && outs[i].on && (long)(now - outs[i].offAt) >= 0) {

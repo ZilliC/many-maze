@@ -176,18 +176,21 @@ class CriteriaDialog(QDialog):
         lay.addWidget(QLabel(f"{len(rows)} animal × criterion evaluation{'s' if len(rows) != 1 else ''}. "
                              f"<b>{sum(len(v) for v in report['completed'].values())}</b> stage(s) completed, "
                              f"<b>{len(report['retire'])}</b> animal(s) to retire."))
-        t = QTableWidget(len(rows), 5)
-        t.setHorizontalHeaderLabels(["Animal", "Criterion", "Trials", "Met at trial", "Outcome"])
+        t = QTableWidget(len(rows), 6)
+        t.setHorizontalHeaderLabels(["Animal", "Criterion", "Trials", "Met at trial", "Variability", "Outcome"])
+        t.horizontalHeaderItem(4).setToolTip("The acceptable variability's value over the last trials (when the "
+                                             "criterion has one)")
         t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         t.verticalHeader().hide()
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         for r, row in enumerate(rows):
             outcome = ("criterion met" if row["met"] else "failed → retire" if row["failed"] and row["action"] == "retire"
                        else "failed" if row["failed"] else "in progress")
+            var = row.get("variability")
             for c, v in enumerate((row["animal"], row["criterion"], str(row["trials"]),
-                                   str(row["met_at_trial"] or "–"), outcome)):
+                                   str(row["met_at_trial"] or "–"), "–" if var is None else f"{var:.3g}", outcome)):
                 it = QTableWidgetItem(v)
-                if c == 4:
+                if c == 5:
                     it.setForeground(QColor("#16a34a" if row["met"] else "#dc2626" if row["failed"] else "#475569"))
                 t.setItem(r, c, it)
         lay.addWidget(t, 1)

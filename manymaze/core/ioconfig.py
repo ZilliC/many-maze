@@ -1,5 +1,6 @@
 """I/O device configurations (``Project.io_devices``, see iodevices): device types, channel kinds, the fields
-each device type uses, and the rules for new devices, pins and the Arduino watchdog."""
+each device type uses, the rules for new devices, pins and the Arduino watchdog, and the operant chamber
+presets."""
 
 from __future__ import annotations
 
@@ -34,7 +35,11 @@ DIGITAL_INPUT_KINDS = ("input", "pir", "status")  # on / off
 VALUE_KINDS = ("analog", "encoder", "sensor")  # a number
 OUTPUT_KINDS = ("output", "pwm")
 CONTROL_KINDS = ("thermostat", "odour", "pump")  # driven by their own actions (set temperature, odour, pump)
-SENSOR_TYPES = {"weight": "g", "light": "lux", "temperature": "°C", "humidity": "%", "generic": ""}
+# sensor types and their units: sound level (a sound level meter's analogue output, A-weighted), ultrasound (a
+# bat / USV detector's peak frequency and its level)
+SENSOR_TYPES = {"weight": "g", "light": "lux", "temperature": "°C", "humidity": "%", "sound": "dBA",
+                "ultrasound": "kHz", "ultrasound_level": "dB", "generic": ""}
+DECIBEL_SENSORS = ("sound", "ultrasound_level")  # levels in dB: their equivalent level (Leq) is also reported
 # where a sensor channel's readings come from: an analogue pin, an HX711 load-cell amplifier or a DHT22
 SENSOR_INTERFACES = ("analog", "hx711", "dht22")
 # derived status channels "<channel>.<suffix>" that drivers and controllers report, and the procedure event each
@@ -175,3 +180,113 @@ def level_for(value: float, points, max_level: float = 1.0) -> float:
         if value <= v1:
             return l0 + (l1 - l0) * ((value - v0) / (v1 - v0) if v1 != v0 else 0.0)
     return pts[-1][0]
+
+
+# ---------------------------------------------------------------- operant chamber presets
+# The named inputs and outputs of typical operant chambers, to set up the I/O device of each chamber at once
+# (Protocol ▸ Mode Input/output only, Experiment › I/O devices). A preset describes the user's own wiring of the
+# chamber's levers, nose pokes, lights, dispenser and shocker to one of the drivers above (the mANY-MAZE Arduino
+# firmware, Firmata, NI-DAQmx or LabJack, or a simulated device): the vendors' own interface cards and software
+# (Med Associates MED-PC, Coulbourn Habitest, Lafayette ABET) are not driven. Channels are (name, kind, role); the
+# role is the I/O devices dialog's (a shocker's outputs switch off after 60 s at most, see iodevices.Device).
+# Names are those of the example procedures where they exist (lever, pellet, house_light, shocker).
+OPERANT_PRESETS: dict[str, dict] = {
+    "med_associates": {
+        "label": "Med Associates-style chamber",
+        "description": "Two retractable levers with a cue light above each, a pellet receptacle with a head entry "
+                       "detector, a house light, a pellet dispenser, a tone (Sonalert) and a grid floor shocker.",
+        "channels": [("left_lever", "input", ""), ("right_lever", "input", ""), ("head_entry", "input", ""),
+                     ("left_lever_out", "output", ""), ("right_lever_out", "output", ""),
+                     ("left_light", "output", "light"), ("right_light", "output", "light"),
+                     ("house_light", "output", "light"), ("pellet", "output", ""), ("tone", "output", "speaker"),
+                     ("shocker", "output", "shocker")]},
+    "coulbourn": {
+        "label": "Coulbourn-style chamber",
+        "description": "A retractable lever with a cue light, two nose pokes with their lights, a feeder trough "
+                       "with a head entry beam, a house light, a pellet feeder, a tone and a shocker.",
+        "channels": [("lever", "input", ""), ("left_poke", "input", ""), ("right_poke", "input", ""),
+                     ("head_entry", "input", ""), ("lever_out", "output", ""), ("cue_light", "output", "light"),
+                     ("left_poke_light", "output", "light"), ("right_poke_light", "output", "light"),
+                     ("house_light", "output", "light"), ("pellet", "output", ""), ("tone", "output", "speaker"),
+                     ("shocker", "output", "shocker")]},
+    "lafayette": {
+        "label": "Lafayette-style chamber",
+        "description": "A wall of five nose-poke holes with a light in each (five-choice serial reaction time "
+                       "task), a food magazine with a head entry beam and a light, a house light, a pellet "
+                       "dispenser and a tone.",
+        "channels": [*((f"poke_{i}", "input", "") for i in range(1, 6)), ("head_entry", "input", ""),
+                     *((f"poke_{i}_light", "output", "light") for i in range(1, 6)),
+                     ("magazine_light", "output", "light"), ("house_light", "output", "light"),
+                     ("pellet", "output", ""), ("tone", "output", "speaker")]},
+    "custom": {
+        "label": "Custom chamber",
+        "description": "No channels: add the chamber's inputs and outputs yourself (Experiment › I/O devices).",
+        "channels": []},
+}
+# the drivers a preset can be wired to (the simulated device lets the protocol be tried without hardware)
+PRESET_DEVICE_TYPES = ("arduino", "firmata", "nidaq", "labjack", "virtual")
+PRESET_KEY = "operant_preset"  # Project.settings_extra: the preset the protocol's chambers were set up with
+# LabJack T4 / T7 digital lines in order (FIO, EIO, CIO, MIO)
+_LABJACK_LINES = ([f"FIO{i}" for i in range(8)] + [f"EIO{i}" for i in range(8)] + [f"CIO{i}" for i in range(4)]
+                  + [f"MIO{i}" for i in range(3)])
+
+
+def preset_pins(type_: str, n_in: int, n_out: int) -> tuple[list, list]:
+    """The pins of a chamber's inputs and outputs for a device type: Arduino / Firmata pins from 2 (inputs first;
+    on an Uno pins 14–19 are A0–A5), NI lines port0/lineN for the inputs and port1, port2 … for the outputs,
+    LabJack lines FIO0… then EIO, CIO and MIO; none for a simulated device."""
+    if type_ in ("arduino", "firmata"):
+        pins = list(range(2, 2 + n_in + n_out))
+        return pins[:n_in], pins[n_in:]
+    if type_ == "nidaq":
+        first = (n_in + 7) // 8  # the outputs start on the port after the inputs'
+        return ([f"port{i // 8}/line{i % 8}" for i in range(n_in)],
+                [f"port{first + i // 8}/line{i % 8}" for i in range(n_out)])
+    if type_ == "labjack":
+        lines = _LABJACK_LINES + [f"DIO{i}" for i in range(len(_LABJACK_LINES), n_in + n_out)]
+        return lines[:n_in], lines[n_in:n_in + n_out]
+    return [None] * n_in, [None] * n_out
+
+
+def operant_device(preset: str, type_: str = "arduino", name: str = "chamber", taken=()) -> dict:
+    """The I/O device of one chamber of a preset (OPERANT_PRESETS) for a device type (PRESET_DEVICE_TYPES): a new
+    device of that type with the preset's named inputs and outputs, roles and pins. Its name is `name`, with a
+    number if taken."""
+    if preset not in OPERANT_PRESETS:
+        raise ValueError(f"unknown operant chamber preset '{preset}'")
+    if type_ not in PRESET_DEVICE_TYPES:
+        raise ValueError(f"an operant chamber cannot use a device of type '{type_}'")
+    cfg = new_device(type_, taken)
+    base, k = name, 2
+    while name in set(taken):
+        name, k = f"{base}{k}", k + 1
+    cfg["name"] = name
+    chans = OPERANT_PRESETS[preset]["channels"]
+    ins, outs = preset_pins(type_, sum(k == "input" for _n, k, _r in chans),
+                            sum(k == "output" for _n, k, _r in chans))
+    ins, outs = iter(ins), iter(outs)
+    for n, kind, role in chans:
+        ch = {"name": n, "kind": kind}
+        pin = next(ins if kind == "input" else outs)
+        if pin is not None:
+            ch["pin"] = pin
+        if role:
+            ch["role"] = role
+        cfg["channels"].append(ch)
+    return cfg
+
+
+def operant_devices(preset: str, type_: str = "arduino", n: int = 1, taken=()) -> list[dict]:
+    """The I/O devices of `n` chambers of a preset, one device per chamber (each test of Several tests at once
+    uses its own device): "chamber" for one, else "chamber1", "chamber2" … (the numbers of names not taken)."""
+    names, out, k = set(taken), [], 1
+    for _ in range(max(1, int(n))):
+        if n == 1 and "chamber" not in names:
+            name = "chamber"
+        else:
+            while f"chamber{k}" in names:
+                k += 1
+            name = f"chamber{k}"
+        names.add(name)
+        out.append(operant_device(preset, type_, name))
+    return out

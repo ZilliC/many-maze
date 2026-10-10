@@ -147,6 +147,54 @@ class Track:
             out.angle = (a + 180) % 360 - 180
         return out
 
+    def remove_jumps(self, max_speed: float, max_duration_s: float = 0.5, scale: float = 1.0) -> int:
+        """Remove the jumps of the tracked position, in place, and return how many were removed.
+
+        A jump is a detection that implies a speed above max_speed (units/s; positions in px × scale) from the last
+        good position, after which the track comes back — within max_duration_s, at a plausible speed and to less
+        than half the jump's distance from that position (a reflection, a shadow or another object detected for a
+        moment). The frames of the jump become missing (not detected, no position: interpolation fills them like
+        any gap). A genuine fast run does not come back to where it started, so it is kept."""
+        n_frames = len(self)
+        if not max_speed or max_speed <= 0 or n_frames < 3:
+            return 0
+        t, x, y = self.t, self.x, self.y
+        idx = np.flatnonzero(self.detected & np.isfinite(x) & np.isfinite(y))
+        drop = np.zeros(n_frames, bool)
+        jumps, k, g = 0, 1, idx[0] if len(idx) else 0
+
+        def dist(i, j):
+            return float(np.hypot(x[i] - x[j], y[i] - y[j])) * scale
+
+        while k < len(idx):
+            i = idx[k]
+            d = dist(i, g)
+            if t[i] <= t[g] or d <= max_speed * (t[i] - t[g]):
+                g, k = i, k + 1
+                continue
+            back = None
+            for m in range(k + 1, len(idx)):
+                j = idx[m]
+                if t[j] - t[i] > max_duration_s + 1e-9:
+                    break
+                dj = dist(j, g)
+                if dj <= 0.5 * d and dj <= max_speed * (t[j] - t[g]):
+                    back = m
+                    break
+            if back is None:  # it does not come back: real movement (or a lasting switch), kept
+                g, k = i, k + 1
+                continue
+            drop[idx[k:back]] = True
+            jumps += 1
+            g, k = idx[back], back + 1
+        if jumps:
+            for c in ("x", "y", "hx", "hy", "tx", "ty", "angle", "area"):
+                getattr(self, c)[drop] = np.nan
+            self.detected[drop] = False
+            if self.outline is not None:
+                self.outline[drop] = None
+        return jumps
+
     def smooth(self, window: int = 5) -> "Track":
         """Centred moving-average smoothing of positions (window in frames, odd).  The orientation follows: it is
         recomputed from the smoothed head and tail, or (frames without them) averaged as a direction."""

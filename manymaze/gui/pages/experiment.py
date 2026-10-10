@@ -9,26 +9,29 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QSpinBox,
+                               QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ...core import pose
+from ...core import ioconfig, plugins, pose, security
 from ...core import workflow as wf
 from ...core.apparatus import unique_name
+from ...core.ioconfig import PRESET_KEY
 from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
 from ...core.export import display_text
 from ...core.measures import AnalysisSettings
-from ...core.periods import ANCHORS
+from ...core.periods import ANCHORS, END_ANCHORS, TARGET_KEY, check_periods
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
+from ...core.sync import sync_from
+from ...core.template_measures import FST_TEMPLATES
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
 from ._results_cache import cached_rows, get_rows, info_columns
-from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, PRESET_TIP,
-                   AnimalPresetCombo, Page, SettingsForm, apply_preset_to_form, property_form)
+from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
+                   FST_SPEC, PRESET_TIP, AnimalPresetCombo, Page, SettingsForm, apply_preset_to_form, property_form)
 from .protocol_pages import CalculationEditor, ElementPage, KeyEditor, small_button
 from .results.dialogs import MeasurePickerDialog, measure_groups
 from .results.table import _names
@@ -47,22 +50,37 @@ BEH_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", 
               "#06b6d4"]
 MET_ACTIONS = [("complete_stage", "Stage completed: skip remaining trials"), ("report", "Report only")]
 FORM_WIDTH = 900  # property pages with only settings stay at a readable width
+LOCKED_TEXT = ("The protocol is locked: only an administrator can change it (File ▸ Users and security). You can look "
+               "at it and run tests.")
 
 
 # record tables (see RecordTable): training criteria, time periods, event-anchored time periods
 CRITERIA_COLS = [("stage", "Stage", "text_choice", None),  # options: the stages, given by the page
-                 ("measure", "Measure", "text", None), ("op", "Is", "choice", [(o, o) for o in ("<", "<=", ">", ">=")]),
+                 ("measure", "Measure", "text", None),
+                 ("op", "Is", "choice", [(o, o) for o in ("<", "<=", ">", ">=")] + [("any", "any")]),
                  ("value", "Value", "number", None),
                  ("consecutive_trials", "Consecutive trials", "spin", (1, wf.MAX_TRIALS)),
                  ("action_met", "When met", "choice", MET_ACTIONS),
-                 ("after", "Retire after", "spin", (0, wf.MAX_TRIALS, "never", " trials"))]
+                 ("after", "Retire after", "spin", (0, wf.MAX_TRIALS, "never", " trials")),
+                 ("min_trials", "Minimum trials", "spin", (0, wf.MAX_TRIALS, "none", "")),
+                 # the acceptable variability (hidden: edited in the Variability row under the table)
+                 ("var_stat", "Variability", "choice", [("", "none")] + list(wf.VARIABILITY_STATS.items())),
+                 ("var_measure", "Variability of", "text", None),
+                 ("var_trials", "Variability over", "spin", (2, wf.MAX_TRIALS)),
+                 ("var_max", "Variability at most", "number", None)]
+_VAR_COLS = {c[0]: i for i, c in enumerate(CRITERIA_COLS) if c[0].startswith("var_")}
 PERIOD_COLS = [("label", "Time period", "text", None), ("start", "Starts at (s)", "number", None),
                ("end", "Ends at (s)", "number", None)]
 EVENT_PERIOD_COLS = [("label", "Time period", "text", None),
                      ("anchor", "The period starts at", "choice", list(ANCHORS.items())),
-                     ("target", "Zone / key / input", "text", None), ("offset_s", "Offset (s)", "number", None),
-                     ("duration_s", "Duration (s)", "number", None), ("occurrence", "Occurrence", "int", None)]
-_TARGET_KEY = {"first_entry": "zone", "first_exit": "zone", "mark": "behaviour", "input": "channel"}
+                     ("target", "Zone / key / input / calculation", "text", None),
+                     ("offset_s", "Offset (s)", "number", None), ("duration_s", "Duration (s)", "number", None),
+                     ("occurrence", "Occurrence", "int", None),
+                     ("end_anchor", "The period ends", "choice", list(END_ANCHORS.items())),
+                     ("end_target", "Ends at zone / key / input / calculation", "text", None),
+                     ("end_offset_s", "End offset (s)", "number", None),
+                     ("end_occurrence", "End occurrence", "int", None)]
+_TARGET_KEY = {k: v for k, v in TARGET_KEY.items() if k in ANCHORS}
 
 
 class ExperimentPage(Page):
@@ -82,6 +100,11 @@ class ExperimentPage(Page):
         self.elements: dict[str, ElementPage] = {}
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.lock_lbl = QLabel(LOCKED_TEXT)
+        self.lock_lbl.setWordWrap(True)
+        self.lock_lbl.setStyleSheet("background:#fff7e0;border-bottom:1px solid #f0d58a;padding:6px 28px;")
+        self.lock_lbl.hide()
+        lay.addWidget(self.lock_lbl)
         lay.addWidget(self.stack)
         self._build_protocol()
         self._build_tracking()
@@ -128,10 +151,22 @@ class ExperimentPage(Page):
         self.mode.currentIndexChanged.connect(self._store_mode)
         for w in (self.name, self.desc, self.protocol, self.mode):
             w.setMinimumWidth(320)
+        # Input/output only mode: the I/O devices of the operant chambers from a preset
+        self.chambers_lbl = hint("")
+        self.chambers_btn = small_button("Operant chambers…", "plug", slot=self.set_up_chambers,
+                                         tip="Set up the I/O devices of the chambers from a preset: levers, nose "
+                                             "pokes, lights, pellet dispenser, house light, shocker")
+        self.chambers_row = QWidget()
+        h = QHBoxLayout(self.chambers_row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(self.chambers_lbl, 1)
+        h.addWidget(self.chambers_btn, 0, Qt.AlignTop)
         f.addRow("Protocol name", self.name)
         f.addRow("Description", self.desc)
         f.addRow("Type of test", self.protocol)
         f.addRow("Mode", self.mode)
+        f.addRow("Chambers", self.chambers_row)
+        self.protocol_form = f
         pg.add(f)
         pg.add(separator())
 
@@ -155,6 +190,20 @@ class ExperimentPage(Page):
         pg.add(f)
         pg.add(separator())
 
+        # forced swim / tail suspension: shown for those types of test (the same settings are under Analysis)
+        self.fst_box = QWidget()
+        lay = QVBoxLayout(self.fst_box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.fst_form = SettingsForm(FST_SPEC, sections=[(FST_SECTION, FST_FIELDS)])
+        self.fst_form.changed.connect(self._fst_changed)
+        lay.addWidget(self.fst_form)
+        lay.addWidget(hint("As ANY-maze's Forced swim / Tail suspension mode: the animal is immobile once it has "
+                           "stopped struggling, judged from the quick movements in the image, wherever it is. "
+                           "Film it from the side; the Struggle index chart of a test helps to set the threshold."))
+        lay.addWidget(separator())
+        self.fst_box.hide()
+        pg.add(self.fst_box)
+
         pg.section("Testing")
         self.blind = QCheckBox("Blind testing — hide the treatments (shown as codes) while testing and scoring")
         self.blind.setToolTip("Hide treatment groups (shown as codes) while testing and scoring")
@@ -162,8 +211,13 @@ class ExperimentPage(Page):
         self.confirm_id = QCheckBox("Confirm the animal's ID before each test")
         self.confirm_id.setToolTip("Scan the barcode / microchip or type the ID; a mismatch blocks the test")
         self.confirm_id.toggled.connect(self._store_workflow)
+        self.weigh_first = QCheckBox("Weigh the animal before each live test (when a balance is connected)")
+        self.weigh_first.setToolTip("A live test is armed only once its animal has a weight of today: the Weigh "
+                                    "dialog opens for it. Needs a balance among the I/O devices.")
+        self.weigh_first.toggled.connect(self._store_weigh)
         pg.add(self.blind)
         pg.add(self.confirm_id)
+        pg.add(self.weigh_first)
         pg.body.addSpacing(10)
         self.summary_lbl = hint("")
         pg.add(self.summary_lbl)
@@ -209,23 +263,58 @@ class ExperimentPage(Page):
         pg.add(self.stages_lbl)
         pg.add(separator())
 
-        pg.section("Training criteria")
-        pg.add(hint("A stage is completed when a result measure meets the condition on N consecutive trials; "
-                    "animals that have not met it after the given number of trials can be retired. Apply the "
-                    "criteria on the Animals page."))
+        pg.section("Training criteria (stage end rules)")
+        pg.add(hint("A stage is completed when a result measure meets the condition on N consecutive trials (Is "
+                    "“any”: any value), once the animal has done the minimum number of trials and, with an "
+                    "acceptable variability, when the measure varies little enough over its last trials. Animals "
+                    "that have not met it after the given number of trials can be retired. Apply the criteria on "
+                    "the Animals page."))
         cols = [c if c[0] != "stage" else c[:3] + (lambda: self.project.stages if self.project else [],)
                 for c in CRITERIA_COLS]
         self.crit = RecordTable(cols, stretch=(1,))
-        for c, wd in ((0, 140), (2, 60), (3, 80), (4, 130), (5, 250), (6, 110)):
+        for c, wd in ((0, 140), (2, 64), (3, 80), (4, 130), (5, 250), (6, 110), (7, 110)):
             self.crit.setColumnWidth(c, wd)
+        for c in _VAR_COLS.values():
+            self.crit.setColumnHidden(c, True)
         self.crit.horizontalHeaderItem(6).setToolTip("Retire animals that have not met the criterion after this many "
                                                      "trials of the stage")
+        self.crit.horizontalHeaderItem(7).setToolTip("The stage cannot end before the animal has done this many "
+                                                     "trials of it, even when the condition is met earlier")
         self.crit.setMinimumHeight(170)
         self.crit.edited.connect(self._store_criteria)
+        self.crit.currentCellChanged.connect(lambda *_: self._show_variability())
         pg.add(self.crit)
+        # the selected criterion's acceptable variability (ANY-maze 7.30)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.var_stat = QComboBox()
+        self.var_stat.addItem("No variability rule", "")
+        for k, label in wf.VARIABILITY_STATS.items():
+            self.var_stat.addItem(label, k)
+        self.var_stat.setToolTip("Variability (%): ANY-maze's ((highest − lowest) / (highest + lowest)) × 100 over "
+                                 "the trials; SD: their standard deviation; CV (%): the SD as a % of their mean")
+        self.var_measure = QLineEdit()
+        self.var_measure.setPlaceholderText("the criterion's measure")
+        self.var_measure.setMinimumWidth(200)
+        self.var_trials = QSpinBox()
+        self.var_trials.setRange(2, wf.MAX_TRIALS)
+        self.var_trials.setSuffix(" trials")
+        self.var_max = QDoubleSpinBox()
+        self.var_max.setRange(0.0, 1e6)
+        self.var_max.setDecimals(3)
+        for w in (QLabel("Acceptable variability:"), self.var_stat, QLabel("of"), self.var_measure,
+                  QLabel("over the last"), self.var_trials, QLabel("is at most"), self.var_max):
+            row.addWidget(w)
+        row.addStretch()
+        self.var_stat.currentIndexChanged.connect(self._variability_edited)
+        self.var_measure.editingFinished.connect(self._variability_edited)
+        self.var_trials.valueChanged.connect(self._variability_edited)
+        self.var_max.valueChanged.connect(self._variability_edited)
+        pg.add(row)
         pg.add(button_row(small_button("Add criterion", "add", slot=self._add_criterion),
                           small_button("Remove", "delete", slot=self.crit.remove_current)))
         pg.finish()
+        self._show_variability()
 
     def _build_keys(self):
         pg = self._element_page("keys", "Keys", "Keys are the behaviours you score by hand: press the key (or click "
@@ -276,6 +365,7 @@ class ExperimentPage(Page):
         self.an_form = SettingsForm(ANALYSIS_SPEC, sections=ANALYSIS_SECTIONS)
         self.an_form.setMaximumWidth(FORM_WIDTH - 56)
         self.an_form.changed.connect(self.main.mark_dirty)
+        self.an_form.changed.connect(self._analysis_changed)
         pg.add(self.an_form)
 
         pg.section("Time periods")
@@ -294,12 +384,16 @@ class ExperimentPage(Page):
                           small_button("Remove", "delete", slot=self.periods.remove_current)))
 
         pg.section("Time periods based on a time marker")
-        pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box. "
-                    "Duration 0 = until the end of the test. Occurrence: 1 = first, 2 = second…, 0 = one period "
-                    "for every occurrence. Periods whose event never happens are left out."))
-        self.ev_periods = RecordTable(EVENT_PERIOD_COLS, stretch=(0, 2))
+        pg.add(hint("A period anchored to an event — e.g. the 30 s after the animal first leaves the start box — "
+                    "or starting at the time (s) given by a calculation. Occurrence: 1 = first, 2 = second…, 0 = one "
+                    "period for every occurrence. Periods whose event never happens are left out. The period lasts "
+                    "its duration (0 = until the end of the test) or ends at an event (its occurrence after the "
+                    "start: 1 = the first) or at a calculation's time; when that never happens, it ends at the end "
+                    "of the test and its results say so (Warnings)."))
+        self.ev_periods = RecordTable(EVENT_PERIOD_COLS, stretch=(0, 2, 7))
         self.ev_periods.setColumnWidth(1, 230)
-        for c in (3, 4, 5):
+        self.ev_periods.setColumnWidth(6, 230)
+        for c in (3, 4, 5, 8, 9):
             self.ev_periods.setColumnWidth(c, 100)
         self.ev_periods.setMinimumHeight(130)
         self.ev_periods.setMaximumHeight(190)
@@ -309,6 +403,26 @@ class ExperimentPage(Page):
         pg.add(self.ev_periods_lbl)
         pg.add(button_row(small_button("New event period", "add", slot=self._add_event_period),
                           small_button("Remove", "delete", slot=self.ev_periods.remove_current)))
+
+        pg.section("Analysis plug-ins")
+        pg.add(hint("Data recorded by other systems — heart rate, Spike2 or LabChart exports, fibre photometry — "
+                    "brought into the results: each series gets the analogue-signal measures (mean, minimum, "
+                    "maximum, baseline…) for the whole test, every time period and every zone. The built-in "
+                    "plug-in reads a CSV / TSV file per test; others are installed as Python packages. Run them "
+                    "once the tests are done (and again when the files change)."))
+        self.plugin_list = QListWidget()
+        self.plugin_list.setFixedHeight(110)
+        self.plugin_list.setStyleSheet("QListWidget::item{padding:4px 4px;}")
+        self.plugin_list.itemDoubleClicked.connect(lambda *_: self.edit_plugin())
+        pg.add(self.plugin_list)
+        self.plugin_add = small_button("Add plug-in", "add")
+        self.plugin_menu = QMenu(self.plugin_add)
+        self.plugin_menu.aboutToShow.connect(self._fill_plugin_menu)
+        self.plugin_add.setMenu(self.plugin_menu)
+        pg.add(button_row(self.plugin_add, small_button("Edit…", "edit", slot=self.edit_plugin),
+                          small_button("Remove", "delete", slot=self.remove_plugin),
+                          small_button("Run on the tests", "play", slot=self.run_plugins,
+                                       tip="Run the plug-ins on every test performed and save the experiment")))
         pg.finish()
 
     def _build_calculations(self):
@@ -359,6 +473,40 @@ class ExperimentPage(Page):
                                    tip="Arduino boards, serial devices, audio and simulated devices used by "
                                        "procedures")
         pg.add(button_row(self.io_btn))
+        pg.add(separator())
+        pg.section("Synchronisation")
+        pg.add(hint("Pulses on a digital output that let another recording system (electrophysiology, imaging, "
+                    "photometry) align its data with the test. Pulses due at the same moment are sent as one: with "
+                    "a pulse for every frame, there are as many pulses as frames. The Arduino firmware times each "
+                    "pulse's width on the board; LabJack and National Instruments devices use their digital line."))
+        f = property_form()
+        self.sync_on = QCheckBox("Send synchronisation pulses in live tests")
+        self.sync_out = QComboBox()
+        self.sync_out.setMinimumWidth(320)
+        self.sync_out.setToolTip("A digital output of an I/O device (Set up I/O devices…)")
+        self.sync_checks = {}
+        boxes = QVBoxLayout()
+        boxes.setSpacing(2)
+        for key, text in (("test_start", "When the test starts"), ("test_end", "When the test ends"),
+                          ("per_frame", "For every captured frame (while the test runs or is paused)"),
+                          ("per_position", "For every position stored in the track")):
+            cb = QCheckBox(text)
+            cb.toggled.connect(self._store_sync)
+            self.sync_checks[key] = cb
+            boxes.addWidget(cb)
+        self.sync_width = QDoubleSpinBox()
+        self.sync_width.setRange(0.001, 1000.0)
+        self.sync_width.setDecimals(3)
+        self.sync_width.setSuffix(" ms")
+        self.sync_width.setToolTip("How long each pulse lasts")
+        f.addRow(self.sync_on)
+        f.addRow("Output", self.sync_out)
+        f.addRow("Send a pulse", boxes)
+        f.addRow("Pulse width", self.sync_width)
+        pg.add(f)
+        self.sync_on.toggled.connect(self._store_sync)
+        self.sync_out.currentIndexChanged.connect(self._store_sync)
+        self.sync_width.valueChanged.connect(self._store_sync)
         pg.add(separator())
         pg.section("Touch screen")
         f = property_form()
@@ -466,6 +614,8 @@ class ExperimentPage(Page):
             self._show_key()
         elif key == "calculations":
             self._show_calculation()
+        elif key == "analysis" and self.project is not None:
+            self._show_event_period_problems([])  # (the calculations may have changed)
 
     # ================================================================== loading
     def set_project(self, project):
@@ -485,7 +635,35 @@ class ExperimentPage(Page):
         self._show_key()
         self._update_mode()
         self._update_summary()
+        self._apply_lock()
         self.main.select_explorer(self, self.element)
+
+    @property
+    def locked(self) -> bool:
+        """The protocol is locked for the current user (Project.security, see core.security)."""
+        p = self.project
+        return p is not None and not security.can(p, "edit_protocol")
+
+    def _apply_lock(self):
+        """A locked protocol is shown read-only: the element pages and the ribbon's editing commands are
+        disabled."""
+        locked = self.locked
+        self.lock_lbl.setVisible(locked)
+        for pg in self.elements.values():
+            pg.widget().setEnabled(not locked)
+        acts = [self.add_item_act, self.template_act, self.apparatus_tpl_act]
+        acts += [a[1] if isinstance(a, tuple) else a for v in self.element_acts.values() for a in v]
+        for a in acts:
+            a.setEnabled(not locked)
+
+    def security_changed(self):
+        self._apply_lock()
+        if self.main.current_page() is self:
+            self._quiet_show = True
+            try:
+                self.main.refresh_ribbon()
+            finally:
+                self._quiet_show = False
 
     def _load(self, p):
         self.name.setText(p.name)
@@ -506,15 +684,18 @@ class ExperimentPage(Page):
         self._validate_behaviours()
         self.blind.setChecked(p.blind)
         self.confirm_id.setChecked(wf.confirm_id_enabled(p))
+        self.weigh_first.setChecked(bool(p.require_weight_before_test))
         self.crit.set_records(self._criterion_row(c) for c in p.training_criteria)
         self.periods.set_records({"label": lbl, "start": a, "end": b} for lbl, a, b in p.analysis.custom_periods)
-        self.ev_periods.set_records({**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), "")}
-                                    for d in p.analysis.event_periods)
+        self.ev_periods.set_records(self._event_period_record(d) for d in p.analysis.event_periods)
         self.periods_lbl.hide()
-        self.ev_periods_lbl.hide()
+        self._show_event_period_problems([])
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
+        self.fst_form.load(p.analysis)
+        self._update_fst()
         self._fill_calculations()
+        self._fill_plugins()
 
     def _update_summary(self):
         p = self.project
@@ -527,6 +708,19 @@ class ExperimentPage(Page):
                  f"{procs} procedure{'s' if procs != 1 else ''}"]
         self.summary_lbl.setText("This protocol has " + ", ".join(parts) + ".")
 
+    def _update_fst(self):
+        """The forced swim / tail suspension settings are shown for those types of test."""
+        self.fst_box.setVisible(self.protocol.currentData() in FST_TEMPLATES)
+
+    def _fst_changed(self):
+        if self.project is not None:
+            self.an_form.load(self.project.analysis)
+        self.main.mark_dirty()
+
+    def _analysis_changed(self):
+        if self.project is not None:
+            self.fst_form.load(self.project.analysis)
+
     def _update_mode(self):
         mode = self.mode.currentData()
         self.takenote_lbl.setText("This protocol uses Input/output only mode: tests run without a camera and these "
@@ -534,6 +728,54 @@ class ExperimentPage(Page):
                                   "This protocol uses TakeNote mode: tests are scored by hand and these settings "
                                   "are only used if you track a test anyway.")
         self.takenote_lbl.setVisible(mode in ("takenote", "io_only"))
+        self.protocol_form.setRowVisible(self.chambers_row, mode == "io_only")
+        p = self.project
+        preset = ioconfig.OPERANT_PRESETS.get(p.settings_extra.get(PRESET_KEY) or "") if p is not None else None
+        n = len(p.io_devices) if p is not None else 0
+        devs = f"{n} I/O device{'s' if n != 1 else ''}"
+        self.chambers_lbl.setText(f"{preset['label']}; {devs} (Hardware)." if preset else
+                                  f"{devs} (Hardware). Set up the chambers' levers, nose pokes, lights, dispenser and "
+                                  "shocker from a preset: Med Associates-, Coulbourn- or Lafayette-style, or custom."
+                                  if n else
+                                  "No I/O devices yet: set up the chambers' levers, nose pokes, lights, dispenser "
+                                  "and shocker from a preset (Med Associates-, Coulbourn- or Lafayette-style, or "
+                                  "custom).")
+
+    def set_up_chambers(self, preset: str | None = None) -> bool:
+        """Input/output only mode: the I/O devices of the operant chambers from a preset (one device per chamber,
+        its inputs and outputs named and its pins numbered for the interface chosen), replacing the experiment's
+        I/O devices or added to them."""
+        p = self.project
+        if p is None:
+            return False
+        from ..io_devices_dialog import OperantPresetDialog
+        dlg = OperantPresetDialog(self, preset or p.settings_extra.get(PRESET_KEY))
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
+            return False
+        keep = []
+        if p.io_devices:
+            names = ", ".join(str(d.get("name", "?")) for d in p.io_devices)
+            r = QMessageBox.question(self, "Operant chambers", f"The experiment already has I/O devices ({names}). "
+                                     "Replace them with the chambers?\n\nNo adds the chambers to them.",
+                                     QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.No)
+            if r == QMessageBox.Cancel:
+                return False
+            if r == QMessageBox.No:
+                keep = list(p.io_devices)
+        new = dlg.devices([d.get("name") for d in keep])
+        p.io_devices[:] = keep + new
+        p.settings_extra[PRESET_KEY] = dlg.preset()
+        self.main.mark_dirty()
+        self._update_hardware()
+        self._update_mode()
+        self.proc_editor.validate()  # the devices changed
+        self.main.status(f"Set up {len(new)} chamber{'s' if len(new) != 1 else ''} "
+                         f"({ioconfig.OPERANT_PRESETS[dlg.preset()]['label']}, "
+                         f"{ioconfig.DEVICE_TYPES[dlg.device_type()]}): check the ports and pins in Hardware › I/O "
+                         "devices.")
+        return True
 
     def _store_mode(self, *_):
         self._update_mode()
@@ -541,10 +783,53 @@ class ExperimentPage(Page):
             return
         self.project.settings_extra["mode"] = self.mode.currentData()
         self.main.mark_dirty()
+        self.proc_editor.validate()  # (Input/output only: what needs the animal is an error)
+        if self.mode.currentData() == "io_only" and not self.project.io_devices:
+            self.main.status("Input/output only: set up the I/O devices of the chambers from a preset with "
+                             "“Operant chambers…”.")
+
+    def _load_sync(self, p):
+        """The synchronisation element of the Hardware page (Project.sync)."""
+        s = sync_from(p.sync if p is not None else None)
+        with loading(self):
+            self.sync_out.clear()
+            for d in (p.io_devices if p is not None else []):
+                for c in d.get("channels") or []:
+                    if c.get("kind", "input") == "output" and c.get("name"):
+                        self.sync_out.addItem(f"{d.get('name', '?')}/{c['name']}", (d.get("name", ""), c["name"]))
+            want = (s["device"], s["channel"])
+            i = next((k for k in range(self.sync_out.count()) if self.sync_out.itemData(k) == want or
+                      not s["device"] and self.sync_out.itemData(k)[1] == s["channel"]), -1)
+            if i < 0 and s["channel"]:
+                self.sync_out.addItem(f"{'/'.join(x for x in want if x)} (not configured)", want)
+                i = self.sync_out.count() - 1
+            self.sync_out.setCurrentIndex(max(i, 0) if self.sync_out.count() else -1)  # default: the first output
+            self.sync_on.setChecked(s["enabled"])
+            for k, cb in self.sync_checks.items():
+                cb.setChecked(s[k])
+            self.sync_width.setValue(s["width_ms"])
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        on = self.sync_on.isChecked()
+        for w in [self.sync_out, self.sync_width, *self.sync_checks.values()]:
+            w.setEnabled(on)
+
+    def _store_sync(self, *_):
+        self._sync_enabled()
+        p = self.project
+        if self._loading or p is None:
+            return
+        dev, ch = self.sync_out.currentData() or ("", "")
+        p.sync = sync_from({"enabled": self.sync_on.isChecked(), "device": dev, "channel": ch,
+                            "width_ms": self.sync_width.value(),
+                            **{k: cb.isChecked() for k, cb in self.sync_checks.items()}})
+        self.main.mark_dirty()
 
     def _update_hardware(self):
         p = self.project
         self.io_list.clear()
+        self._load_sync(p)
         if p is None:
             self.hw_lbl.setText("")
             self.ts_lbl.setText("")
@@ -614,7 +899,8 @@ class ExperimentPage(Page):
         while name in names:
             name = f"{b.name} copy {k}"
             k += 1
-        self._append_behaviour_row(Behaviour(name, wf.free_key(self.project.behaviours), b.kind, b.group, ""))
+        self._append_behaviour_row(Behaviour(name, wf.free_key(self.project.behaviours), b.kind, b.group, "",
+                                             b.activity))
         self.beh.setCurrentCell(self.beh.rowCount() - 1, 0)
         self._store_behaviours()
 
@@ -681,7 +967,7 @@ class ExperimentPage(Page):
         rows = self._calculation_rows()
         reserved = info_columns(p) + [ERROR_COLUMN, "Warnings"]
         measures = [m for m in self._calc_measures or [] if m not in reserved] if rows else None
-        errs = check_calculation(c, measures, p.calculations, reserved)
+        errs = check_calculation(c, measures, p.calculations, reserved, p.analysis.event_periods)
         text = "The results are worked out when they are shown on the Data page."
         row = next((r for r in rows or [] if ERROR_COLUMN not in r), None)
         if not errs and row is not None:
@@ -700,11 +986,10 @@ class ExperimentPage(Page):
             return
         old = p.calculations[r].column
         p.calculations[r] = new
-        # renamed: the other formulas follow (unless the old name is a measure's: theirs may mean the measure)
-        if new.column and old and new.column != old and old not in (self._calc_measures or ()):
-            for c in p.calculations:
-                if c is not new:
-                    c.formula = c.formula.replace("{" + old + "}", "{" + new.column + "}")
+        # renamed: the other formulas (unless the old name is a measure's: theirs may mean the measure), the time
+        # periods it defines and the training criteria on it follow
+        if new.column and old and new.column != old:
+            p.rename_calculation(old, new.column, formulas=old not in (self._calc_measures or ()), skip=new)
         self.calc_list.item(r).setText(new.column or "(no name)")
         self.main.mark_dirty()
         self._check_calculation()
@@ -739,10 +1024,11 @@ class ExperimentPage(Page):
         c, p = self.current_calculation(), self.project
         if c is None:
             return
-        users = [x.column for x in p.calculations if x is not c and "{" + c.column + "}" in x.formula]
+        users = p.calculation_users(c.column) if c.column else []
         msg = f"Delete the calculation “{c.column or c.name}”?"
         if users:
-            msg += "\n\nIts result is used by: " + ", ".join(users) + " (their results will be blank)."
+            msg += ("\n\nIts result is used by: " + ", ".join(users) + " (their results will be blank, the time "
+                    "periods it defines left out).")
         if confirm and QMessageBox.question(self, "Delete calculation", msg) != QMessageBox.Yes:
             return
         p.calculations.remove(c)
@@ -813,7 +1099,7 @@ class ExperimentPage(Page):
                 self, "Apply template", f"Make this a {t.title} protocol with tests of {t.default_duration_s:g} s? "
                 "Existing results are recalculated with the new protocol type.") != QMessageBox.Yes:
             return
-        p.protocol = key
+        p.set_protocol(key)
         p.test_duration_s = float(t.default_duration_s)
         self.on_show()
         self.main.mark_dirty()
@@ -840,7 +1126,8 @@ class ExperimentPage(Page):
         self._update_pose_box()
 
     def restore_analysis_defaults(self):
-        self._restore_defaults(self.project.analysis if self.project else None, AnalysisSettings(), ANALYSIS_SPEC,
+        self._restore_defaults(self.project.analysis if self.project else None,
+                               AnalysisSettings.for_new_experiment(), ANALYSIS_SPEC,
                                self.an_form, "analysis")
 
     def _restore_defaults(self, obj, default, spec, form, what):
@@ -852,6 +1139,100 @@ class ExperimentPage(Page):
         form.load(obj)
         self.main.mark_dirty()
 
+    # ================================================================== analysis plug-ins
+    def _fill_plugins(self):
+        p = self.project
+        row = self.plugin_list.currentRow()
+        self.plugin_list.clear()
+        for c in (p.analysis_plugins if p is not None else []):
+            pl = plugins.analysis_plugin(c.get("plugin", ""))
+            kind = pl.title if pl is not None else f"{c.get('plugin')} (not installed)"
+            off = "" if c.get("enabled", True) else " — not run"
+            self.plugin_list.addItem(QListWidgetItem(icon("chart"), f"{c.get('name') or kind}  ·  {kind}{off}"))
+        if self.plugin_list.count():
+            self.plugin_list.setCurrentRow(min(max(row, 0), self.plugin_list.count() - 1))
+
+    def _fill_plugin_menu(self):
+        self.plugin_menu.clear()
+        for name in plugins.analysis_names():
+            pl = plugins.analysis_plugin(name)
+            a = self.plugin_menu.addAction(pl.title)
+            a.setToolTip(pl.description)
+            a.triggered.connect(lambda _=False, n=name: self.add_plugin(n))
+
+    def add_plugin(self, name: str, dlg=None) -> dict | None:
+        """Add a configured analysis plug-in to the protocol (its settings are asked first)."""
+        p = self.project
+        if p is None:
+            return None
+        cfg = plugins.new_config(name, [c.get("name") for c in p.analysis_plugins])
+        cfg = self._plugin_dialog(cfg, dlg)
+        if cfg is None:
+            return None
+        p.analysis_plugins.append(cfg)
+        self.main.mark_dirty()
+        self._fill_plugins()
+        self.plugin_list.setCurrentRow(self.plugin_list.count() - 1)
+        return cfg
+
+    def _plugin_dialog(self, cfg: dict, dlg=None) -> dict | None:
+        from ..plugin_dialog import PluginOptionsDialog
+
+        given = dlg is not None
+        dlg = dlg or PluginOptionsDialog(self.project, cfg, self)
+        if not given and dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.values()
+
+    def edit_plugin(self, dlg=None) -> dict | None:
+        p = self.project
+        i = self.plugin_list.currentRow()
+        if p is None or not 0 <= i < len(p.analysis_plugins):
+            return None
+        cfg = self._plugin_dialog(p.analysis_plugins[i], dlg)
+        if cfg is None:
+            return None
+        p.analysis_plugins[i] = cfg
+        self.main.mark_dirty()
+        self._fill_plugins()
+        return cfg
+
+    def remove_plugin(self):
+        p = self.project
+        i = self.plugin_list.currentRow()
+        if p is None or not 0 <= i < len(p.analysis_plugins):
+            return
+        del p.analysis_plugins[i]
+        self.main.mark_dirty()
+        self._fill_plugins()
+
+    def run_plugins(self, wait: bool = False):
+        """Run the analysis plug-ins on every test performed (in the background), then save the experiment."""
+        p = self.project
+        if p is None or not p.analysis_plugins:
+            return None
+        if p.path is None and not self.main.save():
+            return None
+
+        def done(res):
+            self.main.mark_dirty()
+            self.main.save()
+            msg = f"Ran the analysis plug-ins on {len(res['done'])} test(s)."
+            self.main.status(msg)
+            if res["errors"]:
+                lines = [f"Test {tid}: {m}" for tid, m in res["errors"][:20]]
+                QMessageBox.warning(self, "Analysis plug-ins", msg + "\n\n" + "\n".join(lines))
+            self.last_plugin_run = res
+
+        w = run_with_progress(self, "Running the analysis plug-ins",
+                              lambda progress, stop: plugins.run_analysis_plugins(p, progress=progress),
+                              on_done=done, on_fail=lambda m: QMessageBox.warning(self, "Analysis plug-ins", m),
+                              cancellable=False)
+        if wait:
+            w.wait()
+            QApplication.processEvents()
+        return w
+
     def edit_io_devices(self):
         if self.project is None:
             return None
@@ -860,6 +1241,7 @@ class ExperimentPage(Page):
         dlg.changed.connect(self.main.mark_dirty)
         dlg.exec()
         self._update_hardware()
+        self._update_mode()  # (the chambers row: devices and preset)
         self.proc_editor.validate()  # the devices changed
         return dlg
 
@@ -887,7 +1269,11 @@ class ExperimentPage(Page):
         p = self.project
         p.name = self.name.text().strip() or p.name
         p.description = self.desc.toPlainText()
-        p.protocol = self.protocol.currentData()
+        if p.protocol != self.protocol.currentData():  # the forced swim / tail suspension immobility follows
+            p.set_protocol(self.protocol.currentData())
+            self.an_form.load(p.analysis)
+            self.fst_form.load(p.analysis)
+            self._update_fst()
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
         self._follow_stage_renames(p)
@@ -923,7 +1309,9 @@ class ExperimentPage(Page):
         r = self.beh.rowCount()
         self.beh.insertRow(r)
         self._key_names.insert(r, b.name)
-        self.beh.setItem(r, 0, QTableWidgetItem(b.name))
+        it = QTableWidgetItem(b.name)
+        it.setData(Qt.UserRole, bool(b.activity))  # counts as activity (the Key property page)
+        self.beh.setItem(r, 0, it)
         k = QTableWidgetItem(b.key.upper() if len(b.key) == 1 else b.key)
         k.setTextAlignment(Qt.AlignCenter)
         self.beh.setItem(r, 1, k)
@@ -1003,7 +1391,7 @@ class ExperimentPage(Page):
         kind = self.beh.cellWidget(r, 2).currentData() if self.beh.cellWidget(r, 2) else "state"
         group = self.beh.item(r, 3).text().strip() if self.beh.item(r, 3) else ""
         color = self.beh.cellWidget(r, 4).property("color") if self.beh.cellWidget(r, 4) else ""
-        return Behaviour(name, key, kind, group, color or "")
+        return Behaviour(name, key, kind, group, color or "", bool(self.beh.item(r, 0).data(Qt.UserRole)))
 
     def _store_behaviours(self, *_):
         if self._loading or self.project is None:
@@ -1048,7 +1436,7 @@ class ExperimentPage(Page):
         if b is None:
             self.key_editor.load(None)
         else:
-            self.key_editor.load(b.name, b.key, b.kind, b.group, b.color)
+            self.key_editor.load(b.name, b.key, b.kind, b.group, b.color, b.activity)
 
     def _key_edited(self, v: dict):
         r = self.beh.currentRow()
@@ -1057,6 +1445,7 @@ class ExperimentPage(Page):
         with loading(self):
             if v["name"]:
                 self.beh.item(r, 0).setText(v["name"])
+            self.beh.item(r, 0).setData(Qt.UserRole, bool(v.get("activity")))
             key = v["key"]
             self.beh.item(r, 1).setText(key.upper() if len(key) == 1 else key)
             self.beh.cellWidget(r, 2).setCurrentIndex(self._kind_index(v["kind"], v["group"]))
@@ -1071,6 +1460,12 @@ class ExperimentPage(Page):
     def _blind_toggled(self, on):
         p = self.project
         if self._loading or p is None:
+            return
+        if not on and p.blind and not security.can(p, "reveal_codes"):
+            with loading(self):
+                self.blind.setChecked(True)
+            QMessageBox.information(self, "Unblind", "Only an administrator can reveal the treatment coding of this "
+                                    "experiment (File ▸ Users and security).")
             return
         if not on and p.blind and QMessageBox.question(
                 self, "Unblind", "Reveal the treatment groups? The experimenter will no longer be blind to the "
@@ -1089,13 +1484,21 @@ class ExperimentPage(Page):
         self.project.settings_extra["confirm_id"] = self.confirm_id.isChecked()
         self.main.mark_dirty()
 
+    def _store_weigh(self, on: bool):
+        if self._loading or self.project is None:
+            return
+        self.project.require_weight_before_test = bool(on)
+        self.main.mark_dirty()
+
     # ================================================================== training criteria, time periods
     @staticmethod
     def _criterion_row(c: dict) -> dict:
         c = wf.normalize_criterion(c)
-        fail = c["action_fail"]
+        fail, var = c["action_fail"], c["variability"] or {}
         return {**c, "action_met": "complete_stage" if c["action_met"] == "advance" else c["action_met"],
-                "after": fail["after_trials"] if fail["action"] == "retire" else 0}
+                "after": fail["after_trials"] if fail["action"] == "retire" else 0,
+                "var_stat": var.get("stat", ""), "var_measure": var.get("measure", ""),
+                "var_trials": var.get("trials", c["consecutive_trials"]), "var_max": var.get("max", 10.0)}
 
     def _add_criterion(self):
         if self.project is None:
@@ -1111,9 +1514,39 @@ class ExperimentPage(Page):
         self.project.training_criteria = [
             {"stage": c["stage"], "measure": c["measure"], "op": c["op"], "value": c["value"] or 0.0,
              "consecutive_trials": c["consecutive_trials"], "action_met": c["action_met"],
-             "action_fail": {"after_trials": c["after"], "action": "retire" if c["after"] else "none"}}
+             "action_fail": {"after_trials": c["after"], "action": "retire" if c["after"] else "none"},
+             "min_trials": c["min_trials"],
+             "variability": {"stat": c["var_stat"], "measure": c["var_measure"], "trials": c["var_trials"],
+                             "max": c["var_max"] or 0.0} if c["var_stat"] else None}
             for c in self.crit.records()]
         self.main.mark_dirty()
+
+    def _show_variability(self):
+        """The Variability row shows the selected criterion's acceptable variability."""
+        r = self.crit.currentRow()
+        rec = self.crit.records()[r] if 0 <= r < self.crit.rowCount() else None
+        with loading(self):
+            self.var_stat.setCurrentIndex(max(0, self.var_stat.findData(rec["var_stat"] if rec else "")))
+            self.var_measure.setText(rec["var_measure"] if rec else "")
+            self.var_trials.setValue(int(rec["var_trials"] or 2) if rec else 3)
+            self.var_max.setValue(float(rec["var_max"] or 0.0) if rec else 10.0)
+        self.var_stat.setEnabled(rec is not None)
+        on = rec is not None and bool(rec["var_stat"])
+        for w in (self.var_measure, self.var_trials, self.var_max):
+            w.setEnabled(on)
+
+    def _variability_edited(self, *_):
+        """Store the Variability row into the selected criterion (its hidden cells, so the row keeps it)."""
+        r = self.crit.currentRow()
+        if self._loading or not 0 <= r < self.crit.rowCount():
+            return
+        t, cols = self.crit, _VAR_COLS
+        t.cellWidget(r, cols["var_stat"]).setCurrentIndex(max(0, t.cellWidget(r, cols["var_stat"]).findData(
+            self.var_stat.currentData())))
+        t.item(r, cols["var_measure"]).setText(self.var_measure.text().strip())
+        t.cellWidget(r, cols["var_trials"]).setValue(self.var_trials.value())
+        t.item(r, cols["var_max"]).setText(f"{self.var_max.value():g}")
+        self._show_variability()
 
     def _add_event_period(self):
         zone = ""
@@ -1122,8 +1555,19 @@ class ExperimentPage(Page):
             zone = p.apparatus[0].zones[-1].name
         n = self.ev_periods.rowCount() + 1
         self.ev_periods.add_record({"label": f"Event period {n}", "anchor": "first_exit", "target": zone,
-                                    "offset_s": 0, "duration_s": 30, "occurrence": 1})
+                                    "offset_s": 0, "duration_s": 30, "occurrence": 1, "end_anchor": "duration",
+                                    "end_offset_s": 0, "end_occurrence": 1})
         self._store_event_periods()
+
+    @staticmethod
+    def _event_period_record(d: dict) -> dict:
+        """A stored event-anchored period as a row of the table (its start's and end's zone / key / input /
+        calculation in one column each)."""
+        end = d.get("end") if isinstance(d.get("end"), dict) else {}
+        ea = end.get("anchor") or "duration"
+        return {**d, "target": d.get(_TARGET_KEY.get(d.get("anchor", ""), "zone"), ""), "end_anchor": ea,
+                "end_target": end.get(TARGET_KEY.get(ea, "zone"), ""), "end_offset_s": end.get("offset_s", 0),
+                "end_occurrence": end.get("occurrence", 1)}
 
     def _store_event_periods(self, *_):
         if self._loading or self.project is None:
@@ -1136,10 +1580,27 @@ class ExperimentPage(Page):
             target = d.pop("target")
             if d["anchor"] in _TARGET_KEY:
                 d[_TARGET_KEY[d["anchor"]]] = target
+            ea, et = d.pop("end_anchor") or "duration", d.pop("end_target")
+            eo, en = d.pop("end_offset_s"), d.pop("end_occurrence")
+            if ea != "duration":  # ends at an event or a calculation's time (an empty offset / occurrence: 0 / 1)
+                d["end"] = {"anchor": ea, TARGET_KEY.get(ea, "zone"): et, "offset_s": eo or 0.0,
+                            "occurrence": max(1, en or 1)}
             out.append({**d, "label": d["label"] or f"Event period {r + 1}"})
         self.project.analysis.event_periods = out
-        self._show_rejected(self.ev_periods_lbl, bad, "the offset, duration and occurrence must be numbers")
+        self._show_event_period_problems(bad)
         self.main.mark_dirty()
+
+    def _show_event_period_problems(self, bad: list[str]):
+        """The periods not stored (numbers missing) and those whose calculation cannot define them (unknown, worked
+        out from other trials, circular reference: they are left out or end at the end of the test)."""
+        p = self.project
+        self._show_rejected(self.ev_periods_lbl, bad, "the offset, duration and occurrence must be numbers")
+        problems = check_periods(p.analysis.event_periods, p.calculations,
+                                 info_columns(p) + [ERROR_COLUMN]) if p is not None else []
+        if problems:
+            text = "\n".join(f"“{label}”: {msg}" for label, msg in problems)
+            self.ev_periods_lbl.setText((self.ev_periods_lbl.text() + "\n" if bad else "") + text)
+            self.ev_periods_lbl.setVisible(True)
 
     @staticmethod
     def _show_rejected(lbl: QLabel, labels: list[str], why: str):

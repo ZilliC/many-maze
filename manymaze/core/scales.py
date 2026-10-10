@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 from .iodevices import _LineDevice
 
@@ -237,6 +237,22 @@ def scale_configs(project) -> list[dict]:
 
 def format_grams(g: float) -> str:
     return f"{round(float(g), 2):g}"
+
+
+def weighed_today(animal, today: date | None = None) -> bool:
+    """Whether the animal's weight history has a weight of today."""
+    day = (today or datetime.now().date()).isoformat()
+    return any(str(w.get("date", ""))[:10] == day for w in animal.weights or [])
+
+
+def weight_needed(project, animal_id: str, today: date | None = None) -> bool:
+    """A live test of this animal must wait until it is weighed: the protocol asks for it
+    (Project.require_weight_before_test), a balance is connected (a scale device) and the animal has no weight of
+    today yet."""
+    if not project.require_weight_before_test or not scale_configs(project):
+        return False
+    a = project.get_animal(animal_id)
+    return a is not None and not weighed_today(a, today)
 
 
 def record_weight(project, animal, grams: float, when: datetime | None = None, field: str = WEIGHT_FIELD) -> dict:

@@ -224,6 +224,82 @@ def test_criteria_normalisation_and_ops():
     assert rep["rows"][0]["met_at_trial"] == 2
 
 
+def _stage_rules(vals: dict, **crit):
+    """A project whose animals have the given values of "Responses" on trials 1, 2 … of stage T, and one criterion
+    on it."""
+    p = make_project(len(vals))
+    for aid, vv in vals.items():
+        for k, v in enumerate(vv):
+            t = p.add_test("", aid, stage="T", trial=k + 1, status="scored")
+            t.result_variables = {"Responses": v, "Rate": 2 * v}
+    p.training_criteria = [{"stage": "T", "measure": "Responses", "op": ">=", "value": 10} | crit]
+    return p
+
+
+def test_stage_end_rule_minimum_trials():
+    # met on trial 2 by the value rule alone, but the stage cannot end before the 4th trial
+    p = _stage_rules({"M1": [5, 12, 13, 14, 15], "M2": [12, 12, 12]}, min_trials=4)
+    rows = {r["animal"]: r for r in wf.evaluate_criteria(p)["rows"]}
+    assert rows["M1"]["met_at_trial"] == 4 and not rows["M2"]["met"]  # M2: only 3 trials so far
+    assert "after at least 4 trials" in rows["M1"]["criterion"]
+    p.training_criteria[0]["min_trials"] = 0
+    assert {r["animal"]: r["met_at_trial"] for r in wf.evaluate_criteria(p)["rows"]} == {"M1": 2, "M2": 1}
+
+
+def test_stage_end_rule_acceptable_variability():
+    # ANY-maze 7.30: the stage ends when the values over the last N trials vary little enough
+    vals = {"M1": [20, 40, 30, 31, 30, 29], "M2": [20, 40, 10, 50, 30, 70]}
+    sd = {"stat": "sd", "trials": 3, "max": 1.5}
+    p = _stage_rules(vals, op="any", variability=sd)
+    rows = {r["animal"]: r for r in wf.evaluate_criteria(p)["rows"]}
+    assert rows["M1"]["met_at_trial"] == 5 and rows["M1"]["variability"] == pytest.approx(0.5774, abs=1e-3)
+    assert not rows["M2"]["met"] and rows["M2"]["variability"] == pytest.approx(20.0)  # SD of 50, 30, 70
+    assert "any value" in rows["M1"]["criterion"] and "SD over the last 3 trials ≤ 1.5" in rows["M1"]["criterion"]
+    # combined with the value rule: both must hold on the same trial
+    p.training_criteria[0] |= {"op": "<", "value": 25}
+    assert not wf.evaluate_criteria(p)["rows"][0]["met"]  # < 25 on trial 1 only, stable only from trial 5
+    p.training_criteria[0]["value"] = 30.5
+    assert wf.evaluate_criteria(p)["rows"][0]["met_at_trial"] == 5
+    # CV (%) of another measure: Rate is twice Responses, so its CV is the same
+    cv = {"stat": "cv", "trials": 4, "max": 3.0, "measure": "Rate"}
+    p.training_criteria = [{"stage": "T", "measure": "Responses", "op": "any", "variability": cv}]
+    row = wf.evaluate_criteria(p)["rows"][0]
+    assert row["met_at_trial"] == 6 and row["variability"] == pytest.approx(100 * 0.8165 / 30, abs=1e-3)
+    assert "CV of Rate over the last 4 trials ≤ 3 %" in row["criterion"]
+    # ANY-maze's own variability, ((max - min) / (max + min)) × 100: its help's examples
+    assert wf.variability_value([25, 24, 27], "range") == pytest.approx(100 * 3 / 51)
+    assert wf.variability_value([25, 24, 56], "range") == pytest.approx(40.0)
+    p.training_criteria = [{"stage": "T", "measure": "Responses", "op": ">=", "value": 25, "consecutive_trials": 3,
+                            "variability": {"stat": "range", "trials": 3, "max": 10}}]
+    row = wf.evaluate_criteria(p)["rows"][0]  # 30, 31, 30 on trials 3-5: 1.6 %
+    assert row["met_at_trial"] == 5 and "variability over the last 3 trials ≤ 10 %" in row["criterion"]
+    # a missing value in the window, or a percentage of values adding up to 0, is not acceptable
+    assert wf.variability_value([1, None, 1], "sd") is None and wf.variability_value([-1, 1], "cv") is None
+    assert wf.variability_value([-1, 1], "range") is None and wf.variability_value([2, 2, 2], "cv") == 0
+
+
+def test_stage_end_rules_stored_and_older_criteria():
+    old = {"stage": "T", "measure": "m", "op": "<", "value": 3, "consecutive_trials": 2,
+           "action_fail": {"after_trials": 5, "action": "retire"}}
+    c = wf.Criterion.from_dict(old)
+    assert c.min_trials == 0 and c.variability is None and c.variability_measure == ""
+    assert c.variability_ok([1, 2, 3]) == (True, None)
+    assert wf.normalize_criterion(old) == old | {"action_met": "complete_stage", "min_trials": 0, "variability": None}
+    new = wf.normalize_criterion(old | {"min_trials": "3", "variability": {"stat": "cv", "trials": 1, "max": "5"}})
+    assert new["min_trials"] == 3 and new["variability"] == {"measure": "", "trials": 2, "stat": "cv", "max": 5.0}
+    assert wf.normalize_criterion(old | {"variability": {"stat": "iqr"}})["variability"] is None
+    p = make_project(1)
+    p.training_criteria = [new]
+    q = Project.from_dict(p.to_dict())
+    assert wf.Criterion.from_dict(q.training_criteria[0]) == wf.Criterion.from_dict(new)
+    # a renamed key renames the variability's measure too
+    p.training_criteria = [{"stage": "T", "measure": "Rearing: count", "op": "any",
+                            "variability": {"stat": "sd", "trials": 3, "max": 1, "measure": "Rearing: duration (s)"}}]
+    p.rename_key("Rearing", "Rear")
+    c = p.training_criteria[0]
+    assert c["measure"] == "Rear: count" and c["variability"]["measure"] == "Rear: duration (s)"
+
+
 def test_criteria_analyse_each_test_once():
     p = make_project(1)
     for k in range(3):

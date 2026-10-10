@@ -123,7 +123,8 @@ def _fresh_copy(project: Project, test: Test, **changes) -> Test:
     """A pending copy of `test` with a new id and none of its recorded data (scoring, I/O log, results, pauses)."""
     d = asdict(test)
     d.update(id=project.next_test_id(), events=[], status="pending", recorded_at="", notes="", io_events=[],
-             result_variables={}, pauses=[], experimenter="", end_reason="", **changes)
+             result_variables={}, pauses=[], experimenter="", end_reason="", extra_series={}, extra_measures={},
+             **changes)
     return Test.from_dict(d)
 
 
@@ -158,8 +159,13 @@ def clear_tracks(project: Project, test: Test) -> int:
 
 
 def delete_test(project: Project, test: Test) -> int:
-    """Remove the test and its track files (videos are kept). Returns the number of track files removed."""
+    """Remove the test, its track files and the time series of the analysis plug-ins (videos are kept). Returns the
+    number of track files removed."""
     n = clear_tracks(project, test)
+    if project.path is not None and test.extra_series:
+        from .plugins import series_path
+
+        series_path(project, test).unlink(missing_ok=True)
     project.tests.remove(test)
     return n
 
@@ -246,14 +252,49 @@ def generate_schedule(project: Project, animals: list[str] | None = None, stages
 
 # ---------------------------------------------------------------- training criteria
 OPS = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b, ">=": lambda a, b: a >= b,
-       "=": lambda a, b: a == b}
+       "=": lambda a, b: a == b, "any": lambda a, b: True}
+# acceptable variability of a measure over the last trials (ANY-maze 7.30): ANY-maze's variability, ((max - min) /
+# (max + min)) × 100 %, or the SD, or the CV (the SD as a % of the mean)
+VARIABILITY_STATS = {"range": "Variability (%)", "sd": "SD", "cv": "CV (%)"}
+
+
+def _variability(v) -> dict | None:
+    """A stored acceptable-variability rule, normalised: {"measure" ("" = the criterion's measure), "trials" (≥ 2),
+    "stat" ("range" | "sd" | "cv"), "max"}; None when there is none or it cannot be used."""
+    if not isinstance(v, dict) or v.get("stat") not in VARIABILITY_STATS:
+        return None
+    try:
+        trials, mx = int(v.get("trials", 3) or 3), float(v.get("max", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return {"measure": str(v.get("measure") or "").strip(), "trials": max(2, min(MAX_TRIALS, trials)),
+            "stat": v["stat"], "max": mx}
+
+
+def variability_value(values: list, stat: str) -> float | None:
+    """The variability of the values: "range" as ANY-maze ((max - min) / (max + min) × 100, e.g. 25, 24, 27 → 5.9
+    %), "sd" (sample SD, n - 1) or "cv" (SD as a % of the absolute mean). None if a value is missing, there are
+    fewer than two, or a percentage of values adding up to 0."""
+    if len(values) < 2 or any(v is None for v in values):
+        return None
+    a = [float(v) for v in values]
+    if stat == "range":
+        return 100.0 * (max(a) - min(a)) / (max(a) + min(a)) if max(a) + min(a) else None
+    mean = sum(a) / len(a)
+    sd = math.sqrt(sum((x - mean) ** 2 for x in a) / (len(a) - 1))
+    if stat == "cv":
+        return 100.0 * sd / abs(mean) if mean else None
+    return sd
 
 
 @dataclass
 class Criterion:
-    """A training criterion (stored in ``Project.training_criteria`` as the dict of :meth:`to_dict`): met when the
-    measure satisfies `op value` on `consecutive_trials` consecutive trials of the stage; it fails when
-    `fail_after_trials` trials were done without meeting it (then `fail_action`: "retire" or "none")."""
+    """A training criterion, ANY-maze's stage end rule (stored in ``Project.training_criteria`` as the dict of
+    :meth:`to_dict`): met when the measure satisfies `op value` (op "any": any value) on `consecutive_trials`
+    consecutive trials of the stage, the animal has done at least `min_trials` trials of it and, with a
+    `variability` rule, the SD or CV of a measure over its last trials is at most the maximum ("acceptable
+    variability"); all must hold on the same trial. It fails when `fail_after_trials` trials were done without
+    meeting it (then `fail_action`: "retire" or "none")."""
 
     stage: str = ""
     measure: str = ""
@@ -263,30 +304,58 @@ class Criterion:
     action_met: str = "complete_stage"
     fail_after_trials: int = 0
     fail_action: str = "none"
+    min_trials: int = 0  # the stage cannot end before this many trials (0 = no minimum)
+    variability: dict | None = None  # {"measure" ("" = measure), "trials", "stat": "sd" | "cv", "max"} (_variability)
 
     @classmethod
     def from_dict(cls, c: dict) -> "Criterion":
-        """From a stored criterion, including the older flat form ({"fail_after_trials": n, "action_fail": "..."})."""
+        """From a stored criterion, including the older flat form ({"fail_after_trials": n, "action_fail": "..."})
+        and criteria saved before the minimum number of trials and the acceptable variability existed."""
         fail = c.get("action_fail") or {}
         if isinstance(fail, str):
             fail = {"action": fail}
         after = int(fail.get("after_trials", c.get("fail_after_trials", 0)) or 0)
         return cls(c.get("stage", ""), c.get("measure", ""), c.get("op", "<"), float(c.get("value", 0) or 0),
                    max(1, int(c.get("consecutive_trials", 1) or 1)), c.get("action_met", "complete_stage"), after,
-                   fail.get("action", "retire" if after else "none"))
+                   fail.get("action", "retire" if after else "none"), max(0, int(c.get("min_trials", 0) or 0)),
+                   _variability(c.get("variability")))
 
     def to_dict(self) -> dict:
         return {"stage": self.stage, "measure": self.measure, "op": self.op, "value": self.value,
                 "consecutive_trials": self.consecutive_trials, "action_met": self.action_met,
-                "action_fail": {"after_trials": self.fail_after_trials, "action": self.fail_action}}
+                "action_fail": {"after_trials": self.fail_after_trials, "action": self.fail_action},
+                "min_trials": self.min_trials, "variability": _variability(self.variability)}
 
     def met_by(self, v) -> bool:
         return v is not None and OPS.get(self.op, OPS["<"])(v, self.value)
 
+    @property
+    def variability_measure(self) -> str:
+        """The measure whose variability is checked ("" without a variability rule)."""
+        v = _variability(self.variability)
+        return (v["measure"] or self.measure) if v else ""
+
+    def variability_ok(self, values: list) -> tuple[bool, float | None]:
+        """(met, SD or CV) of the variability rule over the last of `values` (the variability measure, trial by
+        trial); met without a rule."""
+        v = _variability(self.variability)
+        if v is None:
+            return True, None
+        x = variability_value(values[-v["trials"]:], v["stat"]) if len(values) >= v["trials"] else None
+        return x is not None and x <= v["max"], x
+
     def text(self) -> str:
         n = self.consecutive_trials
-        s = f"{self.stage or 'any stage'}: {self.measure} {self.op} {self.value:g} on {n} consecutive " \
-            f"trial{'s' if n != 1 else ''}"
+        cond = "any value" if self.op == "any" else f"{self.op} {self.value:g}"
+        s = f"{self.stage or 'any stage'}: {self.measure} {cond} on {n} consecutive trial{'s' if n != 1 else ''}"
+        v = _variability(self.variability)
+        if v:
+            what = "" if self.variability_measure == self.measure else f" of {self.variability_measure}"
+            stat = "variability" if v["stat"] == "range" else v["stat"].upper()
+            s += f", {stat}{what} over the last {v['trials']} trials ≤ {v['max']:g}" \
+                 f"{'' if v['stat'] == 'sd' else ' %'}"
+        if self.min_trials:
+            s += f", after at least {self.min_trials} trial{'s' if self.min_trials != 1 else ''}"
         if self.fail_after_trials and self.fail_action == "retire":
             s += f"; retire if not met after {self.fail_after_trials} trials"
         return s
@@ -337,8 +406,10 @@ def evaluate_criteria(project: Project, value_fn=None) -> dict:
     """Evaluate the project's training criteria (see :class:`Criterion`) against the results.
 
     Returns {"rows": [per animal × criterion dict], "completed": {animal: [stages]}, "retire": {animal: reason}}.
-    Trials of a stage are taken in trial order. value_fn(test, measure) -> value (default: measure_value, each
-    test analysed at most once).
+    Trials of a stage are taken in trial order; the criterion is met on the first trial where the value rule
+    (`op value` on the consecutive trials), the minimum number of trials and the acceptable variability all hold.
+    A row's "variability" is the last SD / CV worked out (None without a variability rule or before enough
+    trials). value_fn(test, measure) -> value (default: measure_value, each test analysed at most once).
     """
     rows_cache: dict = {}
     value_fn = value_fn or (lambda t, m: measure_value(project, t, m, rows_cache))
@@ -354,20 +425,25 @@ def evaluate_criteria(project: Project, value_fn=None) -> dict:
             if c.stage and t.stage != c.stage:
                 continue
             by_animal.setdefault(t.animal_id, []).append(t)
+        var_measure = c.variability_measure
         for aid, tests in by_animal.items():
             tests.sort(key=lambda t: (t.trial, t.id))
-            run, met_at, values = 0, None, []
+            run, met_at, values, spread = 0, None, [], []
+            var = None
             for t in tests:
                 v = value_fn(t, c.measure)
                 values.append(v)
                 run = run + 1 if c.met_by(v) else 0
-                if run >= c.consecutive_trials:
+                if var_measure:
+                    spread.append(v if var_measure == c.measure else value_fn(t, var_measure))
+                steady, var = c.variability_ok(spread)
+                if run >= c.consecutive_trials and len(values) >= c.min_trials and steady:
                     met_at = t.trial
                     break
             n = len(values)
             failed = met_at is None and c.fail_after_trials > 0 and n >= c.fail_after_trials
             row = {"animal": aid, "stage": c.stage, "criterion": c.text(), "trials": n, "values": values,
-                   "met": met_at is not None, "met_at_trial": met_at, "failed": failed,
+                   "met": met_at is not None, "met_at_trial": met_at, "failed": failed, "variability": var,
                    "action": c.action_met if met_at is not None else (c.fail_action if failed else "")}
             out["rows"].append(row)
             if met_at is not None and c.action_met in ("complete_stage", "advance"):
@@ -623,10 +699,14 @@ def add_experimenter(project: Project, name: str) -> str:
 
 
 def remove_experimenter(project: Project, name: str) -> bool:
-    """Remove a user from the list (the tests keep the name they were stamped with)."""
+    """Remove a user from the list, with their role and password (the tests keep the name they were stamped
+    with)."""
+    from .security import remove_user
+
     if name not in project.experimenters:
         return False
     project.experimenters.remove(name)
+    remove_user(project, name)
     if project.current_user == name:
         project.current_user = ""
     return True
@@ -716,16 +796,18 @@ def compute_doses(project: Project, animals: list[Animal] | None = None, write: 
 
 # ---------------------------------------------------------------------------- protocol copy
 # settings_extra entries that belong to the protocol (others, e.g. blind codes and completed stages, are data)
-PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose")
+PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose", "operant_preset")
 
 
 def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Project:
     """Give ``dst`` the protocol of ``src`` (ANY-maze: new experiment based on another one's protocol).
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
-    calculations, procedures, I/O devices, training criteria, blind testing and animal ID options, the animal
-    columns and the experimenters (users); I/O device passwords and tokens are not copied (enter them again);
-    with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
+    calculations, results reports, statistics settings, procedures, I/O devices, the synchronisation element,
+    analysis plug-ins, training criteria, blind testing, weighing, start delay and animal ID options, the animal
+    columns and the experimenters (users, with their roles and passwords, and the security settings); I/O device
+    passwords and tokens are not copied (enter them again), nor is the experiment password; with ``treatments``
+    also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
 
@@ -738,6 +820,8 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.detection = DetectionSettings.from_dict(src.detection.to_dict())
     dst.analysis = AnalysisSettings.from_dict(_copy.deepcopy(src.analysis.to_dict()))
     dst.calculations = calculations_from(c.to_dict() for c in src.calculations)
+    dst.reports = _copy.deepcopy(src.reports)
+    dst.statistics = _copy.deepcopy(src.statistics)
     dst.apparatus = [a.copy() for a in src.apparatus]
     dst.behaviours = [Behaviour.from_dict(asdict(b)) for b in src.behaviours]
     dst.stages = list(src.stages)
@@ -747,6 +831,13 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.blind = src.blind
     dst.animal_fields = list(src.animal_fields)
     dst.experimenters += [u for u in src.experimenters if u not in dst.experimenters]
+    have = {u.get("name") for u in dst.users}
+    dst.users += [dict(u) for u in src.users if u.get("name") not in have]
+    dst.security = dict(src.security)
+    dst.sync = _copy.deepcopy(src.sync)
+    dst.analysis_plugins = _copy.deepcopy(src.analysis_plugins)
+    dst.require_weight_before_test = src.require_weight_before_test
+    dst.start_switch_delay_s = src.start_switch_delay_s
     for k in PROTOCOL_EXTRAS:
         if k in src.settings_extra:
             dst.settings_extra[k] = _copy.deepcopy(src.settings_extra[k])

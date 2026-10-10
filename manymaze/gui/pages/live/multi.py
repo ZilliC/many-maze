@@ -1,8 +1,10 @@
-"""Several tests at once: a LiveGroup of camera / video sources and test panels."""
+"""Several tests at once: a LiveGroup of camera / video sources and test panels; in an Input/output only protocol,
+test panels without a camera (e.g. operant chambers side by side), each with its own I/O device."""
 
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from pathlib import Path
 
 import cv2
@@ -13,11 +15,13 @@ from ....core.camera import (CameraView, SourceSpec, camera_lenses, camera_setti
                              set_camera_settings)
 from ....core.camhw import CameraHardware
 from ....core.iodevices import DeviceView
-from ....core.livegroup import device_plan
+from ....core.livegroup import SHARED_DEVICE_TYPES, device_plan
+from ....core.livemonitor import io_panel_lines
 from ....core.procedures import Outputs
 from ....core.video import VIDEO_EXTENSIONS
+from ....core.scales import weight_needed
 from ....core.workflow import confirm_id_enabled
-from ...confirm_id import confirm_animal_id
+from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...icons import icon
 from ...live_widgets import CameraOptionsDialog, TestPanel, short_time
 from ...widgets import fmt_time
@@ -60,21 +64,28 @@ class MultiTestMixin:
             self.add_source(path)
 
     def add_session_row(self, source_key: str | None = None, apparatus: str | None = None,
-                        animal: str | None = None, stage: str | None = None, trial: int | None = None):
-        """Add a test panel (source × apparatus × animal / stage / trial) to the session."""
+                        animal: str | None = None, stage: str | None = None, trial: int | None = None,
+                        device: str | None = None):
+        """Add a test panel (source × apparatus × animal / stage / trial) to the session.  In an Input/output only
+        protocol the panel has no camera and uses an I/O device of its own (by default the first one no other
+        panel uses, e.g. the next operant chamber); its apparatus is optional."""
         p = self.project
         if p is None:
             return None
-        if not self.group.sources:
+        io = self.io_only
+        if io:
+            source_key = None
+        elif not self.group.sources:
             QMessageBox.information(self, "Run tests", "Add a camera or a video file first (Add camera / video "
                                     "source).")
             return None
-        keys = list(self.group.sources)
-        source_key = source_key if source_key in self.group.sources else self._selected_source() or keys[0]
+        else:
+            keys = list(self.group.sources)
+            source_key = source_key if source_key in self.group.sources else self._selected_source() or keys[0]
         used = {e.meta.get("apparatus") for e in self.group.entries_for(source_key)}
         if apparatus is None:
             apparatus = next((a.name for a in p.apparatus if a.name not in used),
-                             p.apparatus[0].name if p.apparatus else "")
+                             "" if io else p.apparatus[0].name if p.apparatus else "")
         ids = [a.id for a in p.animals]
         taken = {e.meta.get("animal") for e in self.group.entries}
         if animal is None:
@@ -82,6 +93,8 @@ class MultiTestMixin:
         meta = {"apparatus": apparatus, "animal": animal,
                 "stage": stage if stage is not None else (p.stages[0] if p.stages else ""),
                 "trial": trial or 1, "test_id": None}
+        if io or device is not None:
+            meta["device"] = self._free_device() if device is None else device
         e = self.group.add_entry(source_key, p.find_apparatus(apparatus) if apparatus else None, "", meta)
         self._relabel(e)
         self._rebuild_session_table()
@@ -106,16 +119,33 @@ class MultiTestMixin:
         self._save_group_layout()
         self._update_buttons()
 
-    def _relabel(self, e):
+    @staticmethod
+    def _place(e) -> str:
+        """Where the test of a panel runs: its apparatus, or (a panel without a camera) its I/O device."""
         m = e.meta
-        e.label = f"{m.get('animal') or '?'} · {m.get('apparatus') or '?'}"
+        dev = m.get("device") if e.source_key is None and m.get("device") != "-" else ""
+        return m.get("apparatus") or dev or "?"
+
+    def _relabel(self, e):
+        e.label = f"{e.meta.get('animal') or '?'} · {self._place(e)}"
 
     def _entries(self) -> list:
-        return [x for x in self.group.entries if x.source_key is not None]
+        """The test panels: those of the camera sources or, in an Input/output only protocol, those without a camera
+        (the other layout is kept for when the protocol's mode changes back); running tests are always listed."""
+        io = self.io_only
+        return [x for x in self.group.entries
+                if (x.source_key is None) == io or x.state in ("waiting", "running", "paused")]
 
-    @staticmethod
-    def _entry_short(e) -> str:
-        return f"{e.meta.get('apparatus') or '?'}: {e.meta.get('animal') or '?'}"
+    def _free_device(self) -> str:
+        """The first I/O device (box, chamber) that no panel without a camera uses yet ("" when every one is)."""
+        p = self.project
+        used = {e.meta.get("device") for e in self.group.entries if e.source_key is None}
+        names = [str(c["name"]) for c in (p.io_devices if p else []) if c.get("enabled", True) and c.get("name")
+                 and c.get("type", "virtual") not in SHARED_DEVICE_TYPES]
+        return next((n for n in names if n not in used), "")
+
+    def _entry_short(self, e) -> str:
+        return f"{self._place(e)}: {e.meta.get('animal') or '?'}"
 
     def _rebuild_session_table(self):
         t = self.sess_table
@@ -139,8 +169,11 @@ class MultiTestMixin:
     def _fill_row(self, r: int, e):
         spec = self.group.sources.get(e.source_key)
         m = e.meta
-        for c, txt in enumerate((spec.label if spec is not None else "?", m.get("apparatus", ""),
-                                 m.get("animal", ""), m.get("stage", ""), str(m.get("trial", 1)))):
+        dev = m.get("device") or ""
+        src = spec.label if spec is not None else {"": "All devices", "-": "Simulated"}.get(dev, dev) \
+            if e.source_key is None else "?"
+        for c, txt in enumerate((src, m.get("apparatus", ""), m.get("animal", ""), m.get("stage", ""),
+                                 str(m.get("trial", 1)))):
             it = self.sess_table.item(r, c)
             if it is not None and it.text() != txt:
                 it.setText(txt)
@@ -158,7 +191,10 @@ class MultiTestMixin:
             for k, spec in self.group.sources.items():
                 self.row_source.addItem(spec.label, k)
             self.row_apparatus.clear()
-            self.row_apparatus.addItems([a.name for a in p.apparatus] if p else [])
+            if e is not None and e.source_key is None:
+                self.row_apparatus.addItem("None", "")  # without a camera the apparatus is optional
+            for a in (p.apparatus if p else []):
+                self.row_apparatus.addItem(a.name, a.name)
             self.row_animal.clear()
             self.row_animal.addItems([a.id for a in p.animals] if p else [])
             self.row_stage.clear()
@@ -177,13 +213,14 @@ class MultiTestMixin:
                     i = self.row_device.count() - 1
                 self.row_device.setCurrentIndex(i)
                 self.row_source.setCurrentIndex(max(0, self.row_source.findData(e.source_key)))
-                self.row_apparatus.setCurrentIndex(self.row_apparatus.findText(e.meta.get("apparatus", "")))
+                self.row_apparatus.setCurrentIndex(self.row_apparatus.findData(e.meta.get("apparatus", "")))
                 self.row_animal.setCurrentText(e.meta.get("animal", ""))
                 self.row_stage.setCurrentText(e.meta.get("stage", ""))
                 self.row_trial.setValue(int(e.meta.get("trial", 1)))
         finally:
             for w in eds:
                 w.blockSignals(False)
+        self.row_form.setRowVisible(self.row_source, e.source_key is not None if e is not None else not self.io_only)
         self.row_editor.setEnabled(e is not None and e.state not in ("waiting", "running", "paused"))
 
     def _refresh_row_choices(self):
@@ -194,8 +231,9 @@ class MultiTestMixin:
         e = self._selected_entry()
         if e is None or e.state in ("waiting", "running", "paused"):
             return
-        e.source_key = self.row_source.currentData() or e.source_key
-        e.meta.update(apparatus=self.row_apparatus.currentText(), animal=self.row_animal.currentText().strip(),
+        if e.source_key is not None:  # (a panel without a camera keeps none)
+            e.source_key = self.row_source.currentData() or e.source_key
+        e.meta.update(apparatus=self.row_apparatus.currentData() or "", animal=self.row_animal.currentText().strip(),
                       stage=self.row_stage.currentText().strip(), trial=self.row_trial.value(), test_id=None,
                       device=self.row_device.currentData() or "")
         e.apparatus = self.project.find_apparatus(e.meta["apparatus"]) if self.project else None
@@ -247,19 +285,25 @@ class MultiTestMixin:
         p.pause_clicked.connect(lambda: ent() is not None and self.row_action(ent(), "pause"))
         p.stop_clicked.connect(lambda: ent() is not None and self.row_action(ent(), "stop"))
         p.undo_clicked.connect(lambda: ent() is not None and self.undo_last_event(ent().session))
-        p.menu.addAction(icon("settings"), "Camera options…",
-                         lambda: (self._panel_clicked(eid), self.multi_camera_options()))
+        if e.source_key is not None:
+            p.menu.addAction(icon("settings"), "Camera options…",
+                             lambda: (self._panel_clicked(eid), self.multi_camera_options()))
         p.menu.addAction(icon("delete"), "Remove this test panel",
                          lambda: (self._panel_clicked(eid), self.remove_session_row()))
         p.menu.addSeparator()
         p.menu.addAction(self.panel_settings_act)
-        p.view.set_message("Turn on the camera image (Show camera image) or press ▶ to start the test.")
+        if e.source_key is None:  # no camera: the panel shows the I/O instead, its Zones tab the inputs
+            p.view.set_message("Input/output only: press ▶ to start the test (no camera).")
+            p.tabs.setTabText(2, "Inputs")
+            p.zones.setHorizontalHeaderLabels(["Input", "Time on (s)", "Activations", "Latency (s)"])
+        else:
+            p.view.set_message("Turn on the camera image (Show camera image) or press ▶ to start the test.")
         self._apply_prefs_to_panel(p)
         return p
 
     def _focus_rect(self, e) -> QRectF | None:
         """Several apparatus in one camera image: each panel shows its own apparatus."""
-        if e.apparatus is None or len(self.group.entries_for(e.source_key)) < 2:
+        if e.apparatus is None or e.source_key is None or len(self.group.entries_for(e.source_key)) < 2:
             return None
         try:
             x0, y0, x1, y1 = e.apparatus.arena_or_bounds().bounds()
@@ -278,6 +322,9 @@ class MultiTestMixin:
             if spec is not None:
                 src = str(spec.source) if spec.is_file else spec.label
                 p.set_source(src, src)
+            elif e.source_key is None:
+                dev = e.meta.get("device") or ""
+                p.set_source("No camera · " + {"": "all I/O devices", "-": "simulated I/O"}.get(dev, dev))
             p.view.set_apparatus(e.session.apparatus if e.session is not None and
                                  e.session.apparatus is not None else e.apparatus)
             p.view.set_focus(self._focus_rect(e))
@@ -315,11 +362,13 @@ class MultiTestMixin:
             else:
                 p.set_state(st, e.elapsed if st != "waiting" else 0.0, s.duration_s or 0.0)
                 stats = s.stats
-                if stats is not None and st in ("running", "paused", "finished"):
+                if getattr(s, "io_only", False):
+                    self._update_io_panel(p, s)
+                elif stats is not None and st in ("running", "paused", "finished"):
                     with s.lock:
                         zones = stats.current_zones() if stats.detected else []
                         rows = stats.rows() if p.stack.currentIndex() == 2 else None
-                        dist, unit = stats.distance, stats.unit
+                        dist, unit = stats.distance * stats.factor, stats.unit
                     inner = [z for z in zones if z != "Arena"] or zones
                     p.vals["zone"].setText(", ".join(inner) if inner else ("—" if stats.detected else
                                                                            "not detected"))
@@ -342,13 +391,31 @@ class MultiTestMixin:
             p.undo_btn.setEnabled(self._can_undo(s))
             p.set_recording(st in ("running", "paused") and bool(e.meta.get("record_path")), e.meta.get("record_path"))
 
+    @staticmethod
+    def _update_io_panel(p, s):
+        """A test without a camera: its panel shows the states of its inputs and outputs instead of an image, and
+        its Inputs tab the inputs' activations, time on and latency."""
+        p.vals["zone"].setText("—")
+        p.vals["distance"].setText("—")
+        try:
+            status = list(s.devices.status()) if s.devices is not None else []
+        except Exception:  # pragma: no cover - a device being closed
+            status = []
+        rows = s.input_rows() if s.state != "waiting" else []
+        text = "\n".join(io_panel_lines(status, rows)) or "No I/O channels"
+        if p.view.message != text:
+            p.view.set_message(text)
+        if p.stack.currentIndex() == 2:
+            p.set_zone_rows([(n, on if math.isfinite(on) else 0.0, k, lat) for n, _v, k, on, lat in rows])
+
     def _update_row_states(self):
         rows = self._entries()
         for r, e in enumerate(rows):
             st = e.state
             s = e.session
             if st == "waiting" and s.start_phase:
-                txt = {"experimenter": "wait hand", "leaving": "hand in", "animal": "wait animal"}[s.start_phase]
+                txt = {"experimenter": "wait hand", "leaving": "hand in", "animal": "wait animal",
+                       "delay": "starting"}.get(s.start_phase, s.start_phase)
             else:
                 txt = {"idle": "not armed"}.get(st, st)
             it = self.sess_table.item(r, 5)
@@ -454,11 +521,13 @@ class MultiTestMixin:
         if self.project is None or self._loading:
             return
         keys = list(self.group.sources)
+        # "source" -1: a panel without a camera (Input/output only; versions without them skip it)
         d = {"sources": [self.group.sources[k].to_dict() for k in keys],
-             "sessions": [{"source": keys.index(e.source_key), **{k: e.meta.get(k) for k in
-                                                                ("apparatus", "animal", "stage", "trial")},
+             "sessions": [{"source": keys.index(e.source_key) if e.source_key is not None else -1,
+                           **{k: e.meta.get(k) for k in ("apparatus", "animal", "stage", "trial")},
                            **({"device": e.meta["device"]} if e.meta.get("device") else {})}
-                          for e in self.group.entries if e.source_key in self.group.sources]}
+                          for e in self.group.entries if e.source_key in self.group.sources
+                          or e.source_key is None]}
         live = self._live_settings()
         if live.get("multi") != d:
             live["multi"] = d
@@ -475,12 +544,14 @@ class MultiTestMixin:
             keys.append(self.group.add_source(spec))
         for sd in d.get("sessions", []):
             i = sd.get("source", 0)
-            if not 0 <= i < len(keys) or keys[i] is None:
+            io = i == -1  # a panel without a camera
+            if not io and (not isinstance(i, int) or not 0 <= i < len(keys) or keys[i] is None):
                 continue
             meta = {"apparatus": sd.get("apparatus", ""), "animal": sd.get("animal", ""),
                     "stage": sd.get("stage", ""), "trial": sd.get("trial", 1), "test_id": None,
                     "device": sd.get("device", "") or ""}
-            e = self.group.add_entry(keys[i], self.project.find_apparatus(meta["apparatus"]), "", meta)
+            e = self.group.add_entry(None if io else keys[i], self.project.find_apparatus(meta["apparatus"] or ""),
+                                     "", meta)
             self._relabel(e)
 
     # ---- arming / control of the group
@@ -513,10 +584,12 @@ class MultiTestMixin:
                 QMessageBox.information(self, "Run tests", "Save the experiment first.")
             return False
         m = e.meta
+        io = e.source_key is None  # no camera (Input/output only): the apparatus is optional
         app = p.find_apparatus(m.get("apparatus") or "")
-        if app is None or not m.get("animal"):
+        if (app is None and (m.get("apparatus") or not io)) or not m.get("animal"):
             what = (f"apparatus “{m.get('apparatus')}” no longer exists — choose its apparatus"
-                    if m.get("apparatus") and app is None else "choose an apparatus and an animal")
+                    if m.get("apparatus") and app is None else "choose an animal" if io else
+                    "choose an apparatus and an animal")
             self._log(f"{e.label}: not armed: {what} first.", e)
             return False
         plan, msg = self._io_plan(e)
@@ -527,33 +600,39 @@ class MultiTestMixin:
             else:
                 self._notice("Run tests", f"{e.label}: {msg}")
             return False
-        if e.source_key not in self.group.runners:
+        if not io and e.source_key not in self.group.runners:
             if not self.group.sources:
                 return False
             self.start_cameras()
         if p.get_animal(m["animal"]) is None:
             p.ensure_animal(m["animal"])
+        app_name = app.name if app is not None else ""
         test = p.get_test(m["test_id"]) if m.get("test_id") is not None else None
         if test is None:
             pend = next((t for t in p.tests if t.status == "pending" and not t.video and t.animal_id == m["animal"]
                          and t.stage == m.get("stage", "") and t.trial == m.get("trial", 1)), None)
-            test = pend or p.add_test("", m["animal"], app.name, stage=m.get("stage", ""), trial=m.get("trial", 1))
+            test = pend or p.add_test("", m["animal"], app_name, stage=m.get("stage", ""), trial=m.get("trial", 1))
             m["new_test"] = pend is None
         if interactive:
-            if not confirm_animal_id(self, test):
+            if not confirm_animal_id(self, test) or not weigh_before_test(self, test, reader=self.scale_reader):
                 if m.get("new_test"):
                     self._remove_test(test)
                 return False
-        elif confirm_id_enabled(p):  # nobody to scan the animal at a scheduled start: noted, not asked
-            note = f"{e.label}: scheduled start — the ID of animal {test.animal_id} was not checked."
-            self._log(note, e)
-            self._notice("Animal ID check", note)
-        test.apparatus = app.name
+        else:  # nobody to scan or weigh the animal at a scheduled start: noted, not asked
+            if confirm_id_enabled(p):
+                note = f"{e.label}: scheduled start — the ID of animal {test.animal_id} was not checked."
+                self._log(note, e)
+                self._notice("Animal ID check", note)
+            if weight_needed(p, test.animal_id):
+                note = f"{e.label}: scheduled start — animal {test.animal_id} was not weighed today."
+                self._log(note, e)
+                self._notice("Weigh the animal", note)
+        test.apparatus = app_name
         dur = self.duration.value()
         test.duration_s = 0.0 if abs(dur - p.test_duration_s) < 1e-9 else dur
         m["test_id"] = test.id
         m["io_plan"] = plan
-        if not self._source_open(e.source_key):
+        if not io and not self._source_open(e.source_key):
             m["arm_pending"] = True
             self._log(f"{e.label}: opening the camera / video — the test is armed as soon as it delivers images.",
                       e)
@@ -566,7 +645,7 @@ class MultiTestMixin:
         m = e.meta
         test = p.get_test(m.get("test_id")) if m.get("test_id") is not None else None
         app = p.find_apparatus(m.get("apparatus") or "")
-        if test is None or app is None:
+        if test is None or app is None and (e.source_key is not None or m.get("apparatus")):
             self._log(f"{e.label}: not armed: its test or apparatus was removed meanwhile.", e)
             m["test_id"] = None
             return False
@@ -591,7 +670,7 @@ class MultiTestMixin:
         if panel is not None:
             panel.log.clear()
         s = self._make_session(test, app, bg, size, fps, self._group_outputs, devices,
-                               f"Test {test.id} · {test.animal_id} · {app.name}", entry=e)
+                               f"Test {test.id} · {test.animal_id} · {self._place(e)}", entry=e)
         m["record_path"] = s.record_path
         self.group.arm(e, s)
         self.main.mark_dirty()
@@ -666,8 +745,8 @@ class MultiTestMixin:
     def arm_all(self, entries=None, interactive: bool = True) -> int:
         """Arm every idle (or finished) row; video files restart so the tests start at their beginning (unless
         another test already running uses the same video)."""
-        ents = [e for e in (entries or self.group.entries) if e.source_key is not None
-                and e.state in ("idle", "finished")]
+        panels = self._entries()
+        ents = [e for e in (entries or panels) if e in panels and e.state in ("idle", "finished")]
         if not ents:
             return 0
         if not self.procedures_ready(interactive):  # checked (and programs allowed) once for all the tests

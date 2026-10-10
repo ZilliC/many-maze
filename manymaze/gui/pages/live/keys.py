@@ -78,7 +78,7 @@ class KeysMixin:
         if self.mode == "multi":
             if any(e.state in ("waiting", "paused") or getattr(e.session, "waiting_end", False)
                    for e in self.group.entries):
-                self.group.start_all()
+                self.group.start_all(switch=True)  # (after the delay after the start switch, if any)
                 self._log("Start key: tests started.")
                 return True
             return False
@@ -90,8 +90,9 @@ class KeysMixin:
             self._update_buttons()
             return True
         if s.state == "waiting":
-            s.request_start()
-            self._log("Start key: test started.")
+            s.request_start(switch=True)
+            delay = getattr(s, "start_delay_s", 0) or 0
+            self._log(f"Start key: the test starts in {delay:g} s." if delay > 0 else "Start key: test started.")
             return True
         if s.state == "paused":
             return self.toggle_pause()
