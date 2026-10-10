@@ -421,3 +421,263 @@ def test_sensors_and_variables_in_zones():
     assert res["Sensor lux in A: mean"] == pytest.approx(150.0) and res["Sensor lux in A: max"] == 200
     assert res["Variable: score in A (count)"] == 2 and res["Variable: score in A (sum)"] == 6
     assert res["Variable: score in A (values)"] == "2, 4"
+
+
+# ------------------------------------------------------------------ left after the audit (TODO §16)
+
+
+def _rest_walk_rest():
+    """2 s still, 2 s walking 20 cm to the right, 2 s still (6 s); no pixel change at all."""
+    pts = np.vstack([hold((100, 200), 50), line((100, 200), (300, 200), 50), hold((300, 200), 50)])
+    return make_track(pts, head=False, motion=np.zeros(len(pts)))
+
+
+def test_activity_is_mobility_or_keys_that_count_as_activity():
+    # 2.23-2.30, p. 26-29: "An animal is defined to be active if it is either mobile OR it's performing some other
+    # behaviour which has been specified as an activity - for example, grooming"
+    beh = [Behaviour("Groom", "g", "state", activity=True), Behaviour("Sniff", "s", "state")]
+    ev = [{"behaviour": "Groom", "t": 4.5, "t_end": 5.5}, {"behaviour": "Sniff", "t": 0.5, "t_end": 1.5}]
+    s = AnalysisSettings(**{**S.to_dict(), "activity_definition": "mobile_or_keys"})
+    res = analyse(_rest_walk_rest(), box_app(), s, events=ev, behaviours=beh)
+    assert res["Time active (s)"] == pytest.approx(res["Time mobile (s)"] + 1.0, abs=0.05)
+    # assumed inactive at the start for active episodes and active for inactive ones (2.25 / 2.26): still at the
+    # start is an inactive episode
+    assert res["Active episodes"] == 2 and res["Inactive episodes"] == 3
+    assert res["Arena: time active (s)"] == res["Time active (s)"]  # per zone too, without a pixel-change value
+    # "If the immobility detection element specifies that mobility should NOT be detected, then activity analysis
+    # will be based purely on the performance of other behaviours"
+    keys = analyse(_rest_walk_rest(), box_app(), AnalysisSettings(**{**s.to_dict(), "activity_definition": "keys"}),
+                   events=ev, behaviours=beh)
+    assert keys["Time active (s)"] == pytest.approx(1.0, abs=0.05) and keys["Active episodes"] == 1
+    # experiments made before the option keep the pixel-change activity (none here: no pixel changed)
+    old = analyse(_rest_walk_rest(), box_app(), S, events=ev, behaviours=beh)
+    assert old["Time active (s)"] == 0
+
+
+def test_activity_settings_of_new_and_old_experiments(tmp_path):
+    from manymaze.core.project import Project
+
+    p = Project(name="new")
+    assert p.analysis.activity_definition == "mobile_or_keys" and p.analysis.undefined_averages == "blank"
+    p.behaviours = [Behaviour("Groom", "g", activity=True)]
+    p.apparatus.append(Apparatus(name="Box", arena=rect(0, 0, 10, 10)))
+    p.apparatus[0].points.append(PointOfInterest("Hot", 1, 2, heatmap="freezing"))
+    p.save(tmp_path / "new")
+    q = Project.load(tmp_path / "new")
+    assert q.behaviours[0].activity and q.analysis.activity_definition == "mobile_or_keys"
+    assert q.apparatus[0].points[0].heatmap == "freezing"
+    # an experiment saved before these options: pixel-change activity, averages as before, no activity keys
+    old = Project.from_dict({"name": "old", "analysis": {"mobility_threshold": 2.0},
+                             "behaviours": [{"name": "Groom", "key": "g", "kind": "state"}],
+                             "apparatus": [{"name": "Box", "zones": [], "points": [{"name": "P", "x": 1, "y": 2}]}]})
+    a = old.analysis
+    assert (a.activity_definition, a.undefined_averages, a.partial_rotation_deg) == ("pixel_change", "", 90.0)
+    assert (a.heading_error_by, a.heading_error_time_s) == ("time", 1.0)
+    assert old.behaviours[0].activity is False and old.apparatus[0].points[0].heatmap == ""
+    assert "heatmap" not in old.apparatus[0].points[0].to_dict()  # old files are written back as they were
+
+
+def test_partial_rotations():
+    # 2.34-2.36, p. 30-31: the body rotated by at least the partial rotation angle without completing a rotation
+    # (ANY-maze's calculation is "still in beta": the turns from one reversal to the next, see the guide)
+    ang = np.r_[np.arange(0, 180, 2.0), np.arange(180, 0, -2.0), np.arange(0, 500, 2.0)]
+    n = len(ang)
+    res = analyse(make_track(hold((200, 200), n), angle=ang), box_app(), S)
+    assert res["Rotations clockwise"] == 1 and res["Rotations anticlockwise"] == 0
+    assert res["Partial rotations clockwise"] == 1  # the first 180° turn (the 500° one completed a rotation)
+    assert res["Partial rotations anticlockwise"] == 1 and res["Partial rotations"] == 2
+    big = analyse(make_track(hold((200, 200), n), angle=ang), box_app(),
+                  AnalysisSettings(**{**S.to_dict(), "partial_rotation_deg": 200.0}))
+    assert big["Partial rotations"] == 0
+    # a partial rotation occurs at the time it is completed (where the turn stopped: 180° at 3.6 s)
+    s = AnalysisSettings(**{**S.to_dict(), "bin_length_s": 4.0})
+    seg = dict(analyse_segmented(make_track(hold((200, 200), n), angle=ang), box_app(), s))
+    assert seg["0-4 s"]["Partial rotations clockwise"] == 1 and seg["4-8 s"]["Partial rotations anticlockwise"] == 1
+
+
+def test_angular_velocity_is_turn_angle_over_test_duration():
+    # 2.37, p. 31: "Angular velocity ... is the Absolute turn angle divided by the Test duration"
+    pts = np.vstack([line((50, 50), (300, 50), 50), line((300, 50), (300, 300), 50), hold((300, 300), 50)])
+    res = analyse(make_track(pts, head=False), box_app(), S)
+    assert res["Absolute turn angle (deg)"] == pytest.approx(90, abs=5)
+    assert res["Angular velocity (deg/s)"] == pytest.approx(res["Absolute turn angle (deg)"] / 6.0, abs=0.05)
+
+
+def test_undefined_averages_blank_or_zero():
+    # 3.12 / 3.28 / 3.30 / 3.33 / 3.52 / 3.55 / 3.76 / 5.5 / 5.9 / 5.12: undefined when there is nothing to
+    # average, or zero with ANY-maze's "Use zero as the result for undefined averages"
+    app = box_app(Zone("Far", rect(350, 350, 40, 40)), Zone("Obj", rect(10, 350, 20, 20), investigation_distance_cm=1))
+    app.sequences.append(Sequence("Q", ["Far", "Obj"]))
+    tr = make_track(line((100, 100), (200, 100), 50))
+    names = ["Far: mean visit (s)", "Far: mean speed (cm/s)", "Far: mean distance to border when inside (cm)",
+             "Far: mean head distance to border when inside (cm)", "Obj: mean investigation bout (s)",
+             "Obj: mean speed while investigating (cm/s)", "Q: mean duration (s)", "Q: mean distance (cm)",
+             "Q: mean speed during sequences (cm/s)", "Far: mean rear duration (s)"]
+
+    def run(mode):
+        s = AnalysisSettings(**{**S.to_dict(), "undefined_averages": mode, "rearing": True})
+        return analyse(tr, app, s)
+    blank, zero, before = run("blank"), run("zero"), run("")
+    assert all(math.isnan(blank[n]) for n in names)
+    assert all(zero[n] == 0 for n in names)
+    # experiments made before the option: 0 for the visit, investigation bout and rear in a zone, else blank
+    assert [before[n] == 0 for n in names] == [True, False, False, False, True, False, False, False, False, True]
+    assert before["Mean rear duration (s)"] == blank["Mean rear duration (s)"] == 0  # 2.44: not an option
+
+
+def test_initial_heading_ignores_immobility_and_can_use_a_distance():
+    # 3.60 / 4.12, p. 64 / 88: the heading from the first position to the first position after the specified time
+    # (or more than the specified distance away); "positions that are detected while the animal is considered to
+    # be immobile are ignored - thus in the first case, the animal must be mobile for the period that is specified"
+    app = box_app(Zone("Goal", rect(350, 150, 40, 100)))
+    app.points.append(PointOfInterest("P", 370, 200))
+    # 3 s still, then 1 cm up and on to the right
+    pts = np.vstack([hold((100, 200), 75), line((100, 200), (100, 190), 10), line((100, 190), (300, 190), 50)])
+    res = analyse(make_track(pts, head=False), app, S)
+    assert res["Goal: initial heading error (deg)"] < 30  # 1 s of moving: mostly to the right, not undefined
+    assert res["P: initial heading error (deg)"] < 30
+    s = AnalysisSettings(**{**S.to_dict(), "heading_error_by": "distance", "heading_error_distance": 0.5})
+    up = analyse(make_track(pts, head=False), app, s)
+    assert up["Goal: initial heading error (deg)"] == pytest.approx(90, abs=2)  # the first 0.5 cm is upwards
+    assert up["Goal: signed initial heading error (deg)"] == pytest.approx(90, abs=2)  # the zone is to its right
+    far = analyse(make_track(pts, head=False), app, AnalysisSettings(**{**s.to_dict(), "heading_error_distance": 50}))
+    assert math.isnan(far["Goal: initial heading error (deg)"])  # never 50 cm from the start
+
+
+def test_heat_map_points():
+    # 4.17-4.19, p. 92-93: a point at the hottest spot of a heat map (where the animal spent the longest time, or
+    # the longest time doing something such as freezing); its X / Y and the approximate time spent there
+    app = box_app()
+    app.points.append(PointOfInterest("Hot", 0, 0, radius_cm=0, heatmap="time"))
+    app.points.append(PointOfInterest("Frozen", 0, 0, radius_cm=0, heatmap="freezing"))
+    app.points.append(PointOfInterest("Fixed", 300, 100, radius_cm=0))
+    pts = np.vstack([line((50, 300), (300, 100), 50), hold((300, 100), 100), line((300, 100), (100, 100), 50),
+                     hold((100, 100), 50)])
+    motion = np.full(len(pts), 50.0)
+    motion[200:] = 0.0  # frozen at (100, 100) only
+    res = analyse(make_track(pts, head=False, motion=motion), app, S)
+    assert res["Hot: X (cm)"] == pytest.approx(30, abs=0.7) and res["Hot: Y (cm)"] == pytest.approx(10, abs=0.7)
+    assert 4.0 <= res["Hot: approximate time at point (s)"] < 4.6  # 4 s on the spot, more on the way in / out
+    assert res["Hot: min distance (cm)"] < 0.7  # the point's measures use the spot
+    assert res["Frozen: X (cm)"] == pytest.approx(10, abs=0.7) and res["Frozen: Y (cm)"] == pytest.approx(10, abs=0.7)
+    assert 1.9 < res["Frozen: approximate time at point (s)"] < 2.2
+    # a point placed in the protocol: the time spent at its location, from the same heat map
+    assert res["Fixed: approximate time at point (s)"] == pytest.approx(res["Hot: approximate time at point (s)"],
+                                                                        abs=0.3)
+    none = analyse(make_track(pts, head=False, motion=np.full(len(pts), 50.0)), app, S)
+    assert math.isnan(none["Frozen: X (cm)"])  # never froze: no spot
+
+
+def test_keys_and_switches_in_investigation_zones_use_investigating():
+    # 6.1-6.10 and 22.1-22.10, p. 98-101 / 145-148: in a zone "or for an investigation zone, while the animal was
+    # investigating the zone"
+    obj = Zone("Object", rect(180, 180, 40, 40), investigation_distance_cm=3.0)
+    app = box_app(obj)
+    # 2 s with the head 10 px from the object (investigating), then 2 s with the head inside it (not)
+    pts = np.vstack([hold((150, 200), 50), hold((170, 200), 50)])
+    tr = make_track(pts, body_len=40, angle=np.zeros(100))
+    beh = [Behaviour("Groom", "g", "state")]
+    ev = [{"behaviour": "Groom", "t": 0.5, "t_end": 1.0}, {"behaviour": "Groom", "t": 2.5, "t_end": 3.0}]
+    io = [E(0.2, "sw", 1, kind="output", dev="virtual", typ="switch"),
+          E(0.6, "sw", 0, kind="output", dev="virtual", typ="switch"),
+          E(2.2, "sw", 1, kind="output", dev="virtual", typ="switch"),
+          E(2.8, "sw", 0, kind="output", dev="virtual", typ="switch")]
+    s = AnalysisSettings(**{**S.to_dict(), "behaviour_by_zone": True})
+    res = analyse(tr, app, s, events=ev, behaviours=beh, io_events=io)
+    assert res["Object: time (s)"] == pytest.approx(4.0, abs=0.05)  # in the zone all along (head near or in it)
+    assert res["Groom in Object: count"] == 1 and res["Groom in Object: duration (s)"] == pytest.approx(0.5, abs=0.05)
+    assert res["Groom in Object: rate (/min)"] == pytest.approx(1 / (2 / 60), abs=0.5)  # per time investigating
+    assert res["sw in Object: times on"] == 1 and res["sw in Object: time on (s)"] == pytest.approx(0.4, abs=0.05)
+
+
+def test_encoder_in_zones():
+    # 8.1-8.14 in zones, p. 105-110: time turning, reversals, (half / quarter) rotations made while the animal was
+    # in the zone, minimum and mean RPM in it
+    app = box_app(Zone("A", rect(0, 0, 200, 400)))
+    pts = np.vstack([hold((100, 200), 100), hold((300, 200), 100)])  # in A for 0-4 s
+    cfg = [{"name": "box", "channels": [{"name": "wheel", "kind": "encoder", "counts_per_rev": 4}]}]
+    v, ev = 0, [E(0.0, "wheel", 0, typ="encoder")]
+    for i in range(1, 81):  # a sample every 0.1 s: clockwise 0-2 s, still 2-3 s, anticlockwise 3-5 s
+        x = i / 10
+        v += 1 if x <= 2.0 + 1e-9 else -1 if 3.0 + 1e-9 < x <= 5.0 + 1e-9 else 0
+        ev.append(E(round(x, 1), "wheel", v, typ="encoder"))
+    res = analyse(make_track(pts, head=False), app, S, io_events=ev, io_devices=cfg)
+    g = "wheel in A"
+    assert res[f"{g}: time turning (s)"] == pytest.approx(3.0, abs=0.05)
+    assert res[f"{g}: reversals"] == 1 and res["wheel: reversals"] == 1
+    assert res[f"{g}: clockwise rotations"] == 5 and res[f"{g}: anticlockwise rotations"] == 2  # 20 and 9 counts
+    assert res[f"{g}: half rotations"] == 14 and res[f"{g}: quarter rotations"] == 29
+    assert res[f"{g}: min rate (rev/min)"] == 0  # it stopped while the animal was in A
+    assert res[f"{g}: mean rate (rev/min)"] == pytest.approx(29 / 4 / (4 / 60), abs=0.5)
+    assert res[f"{g}: mean rate while turning (rev/min)"] == pytest.approx(29 / 4 / (3 / 60), abs=0.5)
+
+
+def test_analogue_signal_and_pump_in_zones():
+    # 9.4 / 9.5 / 9.14 / 9.15 in zones, p. 111-115: the times of the max / min and the integrals above / below the
+    # baseline while the animal was in the zone; 17.1 / 17.2 in zones, p. 135: the volume infused in the zone
+    app = box_app(Zone("A", rect(0, 0, 200, 400)))
+    pts = np.vstack([hold((100, 200), 100), hold((300, 200), 100)])  # in A for 0-4 s of 8 s
+    ev = [E(0.0, "sig", 10, typ="analog"), E(0.5, "sig", 10, typ="analog"), E(2.0, "sig", 30, typ="analog"),
+          E(5.0, "sig", 50, typ="analog"), E(6.0, "sig", 0, typ="analog"),
+          E(1.0, "p1", 1, kind="output", dev="pumps", typ="pump", direction="infuse", rate=6.0),
+          E(5.0, "p1", 0, kind="output", dev="pumps", typ="pump")]
+    s = AnalysisSettings(**{**S.to_dict(), "io_baseline_s": 1.0})
+    res = analyse(make_track(pts, head=False), app, s, io_events=ev)
+    assert res["sig: baseline"] == 10 and res["sig: integral above baseline"] == pytest.approx(20 * 3 + 40)
+    assert res["sig in A: time of max (s)"] == 2.0 and res["sig in A: time of min (s)"] == 0.0
+    assert res["sig in A: integral above baseline"] == pytest.approx(20 * 2, abs=0.01)  # 30 from 2 s to 4 s
+    assert res["sig in A: integral below baseline"] == 0 and res["sig: integral below baseline"] == pytest.approx(20)
+    assert res["Pump p1: volume infused (ml)"] == pytest.approx(0.4)
+    assert res["Pump p1 in A: volume infused (ml)"] == pytest.approx(0.3, abs=0.005)  # 1-4 s at 0.1 ml/s
+    assert res["Pump p1 in A: volume withdrawn (ml)"] == 0
+
+
+def test_rapc_doors():
+    # 2.54-2.56, p. 37-38: 12 switch inputs with the indices 1-12; the last door opened in each chamber is the
+    # unlatched one: type 1 errors open latched doors, type 2 errors open the unlatched door without going through
+    cfg = [{"name": "box", "channels": [{"name": f"d{i}", "kind": "input", "index": i} for i in range(1, 13)]}]
+    opens = [(1, 2), (2, 1), (3, 1), (4, 6), (5, 8), (6, 7), (7, 8), (8, 10)]  # (time, door)
+    ev = []
+    for t, d in opens:
+        ev += [E(float(t), f"d{d}", 1), E(t + 0.5, f"d{d}", 0)]
+    m = io_measures(ev, 10.0, devices=cfg)
+    assert m["RAPC: door sequence"] == "1321"  # the example of the reference
+    assert m["RAPC: type 1 errors"] == 2 and m["RAPC: type 2 errors"] == 2
+    early = io_measures(ev, 10.0, t_range=(0.0, 4.0), devices=cfg)
+    assert early["RAPC: type 1 errors"] == 1 and early["RAPC: type 2 errors"] == 1
+    eleven = [{"name": "box", "channels": cfg[0]["channels"][:11]}]
+    assert "RAPC: door sequence" not in io_measures(ev, 10.0, devices=eleven)  # only with all 12 doors
+
+
+def test_movement_detector_does_not_count_repeated_breaks_of_a_beam():
+    # 11.1-11.3, p. 120-121: repeated breaks of the same beam are not counted; a movement lasts the detector's
+    # time-out after a break; beams already broken at the test start do not count
+    cfg = [{"name": "box", "channels": [{"name": f"b{i}", "kind": "input", "detector": "Cage", "timeout_s": 1.0}
+                                        for i in (1, 2)]}]
+    ev = [E(0.0, "b2", 1), E(0.5, "b2", 0),  # broken when the test starts
+          E(1.0, "b1", 1), E(1.2, "b1", 0), E(1.5, "b1", 1), E(1.7, "b1", 0),  # the same beam twice: one movement
+          E(2.0, "b2", 1), E(2.2, "b2", 0), E(5.0, "b1", 1), E(5.2, "b1", 0)]
+    m = io_measures(ev, 10.0, devices=cfg)
+    g = "Movement detector Cage"
+    assert m[f"{g}: movements"] == 3 and m[f"{g}: latency to first movement (s)"] == 1.0
+    assert m[f"{g}: time moving (s)"] == pytest.approx(3.0)  # 1-3 s (extended by the break at 2 s) and 5-6 s
+
+
+def test_event_measures():
+    # 21.1 / 21.2, p. 144: the number of events and the latency to the first, undefined if it never occurred
+    from manymaze.core.procedures import ProcedureEngine
+
+    when = {"type": "when", "event": "zone_enter", "zone": "A", "mode": "parallel", "record_as": "Entered A",
+            "body": []}
+    eng = ProcedureEngine([{"name": "P", "enabled": True, "statements": [when]}])
+    eng.start(0.0)
+    for i in range(0, 126):
+        t = i / 25
+        eng.update_state(t, {"zones": {"A": 1.0 <= t < 2.0 or 3.0 <= t < 4.0}})
+    eng.stop(5.0)
+    assert [(e["t"], e["kind"]) for e in eng.io_events if e["channel"] == "Entered A"] == [(1.0, "event"),
+                                                                                         (3.0, "event")]
+    m = io_measures(eng.io_events, 5.0)
+    assert m["Event Entered A: count"] == 2 and m["Event Entered A: latency (s)"] == 1.0
+    late = io_measures(eng.io_events, 5.0, t_range=(4.0, 5.0), settings=AnalysisSettings())
+    assert late["Event Entered A: count"] == 0 and math.isnan(late["Event Entered A: latency (s)"])

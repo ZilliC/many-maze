@@ -222,3 +222,21 @@ def zone_sequence(track: Track, app: Apparatus, zone_names: list[str], s: Analys
             seq.append((zn, float(t[a]), float(t[b - 1] + dur[b - 1])))
     seq.sort(key=lambda e: e[1])
     return seq
+
+
+def occupancy_map(x: np.ndarray, y: np.ndarray, w: np.ndarray, bounds, bins: int = 60,
+                  sigma: float = 1.5) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Time spent in each square of a grid over bounds (x0, y0, x1, y1), the longer side cut in `bins` squares,
+    smoothed with a Gaussian of `sigma` squares: the heat map of the positions x, y weighted by w (their frame
+    durations) - drawn by plots.occupancy and used for the heat-map points (ANY-maze 4.17-4.19). Returns
+    (H [x square, y square], x edges, y edges)."""
+    from scipy.ndimage import gaussian_filter
+
+    x0, y0, x1, y1 = bounds
+    span = max(x1 - x0, y1 - y0, 1e-6)
+    nx = max(2, int(round(bins * (x1 - x0) / span)))
+    ny = max(2, int(round(bins * (y1 - y0) / span)))
+    H, xe, ye = np.histogram2d(x, y, bins=[nx, ny], range=[[x0, x1], [y0, y1]], weights=w)
+    if sigma > 0:
+        H = gaussian_filter(H, sigma)
+    return H, xe, ye

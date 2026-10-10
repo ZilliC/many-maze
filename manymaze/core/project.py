@@ -108,7 +108,9 @@ class Behaviour:
     """A manually scored behaviour.
 
     kind = "state" (key toggles it on/off), "hold" (scored while the key is held down) or "point" (instantaneous).
-    Behaviours sharing a non-empty ``group`` are mutually exclusive: starting one stops the others.
+    Behaviours sharing a non-empty ``group`` are mutually exclusive: starting one stops the others. activity: doing
+    it counts as activity (ANY-maze: the animal is active when mobile or doing such a behaviour; state and hold keys,
+    see AnalysisSettings.activity_definition).
     """
 
     name: str
@@ -116,6 +118,7 @@ class Behaviour:
     kind: str = "state"
     group: str = ""
     color: str = ""
+    activity: bool = False
 
     @classmethod
     def from_dict(cls, d):
@@ -171,7 +174,7 @@ class Project:
     # first frame with the animal alone after the experimenter's hand left the image, see autostart.py)
     start_mode: str = "manual"
     detection: DetectionSettings = field(default_factory=DetectionSettings)
-    analysis: AnalysisSettings = field(default_factory=AnalysisSettings)
+    analysis: AnalysisSettings = field(default_factory=AnalysisSettings.for_new_experiment)  # from_dict: as saved
     apparatus: list[Apparatus] = field(default_factory=list)
     animals: list[Animal] = field(default_factory=list)
     groups: list[Group] = field(default_factory=list)
