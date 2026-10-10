@@ -226,7 +226,8 @@ class ApparatusPage(Page):
         self.lock_lbl = QLabel("The protocol is locked: only an administrator can change the apparatus (File ▸ "
                                "Users and security).")
         self.lock_lbl.setWordWrap(True)
-        self.lock_lbl.setStyleSheet("background:#fff7e0;border:1px solid #f0d58a;padding:6px 8px;")
+        theme.style(self.lock_lbl, lambda: f"background:{theme.NOTE_BG};border:1px solid {theme.NOTE_BORDER};"
+                                          "padding:6px 8px;")
         self.lock_lbl.hide()
         lay.addWidget(self.lock_lbl)
         lay.addWidget(self.view, 1)

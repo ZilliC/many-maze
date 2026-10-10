@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ..core import security as sec
+from . import theme
 
 CASUAL = ("This is convenience (“casual”) security: it keeps colleagues from changing the protocol or unblinding the "
           "experiment by mistake, not someone determined who can edit the experiment's files.")
@@ -48,7 +49,7 @@ class PasswordDialog(QDialog):
         f.addRow("Type it again", self.again)
         lay.addLayout(f)
         self.error = QLabel()
-        self.error.setStyleSheet("color:#dc2626;")
+        theme.style(self.error, lambda: f"color:{theme.ERROR};")
         self.error.hide()
         lay.addWidget(self.error)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)

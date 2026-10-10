@@ -104,7 +104,8 @@ class ExperimentPage(Page):
         lay.setContentsMargins(0, 0, 0, 0)
         self.lock_lbl = QLabel(LOCKED_TEXT)
         self.lock_lbl.setWordWrap(True)
-        self.lock_lbl.setStyleSheet("background:#fff7e0;border-bottom:1px solid #f0d58a;padding:6px 28px;")
+        theme.style(self.lock_lbl, lambda: f"background:{theme.NOTE_BG};border-bottom:1px solid {theme.NOTE_BORDER};"
+                                          "padding:6px 28px;")
         self.lock_lbl.hide()
         lay.addWidget(self.lock_lbl)
         lay.addWidget(self.stack)

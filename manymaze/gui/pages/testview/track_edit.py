@@ -69,7 +69,7 @@ class TrackEditMixin:
         jl.addWidget(self._tool(self.a_jumps))
         jh = QLabel("Positions the animal could not have reached (Detection: Remove jumps faster than)")
         jh.setWordWrap(True)
-        jh.setStyleSheet("color:#475569;")
+        theme.style(jh, lambda: f"color:{theme.HINT};")
         jl.addWidget(jh, 1)
         lay.addWidget(jb)
         sw = QGroupBox("Swap identities")
