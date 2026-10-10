@@ -264,11 +264,16 @@ Variables and functions:
 ## 15. Not verified
 
 - [ ] Numerical agreement of our measures with ANY-maze on the same video: still needs a video together with
-      ANY-maze's results for it (none is public). Zone occupancy is verified: on a real ANY-maze water-maze export
+      ANY-maze's results for it. Zone occupancy is verified: on a real ANY-maze water-maze export
       (600 tests, CowenLab/Ovariectomy_and_development, no licence so not shipped) zone entries, time in zone and
       latency to first entry agree with ANY-maze's own entries / exits in 94–100 % of test × zone pairs
       (`scripts/verify_anymaze.py`; opt-in test with `MANYMAZE_ANYMAZE_XML`). Measure definitions were checked
-      against ANY-maze's "A detailed description of the ANY-maze measures"
+      against ANY-maze's "A detailed description of the ANY-maze measures". A search on 2026-10-10 (Zenodo, OSF,
+      figshare, Dryad, Mendeley Data, Dataverse, GitHub, ANY-maze's site, 2,500 open-access papers) found no public
+      video with ANY-maze's results that can be used: the best lead, the Brazilian Reproducibility Initiative's EPM
+      (OSF uzm97, EPM05 lab 07, CC BY 4.0: ANY-maze 7 arm times and entries for 27 tests), has its videos only as
+      ANY-maze `.szv` files, which a Windows computer with ANY-maze installed could convert to MP4 (zone measures
+      only); the others are scored by hand, have no videos, or videos that cannot be tracked
 - [x] ANY-maze XML import against a real ANY-maze file (nested dates and times, the apparatus box, zone entries /
       exits; zone shapes fitted to ANY-maze's occupancy)
 - [x] Hardware-related procedure elements (sensors, pellet out / failed, syringe pumps, temperature, light ramps,
@@ -276,78 +281,87 @@ Variables and functions:
 
 ## 16. Left after the definitions audit (2026-10-08, ANY-maze's "A detailed description of the ANY-maze measures")
 
-Definitions that differed were changed to ANY-maze's (tests/test_anymaze_definitions.py cites the sections). Open:
+Definitions that differed were changed to ANY-maze's (tests/test_anymaze_definitions.py cites the sections). Done
+in #7 (Version 4 of the PDF, 30 May 2024):
 
-- [ ] Activity: ANY-maze means "mobile or doing a behaviour marked as activity"; ours is pixel-change based
-      (needs a "behaviour counts as activity" option)
-- [ ] Ambiguous in the PDF, kept as ours: turn angle mobility gate, angular velocity and average heading error
-      denominators, "moving towards" outside-only, freezing time in a zone by frames, 0 vs blank for undefined
-      averages, initial heading error's immobility / distance options
-- [ ] Partial rotations (2.34–2.36), tracking quality Good / Poor (2.51, formula unpublished), RAPC door measures
-      (2.54–2.56)
-- [ ] Per zone: encoder time turning / reversals / half and quarter rotations / min and mean RPM, analogue time of
+- [x] Activity: ANY-maze's "mobile or doing a behaviour marked as activity" (a *counts as activity* flag per key and
+      an *Activity* definition setting; new experiments use ANY-maze's, older ones keep pixel change)
+- [x] Ambiguous in the PDF: angular velocity (now turn angle / test duration, 2.37), 0 vs blank for undefined
+      averages (ANY-maze's option), initial heading error's immobility / distance options (3.60 / 4.12) settled by
+      the PDF and implemented; turn angle mobility gate, heading error denominators, "moving towards" outside only
+      and freezing time in a zone by frames kept as ours, each stated in the user guide
+- [x] Partial rotations (2.34–2.36; ANY-maze calls them beta, so the algorithm is ours and documented), RAPC door
+      measures (2.54–2.56)
+- [ ] (Not possible) Tracking quality Good / Poor (2.51): the PDF describes it in words only, with no formula
+- [x] Per zone: encoder time turning / reversals / half and quarter rotations / min and mean RPM, analogue time of
       max / min and integrals, pump volumes (17.x)
-- [ ] Event measures (21.x), heat-map points (4.17–4.19), movement-detector beam-repeat rule (11.1)
-- [ ] Investigation zones: use "investigating" rather than zone membership for zone-based I/O and key measures
+- [x] Event measures (21.x, *Record as the event* on When statements), heat-map points (4.17–4.19), movement-detector
+      beam-repeat rule (11.1)
+- [x] Investigation zones: keys and virtual switches count while the animal investigates (6.x, 22.x; the PDF says
+      "investigating" for these only)
 
 ---
 
 ## 17. Gaps found on 2026-10-09 (ANY-maze 7.68 feature pages, help and What's New; not in §1–16)
 
 Checked against the code on 2026-10-09; the latest ANY-maze is 7.68 (bug fixes), the last feature releases were
-7.54 and 7.60. The plan for the items below is in `docs/PLAN-2026-10-09.md`. The app is macOS only.
+7.54 and 7.60. The plan for the items below is in `docs/PLAN-2026-10-09.md`. The app is macOS only. All phases of
+the plan were done on 2026-10-09/10 (#3–#11).
 
 High impact:
 - [x] Camera-free **I/O only / Operant** protocol mode (phase 1, #4): Protocol ▸ Mode *Input/output only*; Run tests
       runs a test without a camera (`live.IOSession`: procedures and I/O devices on the computer's clock, start modes,
       pre-test, pause, continuation, crash recovery), saved without a track and analysed from the I/O log (also per
       time period) *(tested with the virtual devices only, untested on hardware)*
-- [ ] Several input/output only tests at once (operant chambers side by side): *Several tests* still needs a camera
-      per panel; operant chamber presets (levers, nose pokes, lights, feeder, house light)
+- [x] Several input/output only tests at once (operant chambers side by side, #5); operant chamber presets (Med
+      Associates-, Coulbourn- and Lafayette-style, wired to the Arduino / Firmata / NI / LabJack); procedures that
+      need the animal refused in this mode; the I/O log reviewed on the Review page
 - [x] **Calculations** (phase 2, #3): results from other results with a formula, as ANY-maze's (name, decimal
       places, units, graph Y axis range, named values; Count, Sum, Mean, Max, Min, ResultForTrial,
       ResultForLastTrial and ResultForPeriod as `count_trials` … `result_for_period`); Protocol ▸ Calculations,
       *Calculation results* on the Data page, exports, Statistics graphs, protocol report and protocol copy
       (`core/calculations.py`)
-- [ ] Time periods defined by a calculation's result (ANY-maze T0625)
+- [x] Time periods defined by a calculation's result (ANY-maze T0625, #6); training criteria on a calculation
 
 Medium impact:
-- [ ] Saved **results reports** (named sets of selected measures / information columns / segmentation) and saved
-      Statistics settings in the protocol (*Select data* resets on open, gui/pages/results/page.py:376)
-- [ ] Time periods that end **at an event** (zone exit / entry, mark, input, calculation), not only a fixed duration
-      after the start event (core/periods.py:8)
-- [ ] Automatic **jump removal** (implausible position jumps dropped before interpolation; core/tracking.py:930)
-- [ ] Stage end rules: **minimum number of trials** and **acceptable variability** (SD / CV of the measure over the
-      last N trials) besides "value on N consecutive trials" (core/workflow.py:251)
-- [ ] **Lens distortion correction** (fish-eye / barrel) per camera and per video, with a checkerboard calibration or
-      a manual coefficient
-- [ ] **Forced swim / tail suspension mode** with its own immobility detection (motion-based, no translation
-      requirement) instead of renamed freezing measures (core/template_measures.py:466)
-- [ ] User **passwords and an administrator role**; administrator-only reveal of treatment codes
-      (gui/pages/animals.py:160); optional password on an experiment file
-- [ ] **Analysis plug-ins**: external per-frame or per-test data (heart rate, Spike2, photometry) merged into the
-      track and exposed as measures (today plug-ins are only called by procedures, core/procedures/plugins.py)
-- [ ] **Synchronisation element**: test start / end pulses, a pulse per captured frame, a pulse per stored position,
-      configured once in Hardware (today only the `sync_pulse` procedure action, core/procedures/catalog.py:208)
+- [x] Saved **results reports** and saved Statistics settings in the protocol (#6; also `--report` on the CLI)
+- [x] Time periods that end **at an event** (zone entry / exit, mark, input, calculation; #6)
+- [x] Automatic **jump removal** (#6)
+- [x] Stage end rules: **minimum number of trials** and **acceptable variability** (ANY-maze's range %, SD, CV; #8)
+- [x] **Lens distortion correction** per camera and per video, checkerboard or barrel strength (#10)
+- [x] **Forced swim / tail suspension mode** with immobility from the struggle in the image, optional climbing /
+      swimming split, a tail suspension template (#8)
+- [x] User **passwords and an administrator role**; administrator-only reveal of treatment codes; protocol lock;
+      optional experiment password (AES-GCM; #9)
+- [x] **Analysis plug-ins** and the CSV / TSV data file plug-in: series analysed like analogue signals (#9)
+- [x] **Synchronisation element**: test start / end, frame and position pulses; firmware 1.3 `SYNC` command (#9)
 
 Low impact:
-- [ ] Distance units **mm / cm / m** (today cm or px, core/apparatus.py:231)
-- [ ] Barnes maze **UNMC** strategy classification besides direct / serial / random (core/template_measures.py:312)
-- [ ] User-set **significance level** in Statistics
-- [ ] Camera montage of **more than two** sources (core/camera.py:94)
-- [ ] **Ignore lighting changes** detection option (global illumination normalised against the background model)
-- [ ] Animal presets: **hooded rat**, white animal on sawdust; a **rat pose model** (built-in model is mouse only)
-- [ ] **Dark theme** (light forced in gui/app.py:30)
-- [ ] **Terminology** customisation (rename zones / treatments / tests in the interface)
-- [ ] **Recorded video file names** from chosen fields (today `test_NNNN_animal`, gui/pages/live/common.py:56)
-- [ ] **Block the test until the animal is weighed** (balance connected)
-- [ ] **Delay after the start switch** before the test starts
-- [ ] **Sound-level sensor** type (dBA / ultrasound peak) with the other sensors (core/ioconfig.py:37)
-- [ ] Point placed at the **heat map's hottest spot**
-- [ ] **E-mail a report** from the Results page
-- [ ] **Downscale video files** before tracking; **video glitch detection** (duplicate / black frames)
+- [x] Distance units **mm / cm / m** (#8)
+- [x] Barnes maze **UNMC** strategy and ANY-maze 7.54's method (#8)
+- [x] User-set **significance level** in Statistics (#6)
+- [x] Camera montage of up to **four** sources (#10)
+- [x] **Ignore lighting changes** detection option (#10)
+- [x] Animal presets: mouse, rat, **hooded rat**, white animal on sawdust, zebrafish (#10)
+- [ ] (Not available) A **rat pose model**: no top-view rat model has been released (checked October 2026); the pose
+      box has an *Animal* choice and *Convert DeepLabCut model…* for one's own fine-tuned model (#10)
+- [x] **Dark theme**: View ▸ Appearance System / Light / Dark (#11)
+- [x] **Terminology** customisation (#11)
+- [x] **Recorded video file names** from chosen fields (#11)
+- [x] **Block the test until the animal is weighed** (#9)
+- [x] **Delay after the start switch** (#9)
+- [x] **Sound-level / ultrasound sensor** types (#9)
+- [x] Point placed at the **heat map's hottest spot** (#11)
+- [x] **E-mail a report** from the Results page (#11)
+- [x] **Downscale video files** before tracking; **video glitch check** (#11)
 - [ ] Open ANY-maze **.szv** videos *(not possible: undocumented container)*
 
-Still open from earlier sections: §15 numerical agreement on a shared video, §16 definitions, and every item marked
-*(untested on hardware)* in §1 and §7. Distribution: no tagged release yet (version 0.1.0), and the signed /
-notarised build has not been run with a real Developer ID certificate.
+Still open:
+- §15 numerical agreement on a shared video (see above).
+- Every item marked *(untested on hardware)* in §1, §7 and §17: the devices, the Arduino firmware 1.3 (its `SYNC`
+  timer path on AVR has not been compiled on this Apple Silicon Mac, whose Arduino AVR toolchain needs Rosetta), the
+  syringe pumps, balances, capture cards and industrial cameras.
+- A CI job that compiles the firmware for the Uno, Mega, Zero and MKR Zero is ready on the local branch
+  `firmware-ci`; pushing it needs the GitHub CLI's `workflow` scope (`gh auth refresh -h github.com -s workflow`).
+- The signed / notarised build has not been run with a real Developer ID certificate (the release builds are
+  ad-hoc signed).

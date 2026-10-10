@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "manymaze"
-version = "0.1.0"
+version = "0.2.0"
 description = "mANY-MAZE: a libre video-tracking and behavioural analysis suite for animal behaviour experiments"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
