@@ -8,6 +8,7 @@ import random
 import string
 from dataclasses import asdict, dataclass
 
+from .calculations import calculations_from
 from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test, without_secrets
 
 MAX_STAGES = 50
@@ -721,8 +722,8 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     """Give ``dst`` the protocol of ``src`` (ANY-maze: new experiment based on another one's protocol).
 
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
-    procedures, I/O devices, training criteria, blind testing and animal ID options, the animal columns and the
-    experimenters (users); I/O device passwords and tokens are not copied (enter them again);
+    calculations, procedures, I/O devices, training criteria, blind testing and animal ID options, the animal
+    columns and the experimenters (users); I/O device passwords and tokens are not copied (enter them again);
     with ``treatments`` also the treatments (groups). Animals, tests and results are not copied.
     """
     import copy as _copy
@@ -735,6 +736,7 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.start_mode = src.start_mode
     dst.detection = DetectionSettings.from_dict(src.detection.to_dict())
     dst.analysis = AnalysisSettings.from_dict(_copy.deepcopy(src.analysis.to_dict()))
+    dst.calculations = calculations_from(c.to_dict() for c in src.calculations)
     dst.apparatus = [a.copy() for a in src.apparatus]
     dst.behaviours = [Behaviour.from_dict(asdict(b)) for b in src.behaviours]
     dst.stages = list(src.stages)

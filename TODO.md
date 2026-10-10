@@ -290,3 +290,12 @@ Definitions that differed were changed to ANY-maze's (tests/test_anymaze_definit
 - [ ] Event measures (21.x), heat-map points (4.17–4.19), movement-detector beam-repeat rule (11.1)
 - [ ] Investigation zones: use "investigating" rather than zone membership for zone-based I/O and key measures
 
+## 17. Plan 2026-10-09 (docs/PLAN-2026-10-09.md)
+
+The plan and its checklist for this section were not in the repository when phase 2 was implemented; the items
+below are the ones done so far (to merge with the plan's list).
+
+- [x] Calculations (phase 2): results from other results with a formula, as ANY-maze's (name, decimal places,
+      units, graph Y axis range, named values; Count, Sum, Mean, Max, Min, ResultForTrial, ResultForLastTrial and
+      ResultForPeriod as `count_trials` … `result_for_period`); Protocol ▸ Calculations, *Calculation results* on
+      the Data page, exports, Statistics graphs, protocol report and protocol copy (`core/calculations.py`)

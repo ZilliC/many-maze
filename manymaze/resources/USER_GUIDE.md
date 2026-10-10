@@ -114,6 +114,8 @@ everything without a camera.
   so the animal must be stiller to count as freezing (+25 halves the threshold); lower lets it move a little more
   (−25 doubles it). Tests with fewer than 50 motion samples use the manual
   thresholds. Live tests re-estimate the automatic thresholds every 2 s from the motion seen so far.
+* **Calculations** – results worked out from other results with a formula, e.g. a discrimination index (see §9,
+  *Calculations*).
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
   every measure, including the test duration, stops there.
@@ -1489,6 +1491,39 @@ Besides regular time bins and custom periods, **event-anchored periods**: anchor
 exit from a zone, a manual mark, or an input switching on; with offset, duration (0 = to the end) and occurrence
 (1 = first, 0 = every occurrence). Example: *the 30 s after the animal first left the start box*. Paused time is
 excluded from all times and distances.
+
+### Calculations
+
+**Protocol ▸ Calculations** (ANY-maze's *Calculations*) defines new results from the others with a formula — e.g.
+the percentage of time in the open arms of a plus maze, `100 * {Open arms: time (s)} / {Test duration (s)}`, or a
+discrimination index, `({Novel: time investigating (s)} - {Familiar: time investigating (s)}) / ({Novel: time
+investigating (s)} + {Familiar: time investigating (s)})`. *New calculation* (or *Add item ▸ New calculation*) adds
+one; its property page sets the **name**, the **decimal places** of the result (0–9, rounded half away from zero),
+optional **units** (up to 8 characters, shown in brackets after the name: *Open arms (%)*), an optional **graph Y
+axis range** (e.g. 0–100: the Statistics graphs of the calculation use it while every result fits in it) and up to
+two **named values** (constants with a name, e.g. `Limit` = 3, used in the formula as `Limit`). In the formula,
+measures are written in braces — *Insert measure…* picks one from the *Select data* tree, other calculations and
+information columns (`{Trial}`) included — with the operators and maths functions of the procedure expressions
+(see §8, *Expressions and variables*; `=` also compares, as in ANY-maze). *Insert function* adds ANY-maze's
+functions:
+
+* `result_for_period({m}, from_s, to_s)` or `result_for_period({m}, 'Tone 1')` — the measure for part of the test
+  (seconds from the test's start, or a time period's name); up to the end of a test that ends during the period,
+  blank if it ended before (*ResultForPeriod*)
+* `result_for_trial({m}, 'Acquisition', 2)`, `result_for_last_trial({m}, 'Acquisition')` — the animal's result in
+  another trial, or in the last trial of a stage (*ResultForTrial*, *ResultForLastTrial*)
+* `count_trials`, `sum_trials`, `mean_trials`, `max_trials`, `min_trials` — across the animal's trials (*Count*,
+  *Sum*, *Mean*, *Max*, *Min*): `({m})` all its trials, `({m}, 'Acquisition')` a stage, `({m}, 'Acquisition', 2, 4)`
+  trials 2–4 of a stage, `({m}, 'Acquisition', 3, 'Probe', 1)` a range across stages (in the order of the stages).
+  Trials without a result are left out (*Count* counts the trials that have one); the result is blank when the
+  animal has no trial in the range. With time periods, each period uses the same period of the other trials.
+
+A formula whose values are blank (a measure missing in a test, a division by zero) gives a blank result;
+`is_undefined({m})` tests for it. Unlike ANY-maze, which works a formula out strictly from left to right, the usual
+precedence applies (`2 + 3 * 4` is 14). The property page shows mistakes as you type, and the result for the first
+test. The results are listed under **Calculation results** in *Select data*, exported, compared in Statistics and
+printed in the protocol report; renaming a calculation updates the formulas that use it, and a new experiment based
+on this one's protocol gets its calculations.
 
 ### Track plots (Results ▸ Data ▸ Track plots)
 

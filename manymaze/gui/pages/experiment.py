@@ -1,6 +1,7 @@
 """Protocol page: the experiment's protocol elements, one property page at a time as in ANY-maze.
 
-The elements (Protocol, Animal tracking, Stages, Keys, Procedures, Analysis, Hardware) are listed in the explorer
+The elements (Protocol, Animal tracking, Stages, Keys, Procedures, Analysis, Calculations, Hardware) are listed in
+the explorer
 under "Protocol" (``explorer_items`` / ``show_item``) and shown in an internal stack. Every widget of the old
 single-form page is kept as an attribute (``name``, ``det_form``, ``beh``, ``crit``, ``ev_periods`` …)."""
 
@@ -14,22 +15,29 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBo
 
 from ...core import pose
 from ...core import workflow as wf
+from ...core.apparatus import unique_name
+from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
+from ...core.export import display_text
 from ...core.measures import AnalysisSettings
 from ...core.periods import ANCHORS
-from ...core.project import Behaviour
+from ...core.project import ERROR_COLUMN, Behaviour, result_columns
 from ...core.templates import TEMPLATES
 from ...core.tracking import DetectionSettings
 from ..icons import icon
 from ..pose_model import PoseModelBox
-from ..widgets import ColorButton, RecordTable, button_row, hint, loading, separator, style_table
+from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
+from ._results_cache import cached_rows, get_rows, info_columns
 from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, Page, SettingsForm,
                    property_form)
-from .protocol_pages import ElementPage, KeyEditor, small_button
+from .protocol_pages import CalculationEditor, ElementPage, KeyEditor, small_button
+from .results.dialogs import MeasurePickerDialog, measure_groups
+from .results.table import _names
 
 # protocol elements: (key, explorer label, icon)
 ELEMENTS = [("protocol", "Protocol", "protocol"), ("tracking", "Animal tracking", "tracking"),
             ("stages", "Stages", "stages"), ("keys", "Keys", "key"), ("procedures", "Procedures", "procedure"),
-            ("analysis", "Analysis", "chart"), ("hardware", "Hardware", "plug")]
+            ("analysis", "Analysis", "chart"), ("calculations", "Calculations", "calculator"),
+            ("hardware", "Hardware", "plug")]
 MODES = [("tracking", "Video tracking — the animal is tracked and keys can be scored"),
          ("takenote", "TakeNote — behaviours are scored by hand only (no tracking)")]
 # key types of the keys table (the property page offers the full ANY-maze wording)
@@ -67,6 +75,8 @@ class ExperimentPage(Page):
         self._key_names: list[str] = []  # name of each row of the keys table as last stored (renames follow it)
         self._stage_names: list[str] = []  # stage of each line of the stages box as last stored
         self._period_table = None  # the time-period table last worked in (see delete_time_period)
+        self._calc_rows: list[dict] | None = None  # results rows the calculations are checked against …
+        self._calc_measures: list[str] | None = None  # … and their columns that are not calculations
         self.stack = QStackedWidget()
         self.elements: dict[str, ElementPage] = {}
         lay = QVBoxLayout(self)
@@ -78,6 +88,7 @@ class ExperimentPage(Page):
         self._build_keys()
         self._build_procedures()
         self._build_analysis()
+        self._build_calculations()
         self._build_hardware()
         self._build_actions()
         app = QApplication.instance()
@@ -295,6 +306,32 @@ class ExperimentPage(Page):
                           small_button("Remove", "delete", slot=self.ev_periods.remove_current)))
         pg.finish()
 
+    def _build_calculations(self):
+        pg = self._element_page("calculations", "Calculations", "Results worked out from other results with a "
+                                "formula, e.g. a discrimination index or the percentage of time in the open arms. "
+                                "They are listed under Calculation results on the Data page and can be exported, "
+                                "compared in the statistics and used in other calculations.")
+        row = QHBoxLayout()
+        row.setSpacing(28)
+        left = QVBoxLayout()
+        self.calc_list = QListWidget()
+        self.calc_list.setMinimumHeight(260)
+        self.calc_list.setMaximumHeight(460)
+        self.calc_list.setStyleSheet("QListWidget::item{padding:5px 4px;}")
+        self.calc_list.currentRowChanged.connect(lambda *_: self._show_calculation())
+        left.addWidget(self.calc_list, 1)
+        left.addLayout(button_row(small_button("New calculation", "add", slot=self.new_calculation),
+                                  small_button("Delete", "delete", slot=self.delete_calculation)))
+        left.addStretch()
+        row.addLayout(left, 8)
+        self.calc_editor = CalculationEditor()
+        self.calc_editor.edited.connect(self._calculation_edited)
+        self.calc_editor.pick_measure = self._pick_measure
+        self.calc_editor.stages = lambda: self.project.stages if self.project else []
+        row.addWidget(self.calc_editor, 13)
+        pg.add(row)
+        pg.finish()
+
     @staticmethod
     def _error_label() -> QLabel:
         lbl = QLabel()
@@ -338,14 +375,15 @@ class ExperimentPage(Page):
         return a
 
     def _build_actions(self):
-        self.add_item_act = self._act("Add item", "add", lambda: None, "Add an apparatus, stage, key, procedure "
-                                      "or time period to the protocol")
+        self.add_item_act = self._act("Add item", "add", lambda: None, "Add an apparatus, stage, key, procedure, "
+                                      "time period or calculation to the protocol")
         m = QMenu(self)
         for text, ic, fn in (("New apparatus", "zone", self.new_apparatus), ("New stage", "stages", self.new_stage),
                              ("New key", "key", self.new_key), ("New procedure", "procedure", self.new_procedure),
                              ("New time period", "timer", self.new_time_period),
                              ("New event-based time period", "clock", self.new_event_period),
-                             ("New training criterion", "check", self.new_criterion)):
+                             ("New training criterion", "check", self.new_criterion),
+                             ("New calculation", "calculator", self.new_calculation)):
             m.addAction(icon(ic), text, fn)
         self.add_item_act.setMenu(m)
         self.template_act = self._act("Apply template", "layers", lambda: None,
@@ -381,6 +419,9 @@ class ExperimentPage(Page):
                          A("New event period", "clock", self.new_event_period),
                          ("small", A("Delete time period", "delete", self.delete_time_period)),
                          ("small", A("Restore defaults", "refresh", self.restore_analysis_defaults))],
+            "calculations": [A("New calculation", "calculator", self.new_calculation),
+                             A("Delete calculation", "delete", self.delete_calculation),
+                             ("small", A("Duplicate calculation", "copy", self.duplicate_calculation))],
             "hardware": [A("I/O devices", "plug", self.edit_io_devices), A("Touch screen", "touch",
                                                                              self.edit_touchscreen)],
         }
@@ -418,6 +459,8 @@ class ExperimentPage(Page):
             self.proc_editor.set_project(self.project)  # the Live page edits the same procedures
         elif key == "keys":
             self._show_key()
+        elif key == "calculations":
+            self._show_calculation()
 
     # ================================================================== loading
     def set_project(self, project):
@@ -466,6 +509,7 @@ class ExperimentPage(Page):
         self.ev_periods_lbl.hide()
         self.det_form.load(p.detection)
         self.an_form.load(p.analysis)
+        self._fill_calculations()
 
     def _update_summary(self):
         p = self.project
@@ -581,6 +625,153 @@ class ExperimentPage(Page):
             return
         self._goto_element("analysis")
         self._add_event_period()
+
+    # ================================================================== calculations
+    def _fill_calculations(self):
+        p = self.project
+        cur = self.calc_list.currentRow()
+        self.calc_list.blockSignals(True)
+        self.calc_list.clear()
+        for c in p.calculations if p is not None else []:
+            self.calc_list.addItem(QListWidgetItem(icon("calculator"), c.column or "(no name)"))
+        n = self.calc_list.count()
+        if n:
+            self.calc_list.setCurrentRow(min(max(cur, 0), n - 1))
+        self.calc_list.blockSignals(False)
+        self._calc_rows = self._calc_measures = None
+        self._show_calculation()
+
+    def current_calculation(self) -> Calculation | None:
+        r = self.calc_list.currentRow()
+        p = self.project
+        return p.calculations[r] if p is not None and 0 <= r < len(p.calculations) else None
+
+    def _show_calculation(self):
+        self.calc_editor.load(self.current_calculation())
+        self._check_calculation()
+
+    def _calculation_rows(self) -> list[dict] | None:
+        """Results rows to check the formulas against (the cached results, if any: computing them is slow)."""
+        if self._calc_rows is None and self.project is not None:
+            self._set_calculation_rows(cached_rows(self.project, False))
+        return self._calc_rows
+
+    def _set_calculation_rows(self, rows):
+        """Keep results rows (made with the current calculations) and their measure columns."""
+        self._calc_rows = rows
+        calcs = {c.column for c in self.project.calculations} if self.project is not None else set()
+        self._calc_measures = [c for c in result_columns(rows) if c not in calcs] if rows is not None else None
+
+    def _check_calculation(self):
+        """Show the problems of the selected calculation, or its result for the first test."""
+        c, p = self.current_calculation(), self.project
+        if c is None:
+            self.calc_editor.set_status([])
+            return
+        rows = self._calculation_rows()
+        reserved = info_columns(p) + [ERROR_COLUMN, "Warnings"]
+        measures = [m for m in self._calc_measures or [] if m not in reserved] if rows else None
+        errs = check_calculation(c, measures, p.calculations, reserved)
+        text = "The results are worked out when they are shown on the Data page."
+        row = next((r for r in rows or [] if ERROR_COLUMN not in r), None)
+        if not errs and row is not None:
+            if parse(c.formula).functions:
+                text = "Worked out for every test when the results are calculated (it uses other trials or periods)."
+            else:
+                v = evaluate_calc(c, row)
+                v = f"{v:.{c.decimals}f}" if isinstance(v, float) and v == v else display_text(v) or "undefined"
+                text = f"Result for test {row.get('Test')} (animal {row.get('Animal')}): {v}"
+        self.calc_editor.set_status(errs, text)
+
+    def _calculation_edited(self, new: Calculation):
+        r = self.calc_list.currentRow()
+        p = self.project
+        if p is None or not 0 <= r < len(p.calculations) or p.calculations[r] == new:
+            return
+        old = p.calculations[r].column
+        p.calculations[r] = new
+        # renamed: the other formulas follow (unless the old name is a measure's: theirs may mean the measure)
+        if new.column and old and new.column != old and old not in (self._calc_measures or ()):
+            for c in p.calculations:
+                if c is not new:
+                    c.formula = c.formula.replace("{" + old + "}", "{" + new.column + "}")
+        self.calc_list.item(r).setText(new.column or "(no name)")
+        self.main.mark_dirty()
+        self._check_calculation()
+
+    def new_calculation(self):
+        p = self.project
+        if p is None:
+            return
+        self._goto_element("calculations")
+        name = unique_name("Calculation 1" if not p.calculations else f"Calculation {len(p.calculations) + 1}",
+                           [c.name for c in p.calculations])
+        p.calculations.append(Calculation(name, ""))
+        self.main.mark_dirty()
+        self._fill_calculations()
+        self.calc_list.setCurrentRow(len(p.calculations) - 1)
+        self.calc_editor.name.setFocus()
+        self.calc_editor.name.selectAll()
+
+    def duplicate_calculation(self):
+        c, p = self.current_calculation(), self.project
+        if c is None:
+            return
+        d = Calculation.from_dict(c.to_dict())
+        d.name = unique_name(f"{c.name} copy", [x.name for x in p.calculations])
+        p.calculations.insert(self.calc_list.currentRow() + 1, d)
+        self.main.mark_dirty()
+        row = self.calc_list.currentRow() + 1
+        self._fill_calculations()
+        self.calc_list.setCurrentRow(row)
+
+    def delete_calculation(self, confirm: bool = True):
+        c, p = self.current_calculation(), self.project
+        if c is None:
+            return
+        users = [x.column for x in p.calculations if x is not c and "{" + c.column + "}" in x.formula]
+        msg = f"Delete the calculation “{c.column or c.name}”?"
+        if users:
+            msg += "\n\nIts result is used by: " + ", ".join(users) + " (their results will be blank)."
+        if confirm and QMessageBox.question(self, "Delete calculation", msg) != QMessageBox.Yes:
+            return
+        p.calculations.remove(c)
+        self.main.mark_dirty()
+        self._fill_calculations()
+
+    def _pick_measure(self, done):
+        """Choose a results column for a formula (the Select data tree of the Data page) and pass it to done();
+        the results are calculated first if none are at hand (editing the calculations does not change the
+        measures: the rows already checked against are used)."""
+        p = self.project
+        if p is None:
+            return
+
+        def pick(rows):
+            if rows is not self._calc_rows:
+                self._set_calculation_rows(rows)
+            c = self.current_calculation()
+            others = [x.column for x in p.calculations if x is not c and x.column]
+            cols = [x for x in dict.fromkeys(result_columns(rows) + others)
+                    if x != ERROR_COLUMN and (c is None or x != c.column)]
+            info = [x for x in info_columns(p) if x in cols and x != "Test"]
+            cats = measure_groups([x for x in cols if x not in info], _names(p), info)
+            dlg = self.measure_dialog(cats)
+            done(dlg.selected() if dlg.exec() == MeasurePickerDialog.Accepted else None)
+
+        rows = self._calculation_rows()
+        if rows is not None:
+            pick(rows)
+        elif not p.tests:
+            QMessageBox.information(self, "Insert measure", "The measures are listed once the experiment has "
+                                    "tests with results. You can also type a measure's name in braces, e.g. "
+                                    "{Total distance (m)}.")
+        else:
+            run_with_progress(self, "Calculating results", lambda progress, _stop: get_rows(p, False,
+                                                                                         progress=progress), pick)
+
+    def measure_dialog(self, cats: dict) -> MeasurePickerDialog:
+        return MeasurePickerDialog(cats, self)
 
     def new_criterion(self):
         if self.project is None:

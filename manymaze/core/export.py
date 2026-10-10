@@ -552,7 +552,7 @@ def trial_means(rows: list[dict], measures: list[str], keep: tuple[str, ...] = (
 def protocol_report(project: Project, path) -> Path:
     """Self-contained HTML description of the protocol (ANY-maze protocol report): experiment, stages, keys,
     apparatus maps with every zone / point / line / group / sequence, animal tracking and analysis settings,
-    procedures, I/O devices and training criteria."""
+    calculations, procedures, I/O devices and training criteria."""
     from . import plots
     from .measures import AnalysisSettings
     from .procedures import describe_statement, normalize_procedures
@@ -645,6 +645,13 @@ def protocol_report(project: Project, path) -> Path:
         out.append("</div>")
     out.append("<h2>Animal tracking</h2>" + settings(p.detection, DetectionSettings()))
     out.append("<h2>Analysis</h2>" + settings(p.analysis, AnalysisSettings()))
+    if p.calculations:
+        out.append("<h2>Calculations</h2>" + table(("Calculation", "Formula", "Decimal places", "Graph Y axis",
+                                                     "Named values"), [
+            (c.column, c.formula, c.decimals,
+             "automatic" if c.y_max is None and c.y_min is None else
+             f"{'auto' if c.y_min is None else f'{c.y_min:g}'} – {'auto' if c.y_max is None else f'{c.y_max:g}'}",
+             ", ".join(f"{n} = {v:g}" for n, v in c.values().items()) or "—") for c in p.calculations]))
     procs = normalize_procedures(p.procedures)
     if procs:
         out.append("<h2>Procedures</h2>")
@@ -809,6 +816,8 @@ def export_xml(project: Project, path, tests=None, include_tracks: bool = True, 
     path = Path(path)
     tests = [t for t in (tests if tests is not None else project.tests)]
     by_test: dict = {}
+    if rows is None and include_results and any(st.deferred for st in project.calculation_steps()):
+        rows = project.results(tests, segmented=segmented)  # calculations across trials need every test's results
     if rows is not None:
         for r in rows:
             by_test.setdefault(r.get("Test"), []).append(r)
@@ -1018,11 +1027,12 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
         rows = []
         for t in tests:
             try:
-                rows.extend(project.analyse_test(t))
+                rows.extend(project.analyse_test(t, deferred=False))
             except Exception as e:
                 log.warning("analysis of test %s failed in the HTML report: %s", t.id, e)
                 errors.append(f"Test {t.id}: {type(e).__name__}: {e}")
                 rows.append(project.error_row(t, e))
+        project.finish_calculations(rows)  # calculations across trials, once for all the tests
     cols = result_columns(rows)
     if measures:
         info = ["Test", "Animal", "Group", "Stage", "Trial"]

@@ -8,6 +8,7 @@ import math
 import numpy as np
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 
+from ....core.calculations import CATEGORY as CALCULATIONS
 from ....core.export import display_text, value_text
 from ....core.stats import is_number
 
@@ -28,7 +29,7 @@ GENERAL_PREFIXES = ("Test duration", "Detection", "Total distance", "Mean speed"
                     "Mean distance from centre", "Max distance from centre", "Arena quadrant", "First zone entered",
                     "Visited zones", "Investigated zones", "Zone transitions", "Total line crossings")
 CATEGORY_ORDER = ["Information", "General", "Zones", "Points of interest", "Lines", "Test-specific", "Behaviours",
-                  "Social", "I/O", "Other"]
+                  "Social", "I/O", CALCULATIONS, "Other"]
 COLUMN_LABELS = {"Group": "Treatment"}
 
 
@@ -45,11 +46,15 @@ def _names(project) -> dict[str, set]:
         for c in d.get("channels", []) or []:
             if c.get("name"):
                 io.update((str(c["name"]), f"{d.get('name')}/{c['name']}"))
-    return {"zones": zones, "points": points, "lines": lines, "behaviours": beh, "io": io}
+    calcs = {c.column for c in (getattr(project, "calculations", None) or [])}
+    return {"zones": zones, "points": points, "lines": lines, "behaviours": beh, "io": io, "calculations": calcs}
 
 
 def measure_category(col: str, names: dict) -> tuple[str, str]:
-    """(category, sub-category) of a measure column, inferred from its "Name: measure" prefix."""
+    """(category, sub-category) of a measure column, inferred from its "Name: measure" prefix (the experiment's
+    calculations: "Calculation results")."""
+    if col in names.get("calculations", ()):
+        return CALCULATIONS, ""
     if ": " in col:
         prefix = col.split(": ", 1)[0]
         for key, cat in (("zones", "Zones"), ("points", "Points of interest"), ("lines", "Lines"),

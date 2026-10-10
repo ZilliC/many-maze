@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QLineEdit, QMenu, QProgressBar, QPushButton, QStackedWidget, QTableView,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QTreeWidget, QVBoxLayout, QWidget)
 
 from ....core.project import OPTIONAL_INFO_COLUMNS, result_columns
 from ... import ribbon, theme
@@ -18,9 +18,10 @@ from ...widgets import error_box
 from .._results_cache import SEGMENT_COLUMNS, RowsLoader, info_columns
 from ..base import Page
 from .charts_panel import ChartsPanel
+from .dialogs import fill_measure_tree, filter_measure_tree, measure_groups
 from .exports import ExportsMixin
 from .plot_views import PLOT_VIEWS, RIBBON_CONTROL_STYLE, PlotViewsMixin
-from .table import CATEGORY_ORDER, ResultsModel, ResultsProxy, _names, measure_category
+from .table import ResultsModel, ResultsProxy, _names
 
 # views of the Data page (explorer sub-items): key, label, icon, page title
 VIEWS = [("spreadsheet", "Spreadsheet", "table", "Data"), ("track", "Track plots", "track", "Track plots"),
@@ -611,38 +612,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
     # ------------------------------------------------------------------ chooser tree
     def _build_tree(self):
         self._loading_tree = True
-        self.tree.clear()
-        hidden = self.hidden
-        cats: dict[str, dict[str, list[str]]] = {}
         info = [c for c in info_columns(self.project) if c in self.all_columns() and c != "Test"
                 and (c not in SEGMENT_COLUMNS or self.segmented)]
-        if info:
-            cats["Information"] = {"": info}
-        for c in self.measure_columns():
-            cat, sub = measure_category(c, self._names)
-            cats.setdefault(cat, {}).setdefault(sub, []).append(c)
-        expanded = len(cats) <= 2
-        for cat in CATEGORY_ORDER:
-            if cat not in cats:
-                continue
-            top = QTreeWidgetItem([cat])
-            top.setFlags(top.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
-            self.tree.addTopLevelItem(top)
-            for sub, cols in cats[cat].items():
-                parent = top
-                if sub:
-                    parent = QTreeWidgetItem(top, [sub])
-                    parent.setFlags(parent.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
-                for c in cols:
-                    label = c.split(": ", 1)[1] if sub and c.startswith(sub + ": ") else c
-                    it = QTreeWidgetItem(parent, [label])
-                    it.setData(0, Qt.UserRole, c)
-                    it.setToolTip(0, c)
-                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-                    it.setCheckState(0, Qt.Unchecked if c in hidden else Qt.Checked)
-            top.setExpanded(expanded or cat == "General")
-            if cat == "Information":
-                top.setToolTip(0, "Identification columns (empty columns are hidden automatically)")
+        fill_measure_tree(self.tree, measure_groups(self.measure_columns(), self._names, info), self.hidden)
         self._loading_tree = False
         self._filter_tree(self.search.text())
 
@@ -659,23 +631,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._tree_timer.start()
 
     def _filter_tree(self, text):
-        t = text.strip().lower()
-
-        def walk(item) -> bool:
-            if item.childCount() == 0:
-                full = item.data(0, Qt.UserRole) or item.text(0)
-                vis = not t or t in full.lower()
-            else:
-                vis = False
-                for i in range(item.childCount()):
-                    vis = walk(item.child(i)) or vis
-                if t and vis:
-                    item.setExpanded(True)
-            item.setHidden(not vis)
-            return vis
-
-        for i in range(self.tree.topLevelItemCount()):
-            walk(self.tree.topLevelItem(i))
+        filter_measure_tree(self.tree, text)
 
     def clear_settings(self):
         """Show every measure and test again: clears the measure selection, filters, sorting and time periods."""
