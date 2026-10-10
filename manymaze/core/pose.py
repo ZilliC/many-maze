@@ -11,6 +11,9 @@ Engine / GPU), CUDA when available, and the CPU otherwise.
 Custom models: any ONNX file with a sidecar ``<name>.json`` using the same
 metadata schema as ``MODELS`` entries (``input_size``, ``mean``, ``std``,
 ``color``, ``output`` = "simcc" | "heatmap", ``keypoints``, ``parts``...).
+One's own DeepLabCut 3 RTMPose checkpoints (e.g. TopViewMouse fine-tuned on
+rats, for which no model has been released: see ``SPECIES``) are converted to
+such a model by :func:`convert_checkpoint`.
 """
 
 from __future__ import annotations
@@ -84,6 +87,24 @@ _META_DEFAULTS = {
     "color": "RGB", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "crop": "context",
     "margin": 0, "output": "simcc", "simcc_split_ratio": 2.0, "sigma": [5.66, 5.66], "decode_beta": 150.0,
     "heatmap_activation": "none", "parts": {},
+}
+
+# The animals offered by the pose model choice: the built-in model of each, or None when no released model exists
+# (the user then converts or chooses a model of their own).  Checked in October 2026: DeepLabCut's SuperAnimal
+# family has TopViewMouse (mice from above; its model card says it is not suitable for other species) and
+# Quadruped (side views); no top-view rat model has been released by DeepLabCut, SLEAP or MMPose.
+RAT_MODEL_NOTE = (
+    "No pose model of rats filmed from above has been released (checked in October 2026: DeepLabCut's SuperAnimal "
+    "models are TopViewMouse, for mice only, and Quadruped, for animals filmed from the side). Use a model of your "
+    "own: fine-tune SuperAnimal-TopViewMouse RTMPose-S on frames of your rats in DeepLabCut 3 and convert the "
+    "checkpoint here, or choose an ONNX model with its JSON description."
+)
+SPECIES: dict[str, dict] = {
+    "mouse": {"title": "Mouse", "model": "topviewmouse_rtmpose_s"},
+    "rat": {"title": "Rat", "model": None, "note": RAT_MODEL_NOTE},
+    "other": {"title": "Another animal", "model": None,
+              "note": "Use a keypoint model of your own: convert a DeepLabCut RTMPose checkpoint here, or choose an "
+                      "ONNX model with its JSON description."},
 }
 
 
@@ -194,6 +215,83 @@ def install_model(key: str, progress: Callable[[float], None] | None = None,
 def uninstall_model(key: str):
     for p in model_paths(key):
         p.unlink(missing_ok=True)
+
+
+def checkpoint_keypoint_count(path) -> int:
+    """Keypoints of a DeepLabCut RTMPose checkpoint (from its head)."""
+    sd = find_state_dict(load_torch_checkpoint(path))
+    w = sd.get("heads.bodypart.final_layer.weight")
+    if w is None or "backbone.stem.0.conv.weight" not in sd:
+        raise ValueError(f"{Path(path).name} is not a DeepLabCut RTMPose (CSPNeXt) checkpoint")
+    return int(w.shape[0])
+
+
+def convert_checkpoint(path, keypoints: Sequence[str], parts: dict, input_size: Sequence[int] = (256, 256),
+                       species: str = "", dest=None, progress: Callable[[float], None] | None = None) -> Path:
+    """Convert one's own DeepLabCut 3 RTMPose checkpoint (e.g. SuperAnimal-TopViewMouse RTMPose-S fine-tuned on
+    rats) to an ONNX model with its JSON description, usable as a custom model; returns the .onnx path.
+
+    ``keypoints`` are the model's body part names in order (the project's ``bodyparts``), ``parts`` maps "nose",
+    "centre" and "tail_base" to them, ``input_size`` is the crop (width, height) the model was trained on.  The
+    model goes to ``dest`` (a .onnx path), by default ``custom/<checkpoint name>.onnx`` in the models folder."""
+    path = Path(path)
+    if progress:
+        progress(0.05)
+    sd = find_state_dict(load_torch_checkpoint(path))
+    w = sd.get("heads.bodypart.final_layer.weight")
+    if w is None:
+        raise ValueError(f"{path.name} is not a DeepLabCut RTMPose (CSPNeXt) checkpoint")
+    keypoints = [str(k).strip() for k in keypoints if str(k).strip()]
+    if len(keypoints) != int(w.shape[0]):
+        raise ValueError(f"The model has {int(w.shape[0])} keypoints but {len(keypoints)} body part names were "
+                         "given: list them all, in the order of the DeepLabCut project")
+    meta = dict(_META_DEFAULTS)
+    meta.update(title=f"{path.stem} ({species})" if species else path.stem, architecture="rtmpose",
+                input_size=[int(v) for v in input_size], keypoints=keypoints,
+                parts={k: v for k, v in parts.items() if v}, converter_version=CONVERTER_VERSION,
+                source=path.name, source_sha256=_sha256(path))
+    if species:
+        meta["species"] = species
+    meta = validate_meta(meta)
+    if progress:
+        progress(0.3)
+    model = build_rtmpose_onnx(sd, meta)
+    if progress:
+        progress(0.9)
+    onnx_path = Path(dest) if dest else models_dir() / "custom" / (path.stem + ".onnx")
+    _atomic_write(onnx_path, model.SerializeToString())
+    _atomic_write(onnx_path.with_suffix(".json"), json.dumps(meta, indent=1).encode())
+    if progress:
+        progress(1.0)
+    return onnx_path
+
+
+def bodyparts_from_config(path) -> list[str]:
+    """The body part names of a DeepLabCut project: ``bodyparts`` (or ``multianimalbodyparts``) of its
+    config.yaml, or ``metadata: bodyparts`` of a pytorch_config.yaml ([] when there are none)."""
+    import re
+
+    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    for key in ("bodyparts", "multianimalbodyparts"):
+        for i, line in enumerate(lines):
+            m = re.match(rf"^(\s*){key}:\s*(.*?)\s*$", line)
+            if not m:
+                continue
+            rest = m.group(2)
+            if rest.startswith("["):
+                names = [n.strip().strip("'\"") for n in rest.strip("[]").split(",")]
+            else:
+                names = []
+                indent = len(m.group(1))
+                for nxt in lines[i + 1:]:
+                    item = re.match(r"^(\s*)-\s*(.+?)\s*$", nxt)
+                    if item is None or len(item.group(1)) < indent:
+                        break
+                    names.append(item.group(2).strip("'\""))
+            names = [n for n in names if n]
+            if names:
+                return names
+    return []
 
 
 def _meta_from_spec(key: str) -> dict:

@@ -1,6 +1,6 @@
-"""Camera image options for live testing: region (crop), digital zoom / pan, rotation, flip, merging two
-cameras into one image, camera hardware settings (core.camhw), frame-rate pacing, reading a source in its own
-thread and per-camera persistence in ``project.settings_extra``.
+"""Camera image options for live testing: region (crop), digital zoom / pan, rotation, flip, merging up to four
+cameras into one image (a montage), lens distortion correction (core.lens), camera hardware settings (core.camhw),
+frame-rate pacing, reading a source in its own thread and per-camera persistence in ``project.settings_extra``.
 
 A source is an OpenCV camera index (int), a native industrial camera ("pylon:<serial>" …, core.camsources) or a
 video file simulating a camera."""
@@ -16,6 +16,7 @@ import numpy as np
 
 from .camhw import CameraHardware, UnsupportedPixelFormat, describe_report
 from .camsources import NativeCamera, is_native_source, native_label
+from .lens import LensCorrection, lens_from
 from .tracking import sample_background
 
 _ROT = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
@@ -91,41 +92,88 @@ class CameraView:
         return np.ascontiguousarray(img)
 
 
-def merge_frames(a: np.ndarray, b: np.ndarray, layout: str = "side") -> np.ndarray:
-    """Join two camera images into one: "side" (a left of b) or "stack" (a above b); the smaller is padded."""
-    if a.ndim != b.ndim:
-        a = a if a.ndim == 3 else cv2.cvtColor(a, cv2.COLOR_GRAY2BGR)
-        b = b if b.ndim == 3 else cv2.cvtColor(b, cv2.COLOR_GRAY2BGR)
-    if layout == "stack":
-        w = max(a.shape[1], b.shape[1])
-        pad = lambda f: cv2.copyMakeBorder(f, 0, 0, 0, w - f.shape[1], cv2.BORDER_CONSTANT, value=0)
-        return np.vstack([pad(a), pad(b)])
-    h = max(a.shape[0], b.shape[0])
-    pad = lambda f: cv2.copyMakeBorder(f, 0, h - f.shape[0], 0, 0, cv2.BORDER_CONSTANT, value=0)
-    return np.hstack([pad(a), pad(b)])
+MAX_SOURCES = 4  # cameras in one montage
+# montage layouts: "side" (a row, left to right), "stack" (a column, top to bottom), "grid" (two per row)
+MERGE_LAYOUTS = [("side", "Side by side (a row)"), ("stack", "One above the other (a column)"),
+           ("grid", "In a grid (two per row)")]
+_LAYOUT_ALIASES = {"row": "side", "column": "stack"}
+
+
+def merge_layout(layout) -> str:
+    """A montage layout name: "side" | "stack" | "grid" ("row" and "column" are the same as "side" and "stack")."""
+    layout = _LAYOUT_ALIASES.get(str(layout or "side"), str(layout or "side"))
+    return layout if layout in ("side", "stack", "grid") else "side"
+
+
+def _montage(sizes: list[tuple[int, int]], layout: str) -> tuple[list[int], list[int], int]:
+    """(column widths, row heights, columns) of a montage of images of `sizes` (w, h): each column as wide as its
+    widest image and each row as high as its highest one."""
+    n = len(sizes)
+    layout = merge_layout(layout)
+    cols = n if layout == "side" else 1 if layout == "stack" else min(n, 2)
+    rows = -(-n // cols)
+    widths = [max(sizes[i][0] for i in range(c, n, cols)) for c in range(cols)]
+    heights = [max(sizes[i][1] for i in range(r * cols, min(n, (r + 1) * cols))) for r in range(rows)]
+    return widths, heights, cols
+
+
+def merged_size(sizes, layout: str = "side") -> tuple[int, int]:
+    """Size (w, h) of the montage of images of `sizes`."""
+    sizes = [(int(w), int(h)) for w, h in sizes]
+    if len(sizes) <= 1:
+        return sizes[0] if sizes else (0, 0)
+    widths, heights, _ = _montage(sizes, layout)
+    return sum(widths), sum(heights)
+
+
+def merge_frames(frames, b: np.ndarray | None = None, layout: str = "side") -> np.ndarray:
+    """Join up to four camera images into one: "side" / "row" (left to right), "stack" / "column" (top to bottom)
+    or "grid" (two per row: 2 × 2 for three or four images; an empty cell stays black).  Smaller images are padded
+    with black at their right / bottom.  ``merge_frames(a, b, layout)`` joins two images as before."""
+    frames = [frames] + ([b] if b is not None else []) if isinstance(frames, np.ndarray) else list(frames)
+    if len(frames) == 1:
+        return frames[0]
+    if any(f.ndim == 3 for f in frames):
+        frames = [f if f.ndim == 3 else cv2.cvtColor(f, cv2.COLOR_GRAY2BGR) for f in frames]
+    widths, heights, cols = _montage([(f.shape[1], f.shape[0]) for f in frames], layout)
+    out = np.zeros((sum(heights), sum(widths)) + frames[0].shape[2:], frames[0].dtype)
+    for i, f in enumerate(frames):
+        r, c = divmod(i, cols)
+        y, x = sum(heights[:r]), sum(widths[:c])
+        out[y:y + f.shape[0], x:x + f.shape[1]] = f
+    return out
 
 
 class TransformedSource:
     """Wraps a VideoSource-like object (read / seek / release, fps, width, height) applying a CameraView and,
-    optionally, merging a second source into the same image."""
+    optionally, lens distortion correction (``lenses``: one LensCorrection or None per source, applied before
+    merging) and merging further sources (``second`` then ``more``, up to four in all) into the same image."""
 
-    def __init__(self, src, view: CameraView | None = None, second=None, layout: str = "side"):
-        self.src, self.second, self.layout = src, second, layout
+    def __init__(self, src, view: CameraView | None = None, second=None, layout: str = "side", more=(),
+                 lenses=None):
+        self.src, self.second, self.layout = src, second, merge_layout(layout)
+        self.extra = ([second] if second is not None else []) + [m for m in more if m is not None]
+        self.lenses = list(lenses or [])[:1 + len(self.extra)]
         self.view = view or CameraView()
         self.source = getattr(src, "source", None)
         self.is_camera = bool(getattr(src, "is_camera", False))
         self.fps = float(getattr(src, "fps", 25.0) or 25.0)
         self.frame_count = int(getattr(src, "frame_count", 0) or 0)
-        if second is not None and getattr(second, "frame_count", 0):
-            self.frame_count = min(self.frame_count or second.frame_count, second.frame_count)
+        for other in self.extra:
+            if getattr(other, "frame_count", 0):
+                self.frame_count = min(self.frame_count or other.frame_count, other.frame_count)
         w, h = int(getattr(src, "width", 0) or 0), int(getattr(src, "height", 0) or 0)
-        if second is not None:
-            w2, h2 = int(second.width), int(second.height)
-            w, h = (max(w, w2), h + h2) if layout == "stack" else (w + w2, max(h, h2))
+        if self.extra:
+            w, h = merged_size([(w, h)] + [(int(o.width), int(o.height)) for o in self.extra], self.layout)
         self.raw_size = (w, h)
         self.last_raw: np.ndarray | None = None  # untransformed frames, for the camera options dialog
         self.last_raw2: np.ndarray | None = None
+        self.last_raws: list = [None] * (1 + len(self.extra))
         self.width, self.height = self.view.output_size(w, h) if w and h else (w, h)
+
+    def _lens(self, i: int, f: np.ndarray) -> np.ndarray:
+        lens = self.lenses[i] if i < len(self.lenses) else None
+        return f if lens is None else lens.apply(f)
 
     @property
     def pos(self) -> int:
@@ -139,19 +187,23 @@ class TransformedSource:
         ok, f = self.src.read()
         if not ok:
             return ok, f
-        self.last_raw = f
-        if self.second is not None:
-            ok2, f2 = self.second.read()
+        self.last_raw = self.last_raws[0] = f
+        frames = [self._lens(0, f)]
+        for i, other in enumerate(self.extra, start=1):
+            ok2, f2 = other.read()
             if not ok2:
                 return False, None
-            self.last_raw2 = f2
-            f = merge_frames(f, f2, self.layout)
+            self.last_raws[i] = f2
+            if i == 1:
+                self.last_raw2 = f2
+            frames.append(self._lens(i, f2))
+        f = merge_frames(frames, layout=self.layout) if len(frames) > 1 else frames[0]
         return True, self.view.apply(f)
 
     def seek(self, index: int):
         self.src.seek(index)
-        if self.second is not None:
-            self.second.seek(index)
+        for other in self.extra:
+            other.seek(index)
 
     def frame_at(self, index: int):
         self.seek(index)
@@ -160,8 +212,8 @@ class TransformedSource:
 
     def release(self):
         self.src.release()
-        if self.second is not None:
-            self.second.release()
+        for other in self.extra:
+            other.release()
 
     def __enter__(self):
         return self
@@ -178,6 +230,11 @@ def _source_key(s) -> str:
     if is_native_source(s):
         return s
     return f"file:{s}" if _is_file(s) else f"camera:{int(s)}"
+
+
+def source_key(s) -> str:
+    """The key of one camera / file in the saved camera options ("camera:0", "file:<path>", a native id)."""
+    return _source_key(s)
 
 
 def hardware_target(src):
@@ -202,17 +259,37 @@ def apply_hardware(src, hw: CameraHardware | dict | None) -> dict:
 @dataclass
 class SourceSpec:
     """A live image source: an OpenCV camera index, a native camera id ("pylon:<serial>", core.camsources) or a
-    video file (simulating a camera), optionally merged with a second camera / file, with its CameraView and the
-    hardware settings of the (first) camera."""
+    video file (simulating a camera), optionally merged with up to three more cameras / files into one image (a
+    montage: ``second``, then ``others``; see :attr:`merge`), with its CameraView, the hardware settings of the
+    (first) camera and the lens distortion correction of each camera (``undistort``: {source key: LensCorrection
+    dict}, core.lens)."""
 
     source: str | int = 0
-    second: str | int | None = None
-    layout: str = "side"  # merge layout: "side" | "stack"
+    second: str | int | None = None  # the first merged source
+    layout: str = "side"  # merge layout: "side" | "stack" | "grid" (see MERGE_LAYOUTS)
     view: CameraView = field(default_factory=CameraView)
     size: tuple | None = None  # requested camera resolution (w, h)
     fps: float | None = None  # requested camera frame rate
     name: str = ""
     hardware: CameraHardware = field(default_factory=CameraHardware)
+    others: list = field(default_factory=list)  # the third and fourth merged sources
+    undistort: dict = field(default_factory=dict)
+
+    @property
+    def merge(self) -> list:
+        """The sources merged into the image of the first one (at most MAX_SOURCES − 1)."""
+        return [s for s in [self.second, *self.others] if s is not None and s != ""][:MAX_SOURCES - 1]
+
+    @merge.setter
+    def merge(self, sources):
+        sources = [s for s in (sources or []) if s is not None and s != ""][:MAX_SOURCES - 1]
+        self.second = sources[0] if sources else None
+        self.others = sources[1:]
+
+    @property
+    def sources(self) -> list:
+        """Every source of the image, the first one first."""
+        return [self.source, *self.merge]
 
     @property
     def is_file(self) -> bool:
@@ -225,11 +302,8 @@ class SourceSpec:
     @property
     def key(self) -> str:
         """Identifier used to persist the camera options (camera index, native camera id or file path, plus the
-        merged source)."""
-        k = _source_key(self.source)
-        if self.second is not None and self.second != "":
-            k += "+" + _source_key(self.second)
-        return k
+        merged sources)."""
+        return "+".join(_source_key(s) for s in self.sources)
 
     @property
     def label(self) -> str:
@@ -238,23 +312,35 @@ class SourceSpec:
         from pathlib import Path
         one = lambda s: (native_label(s) if is_native_source(s) else Path(s).name if _is_file(s) else
                          f"Camera {int(s)}")
-        lbl = one(self.source)
-        if self.second is not None and self.second != "":
-            lbl += (" | " if self.layout == "side" else " / ") + one(self.second)
-        return lbl
+        sep = {"side": " | ", "stack": " / "}.get(merge_layout(self.layout), " + ")
+        return sep.join(one(s) for s in self.sources)
+
+    def lens(self, source) -> LensCorrection | None:
+        """The lens correction of one of the sources (None when it has none)."""
+        return lens_from(self.undistort.get(_source_key(source)))
 
     def to_dict(self) -> dict:
         d = {"source": self.source, "second": self.second, "layout": self.layout, "view": self.view.to_dict(),
              "size": list(self.size) if self.size else None, "fps": self.fps, "name": self.name}
+        if len(self.merge) > 1:
+            d["merge"] = self.merge
         if not self.hardware.is_empty:
             d["hardware"] = self.hardware.to_dict()
+        lenses = {k: v for k, v in self.undistort.items() if lens_from(v) is not None}
+        if lenses:
+            d["undistort"] = lenses
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "SourceSpec":
-        return cls(source=d.get("source", 0), second=d.get("second"), layout=d.get("layout", "side"),
+        spec = cls(source=d.get("source", 0), second=d.get("second"), layout=merge_layout(d.get("layout", "side")),
                    view=CameraView.from_dict(d.get("view")), size=tuple(d["size"]) if d.get("size") else None,
                    fps=d.get("fps"), name=d.get("name", ""), hardware=CameraHardware.from_dict(d.get("hardware")))
+        spec.merge = merged_sources(d)
+        und = d.get("undistort")
+        spec.undistort = {str(k): LensCorrection.from_dict(v).to_dict() for k, v in und.items()
+                          if lens_from(v) is not None} if isinstance(und, dict) else {}
+        return spec
 
     def open(self, opener=None):
         """Open the source (opener defaults to core.video.VideoSource; native cameras use
@@ -266,21 +352,36 @@ class SourceSpec:
         conv = lambda s: int(s) if not isinstance(s, str) or s.isdigit() else s
         open_one = lambda s: (NativeCamera if is_native_source(s) else opener)(conv(s), w, h, self.fps or None)
         src = open_one(self.source)
-        second = None
-        if self.second is not None and self.second != "":
-            try:
-                second = open_one(self.second)
-            except Exception:
-                src.release()
-                raise
+        merged = []
+        try:
+            for s in self.merge:
+                merged.append(open_one(s))
+        except Exception:
+            for o in [src, *merged]:
+                o.release()
+            raise
         report = apply_hardware(src, self.hardware)
-        out = src if second is None and self.view.is_identity else TransformedSource(src, self.view, second,
-                                                                                       self.layout)
+        lenses = [self.lens(s) for s in self.sources]
+        if not merged and self.view.is_identity and lenses[0] is None:
+            out = src
+        else:
+            out = TransformedSource(src, self.view, merged[0] if merged else None, self.layout, merged[1:], lenses)
         try:
             out.hardware_report = report
         except Exception:  # objects refusing new attributes (tests)
             pass
         return out
+
+
+def merged_sources(d: dict | None) -> list:
+    """The merged sources of saved camera options or a saved SourceSpec: ``merge`` (three or four cameras) or the
+    ``second`` of a two-camera montage."""
+    d = d or {}
+    m = d.get("merge")
+    if isinstance(m, list) and m:
+        return [s for s in m if s is not None and s != ""][:MAX_SOURCES - 1]
+    s = d.get("second")
+    return [s] if s is not None and s != "" else []
 
 
 class FramePacer:
@@ -423,6 +524,13 @@ class SourceReader:
         if isinstance(src, TransformedSource):
             return src.last_raw, src.last_raw2
         return self.last_frame, None
+
+    def raw_frames_all(self) -> list:
+        """The untransformed frame of every source of the image (None for those not read yet)."""
+        src = self.src
+        if isinstance(src, TransformedSource):
+            return list(src.last_raws)
+        return [self.last_frame] + [None] * len(self.spec.merge)
 
     def camera(self):
         """The open camera with hardware settings (VideoSource / NativeCamera), or None (files, not open yet)."""
@@ -578,7 +686,8 @@ class SourceReader:
 
 # ------------------------------------------------------------------ persistence
 def camera_settings(project, key: str) -> dict:
-    """Saved options of one camera / source (``{"view": {...}, "second": ..., "layout": ...}``) or {}."""
+    """Saved options of one camera / source (``{"view": {...}, "second": ..., "merge": [...], "layout": ...,
+    "hardware": {...}, "undistort": {...}}``) or {}."""
     if project is None:
         return {}
     return dict((project.settings_extra.get("cameras") or {}).get(key) or {})
@@ -592,3 +701,17 @@ def set_camera_settings(project, key: str, settings: dict):
         cams[key] = settings
     else:
         cams.pop(key, None)
+
+
+def camera_lenses(project, sources) -> dict:
+    """{source key: lens correction dict} of the cameras of a montage that have one (each camera keeps its own
+    correction with its camera options; core.lens)."""
+    out = {}
+    for s in sources:
+        if s is None or s == "":
+            continue
+        k = _source_key(s)
+        lens = lens_from(camera_settings(project, k).get("undistort"))
+        if lens is not None:
+            out[k] = lens.to_dict()
+    return out

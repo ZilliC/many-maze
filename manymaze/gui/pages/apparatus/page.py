@@ -21,9 +21,11 @@ from ....core import plots, security, templates
 from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
                                 load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
+from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
 from ... import theme
 from ...icons import icon
+from ...live_widgets import LensCorrectionDialog
 from ...widgets import error_box, hint, loading, separator
 from ..base import Page
 from .background import BackgroundController
@@ -149,6 +151,10 @@ class ApparatusPage(Page):
                                    self.bg.load_dialog)
         self.testvid_act = self._action("Test video", "video", "Use a frame from the video of one of the tests")
         self.testvid_act.setMenu(self.bg.test_menu)
+        self.lens_act = self._action("Lens correction…", "camera",
+                                     "Correct the distortion of a wide-angle (fish-eye / barrel) lens in the test "
+                                     "videos, so that the map is drawn on straight images and tests are tracked in "
+                                     "them", self.lens_correction)
         # edit
         self.undo_act = self._action("Undo", "undo", "Undo the last change to the map", self.undo, QKeySequence.Undo)
         self.redo_act = self._action("Redo", tool_icon("redo"), "Redo", self.redo,
@@ -177,7 +183,7 @@ class ApparatusPage(Page):
             ("Define", [(t["arena"], "small"), (t["point"], "small"), (self.grid_act, "small"),
                         (self.group_act, "small"), (self.seq_act, "small")]),
             ("Calibration", [(t["calibrate"], "small"), (self.clear_cal_act, "small")]),
-            ("Background", [(self.bg_act, "small"), (self.testvid_act, "small")]),
+            ("Background", [(self.bg_act, "small"), (self.testvid_act, "small"), (self.lens_act, "small")]),
             ("View", [(self.fit_act, "small"), (self.labels_act, "small"), (self.map_img_act, "small")]),
         ]
 
@@ -364,8 +370,8 @@ class ApparatusPage(Page):
         edit = on and not locked
         for a in [a for k, a in self.tool_actions.items() if k != "select"] + [
                 self.undo_act, self.redo_act, self.grid_act, self.paste_act, self.dup_act, self.ren_act,
-                self.del_act, self.bg_act, self.testvid_act, self.clear_cal_act, self.delete_sel_act, self.group_act,
-                self.seq_act]:
+                self.del_act, self.bg_act, self.testvid_act, self.lens_act, self.clear_cal_act, self.delete_sel_act,
+                self.group_act, self.seq_act]:
             a.setEnabled(edit)
         for a in (self.tool_actions["select"], self.copy_act, self.export_act, self.map_img_act, self.select_all_act):
             a.setEnabled(on)
@@ -461,6 +467,54 @@ class ApparatusPage(Page):
         out = save_apparatus_file([app], path)
         self.main.status(f"Saved {app.name} to {out}")
         return out
+
+    def lens_correction(self, result: dict | None = None, apply_to: str | None = None) -> int:
+        """Lens distortion correction of video tests (a dialog on the background frame unless ``result`` — a
+        LensCorrection dict, {} for none — and ``apply_to`` are given): "video" the tests that use the background
+        video, "apparatus" the video tests of this apparatus, "all" every video test.  Returns how many tests were
+        changed."""
+        p, app = self.project, self.app
+        if p is None:
+            return 0
+        bg_path = self.bg.path if self.bg.real else None
+        groups = {"video": [t for t in p.tests if t.video and bg_path and same_video(p.abs_path(t.video), bg_path)],
+                  "apparatus": [t for t in p.tests if t.video and app is not None and t.apparatus == app.name],
+                  "all": [t for t in p.tests if t.video]}
+        if not groups["all"]:
+            QMessageBox.information(self, "Lens correction", "No test has a video yet. Lens correction applies to "
+                                    "the videos of tests; for a camera, use Camera options on the Run tests page.")
+            return 0
+        if result is None:
+            labels = {"video": "Tests that use this video", "apparatus": "Video tests of this apparatus",
+                      "all": "All the tests with a video"}
+            choices = [(f"{labels[k]} ({len(v)})", k) for k, v in groups.items() if v]
+            current = self.bg.lens.to_dict() if self.bg.lens is not None else (
+                next((t.undistort for t in groups[choices[0][1]] if t.undistort), {}))
+            dlg = LensCorrectionDialog(self.bg.raw_frame if self.bg.real else None, current,
+                                       video_path=bg_path or "", parent=self,
+                                       title="Lens correction of the test videos", apply_choices=choices)
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
+                return 0
+            result, apply_to = dlg.result(), dlg.apply_to()
+        tests = groups.get(apply_to or "video") or []
+        changed = [t for t in tests if (t.undistort or {}) != (result or {})]
+        for t in changed:
+            t.undistort = dict(result or {})
+        if not changed:
+            return 0
+        self.main.mark_dirty()
+        if self.bg.path:
+            self.bg.load(self.bg.path, self.bg.time_spin.value(), quiet=True)
+        tracked = [t for t in changed if p.has_track(t)]
+        what = "removed" if not result else "set"
+        msg = f"Lens correction {what} for {len(changed)} test{'s' if len(changed) != 1 else ''}."
+        if tracked:
+            msg += (f" {len(tracked)} of them {'were' if len(tracked) != 1 else 'was'} tracked without it: check the "
+                    "apparatus map on the corrected image, then track them again.")
+        self.main.status(msg)
+        return len(changed)
 
     def export_map_image(self, path: str | None = None, background: bool | None = None) -> str | None:
         """Save the zone map as an image (PNG / SVG / PDF by extension); background: draw it over the background

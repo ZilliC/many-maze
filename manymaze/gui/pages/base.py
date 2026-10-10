@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
 
 from ...core.freezing import IMMOBILITY_MODES
 from ...core.template_measures import BARNES_METHODS
+from ...core.tracking import ANIMAL_PRESETS, apply_animal_preset
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -55,7 +56,8 @@ DETECTION_SPEC = [
      "colour finds the pixels of the chosen colour (a coloured animal, dye mark, collar or LED)."),
     ("contrast", "Compared with the background the animal is", "choice",
      [("auto", "Darker or lighter"), ("dark", "Darker"), ("light", "Lighter")],
-     "Contrast of the animal against the background (e.g. dark mouse on white floor = Darker)."),
+     "Contrast of the animal against the background (e.g. dark mouse on white floor = Darker). Darker or "
+     "lighter also tracks animals that are partly both, such as a hooded rat."),
     ("threshold", "Detection threshold (0 = automatic)", "int", (0, 255, 1),
      "Grey-level difference that counts as animal. 0 = automatic (Otsu)."),
     ("background", "Build the background from", "choice", [("median", "The median of sampled frames"),
@@ -67,6 +69,11 @@ DETECTION_SPEC = [
      "Frame used when the background is built from an empty-arena frame."),
     ("background_samples", "Frames sampled for the median", "int", (3, 501, 2),
      "Frames used for the median background."),
+    ("lighting_compensation", "Ignore lighting changes", "bool", None,
+     "Before each frame is compared with the background, its brightness is scaled so that the arena's median grey "
+     "level matches the background's (each arena separately): lights dimmed or switched on during a test, or a "
+     "camera adjusting its exposure, are not taken for the animal. Only changes of the whole image are removed, "
+     "not local shadows or reflections."),
     ("target_colour", "Colour of the animal or mark (#rrggbb)", "text", None,
      "Used when the animal is detected by its colour, e.g. #ff0000 for a red mark."),
     ("colour_tolerance", "Colour tolerance (hue, degrees)", "int", (1, 90, 1),
@@ -266,7 +273,7 @@ ANALYSIS_SPEC = [
 # here are shown in the last section, so new spec entries always appear.
 DETECTION_SECTIONS = [
     ("Detection", ["method", "contrast", "threshold", "background", "background_frame", "background_samples",
-                   "min_area_px", "max_area_px"]),
+                   "lighting_compensation", "min_area_px", "max_area_px"]),
     ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
     ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
@@ -427,6 +434,19 @@ class SettingsForm(QWidget):
         form = self.forms.get(title) or list(self.forms.values())[-1]
         form.addRow(widget)
 
+    def insert_row(self, title: str, label: str, widget: QWidget, row: int = 0, tip: str = ""):
+        """Insert a labelled row (e.g. the animal presets) into a section, at its top by default (the first
+        section if `title` is unknown)."""
+        form = self.forms.get(title) or list(self.forms.values())[0]
+        lbl = QLabel(label)
+        if tip:
+            lbl.setToolTip(tip)
+            widget.setToolTip(tip)
+        if self.labels:
+            lbl.setMinimumWidth(max(x.minimumWidth() for x in self.labels.values()))
+        form.insertRow(row, lbl, widget)
+        return lbl
+
     def load(self, obj):
         self.obj = obj
         with loading(self):
@@ -459,3 +479,46 @@ class SettingsForm(QWidget):
                 setattr(obj, attr, w.currentData())
             else:
                 setattr(obj, attr, w.text())
+
+
+PRESET_TIP = ("Set the contrast, the body-size limits, the clean-up and Ignore lighting changes for a kind of animal "
+              "and floor. The body-size limits use the calibration of the apparatus; without one they are left as "
+              "they are. Adjust the settings afterwards if needed.")
+
+
+class AnimalPresetCombo(QComboBox):
+    """The animal presets of the detection settings (core.tracking.ANIMAL_PRESETS): choosing one emits
+    ``chosen(key)`` and the box returns to its prompt (a preset is an action, not a setting)."""
+
+    chosen = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.addItem("Choose an animal…", None)
+        for k, p in ANIMAL_PRESETS.items():
+            self.addItem(p["title"], k)
+        self.setMinimumWidth(FIELD_WIDTH)
+        self.activated.connect(self._activated)
+
+    def _activated(self, i: int):
+        key = self.itemData(i)
+        self.setCurrentIndex(0)
+        if key:
+            self.chosen.emit(key)
+
+
+def apply_preset_to_form(form: SettingsForm, key: str, px_per_cm: float | None) -> tuple[list[str], str]:
+    """Set an animal preset on the settings object of a detection form and show it; returns (the fields changed,
+    a status message)."""
+    changed = apply_animal_preset(form.obj, key, px_per_cm)
+    form.load(form.obj)
+    labels = {a: lbl for a, lbl, *_ in DETECTION_SPEC}
+    title = ANIMAL_PRESETS[key]["title"]
+    if changed:
+        msg = f"{title}: {len(changed)} setting{'s' if len(changed) != 1 else ''} changed (" + \
+            ", ".join(labels.get(c, c).lower() for c in changed) + ")."
+    else:
+        msg = f"{title}: the settings were already those of this preset."
+    if not px_per_cm:
+        msg += " Calibrate the apparatus to let the preset set the body-size limits too."
+    return changed, msg

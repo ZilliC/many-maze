@@ -31,7 +31,7 @@ from ..pose_model import PoseModelBox
 from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
 from ._results_cache import cached_rows, get_rows, info_columns
 from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
-                   FST_SPEC, Page, SettingsForm, property_form)
+                   FST_SPEC, PRESET_TIP, AnimalPresetCombo, Page, SettingsForm, apply_preset_to_form, property_form)
 from .protocol_pages import CalculationEditor, ElementPage, KeyEditor, small_button
 from .results.dialogs import MeasurePickerDialog, measure_groups
 from .results.table import _names
@@ -236,6 +236,9 @@ class ExperimentPage(Page):
         self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS)
         self.det_form.changed.connect(self.main.mark_dirty)
         self.det_form.changed.connect(self._update_pose_box)
+        self.preset = AnimalPresetCombo()
+        self.preset.chosen.connect(self.apply_animal_preset)
+        self.det_form.insert_row("Detection", "Set the detection up for", self.preset, tip=PRESET_TIP)
         self.pose_box = PoseModelBox()
         self.pose_box.changed.connect(self.main.mark_dirty)
         self.det_form.add_to_section("Body parts", self.pose_box)
@@ -1102,6 +1105,20 @@ class ExperimentPage(Page):
         self.main.mark_dirty()
         self.main.status(f"Protocol set to {t.title} ({t.default_duration_s:g} s tests). Use “Apparatus from "
                          "template” to draw its apparatus.")
+
+    def apply_animal_preset(self, key: str) -> list[str]:
+        """Set an animal preset (core.tracking.ANIMAL_PRESETS) on the default detection settings; the body-size
+        limits use the calibration of the first calibrated apparatus.  Returns the fields changed."""
+        p = self.project
+        if p is None or self.det_form.obj is None:
+            return []
+        ppc = next((a.px_per_cm for a in p.apparatus if a.px_per_cm), None)
+        changed, msg = apply_preset_to_form(self.det_form, key, ppc)
+        if changed:
+            self.main.mark_dirty()
+            self._update_pose_box()
+        self.main.status(msg)
+        return changed
 
     def restore_detection_defaults(self):
         self._restore_defaults(self.project.detection if self.project else None, DetectionSettings(), DETECTION_SPEC,

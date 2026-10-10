@@ -32,6 +32,7 @@ from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_unit
 from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
+from .lens import LensCorrection, corrected, lens_from
 from .measures import (AnalysisSettings, add_warning, all_periods, analyse, analyse_period, analyse_segmented,
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
 from .periods import Period, calculation_columns, no_end_warning, uses_calculations
@@ -157,6 +158,7 @@ class Test:
     replaces: int = 0  # id of the test this attempt re-performs (0 = none)
     experimenter: str = ""  # the user who ran (live) or tracked / scored the test
     end_reason: str = ""  # why a live test ended (END_* values); "" for tests tracked from a video
+    undistort: dict = field(default_factory=dict)  # lens distortion correction of the video (core.lens; {} = none)
     # analysis plug-ins (plugins.py): their time series ({name: {"source", "samples", "unit"}}, the samples in
     # tracks/test_NNNN_series.json) and per-test measures ({name: value})
     extra_series: dict = field(default_factory=dict)
@@ -774,12 +776,28 @@ class Project:
         return self.path / "tracks" / f"test_{test.id:04d}{suffix}.csv"
 
     def start_frame(self, test: Test) -> np.ndarray | None:
-        """The video frame at the start of the test (None without a readable video), e.g. under track plots."""
+        """The video frame at the start of the test (None without a readable video), e.g. under track plots;
+        corrected for lens distortion like the frames tracked."""
         try:
-            with VideoSource(self.abs_path(test.video)) as v:
+            with corrected(VideoSource(self.abs_path(test.video)), self.lens_for(test)) as v:
                 return v.frame_at(int(round(test.start_s * v.fps)))
         except Exception:
             return None
+
+    def lens_for(self, test: Test) -> LensCorrection | None:
+        """The lens distortion correction of a test's video (None when it has none)."""
+        return lens_from(test.undistort)
+
+    def lens_for_video(self, path: str) -> LensCorrection | None:
+        """The lens correction of the tests that use a video file (the first one that has a correction)."""
+        if not path:
+            return None
+        for t in self.tests:
+            if t.video and t.undistort and same_video(self.abs_path(t.video), path):
+                lens = self.lens_for(t)
+                if lens is not None:
+                    return lens
+        return None
 
     def recordings_dir(self) -> Path:
         d = (self.path or Path.cwd()) / "recordings"
@@ -830,10 +848,12 @@ class Project:
         app = self.apparatus_of(test)
         settings = self.detection_for(test)
         video = self.abs_path(test.video)
+        lens = self.lens_for(test)
         if self.start_mode in ("on_detection", "experimenter_leaves"):
             dur = settings.duration_s
             settings.duration_s = 0.0
-            raw = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback)[0]
+            raw = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback,
+                              lens=lens)[0]
             t0 = None
             if self.start_mode == "experimenter_leaves" and raw:
                 from .autostart import experimenter_leaves_start
@@ -845,7 +865,8 @@ class Project:
                     tr.meta["start"] = ("experimenter left" if t0 is not None else
                                         "first detection (no experimenter seen)")
         else:
-            tracks = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback)[0]
+            tracks = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback,
+                                 lens=lens)[0]
         self.save_tracks(test, tracks)
         return tracks
 
@@ -855,7 +876,7 @@ class Project:
             return {}
         video = self.abs_path(tests[0].video)
         jobs = [ArenaJob(self.apparatus_of(t), self.detection_for(t)) for t in tests]
-        res = track_video(video, jobs, progress, should_stop)
+        res = track_video(video, jobs, progress, should_stop, lens=self.lens_for(tests[0]))
         out = {}
         for t, tracks in zip(tests, res):
             self.save_tracks(t, tracks)
@@ -1230,6 +1251,16 @@ class Project:
             row = {"Test": test.id, "Animal": test.animal_id}
         row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: f"{type(error).__name__}: {error}"})
         return row
+
+
+def same_video(a, b) -> bool:
+    """Two paths of the same video file (also when one of them no longer exists)."""
+    if os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b)):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 def read_project_file(path, password: str | None = None) -> tuple[dict, ExperimentKey | None]:

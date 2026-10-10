@@ -12,11 +12,13 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
 
 from ....core import autosave, diskspace
-from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
+from ....core.camera import (CameraView, SourceReader, SourceSpec, camera_lenses, camera_settings, merge_layout,
+                             merged_sources, set_camera_settings)
 from ....core.camhw import CameraHardware
 from ....core.camsources import is_native_source, list_native_cameras
 from ....core.live import IOSession, LiveSession, draw_display_texts
 from ....core.livemonitor import beam_angle
+from ....core.lens import LensCorrection
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs, test_context
 from ....core.project import INFO_COLUMNS
@@ -27,7 +29,7 @@ from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...io_devices_dialog import open_device_manager
 from ...live_widgets import CameraOptionsDialog, short_time
 from ...widgets import Worker, error_box, fmt_time
-from .common import TRAIL_LEN, describe_view, peek_frame, recording_path
+from .common import TRAIL_LEN, camera_options_settings, describe_view, peek_frame, recording_path
 
 
 class _GrabberSignals(QObject):
@@ -102,6 +104,15 @@ def scan_all_cameras() -> tuple[list[tuple[str, object]], list[str]]:
 class SingleTestMixin:
     """One test: its source and preview, frame processing, test setup and run control."""
 
+    @property
+    def _second(self):
+        """The first source merged into the camera image (None: a single camera)."""
+        return self._merge[0] if self._merge else None
+
+    @_second.setter
+    def _second(self, source):
+        self._merge = [source] if source is not None else []
+
     def _source_mode_changed(self, *_):
         cam = self.cam_radio.isChecked()
         for w in (self.camera, self.scan_btn, self.resolution, self.cam_fps):
@@ -157,11 +168,11 @@ class SingleTestMixin:
         self._file_background = None
         self._source_is_file = True
         self._load_single_view()
-        if self.grabber is None and self._second is None:  # show the first image until the preview starts
+        if self.grabber is None and not self._merge:  # show the first image until the preview starts
             f = peek_frame(path)
             if f is not None:
                 try:
-                    self.view.set_frame(self._view.apply(f))
+                    self.view.set_frame(self._view.apply(LensCorrection.from_dict(self._undistort).apply(f)))
                 except Exception:
                     pass
 
@@ -196,10 +207,12 @@ class SingleTestMixin:
         key = self._single_key()
         d = camera_settings(self.project, key) if key else {}
         self._view = CameraView.from_dict(d.get("view"))
-        self._second = d.get("second")
-        self._merge_layout = d.get("layout", "side")
+        self._merge = merged_sources(d)
+        self._merge_layout = merge_layout(d.get("layout", "side"))
+        self._undistort = LensCorrection.from_dict(d.get("undistort")).to_dict()
         self._hardware = CameraHardware.from_dict(d.get("hardware"))
-        self.view_lbl.setText(describe_view(self._view, self._second, self._merge_layout, self._hardware))
+        self.view_lbl.setText(describe_view(self._view, self._merge, self._merge_layout, self._hardware,
+                                            self._undistort))
         self._update_single_title()
 
     def _merge_choices(self, exclude=None) -> list[tuple[str, object]]:
@@ -210,25 +223,30 @@ class SingleTestMixin:
         return [(lbl, s) for lbl, s in out if s != exclude]
 
     def camera_options(self) -> bool:
-        """Region / zoom / rotation / flip / merge options and camera hardware settings of the single-test
-        source (hardware settings change live while the camera image is on)."""
+        """Region / zoom / rotation / flip / merge options, lens correction and camera hardware settings of the
+        single-test source (hardware settings change live while the camera image is on)."""
         src = self._source()
         if src is None:
             QMessageBox.information(self, "Camera options", "Choose a camera or a video file first.")
             return False
-        raw, raw2 = self.grabber.raw_frames() if self.grabber is not None else (None, None)
+        raws = self.grabber.raw_frames_all() if self.grabber is not None else [None] * (1 + len(self._merge))
+        raws += [None] * (1 + len(self._merge) - len(raws))
+        raw = raws[0]
         if raw is None:
             # the last image only when it is of this source, untransformed (never another camera's / file's)
-            raw = self._last_frame if (self._view.is_identity and self._second is None
+            raw = self._last_frame if (self._view.is_identity and not self._merge and not self._undistort
                                        and self._frame_key == self._single_key()) else None
         if raw is None and SourceSpec(src).is_file:
             raw = peek_frame(src)
-        if raw2 is None and self._second is not None and SourceSpec(self._second).is_file:
-            raw2 = peek_frame(self._second)
+        others = [f if f is not None or not SourceSpec(m).is_file else peek_frame(m)
+                  for m, f in zip(self._merge, raws[1:])]
         camera = self.grabber.camera() if self.grabber is not None and not self.simulating else None
-        dlg = CameraOptionsDialog(raw, self._view, self._second, self._merge_layout, self._merge_choices(src),
-                                  raw2, self, hardware=self._hardware, camera=camera, is_camera=not self.simulating,
-                                  genicam=is_native_source(src))
+        g = self.grabber
+        dlg = CameraOptionsDialog(raw, self._view, list(self._merge), self._merge_layout, self._merge_choices(src),
+                                  others, self, hardware=self._hardware, camera=camera, is_camera=not self.simulating,
+                                  genicam=is_native_source(src), lens=self._undistort,
+                                  merge_lenses=camera_lenses(self.project, self._merge),
+                                  frame_source=(lambda: g.raw_frames()[0]) if g is not None else None)
         accepted = dlg.exec() == QDialog.Accepted
         dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
         if not accepted:
@@ -239,23 +257,19 @@ class SingleTestMixin:
     def _apply_single_view(self, res: dict):
         key = self._single_key()
         view = CameraView.from_dict(res.get("view"))
-        second = res.get("second")
-        layout = res.get("layout", "side")
+        merge = merged_sources(res)
+        layout = merge_layout(res.get("layout", "side"))
         hardware = CameraHardware.from_dict(res["hardware"]) if "hardware" in res else self._hardware
-        settings = {}
-        if not view.is_identity:
-            settings["view"] = view.to_dict()
-        if second is not None:
-            settings.update(second=second, layout=layout)
-        if not hardware.is_empty:
-            settings["hardware"] = hardware.to_dict()
-        set_camera_settings(self.project, key, settings)
+        undistort = LensCorrection.from_dict(res["undistort"]).to_dict() if "undistort" in res else self._undistort
+        set_camera_settings(self.project, key, camera_options_settings(view, merge, layout, hardware, undistort))
         self.main.mark_dirty()
-        image_changed = (view, second, layout) != (self._view, self._second, self._merge_layout)
-        self._view, self._second, self._merge_layout, self._hardware = view, second, layout, hardware
+        image_changed = (view, merge, layout, undistort) != (self._view, self._merge, self._merge_layout,
+                                                             self._undistort)
+        self._view, self._merge, self._merge_layout, self._hardware = view, merge, layout, hardware
+        self._undistort = undistort
         if self.grabber is not None:
             self.grabber.spec.hardware = hardware  # already applied live by the dialog
-        self.view_lbl.setText(describe_view(view, second, layout, hardware))
+        self.view_lbl.setText(describe_view(view, merge, layout, hardware, undistort))
         if not image_changed:
             return
         self._file_background = None
@@ -275,8 +289,10 @@ class SingleTestMixin:
         size = self.resolution.currentData() if not self.simulating else None
         fps = self.cam_fps.value() if not self.simulating else None
         self._source_is_file = self.simulating
-        spec = SourceSpec(src, self._second, self._merge_layout, self._view, size, fps or None,
+        spec = SourceSpec(src, None, self._merge_layout, self._view, size, fps or None,
                           hardware=self._hardware if not self.simulating else CameraHardware())
+        spec.merge = self._merge
+        spec.undistort = camera_lenses(self.project, spec.sources)
         g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
         g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
         g.session_of = lambda: self.session
