@@ -9,15 +9,17 @@ from pathlib import Path
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QModelIndex, QRect,
                             QSortFilterProxyModel, Qt)
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QPainter, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QMenu, QMessageBox, QSpinBox, QStyledItemDelegate,
-                               QTableView, QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMenu, QMessageBox,
+                               QSpinBox, QStyledItemDelegate, QTableView, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout)
 
 from ...core import workflow as wf
 from ...core.batch import track_tests, tracking_batches
 from ...core.importers import dlc_bodyparts, trim_to_test
 from ...core.track import Track, import_deeplabcut_csv
-from ...core.video import VIDEO_EXTENSIONS, VideoSource, is_playlist, write_playlist
+from ...core.video import VIDEO_EXTENSIONS, VideoSource, check_video, is_playlist, write_playlist
+from ...core.terminology import term
 from ...core.workflow import treatment_code
 from .. import ribbon, theme
 from ..icons import icon
@@ -116,8 +118,9 @@ class TestsModel(QAbstractTableModel):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
             p = self.page.project
             if section == C_GROUP:
-                return "Code" if p is not None and p.blind else "Treatment"
-            return COLUMNS[section]
+                return "Code" if p is not None and p.blind else term(p, "treatment")
+            return {C_ID: term(p, "test"), C_ANIMAL: term(p, "animal"), C_STAGE: term(p, "stage"),
+                    C_TRIAL: term(p, "trial"), C_APP: term(p, "apparatus")}.get(section, COLUMNS[section])
         if orientation == Qt.Horizontal and role == Qt.TextAlignmentRole:
             return int(Qt.AlignLeft | Qt.AlignVCenter)
         return None
@@ -453,6 +456,9 @@ class TestsPage(Page):
         self.a_import_data = act("Import track data…", "import_table", lambda: self.import_track_data(),
                                  "Import positions exported by ANY-maze, EthoVision or other software (any table "
                                  "with time and X / Y columns) for the selected test", large=False)
+        self.a_check = act("Check video…", "check", lambda: self.check_videos(),
+                           "Look through the selected tests' videos for glitches: duplicate frames, black frames and "
+                           "missing frames (gaps in the frame timestamps)", large=False)
         # Status
         self.a_skip = act("Skip", "skip", self.skip_selected,
                           "Skip the selected tests for now — they can be resumed later", large=False)
@@ -491,7 +497,7 @@ class TestsPage(Page):
         self.a_vars = act("Test variables", "variable", self.edit_variables,
                           "Per-test variables: novel object (NOR), social stimulus side (three-chamber)")
 
-        title = QLabel("Test schedule")
+        self.title_lbl = title = QLabel("Test schedule")
         title.setObjectName("PageTitle")
         self.summary = QLabel()
         self.summary.setObjectName("Hint")
@@ -516,7 +522,7 @@ class TestsPage(Page):
         return [("Tests", [self.a_add, self.a_add_blank, self.a_schedule, (self.a_dup, "small"),
                            (self.a_video, "small"), (self.a_del, "small")]),
                 ("Testing", [self.a_open, self.a_track, self.a_track_all, (self.a_import, "small"),
-                             (self.a_import_data, "small")]),
+                             (self.a_import_data, "small"), (self.a_check, "small")]),
                 ("Status", [(self.a_skip, "small"), (self.a_resume, "small"), (self.a_redo, "small"),
                             (self.a_excl, "small"), (self.a_clear, "small"), (self.a_end_stage, "small"),
                             (self.a_reopen_stage, "small"), (self.a_user, "small")]),
@@ -530,6 +536,7 @@ class TestsPage(Page):
         self.refresh()
 
     def refresh(self):
+        self.title_lbl.setText(f"{term(self.project, 'test')} schedule")
         sel = set(self.selected_ids())
         self.model.reset()
         self.select_ids(sel)
@@ -715,7 +722,7 @@ class TestsPage(Page):
         for a in (self.a_add, self.a_add_blank, self.a_schedule, self.a_track_all):
             a.setEnabled(has)
         for a in (self.a_dup, self.a_del, self.a_excl, self.a_track, self.a_vars, self.a_redo, self.a_clear,
-                  self.a_video):
+                  self.a_video, self.a_check):
             a.setEnabled(n > 0)
         self.a_open.setEnabled(n == 1)
         self.a_import.setEnabled(n == 1)
@@ -1097,6 +1104,86 @@ class TestsPage(Page):
         self._tracking = False
         self.refresh()
         error_box(self, "Tracking", msg)
+
+    # ------------------------------------------------------------------ video check
+    def check_videos(self, tests=None, show: bool = True):
+        """*Check video*: look through the videos of the selected tests (``tests``) for duplicate, black and missing
+        frames (core.video.check_video), in the background, each video once; the findings are listed in a dialog
+        (``show``). Returns the worker; its result is {video path: VideoCheck}."""
+        p = self.project
+        if p is None:
+            return None
+        tests = [t for t in (self.selected_tests() if tests is None else tests) if t.video]
+        videos: dict[str, list] = {}
+        for t in tests:
+            videos.setdefault(p.abs_path(t.video), []).append(t)
+        missing = [v for v in videos if not Path(v).exists()]
+        if not videos:
+            QMessageBox.information(self, "Check video", "The selected tests have no video.")
+            return None
+
+        def work(progress, stop):
+            out = {}
+            todo = [v for v in videos if v not in missing]
+            for k, v in enumerate(todo):
+                if stop():
+                    break
+                out[v] = check_video(v, lambda f, k=k: progress((k + f) / len(todo)), stop)
+            return out
+
+        def done(res):
+            self.video_checks = res
+            bad = sum(1 for c in res.values() if not c.ok)
+            self.main.status(f"Checked {len(res)} video{'s' if len(res) != 1 else ''}: "
+                             + (f"{bad} with glitches" if bad else "no glitches found")
+                             + (f", {len(missing)} missing" if missing else ""))
+            if show:
+                self._show_video_checks(res, videos, missing)
+
+        title = f"Checking {len(videos)} video{'s' if len(videos) != 1 else ''}"
+        return run_with_progress(self, title, work, on_done=done)
+
+    def _show_video_checks(self, res: dict, videos: dict, missing: list):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Check video")
+        dlg.resize(900, 360)
+        v = QVBoxLayout(dlg)
+        heads = [term(self.project, "test", plural=True), "Video", "Frames", "Duplicate", "Black", "Missing",
+                 "Findings"]
+        tbl = QTableWidget(len(videos), len(heads))
+        tbl.setHorizontalHeaderLabels(heads)
+        tbl.verticalHeader().hide()
+        tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        for r, (path, ts) in enumerate(videos.items()):
+            c = res.get(path)
+            if path in missing:
+                vals = ["", "", "", "", "The video file is missing"]
+            elif c is None:
+                vals = ["", "", "", "", "Not checked (stopped)"]
+            else:
+                vals = [str(c.frames), str(len(c.duplicate)), str(len(c.black)),
+                        str(c.missing) if c.timestamps else "?", c.summary()]
+            cells = [", ".join(str(t.id) for t in ts), Path(path).name] + vals
+            for col, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setToolTip(path if col == 1 else text)
+                if 2 <= col <= 5:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                tbl.setItem(r, col, it)
+        tbl.resizeColumnsToContents()
+        v.addWidget(QLabel("Duplicate frames repeat the previous frame (the camera or recorder dropped frames); "
+                           "missing frames are gaps in the timestamps longer than 1.5 frame intervals. Tracking "
+                           "uses the frames as they are: consider re-recording a test with many glitches."))
+        v.itemAt(0).widget().setWordWrap(True)
+        v.addWidget(tbl, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        dlg.setModal(False)
+        dlg.show()
+        self._check_dialog = dlg
+        return dlg
 
     # ------------------------------------------------------------------ track import
     def import_track(self):

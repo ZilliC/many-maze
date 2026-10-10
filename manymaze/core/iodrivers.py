@@ -22,13 +22,10 @@ The hardware packages are optional and imported when a device opens; tests injec
 from __future__ import annotations
 
 import base64
-import smtplib
-import ssl
 import threading
 import time
 import urllib.parse
 import urllib.request
-from email.message import EmailMessage
 
 from .iodevices import DRIVERS, Device, _open_serial
 
@@ -624,25 +621,9 @@ class NotifyDevice(Device):
                 self._error(f"{self.name}: could not send the alert to {to}: {e}")
 
     def _email(self, to, subject, text):  # pragma: no cover - network dependent
-        c = self.cfg
-        host, port = str(c.get("smtp_host", "")), int(c.get("smtp_port", 587) or 587)
-        if not host:
-            raise RuntimeError("no SMTP server configured")
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = c.get("from_addr") or c.get("smtp_user") or "manymaze@localhost"
-        msg["To"] = to
-        msg.set_content(text)
-        ctx = ssl.create_default_context()
-        if port == 465:
-            srv = smtplib.SMTP_SSL(host, port, timeout=20, context=ctx)
-        else:
-            srv = smtplib.SMTP(host, port, timeout=20)
-            srv.starttls(context=ctx)
-        with srv:
-            if c.get("smtp_user"):
-                srv.login(str(c["smtp_user"]), str(c.get("smtp_password", "")))
-            srv.send_message(msg)
+        from .mail import send_email
+
+        send_email(self.cfg, to, subject, text)
 
     def _twilio(self, to, text):  # pragma: no cover - network dependent
         c = self.cfg

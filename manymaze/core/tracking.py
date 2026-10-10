@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Callable, Sequence
 
 import cv2
@@ -24,7 +24,7 @@ from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
 from .track import COLUMNS, Track, simplify_outline
-from .video import FrameReader, VideoSource
+from .video import DOWNSCALE_FACTORS, FrameReader, VideoSource, downscaled_size
 
 
 @dataclass
@@ -52,6 +52,9 @@ class DetectionSettings:
     start_time_s: float = 0.0  # analyse from this time in the video
     duration_s: float = 0.0  # analyse this many seconds (0 = to end)
     frame_step: int = 1  # analyse every Nth frame
+    # video files: track frames downscaled 2 or 4 times in width and height (faster on high-resolution video);
+    # positions are scaled back, so tracks, apparatus and calibration stay in the video's pixels
+    downscale: int = 1
     arena_margin_px: int = 4
     body_parts: str = "contour"  # "contour": head/tail from blob shape; "pose": deep-learning keypoints
     pose_model: str = "topviewmouse_rtmpose_s"  # core.pose.MODELS key or path to a custom .onnx
@@ -204,6 +207,59 @@ def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarr
 def _odd(k: int) -> int:
     k = int(k)
     return k if k % 2 == 1 else k + 1
+
+
+# ---------------------------------------------------------------------------------- downscaled tracking
+def downscale_factor(settings: DetectionSettings) -> int:
+    """The factor by which video files are downscaled before tracking (1, 2 or 4)."""
+    try:
+        f = int(getattr(settings, "downscale", 1) or 1)
+    except (TypeError, ValueError):
+        return 1
+    return f if f in DOWNSCALE_FACTORS else 1
+
+
+def downscaled_settings(settings: DetectionSettings, factor: int) -> DetectionSettings:
+    """Detection settings for frames downscaled ``factor`` times: the sizes in pixels (object areas, blur,
+    clean-up, thin-structure eraser, arena margin) shrink with the image, so the same animal is found."""
+    if factor <= 1:
+        return settings
+    f, f2 = float(factor), float(factor) ** 2
+
+    def px(v):
+        return int(round(v / f)) if v else 0
+
+    s = DetectionSettings.from_dict(settings.to_dict())
+    s.min_area_px = max(1, int(round(settings.min_area_px / f2)))
+    s.max_area_px = max(s.min_area_px, int(round(settings.max_area_px / f2))) if settings.max_area_px else 0
+    s.blur, s.morph_open, s.morph_close = px(settings.blur), px(settings.morph_open), px(settings.morph_close)
+    s.erase_thin_px = px(settings.erase_thin_px)
+    s.arena_margin_px = int(math.ceil(settings.arena_margin_px / f))
+    return s
+
+
+def upscaled_detection(d: Detection, sx: float, sy: float) -> Detection:
+    """A detection made in a downscaled frame in the coordinates of the full frame (sx, sy: full / downscaled
+    width and height): positions, contour, outline and keypoints scaled back (pixel centres kept), area and
+    motion (pixel counts) multiplied by the area ratio. A copy: the tracker keeps the original."""
+    def x(v):
+        return (v + 0.5) * sx - 0.5
+
+    def y(v):
+        return (v + 0.5) * sy - 0.5
+
+    def pts(a, as_int):
+        if a is None:
+            return None
+        b = np.asarray(a, float).copy()
+        flat = b.reshape(-1, b.shape[-1])
+        flat[:, 0] = x(flat[:, 0])
+        flat[:, 1] = y(flat[:, 1])
+        return np.round(b).astype(np.int32) if as_int else b
+
+    return replace(d, x=x(d.x), y=y(d.y), hx=x(d.hx), hy=y(d.hy), tx=x(d.tx), ty=y(d.ty), area=d.area * sx * sy,
+                   motion=d.motion * sx * sy, contour=pts(d.contour, True), outline=pts(d.outline, True),
+                   keypoints=pts(d.keypoints, False))
 
 
 class ArenaTracker:
@@ -915,6 +971,57 @@ class TrackBuilder:
         return Track(**cols, fps=fps, outline=outline if any(o is not None for o in outline) else None)
 
 
+class DownscaledTracker:
+    """An :class:`ArenaTracker` that finds the animal in frames downscaled ``factor`` times (2 or 4: faster on
+    high-resolution video) and gives its detections in the pixels of the full frame (:func:`upscaled_detection`),
+    so tracks, apparatus and calibration are unchanged. Frames, masks and backgrounds may be given at full size
+    (they are downscaled) or already downscaled."""
+
+    def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None, frame_hw: tuple[int, int],
+                 factor: int, pose=None):
+        H, W = int(frame_hw[0]), int(frame_hw[1])
+        self.factor = max(1, int(factor))
+        self.full_wh = (W, H)
+        self.small_wh = downscaled_size(W, H, self.factor)
+        self.sx, self.sy = W / self.small_wh[0], H / self.small_wh[1]
+        self.tracker = ArenaTracker(downscaled_settings(settings, self.factor), self.small(arena_mask, True), pose)
+
+    def small(self, img: np.ndarray | None, nearest: bool = False) -> np.ndarray | None:
+        if img is None or img.shape[1::-1] == self.small_wh:
+            return img
+        return cv2.resize(img, self.small_wh, interpolation=cv2.INTER_NEAREST if nearest else cv2.INTER_AREA)
+
+    @property
+    def pose_error(self) -> str:
+        return self.tracker.pose_error
+
+    def animal_contrast(self) -> str:
+        return self.tracker.animal_contrast()
+
+    def set_background(self, bg_gray: np.ndarray):
+        self.tracker.set_background(self.small(bg_gray))
+
+    def set_motion_reference(self, frame: np.ndarray):
+        self.tracker.set_motion_reference(self.small(frame))
+
+    def process(self, frame: np.ndarray, full_mask: bool = True) -> tuple[list[Detection], np.ndarray]:
+        dets, fg = self.tracker.process(self.small(frame), full_mask)
+        dets = [upscaled_detection(d, self.sx, self.sy) for d in dets]
+        if fg is not None and full_mask and fg.shape[1::-1] == self.small_wh:
+            fg = cv2.resize(fg, self.full_wh, interpolation=cv2.INTER_NEAREST)
+        return dets, fg
+
+
+def arena_tracker(settings: DetectionSettings, arena_mask: np.ndarray | None, frame_hw: tuple[int, int],
+                  pose=None, factor: int | None = None):
+    """The tracker of an arena in frames of size frame_hw: an :class:`ArenaTracker`, or a
+    :class:`DownscaledTracker` when the settings (or ``factor``) downscale the video."""
+    f = downscale_factor(settings) if factor is None else factor
+    if f > 1:
+        return DownscaledTracker(settings, arena_mask, frame_hw, f, pose)
+    return ArenaTracker(settings, arena_mask, pose=pose)
+
+
 @dataclass
 class ArenaJob:
     """One arena in a video to be tracked: its mask and detection settings."""
@@ -958,6 +1065,9 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         return poses.get((settings.pose_model, settings.pose_device)) if settings.body_parts == "pose" else None
 
     pose = next(iter(poses.values()), None)
+    # downscaled tracking (the first arena's setting: the video is decoded once for all arenas) - frames are decoded
+    # downscaled, the trackers give positions in the video's pixels
+    factor = downscale_factor(s0)
     with VideoSource(video_path) as v:
         W, H = v.width, v.height
         trackers = []
@@ -966,7 +1076,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             mask = job.mask
             if mask is None and job.apparatus is not None:
                 mask = job.apparatus.arena_or_bounds().mask((H, W))
-            tr = ArenaTracker(job.settings, mask, pose=pose_of(job.settings))
+            tr = arena_tracker(job.settings, mask, (H, W), pose_of(job.settings), factor)
             if job.settings.method == "background" and job.settings.background != "adaptive":
                 if background is not None:
                     tr.set_background(background)
@@ -987,7 +1097,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
     # colour is only needed for the pose model, colour tracking and preview callbacks; otherwise decode to grey
     colour = any(j.settings.needs_colour() for j in jobs)
     reader = FrameReader(video_path, start, gray=pose is None and frame_callback is None and not colour,
-                         threads=decode_threads)
+                         threads=decode_threads, downscale=factor)
     with reader:
         for i, frame in reader:
             if i >= end:
@@ -1004,7 +1114,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                         b.add(t, d)
                     all_dets.append(dets)
                 if frame_callback:
-                    frame_callback(i, frame, all_dets)
+                    frame_callback(i, frame if factor <= 1 else cv2.resize(frame, (W, H)), all_dets)
             if progress and (i + 1 - start) % 25 == 0:
                 progress(min(1.0, (i + 1 - start) / total))
             if should_stop and should_stop():
@@ -1021,6 +1131,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             if trk.animal_contrast():
                 tr.meta["animal_contrast"] = trk.animal_contrast()
             tr.meta["decoder"] = reader.backend
+            if factor > 1:
+                tr.meta["downscale"] = factor
             est = pose_of(job.settings)
             if est is not None:
                 tr.meta["pose_model"] = job.settings.pose_model

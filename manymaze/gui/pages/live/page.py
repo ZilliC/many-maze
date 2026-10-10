@@ -800,6 +800,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.sched_daily.setChecked(bool(d.get("schedule_daily", False)))
         finally:
             self._loading = False
+        self._update_recording_names()
 
     def _save_live_settings(self, *_):
         if self._loading or self.project is None:

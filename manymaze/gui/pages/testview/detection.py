@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QGridLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from ....core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_overlay
+from ....core.tracking import DetectionSettings, arena_tracker, compute_background, draw_overlay
 from ...widgets import Worker
 from ..base import DETECTION_SPEC, SettingsForm
 
@@ -68,7 +68,7 @@ class DetectionMixin:
                 mask = app.arena_or_bounds().mask((h, w))
             except ValueError:
                 mask = None
-        tracker = ArenaTracker(s, mask)
+        tracker = arena_tracker(s, mask, (h, w))  # downscaled as tracking will be (Downscale before tracking)
         if s.method == "background":
             key = self.bg_key(s)
             bg = self._bg_cache.get(key)

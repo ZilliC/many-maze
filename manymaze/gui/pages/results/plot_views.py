@@ -7,11 +7,12 @@ from pathlib import Path
 import numpy as np
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QStackedWidget, QTabWidget,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+                               QInputDialog, QLabel, QListWidget, QListWidgetItem, QPushButton, QSizePolicy,
+                               QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from ....core import charts, plots
+from ....core.apparatus import PointOfInterest, unique_name
 from ....core.measures import kinematics
 from ....core.pauses import period_frames
 from ....core.videoexport import export_video
@@ -488,15 +489,89 @@ class PlotViewsMixin:
         per = self.period_combo.currentData() if self.seg_check.isChecked() else None
         per = per if per and per != "Whole test" else None
 
+        # the maps are aligned onto the apparatus of the first test of the first treatment (points go there)
+        ref_test = by_group[plots.group_order(p, by_group)[0]][0]
+
         def work(progress, stop):
             return plots.group_heatmap(p, by_group, o["heat_of"], per, o["part"], o["norm"], o["vmax"], progress)
 
         def done(fig):
             self.groups_canvas.set_figure(fig)
+            self._group_heat_ref = ref_test.apparatus
             self.tabs.setCurrentWidget(self.groups_canvas)
             self._sync_modes()
 
         return self._run("Treatment heat maps", work, on_done=done)
+
+    # ------------------------------------------------------------------ hottest spot
+    def hot_spots(self) -> list[tuple[str, float, float]]:
+        """The hottest spot of each heat map shown — this test's, or each treatment's — as (label, x, y) in the
+        coordinates of the apparatus the map is drawn in (the smoothed map, as shown: body part, behaviour, period
+        and scale included)."""
+        canvas = self.tabs.currentWidget()
+        if canvas not in (self.heat_canvas, self.groups_canvas) or canvas.figure is None:
+            return []
+        app = self._hot_spot_apparatus()
+        region = None
+        if app is not None:
+            try:
+                region = app.arena_or_bounds()
+            except ValueError:
+                region = None
+        out = []
+        for ax in canvas.figure.axes:
+            if not ax.images or ax.get_label() == "<colorbar>":
+                continue
+            im = ax.images[0]
+            xy = plots.hottest_spot(np.ma.filled(im.get_array(), np.nan), im.get_extent(), region)
+            if xy is not None:
+                title = ax.get_title()
+                out.append((title.split(" (n = ")[0] if canvas is self.groups_canvas else "", *xy))
+        return out
+
+    def _hot_spot_apparatus(self):
+        """The apparatus the shown heat map is drawn in: the test's, or the treatment maps' reference."""
+        p = self.project
+        if p is None:
+            return None
+        if self.tabs.currentWidget() is self.groups_canvas:
+            name = getattr(self, "_group_heat_ref", None)
+            return p.get_apparatus(name) if name is not None else None
+        return p.get_apparatus(self._detail["test"].apparatus) if self._detail else None
+
+    def add_hot_spot_point(self, which: str | None = None) -> list[str]:
+        """*Add point here*: a point of the apparatus at the hottest spot of the heat map shown (ANY-maze 7.60):
+        named "Hottest spot" for a test's map, "Hottest spot (treatment)" for a treatment's. With several treatment
+        maps ``which`` chooses one, or "" for all (asked when None). Returns the names of the points added."""
+        spots = self.hot_spots()
+        app = self._hot_spot_apparatus()
+        if not spots or app is None:
+            self.main.status("No heat map with a hottest spot is shown.")
+            return []
+        if len(spots) > 1:
+            if which is None:
+                labels = ["Every map"] + [lab for lab, _, _ in spots]
+                choice, ok = QInputDialog.getItem(self, "Add point here", "Add a point at the hottest spot of",
+                                                  labels, 0, False)
+                if not ok:
+                    return []
+                which = "" if choice == labels[0] else choice
+            if which:
+                spots = [sp for sp in spots if sp[0] == which]
+        names = []
+        for label, x, y in spots:
+            name = unique_name(f"Hottest spot ({label})" if label else "Hottest spot",
+                               [pt.name for pt in app.points])
+            app.points.append(PointOfInterest(name, round(x, 2), round(y, 2)))
+            names.append(name)
+            for ax in self.tabs.currentWidget().figure.axes:  # show it on the map at once
+                if ax.images and (not label or ax.get_title().split(" (n = ")[0] == label):
+                    ax.plot(x, y, "o", color="#f59e0b", ms=6, mec="white", mew=0.8, zorder=8)
+        self.tabs.currentWidget().canvas.draw_idle()
+        if names:
+            self.main.mark_dirty()
+            self.main.status(f"Added {', '.join(names)} to the apparatus {app.name} (see Protocol ▸ Apparatus)")
+        return names
 
     def save_figure(self, path: str | None = None):
         canvas = self.tabs.currentWidget()

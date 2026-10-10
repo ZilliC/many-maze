@@ -23,10 +23,11 @@ from ..core.export import protocol_report
 from ..core import explock
 from ..core.project import PROJECT_FILE, Project, same_folder
 from ..core.templates import TEMPLATES
+from ..core.terminology import term
 from ..core.workflow import add_experimenter, copy_protocol, remove_experimenter
 from . import theme
 from .icons import icon
-from .ribbon import Ribbon
+from .ribbon import Ribbon, two_lines
 from .widgets import Worker, error_box, run_with_progress
 
 # (module, class) of every page
@@ -49,6 +50,10 @@ SECTIONS = [
               ("Review and score", "video", "TestViewPage")]),
     ("Results", [("Data", "table", "ResultsPage"), ("Statistics", "bars", "StatisticsPage")]),
 ]
+# explorer entries and ribbon buttons named after a term (Protocol ▸ Protocol ▸ Terminology)
+TERM_ENTRIES = {"Apparatus": lambda p: term(p, "apparatus"),
+                "Test schedule": lambda p: f"{term(p, 'test')} schedule",
+                "Run tests": lambda p: f"Run {term(p, 'test', plural=True, lower=True)}"}
 
 
 class NewProjectDialog(QDialog):
@@ -281,6 +286,7 @@ class SectionView(QWidget):
         it = QTreeWidgetItem([label])
         it.setIcon(0, icon(icon_name))
         it.setData(0, Qt.UserRole, len(self.pages))
+        it.setData(0, Qt.UserRole + 2, label)  # the label in mANY-MAZE's terms (see apply_terminology)
         self.explorer.addTopLevelItem(it)
         self.pages.append(page)
         self.stack.addWidget(page)
@@ -396,6 +402,7 @@ class MainWindow(QMainWindow):
                 a.setCheckable(True)
                 a.triggered.connect(lambda _=False, p=page: self.show_page(p))
                 a.page = page
+                a.base_label = label
                 nav.add_large(a)
                 sec.nav_actions.append(a)
             sec.panel = panel
@@ -675,8 +682,7 @@ class MainWindow(QMainWindow):
             self.ribbon.tabs.setTabEnabled(i, has)
         self.save_quick.setEnabled(has)
         self._for_pages("set_project", project)
-        for page in self.pages:
-            self.refresh_explorer(page)
+        self.apply_terminology()
         if has:
             self.show_page(self.pages[0])
         else:
@@ -767,6 +773,24 @@ class MainWindow(QMainWindow):
 
     def current_page(self):
         return self._current_page if self.project is not None else None
+
+    def apply_terminology(self):
+        """Name the explorer entries, the ribbon's page buttons and the pages' explorer sub-items in the experiment's
+        terminology (core.terminology); called when an experiment is opened and when its terminology changes."""
+        p = self.project
+        for sec in self.sections:
+            for i in range(sec.explorer.topLevelItemCount()):
+                it = sec.explorer.topLevelItem(i)
+                base = it.data(0, Qt.UserRole + 2)
+                if base in TERM_ENTRIES:
+                    it.setText(0, TERM_ENTRIES[base](p))
+            for a in sec.nav_actions:
+                if a.base_label in TERM_ENTRIES:
+                    text = TERM_ENTRIES[a.base_label](p)
+                    a.setText(text)
+                    a.setIconText(two_lines(text))
+        for page in self.pages:
+            self.refresh_explorer(page)
 
     def refresh_explorer(self, page):
         idx = self._page_section.get(id(page))

@@ -61,7 +61,8 @@ simply saves it; replacing another experiment swaps its tracks only once the cop
 
 **Based on another experiment**: choose an existing experiment under *Based on* and the new one gets its protocol —
 apparatus, stages, keys, test duration and start, animal tracking and analysis settings, procedures, I/O devices,
-training criteria, blind testing and animal ID options, animal columns and (optionally) the treatments. Animals,
+training criteria, blind testing and animal ID options, animal columns, terminology, recorded video file names and
+(optionally) the treatments. Animals,
 tests and results are not copied, nor the I/O devices' passwords and tokens (enter them again). Use it for a new
 cohort or a replication.
 
@@ -121,6 +122,26 @@ everything without a camera.
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
   every measure, including the test duration, stops there.
+* **Protocol ▸ Terminology** – the words this experiment uses for *animal*, *treatment*, *test*, *stage*, *trial*,
+  *apparatus* and *zone*, as in ANY-maze's terminology options: e.g. *Subject* or *Fish* for animal, *Condition*
+  for treatment, *Session* for test. Type the new word under *Called*; the plural is filled in (type another, e.g.
+  *Mice*). A blank row keeps mANY-MAZE's word; experiments without terminology look exactly as before.
+
+  What follows the terms: the explorer (*Session schedule*, *Run sessions*, the *Subjects* and *Conditions* sheets,
+  the *Stages* element), the page titles and column headings of the Animals and Treatments sheets and of the test
+  schedule, the results filters, the zones tab of the apparatus panel, the field names of recorded video files, and
+  the **information columns of the results** (*Animal*, *Group* — the treatment —, *Treatment code*, *Animal notes*,
+  *Test*, *Test date*, *Test time*, *Test notes*, *Stage*, *Trial*, *Apparatus*, *Reason for test end* …) wherever
+  they are shown or written: the Data spreadsheet and its *Select data* list, the HTML report, exported tables
+  (CSV, tab-separated, Excel — including its Animals and Tests sheets —, SYLK, dBase), the clipboard and the command
+  line's results export.
+
+  What does not: **measure names** (*Open arms: time (s)*, *Visited zones* …) are never renamed, because
+  calculations and training criteria refer to them by name; formulas keep using the standard information column
+  names (`{Trial}`, `{Group}`), as do statistics factors and the command line's options; the experiment XML export
+  keeps its element names (programs read it back); ANY-maze imports map ANY-maze's own column names; file and folder
+  names are unchanged. A new term that would give a column the name of another one (e.g. calling animals *Group*)
+  leaves that column its standard name.
 
 ## 2. Experiment tab: treatments and animals
 
@@ -222,6 +243,13 @@ done elsewhere.
 
 **Track selected / Track all untracked** runs the tracker in the background.
 
+**Check video…** (Testing group) looks through the videos of the selected tests for glitches and lists, per video,
+the frames read and what it found: **duplicate frames** (a frame that repeats the previous one — the camera or the
+recorder dropped frames and repeated one), **black frames** (nearly black and uniform) and **missing frames** (a gap
+in the frames' timestamps longer than 1.5 frame intervals, with the number of frames missing and where; files without
+timestamps are marked *?*). Frame numbers count from 0; a video shared by several tests is checked once. Nothing is
+changed: tracking uses the frames as they are, so consider re-recording a test with many glitches.
+
 **Add tests from videos ▾ Join video files into one test…** is for a test filmed in several consecutive files (a split
 recording, a camera that starts a new file every 4 GB): choose the files and they are listed, in name order, in an M3U
 playlist in the experiment's `videos` folder. The playlist becomes the selected test's video (or a new test's) and
@@ -269,6 +297,15 @@ when no range is set. *Undo* reverts the swap.
    in the test view, live images and exported videos (*Record the animal's whole-body outline*, on by default;
    tracks from older versions simply have no outline).
 6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
+
+**Downscale the video before tracking** (Animal tracking ▸ Tracking quality, also per test) tracks video files at
+half (*By 2*) or a quarter (*By 4*) of their width and height — much faster for 4K or other high-resolution video,
+where the animal is large in the image. The frames are reduced as they are decoded, the sizes in pixels of the
+detection settings (object areas, blur, specks, holes, thin wires, arena margin) are reduced with them, and every
+position, outline and area is scaled back to the video's pixels: tracks, apparatus, calibration and results stay in
+the same units, and the detection preview uses the same reduction. Positions are a little less precise (about half
+a pixel at *By 2* on the demo videos); keep full resolution for small animals in a large field of view. Live tests
+are tracked at the camera's resolution.
 
 ### Tracking by colour
 
@@ -620,6 +657,15 @@ time and the latest event labels on the recording; leave it off for a clean vide
 **Start a new video file every … min** is for long tests (24-hour home cage, circadian activity): the recording is
 written as consecutive files (`test_0001_part001.mp4`, `…part002.mp4`, …) listed in a playlist `test_0001.m3u`,
 which is the test's video. A crash or power cut loses at most the end of the current file.
+
+**Name the video files after ▸ File names…** chooses the fields the recordings are named after, in order (drag them),
+joined by `_`: the test number (`test_0007`), the animal, the treatment, the stage, the trial (`trial_2`), the date
+(`2026-10-09`) and the time (`14-05-31`) when the test is set up. *Animal, stage, date* gives e.g.
+`M01_Day_1_2026-10-09.mp4`. The default (*Restore defaults*) is mANY-MAZE's `test_0007_M01.mp4`. While testing
+blind the treatment's code is used, never its name (nothing until a code is assigned). Fields a test does not have
+(no stage) are left out, and characters that file names cannot hold become `_`. A name is never used twice: when a
+recording, a split recording's parts or playlist, or a test set up at the same moment in another panel already has
+it, `_2`, `_3` … is added. The fields are saved with the experiment (and copied with its protocol).
 
 ### Erasing thin wires and cage bars
 
@@ -1098,7 +1144,7 @@ lb are refused rather than read as grams; weighing an animal never blocks the ot
 | **LabJack** | LabJack T4 / T7 / T8 through LJM (`pip install labjack-ljm`): `FIO`/`EIO` digital lines, `AIN` analogue inputs, `DAC` outputs, quadrature encoders on two `DIO` lines. |
 | **Syringe pump(s)** | One or several pumps (daisy-chained by address where the protocol allows): New Era / WPI Aladdin and OEMs, Harvard Apparatus (Ultra and legacy command sets), KD Scientific, Chemyx, Cavro-type pumps, a custom text protocol, or *simulated*. Channels of kind *Syringe pump* with `syringe=` (131 predefined syringes from 14 makers — check the inner diameter against your syringe's data sheet) or `diameter_mm=`. Each pump reports `<pump>.running`, `.stalled`, `.target_reached`, `.infused_ml` and `.withdrawn_ml`. |
 | **Balance** | Serial balances (Mettler Toledo MT-SICS, Ohaus, Sartorius, A&D, Kern, or any balance that sends its weight continuously): **Animals ▸ Weigh** records each animal's weight with the date (*Weight (g)* column and weight history), and the *Weigh the animal* action does it during a test. |
-| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device. The SMTP password and Twilio token are not stored in `project.json`: they go to `io-secrets.json` in the experiment folder (readable only by your user account), which archives, protocol reports and experiments based on this one leave out. |
+| **Alerts (e-mail / SMS)** | Where alerts are sent: e-mail through an SMTP server, SMS through Twilio or an e-mail-to-SMS gateway address. Sensors out of their range and the *Send alert* action use every alert device; *Results ▸ E-mail report* sends through its SMTP server too. The SMTP password and Twilio token are not stored in `project.json`: they go to `io-secrets.json` in the experiment folder (readable only by your user account), which archives, protocol reports and experiments based on this one leave out. |
 | **Simulated device** | For designing and testing procedures without hardware: outputs are shown, inputs are switched by hand (*Simulate*). |
 
 Channels have a name (used by procedures), a kind (digital input, movement detector, digital output, PWM output,
@@ -1578,6 +1624,12 @@ track is shown again. Playback is not available with *Split by period*.
 - **By treatment** (*Treatment heat maps*): averages the heat maps of each treatment's tests shown in the table. Each test's alignment is
   applied, the maps are drawn on a common apparatus frame and colour scale, and the chosen behaviour, scale and time
   period are used.
+- **Add point here** (*Hottest spot* group): adds a point to the apparatus at the hottest spot of the heat map shown
+  — the centre of its hottest bin after smoothing, within the arena, with the body part, behaviour, time period and
+  scale chosen. On *This test* the point (*Hottest spot*) goes into the test's apparatus; on *By treatment* you
+  choose one treatment's map or every map, and the points (*Hottest spot (Saline)* …) go into the apparatus the
+  maps are drawn on (that of the first test of the first treatment). The point is drawn on the map at once; move,
+  rename or resize it on the Apparatus page. Point measures (time near, distance to …) then use it like any point.
 
 ### Charts of parameters over time (Results ▸ Data ▸ Charts)
 
@@ -1668,6 +1720,13 @@ From Python: `manymaze.core.videoexport.export_video(project, test, "out.mp4", O
   exits, key presses (on / off), I/O inputs and outputs, pauses — with the test, stage, trial and animal.
 - **HTML report…**: you can also set the heat-map scale (including one scale for all tests) and add charts of the
   parameters ticked in the Charts view.
+- **E-mail report…** (*Spreadsheet* group): sends the shown results by e-mail, as the spreadsheet (Excel workbook or
+  CSV) and / or the HTML report (with statistics of the main measures; track plots and heat maps optional, they make
+  the message larger). It uses the e-mail server of an **Alerts (e-mail / SMS)** device (Protocol ▸ Hardware ▸ I/O
+  devices) — the one the sensor alerts use, whose password stays in `io-secrets.json` — and offers its *E-mail alerts
+  to* addresses (several, separated by commas). The message is sent in the background; a failure is reported and
+  nothing is sent. Port 465 uses SSL; other ports must offer STARTTLS (a server on this computer, such as a local
+  relay, may be plain). Attachments of more than 20 MB are refused.
 
 ### Importing from ANY-maze
 

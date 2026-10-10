@@ -22,6 +22,7 @@ from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone
                                 make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
 from ....core.templates import PALETTE, TEMPLATES
+from ....core.terminology import term
 from ... import theme
 from ...icons import icon
 from ...widgets import error_box, hint, loading, separator
@@ -288,6 +289,7 @@ class ApparatusPage(Page):
     def on_show(self):
         if self.project is None:
             return
+        self.panel.tabs.setTabText(0, term(self.project, "zone", plural=True))  # the experiment's terminology
         self._refresh_app_list(select=self.app)
         self.bg.refresh_tests()
         self.view.setFocus()

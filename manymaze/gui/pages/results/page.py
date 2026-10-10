@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLay
                                QTreeWidget, QVBoxLayout, QWidget)
 
 from ....core.project import OPTIONAL_INFO_COLUMNS, result_columns
+from ....core.terminology import column_labels, term
 from ... import ribbon, theme
 from ...icons import icon
 from ...ribbon import RibbonHost
@@ -237,6 +238,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.save_act.setMenu(m)
         self.report_act = A("HTML report", "report", self.html_report,
                             "Create a report with the results, statistics, track plots, heat maps and charts")
+        self.email_act = A("E-mail report…", "email", lambda: self.email_report(),
+                           "E-mail the results (spreadsheet and / or HTML report) through the e-mail server of an "
+                           "alert device (Protocol ▸ Hardware ▸ I/O devices)", small=True)
         self.select_act = A("Select data", "select_data", self.chooser.setVisible,
                             "Choose the measures shown in the spreadsheet", checkable=True)
         self.view_sheet_act = A("View spreadsheet", "view_table", lambda: self.set_view("spreadsheet"),
@@ -253,6 +257,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.group_heat_act = A("Treatment heat maps", "layers", self.group_heatmaps,
                                 "Average heat map of each treatment (tests shown in the spreadsheet), on a common "
                                 "scale, with each test's alignment applied")
+        self.hot_point_act = A("Add point here", "point", lambda: self.add_hot_spot_point(),
+                               "Add a point to the apparatus at the hottest spot of the heat map shown (this test's "
+                               "map, or the treatment maps')")
         self.video_act = A("Export video", "video_file", self.export_video,
                            "Save the selected test's video with zones, track, behaviours and time stamp drawn on it")
         self.measure_act = A("Measure interval", "ruler", self.charts.measure_check.setChecked,
@@ -281,14 +288,17 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
             return [nav, ("Body part", [host([self.part_combo])]), ("Heat map of", [host([self.heat_of])]),
                     ("Scale", [host([self.heat_norm], [self.heat_max])]), ("Align", [host([self.align_combo])]),
                     ("Treatments", [(self.group_heat_act, "large")]),
+                    ("Hottest spot", [(self.hot_point_act, "large")]),
                     ("Figure", [(self.save_fig_act, "large"), (self.copy_fig_act, "large")])]
         if self.view == "video":
             return [nav, ("Video", [(self.video_act, "large"), (self.open_test_act, "large")])]
         return [nav, ("Clipboard", [(self.copy_act, "large"), (self.copy_sel_act, "small")]),
-                ("Spreadsheet", [(self.print_act, "large"), (self.save_act, "large"), (self.report_act, "large")]),
+                ("Spreadsheet", [(self.print_act, "large"), (self.save_act, "large"), (self.report_act, "large"),
+                                 (self.email_act, "small")]),
                 ("Actions", [(self.select_act, "large"), (self.view_sheet_act, "large"), (self.clear_act, "small"),
                              (self.segment_act, "small"), (self.recalc_act, "small")]),
-                ("Filter", [host(["Treatment", self.group_combo], ["Stage", self.stage_combo])]),
+                ("Filter", [host([term(self.project, "treatment"), self.group_combo],
+                                 [term(self.project, "stage"), self.stage_combo])]),
                 ("Time periods", [host([self.seg_check], [self.period_combo])])]
 
     def _host(self, *rows) -> RibbonHost:
@@ -364,7 +374,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.view_sheet_act.setEnabled(self.view != "spreadsheet")
         has = bool(self.rows)
         for a in (self.copy_act, self.copy_sel_act, self.print_act, self.save_act, self.report_act,
-                  self.group_heat_act):
+                  self.email_act, self.group_heat_act, self.hot_point_act):
             a.setEnabled(has)
         row = self.current_row() if has else None
         self.open_test_act.setEnabled(row is not None)
@@ -379,6 +389,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._detail = None
         self._detail_key = None
         self._names = _names(project)
+        self.model.project = project
         self.seg_check.blockSignals(True)
         self.seg_check.setChecked(False)
         self.seg_check.blockSignals(False)
@@ -614,7 +625,8 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._loading_tree = True
         info = [c for c in info_columns(self.project) if c in self.all_columns() and c != "Test"
                 and (c not in SEGMENT_COLUMNS or self.segmented)]
-        fill_measure_tree(self.tree, measure_groups(self.measure_columns(), self._names, info), self.hidden)
+        fill_measure_tree(self.tree, measure_groups(self.measure_columns(), self._names, info), self.hidden,
+                          labels=column_labels(self.project, info))
         self._loading_tree = False
         self._filter_tree(self.search.text())
 

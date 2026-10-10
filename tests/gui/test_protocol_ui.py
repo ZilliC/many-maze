@@ -190,7 +190,7 @@ def test_settings_form_sections():
     form = SettingsForm(DETECTION_SPEC + [("extra_attr", "Some new setting", "int", (0, 9, 1), "")],
                         sections=DETECTION_SECTIONS)
     assert list(form.forms) == [t for t, _a in DETECTION_SECTIONS]
-    assert form.forms["Tracking quality"].rowCount() == 5  # unknown attributes land in the last section
+    assert form.forms["Tracking quality"].rowCount() == 6  # unknown attributes land in the last section
     assert all(w.minimumWidth() >= 200 for a, w in form.editors.items() if a in form.labels)
     s = DetectionSettings()
     s.extra_attr = 3

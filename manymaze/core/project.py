@@ -35,6 +35,7 @@ from .measures import (AnalysisSettings, all_periods, analyse, analyse_period, a
                        behaviour_measures, io_only_measures, io_only_periods, time_periods)
 from .session import END_ZONE
 from .templates import apply_overrides
+from .terminology import terminology_from
 from .track import Track
 from .tracking import ArenaJob, DetectionSettings, track_video
 from .video import VideoSource
@@ -181,6 +182,9 @@ class Project:
     variables: dict = field(default_factory=dict)  # procedure variables kept between tests
     training_criteria: list = field(default_factory=list)  # per-stage criteria (see project workflow)
     calculations: list[Calculation] = field(default_factory=list)  # results from other results (calculations.py)
+    # the words used for animal, treatment, test … where changed: {term: {"singular", "plural"}} (terminology.py)
+    terminology: dict = field(default_factory=dict)
+    recording_name_fields: list = field(default_factory=list)  # live recordings' file names (recordings.py)
     blind: bool = False  # hide group / treatment while testing and scoring
     experimenters: list = field(default_factory=list)  # user names offered as the current user / test experimenter
     settings_extra: dict = field(default_factory=dict)  # misc. UI / workflow settings
@@ -385,6 +389,8 @@ class Project:
             "variables": self.variables,
             "training_criteria": self.training_criteria,
             "calculations": [c.to_dict() for c in self.calculations],
+            "terminology": self.terminology,
+            "recording_name_fields": self.recording_name_fields,
             "blind": self.blind,
             "experimenters": self.experimenters,
             "settings_extra": self.settings_extra,
@@ -435,6 +441,8 @@ class Project:
             variables=d.get("variables", {}),
             training_criteria=d.get("training_criteria", []),
             calculations=calculations_from(d.get("calculations")),
+            terminology=terminology_from(d.get("terminology")),
+            recording_name_fields=[str(f) for f in d.get("recording_name_fields") or [] if isinstance(f, str)],
             blind=d.get("blind", False),
             experimenters=[str(u) for u in d.get("experimenters", []) if str(u).strip()],
             settings_extra=d.get("settings_extra", {}),

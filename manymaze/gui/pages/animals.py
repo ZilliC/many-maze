@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QC
 from ...core import export, scales
 from ...core import workflow as wf
 from ...core.project import Animal
+from ...core.terminology import term
 from ...core.workflow import treatment_code, treatment_text
 from .. import ribbon, theme
 from ..icons import icon
@@ -289,7 +290,9 @@ class AnimalsPage(Page):
                             (self.a_field_remove, "small")])]
 
     def explorer_items(self):
-        return [("Treatments", "treatment", "treatments"), ("Animals", "animal", "animals")]
+        p = self.project
+        return [(term(p, "treatment", plural=True), "treatment", "treatments"),
+                (term(p, "animal", plural=True), "animal", "animals")]
 
     def show_item(self, key):
         self.set_view(key)
@@ -300,7 +303,7 @@ class AnimalsPage(Page):
         changed = view != self.view
         self.view = view
         self.stack.setCurrentWidget(self.treatments if view == "treatments" else self.table)
-        self.title_lbl.setText("Treatments" if view == "treatments" else "Animals")
+        self.title_lbl.setText(term(self.project, "treatment" if view == "treatments" else "animal", plural=True))
         for a, on in ((self.a_view_treat, view == "treatments"), (self.a_view_animals, view == "animals")):
             if a.isChecked() != on:
                 a.blockSignals(True)
@@ -342,8 +345,9 @@ class AnimalsPage(Page):
         p = self.project
         self._cols = ([("number", ""), ("id", ""), ("status", ""), ("treatment", "")]
                       + [("field", f) for f in p.animal_fields] + [("sex", ""), ("tests", ""), ("notes", "")])
-        titles = {"number": "Animal", "id": "Animal ID", "status": "Status", "treatment": "Treatment", "sex": "Sex",
-                  "tests": "Tests", "notes": "Notes"}
+        titles = {"number": term(p, "animal"), "id": f"{term(p, 'animal')} ID", "status": "Status",
+                  "treatment": term(p, "treatment"), "sex": "Sex", "tests": term(p, "test", plural=True),
+                  "notes": "Notes"}
         return [f if k == "field" else titles[k] for k, f in self._cols]
 
     def _col_kind(self, c: int) -> str | None:
@@ -367,6 +371,9 @@ class AnimalsPage(Page):
         cols = self._columns()
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
+        self.treatments.setHorizontalHeaderLabels([term(p, "treatment"), "Code", "Colour",
+                                                   f"Number of {term(p, 'animal', plural=True, lower=True)}"])
+        self.title_lbl.setText(term(p, "treatment" if self.view == "treatments" else "animal", plural=True))
         counts = self._test_counts()
         self.table.setRowCount(len(p.animals))
         for r, a in enumerate(p.animals):
@@ -432,8 +439,9 @@ class AnimalsPage(Page):
         n_tests = sum(len(v) for k, v in counts.items() if p.get_animal(k))
         n_ret = sum(1 for a in p.animals if a.retired)
         nt = len(p.groups)
-        self.summary.setText(f"{len(p.animals)} animals · {nt} treatment{'s' if nt != 1 else ''} · {n_tests} tests"
-                             + (f" · {n_ret} retired" if n_ret else ""))
+        self.summary.setText(f"{len(p.animals)} {term(p, 'animal', plural=True, lower=True)} · {nt} "
+                             f"{term(p, 'treatment', plural=nt != 1, lower=True)} · {n_tests} "
+                             f"{term(p, 'test', plural=True, lower=True)}" + (f" · {n_ret} retired" if n_ret else ""))
         self.blind_lbl.setVisible(p.blind)
         self.a_reveal.blockSignals(True)
         self.a_reveal.setChecked(not p.blind)

@@ -11,6 +11,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyMod
 from ....core.calculations import CATEGORY as CALCULATIONS
 from ....core.export import display_text, value_text
 from ....core.stats import is_number
+from ....core.terminology import column_label as term_label, term
 
 GENERAL_PREFIXES = ("Test duration", "Detection", "Total distance", "Mean speed", "Max speed", "Time mobile",
                     "Time immobile", "Immobile episodes", "Latency to first immobility", "Time freezing",
@@ -83,9 +84,12 @@ def measure_category(col: str, names: dict) -> tuple[str, str]:
     return "Test-specific", ""
 
 
-def column_label(col: str) -> str:
-    """Column heading as shown (ANY-maze terms; the data keep their names, e.g. "Group" holds the treatment)."""
-    return COLUMN_LABELS.get(col, col)
+def column_label(col: str, project=None) -> str:
+    """Column heading as shown (ANY-maze terms and the experiment's terminology; the data keep their names, e.g.
+    "Group" holds the treatment)."""
+    if col == "Group":
+        return term(project, "treatment")
+    return term_label(project, col) if project is not None else COLUMN_LABELS.get(col, col)
 
 
 # ------------------------------------------------------------------ table model
@@ -94,6 +98,7 @@ class ResultsModel(QAbstractTableModel):
         super().__init__(parent)
         self.rows: list[dict] = []
         self.columns: list[str] = []
+        self.project = None  # for the headings in the experiment's terminology
 
     def set_data(self, rows: list[dict], columns: list[str]):
         self.beginResetModel()
@@ -134,9 +139,9 @@ class ResultsModel(QAbstractTableModel):
         if orientation == Qt.Horizontal and 0 <= section < len(self.columns):
             c = self.columns[section]
             if role == Qt.DisplayRole:
-                return column_label(c)
+                return column_label(c, self.project)
             if role == Qt.ToolTipRole:
-                return "Treatment (the animal's group)" if c == "Group" else c
+                return f"{term(self.project, 'treatment')} (the animal's group)" if c == "Group" else c
         elif orientation == Qt.Vertical and role == Qt.DisplayRole:
             return str(section + 1)
         return None

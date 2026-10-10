@@ -7,17 +7,21 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication
-from PySide6.QtWidgets import QDialog, QFileDialog
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from ....core.export import (display_text, event_log_rows, export_raw_data, export_xml, html_report, results_workbook,
                              TABLE_SUFFIXES, table_text, trial_means, wide_rows, write_table,
                              write_xlsx)
+from ....core.mail import mail_devices, send_email
 from ....core.project import result_columns
+from ....core.recordings import safe_part
 from ....core.stats import is_number, numeric_columns
+from ....core.terminology import relabel
 from ...figures import TABLE_FILTER
 from ...widgets import error_box, run_with_progress
 from .._results_cache import info_columns
 from .dialogs import ReportDialog
+from .email import EmailReportDialog, attachments_dir, remove_dir
 from .table import column_label, measure_category
 
 # information columns describing the animal (not the test), kept in the one-row-per-animal export when shown
@@ -55,16 +59,23 @@ class ExportsMixin:
         if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += suffix
         try:
-            if path.lower().endswith(".xlsx") and not selection:
-                sheets, colmap = results_workbook(self.project, rows, cols, self.segmented)
-                write_xlsx(sheets, path, colmap)
-            else:
-                write_table(rows, path, cols)
+            self._write_results(path, rows, cols, workbook=not selection)
         except Exception as e:
             error_box(self, "Save", e)
             return
         self.main.status(f"Exported {len(rows)} rows × {len(cols)} columns to {path}")
         return path
+
+    def _write_results(self, path: str, rows: list[dict], cols: list[str], workbook: bool = True):
+        """Write results rows to a table file (the format follows the extension; an Excel workbook of the whole
+        table also has the time periods, zone visits, animals, tests and settings), with the experiment's
+        terminology in the headings."""
+        if str(path).lower().endswith(".xlsx") and workbook:
+            sheets, colmap = results_workbook(self.project, rows, cols, self.segmented)
+            write_xlsx(sheets, path, colmap)
+        else:
+            rows, cols = relabel(self.project, rows, cols)
+            write_table(rows, path, cols)
 
     def _measure_columns(self) -> list[str]:
         """The shown columns that are measures (not animal / test information)."""
@@ -89,7 +100,7 @@ class ExportsMixin:
                 return None
         if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += ".xlsx"
-        rows, cols = self.wide_rows()
+        rows, cols = relabel(self.project, *self.wide_rows())
         try:
             write_table(rows, path, cols, sheet="By animal")
         except Exception as e:
@@ -111,8 +122,9 @@ class ExportsMixin:
         if Path(path).suffix.lower() not in TABLE_SUFFIXES:
             path += ".xlsx"
         rows = trial_means(self.shown_rows(), self._measure_columns())
+        rows, cols = relabel(self.project, rows, result_columns(rows))
         try:
-            write_table(rows, path, result_columns(rows), sheet="Trial means")
+            write_table(rows, path, cols, sheet="Trial means")
         except Exception as e:
             error_box(self, "Export trial means", e)
             return None
@@ -140,7 +152,8 @@ class ExportsMixin:
                     return None
                 out += [{"Test": t.id, "Stage": t.stage, "Trial": t.trial, **r} for r in event_log_rows(p, t)]
                 progress((i + 1) / max(1, len(tests)))
-            write_table(out, path, sheet="Event log")
+            rows, cols = relabel(p, out, result_columns(out))
+            write_table(rows, path, cols, sheet="Event log")
             return out
 
         def done(out):
@@ -207,7 +220,7 @@ class ExportsMixin:
         none), as tab-separated full-precision text."""
         rng = self.selection_range(any_cells=selection)
         rows, cols = rng if rng else (self.shown_rows(selected_only=True), self.shown_columns())
-        return table_text(rows, cols, header=header)
+        return table_text(*relabel(self.project, rows, cols), header=header)
 
     def copy_to_clipboard(self, selection: bool = False):
         if not self.rows or (selection and not self.table.selectionModel().hasSelection()):
@@ -224,7 +237,7 @@ class ExportsMixin:
     def table_html(self) -> str:
         """The spreadsheet as shown (column headings, filters, number format) as an HTML table."""
         cols = self.shown_columns()
-        head = "".join(f"<th>{escape(column_label(c))}</th>" for c in cols)
+        head = "".join(f"<th>{escape(column_label(c, self.project))}</th>" for c in cols)
         body = []
         for r in self.shown_rows():
             cells = []
@@ -312,3 +325,71 @@ class ExportsMixin:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
         return self._run("Creating HTML report", work, on_done=done, cancellable=False)
+
+    # ------------------------------------------------------------------ e-mail
+    def email_report(self, to: str | None = None, subject: str | None = None, text: str | None = None,
+                     table: str = ".xlsx", report: bool | None = None, plots: bool = False,
+                     device: str | None = None):
+        """Results ▸ E-mail report: the shown results as a spreadsheet (.xlsx / .csv, "" for none) and / or the HTML
+        report, e-mailed through an alert device's SMTP server (asked in a dialog when ``to`` is None; ``device``:
+        the alert device's name, default the first with a server). Sent in the background."""
+        p = self.project
+        if p is None or not self.rows:
+            return None
+        devices = mail_devices(p)
+        if not devices:
+            QMessageBox.information(
+                self, "E-mail report", "No e-mail server is set up. Add an Alerts (e-mail / SMS) device with its "
+                "SMTP server in Protocol ▸ Hardware ▸ I/O devices: reports are sent through it, as the alerts are.")
+            return None
+        measures = self.visible_measures()
+        numeric = numeric_columns(self.rows, measures)
+        if to is None:
+            dlg = EmailReportDialog(p, self, has_numeric=bool(numeric))
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()
+            if not accepted:
+                return None
+            cfg, to, subject, text = dlg.device_config(), dlg.to.text(), dlg.subject.text(), dlg.message.toPlainText()
+            table, report, plots = dlg.table.currentData(), dlg.report.isChecked(), dlg.plots.isChecked()
+        else:
+            cfg = next((d for d in devices if device is None or d.get("name") == device), None)
+            if cfg is None:
+                error_box(self, "E-mail report", f"No alert device called {device!r} has an e-mail server.")
+                return None
+        report = bool(numeric) if report is None else report
+        subject = subject or f"{p.name} — results"
+        text = text if text is not None else f"The results of the experiment {p.name}, sent by mANY-MAZE."
+        rows, cols, tests = self.shown_rows(), self.shown_columns(), self._shown_tests()
+        if not (self.segmented and self.period_combo.currentData()):  # as the HTML report: the whole tests
+            report_rows = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
+        else:
+            report_rows = rows
+        stats = self._report_preselect(numeric)
+        color_by = self.color_combo.currentData() or "time"
+        base = safe_part(p.name) or "experiment"
+
+        def work(progress, stop):
+            folder = attachments_dir()
+            try:
+                files = []
+                if table:
+                    files.append(folder / f"{base} results{table}")
+                    self._write_results(str(files[-1]), rows, cols)
+                    progress(0.2)
+                if report:
+                    files.append(html_report(p, folder / f"{base} report.html", tests=tests, include_plots=plots,
+                                             measures=measures, stats_measures=stats, color_by=color_by,
+                                             rows=report_rows))
+                progress(0.8)
+                return send_email(cfg, to, subject, text, files)
+            finally:
+                remove_dir(folder)
+
+        def done(rcpt):
+            self.main.status(f"Report e-mailed to {', '.join(rcpt)}")
+
+        def failed(msg):
+            error_box(self, "E-mail report", f"The report was not sent: {msg}")
+
+        return self._run("E-mailing the report", work, on_done=done, on_fail=failed, cancellable=False)
