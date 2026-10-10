@@ -33,7 +33,7 @@ def _stopper(should_stop):
 
 
 def tracking_batches(project, tests) -> list[list]:
-    """Group tests that share a video and time window so they are tracked in one pass."""
+    """Group tests that share a video, time window and lens correction so they are tracked in one pass."""
     batches: dict[tuple, list] = {}
     order = []
     for t in tests:
@@ -43,7 +43,9 @@ def tracking_batches(project, tests) -> list[list]:
         if project.start_mode in ("on_detection", "experimenter_leaves"):
             key = ("single", t.id)
         else:
-            key = (project.abs_path(t.video), round(s.start_time_s, 4), round(s.duration_s, 4), s.frame_step)
+            lens = project.lens_for(t)  # tests tracked together share one corrected image
+            key = (project.abs_path(t.video), round(s.start_time_s, 4), round(s.duration_s, 4), s.frame_step,
+                   lens.key() if lens is not None else None)
         if key not in batches:
             batches[key] = []
             order.append(key)

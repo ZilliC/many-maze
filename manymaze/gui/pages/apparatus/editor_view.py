@@ -111,7 +111,7 @@ class EditorView(FrameView):
             self.ruler = RulerItem(x1, y1, x2, y2, app.px_per_cm, self._root)
             self.ruler.setZValue(45)
             if app.calibration_length_cm:
-                lb = Label(f"{app.calibration_length_cm:g} cm", self._root, theme.RULER, anchor="top")
+                lb = Label(app.length_text(app.calibration_length_cm), self._root, theme.RULER, anchor="top")
                 lb.setPos((x1 + x2) / 2, (y1 + y2) / 2)
                 lb.setZValue(46)
                 lb.setVisible(self.show_labels)

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFr
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSpinBox,
                                QTabWidget, QVBoxLayout, QWidget)
 
-from ....core.apparatus import ENTRY_RULES, Apparatus, ZoneGroup
+from ....core.apparatus import ENTRY_RULES, HEATMAP_POINTS, Apparatus, ZoneGroup
 from ....core.geometry import Ellipse, Polygon
 from ... import theme
 from ...widgets import ColorButton, button_row, color_icon, hint, loading, separator
@@ -333,6 +333,15 @@ class PropertyPanel(QFrame):
                                       "proximity)")
         self.point_radius.valueChanged.connect(lambda v: self._set("point", radius_cm=float(v)))
         pl.addWidget(self.point_radius)
+        self.point_heatmap = _sentence_combo(
+            [("", "Its position is set here, the same in all tests")]
+            + [(k, f"In each test, the hottest spot of the heat map of {v}") for k, v in HEATMAP_POINTS.items()],
+            "As ANY-maze, a point can be located in each test by a heat map: where the animal spent the longest "
+            "time, or the longest time freezing, immobile or rearing. Its measures then use that spot, and give its "
+            "X / Y and the approximate time spent there; the position below only places it on the map.")
+        self.point_heatmap.currentIndexChanged.connect(
+            lambda _: self._set("point", heatmap=self.point_heatmap.currentData() or ""))
+        pl.addWidget(self.point_heatmap)
         self.point_x, self.point_y = QDoubleSpinBox(), QDoubleSpinBox()
         xy = QHBoxLayout()
         xy.setSpacing(6)
@@ -555,9 +564,10 @@ class PropertyPanel(QFrame):
             p = self.selected("point")
             self.point.show(p)
             self.point_radius.setValue(p.radius_cm if p else 0)
+            self.point_heatmap.setCurrentIndex(max(0, self.point_heatmap.findData(p.heatmap if p else "")))
             self.point_x.setValue(p.x if p else 0)
             self.point_y.setValue(p.y if p else 0)
-            for w in (self.point_radius, self.point_x, self.point_y, self.btn_point_del):
+            for w in (self.point_radius, self.point_heatmap, self.point_x, self.point_y, self.btn_point_del):
                 w.setEnabled(p is not None)
 
             ln = self.selected("line")

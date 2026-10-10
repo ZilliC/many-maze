@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QFram
 
 from ..core.apparatus import Apparatus
 from ..core.geometry import Ellipse
+from ..core.lens import corrected
 from ..core.video import VideoSource
 from . import theme
 
@@ -264,10 +265,11 @@ class VideoPlayer(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
 
     # ------------------------------------------------------------------
-    def open(self, path: str) -> bool:
+    def open(self, path: str, lens=None) -> bool:
+        """Open a video; ``lens`` (a core.lens.LensCorrection) corrects its frames for lens distortion."""
         self.close_video()
         try:
-            self.source = VideoSource(path)
+            self.source = corrected(VideoSource(path), lens)
         except Exception as e:
             self.time_lbl.setText(f"cannot open: {e}")
             return False

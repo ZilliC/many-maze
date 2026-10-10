@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDoubleValidator, QTextCursor
-from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit,
+                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from ...core import workflow as wf
 from ...core.calculations import AGGREGATES, MAX_DECIMALS, MAX_NAMED_VALUES, MAX_UNITS, Calculation
@@ -80,10 +80,11 @@ class ElementPage(QScrollArea):
 
 
 class KeyEditor(QWidget):
-    """The "Key" property page of ANY-maze: key name, key stroke, how the key works, radio set and colour.
+    """The "Key" property page of ANY-maze: key name, key stroke, how the key works, radio set, colour and whether
+    the behaviour counts as activity.
 
-    ``load(name, key, kind, group, color)`` shows a key; ``edited`` is emitted with a dict of the new values
-    (name, key, kind, group, color) when the user changes one."""
+    ``load(name, key, kind, group, color, activity=False)`` shows a key; ``edited`` is emitted with a dict of the
+    new values (name, key, kind, group, color, activity) when the user changes one."""
 
     edited = Signal(dict)
 
@@ -136,6 +137,13 @@ class KeyEditor(QWidget):
         self.color.color_changed.connect(lambda _c: self._emit())
         f.addRow("Colour of the scoring button", self.color)
         lay.addLayout(f)
+        self.activity = QCheckBox("This behaviour counts as activity")
+        self.activity.setToolTip("As ANY-maze, the animal is active while it is mobile or doing a behaviour that "
+                                 "counts as activity (e.g. grooming): Time active, active / inactive episodes. Used "
+                                 "when Protocol ▸ Analysis ▸ Activity is measured as in ANY-maze; Simple, Toggle "
+                                 "and Radio keys only.")
+        self.activity.toggled.connect(self._emit)
+        lay.addWidget(self.activity)
         lay.addStretch()
         self.setEnabled(False)
 
@@ -145,7 +153,8 @@ class KeyEditor(QWidget):
         lbl.setMinimumWidth(110)
         return lbl
 
-    def load(self, name: str | None, key: str = "", kind: str = "state", group: str = "", color: str = ""):
+    def load(self, name: str | None, key: str = "", kind: str = "state", group: str = "", color: str = "",
+             activity: bool = False):
         """Show a key (name None = no key selected)."""
         with loading(self):
             self.setEnabled(name is not None)
@@ -159,12 +168,14 @@ class KeyEditor(QWidget):
             self.group.setText(group)
             if color:
                 self.color.set_color(color)
+            self.activity.setChecked(bool(activity))
             self._update_group_row()
 
     def _update_group_row(self):
         on = self.mode.currentData() == "radio" or bool(self.group.text().strip())
         self.group.setVisible(on)
         self.group_lbl.setVisible(on)
+        self.activity.setEnabled(self.mode.currentData() != "event")  # an instant has no duration
 
     def _mode_changed(self, *_):
         if self._loading:
@@ -180,7 +191,7 @@ class KeyEditor(QWidget):
         if self.mode.currentData() in ("simple", "event"):
             group = self.group.text().strip()
         return {"name": self.name.text().strip(), "key": self.stroke.currentData() or "", "kind": kind,
-                "group": group, "color": self.color.color()}
+                "group": group, "color": self.color.color(), "activity": self.activity.isChecked()}
 
     def _emit(self, *_):
         if self._loading or not self.isEnabled():

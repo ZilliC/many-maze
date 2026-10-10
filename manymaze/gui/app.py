@@ -99,6 +99,11 @@ def _smoke_test(app, window) -> int:
             print(f"smoke test: pose model ran on {tr.meta['pose_device']}")
         print(f"smoke test: {res['workers']} parallel workers, decoder {decoder}, hardware decoder "
               f"{hw_decoder_name()}, recorder {rec.backend}, inference providers {pose.available_providers()}")
+        from ..core.project import Project
+
+        proj.set_experiment_password("smoke")  # the cryptography package is in the app (protected experiments)
+        proj.save()
+        assert Project.load(proj.path, "smoke").protected
         window.set_project(proj)
         for page in window.pages:
             window.show_page(page)

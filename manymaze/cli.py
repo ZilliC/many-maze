@@ -7,13 +7,18 @@
     manymaze project DIR track [--all]
     manymaze project DIR relink --folder VIDEOS   # find moved videos by file name
     manymaze project DIR results -o results.xlsx [--bins]   # or .csv / .tsv / .slk / .dbf / .xml
-    manymaze project DIR report -o report.html
+    manymaze project DIR results --report NAME -o results.csv   # a results report saved on the Data page
+    manymaze project DIR report -o report.html [--report NAME]
+    manymaze project DIR plugins                 # run the protocol's analysis plug-ins on every test performed
     manymaze templates
+
+An experiment protected by a password is opened with the password in the environment variable MANYMAZE_PASSWORD.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +27,23 @@ from . import __version__
 
 TABLE_OUTPUT_HELP = ("the format follows the extension: .csv, .tsv / .txt, .xlsx, .slk (SYLK) or .dbf (dBase III); "
                      "results also .xml")
+PASSWORD_ENV = "MANYMAZE_PASSWORD"  # the password of an experiment protected by one
+
+
+def _password() -> str | None:
+    return os.environ.get(PASSWORD_ENV) or None
+
+
+def _load_project(path):
+    """The experiment at path; a protected one is opened with MANYMAZE_PASSWORD (exit with a message otherwise)."""
+    from .core.project import Project
+    from .core.security import PasswordRequired
+
+    try:
+        return Project.load(path, password=_password())
+    except PasswordRequired as e:
+        sys.exit(f"{e}. Set the environment variable {PASSWORD_ENV} to its password." if not e.wrong else
+                 f"{e} (the environment variable {PASSWORD_ENV}).")
 
 
 def _progress(prefix):
@@ -43,11 +65,13 @@ def cmd_track(a):
     with VideoSource(a.video) as v:
         W, H = v.width, v.height
     if a.apparatus:
-        import json
-
         from .core.apparatus import Apparatus
+        from .core.security import PasswordRequired, loads
 
-        d = json.loads(Path(a.apparatus).read_text(encoding="utf-8"))
+        try:  # an apparatus file, or an experiment's project.json (MANYMAZE_PASSWORD if it is protected)
+            d = loads(Path(a.apparatus).read_text(encoding="utf-8"), _password(), a.apparatus)[0]
+        except PasswordRequired as e:
+            sys.exit(f"{e} (set the environment variable {PASSWORD_ENV})")
         if isinstance(d, dict) and isinstance(d.get("apparatus"), list):  # apparatus file or experiment
             if not d["apparatus"]:
                 sys.exit(f"{a.apparatus} contains no apparatus")
@@ -103,10 +127,9 @@ def _lock_for_writing(p):
 
 def cmd_project(a):
     from .core import explock
-    from .core.project import Project
 
-    p = Project.load(a.dir)
-    if a.action in ("track", "relink"):
+    p = _load_project(a.dir)
+    if a.action in ("track", "relink", "plugins"):
         _lock_for_writing(p)
         try:
             return _change_project(p, a)
@@ -116,7 +139,9 @@ def cmd_project(a):
         from .core.export import export_results
 
         out = a.output or str(p.exports_dir() / ("results by animal.xlsx" if a.wide else "results.xlsx"))
-        if a.wide:
+        if a.report:
+            _export_report(p, a, out)
+        elif a.wide:
             from .core.export import wide_rows, write_table
             from .core.project import result_columns
 
@@ -181,7 +206,17 @@ def cmd_project(a):
         from .core.export import html_report
 
         out = a.output or str(p.exports_dir() / "report.html")
-        html_report(p, out)
+        if a.report:  # the tests, rows and measures of a saved results report
+            from .core.reports import find_report
+
+            rows, cols = _report_table(p, a.report)
+            if not find_report(p.reports, a.report)["period"]:  # as the Data page: one period, else whole tests
+                rows = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
+            info = set(p.info_columns())
+            tests = [t for t in (p.get_test(i) for i in dict.fromkeys(r.get("Test") for r in rows)) if t is not None]
+            html_report(p, out, tests=tests, measures=[c for c in cols if c not in info], rows=rows, report=a.report)
+        else:
+            html_report(p, out)
         print(f"Wrote {out}")
     elif a.action == "info":
         print(f"{p.name}: {len(p.tests)} tests, {len(p.animals)} animals, apparatus: "
@@ -192,6 +227,42 @@ def cmd_project(a):
         if missing:
             print(f"{len(missing)} test(s) with a missing video: {', '.join(str(t.id) for t in missing)} (find them "
                   f"with: manymaze project DIR relink --folder FOLDER)")
+
+
+def _report_table(p, name):
+    """The rows and columns of a saved results report; exit if the experiment has none of that name."""
+    try:
+        return p.report_table(name)
+    except KeyError:
+        names = ", ".join(f"“{r['name']}”" for r in p.reports) or "none"
+        sys.exit(f"The experiment has no results report called “{name}” (saved reports: {names}). Reports are "
+                 f"saved on the Data page (Report ▸ Save as…).")
+
+
+def _export_report(p, a, out):
+    """results --report NAME: the rows and columns of a saved results report (--wide: one row per animal)."""
+    from .core.export import results_workbook, wide_rows, write_table, write_xlsx
+    from .core.project import result_columns
+    from .core.reports import find_report
+
+    if a.column or a.bins:
+        sys.exit("--report sets the columns and the time periods: leave out --column and --bins")
+    if Path(out).suffix.lower() == ".xml":
+        sys.exit("--report writes a table: use .csv, .tsv, .txt, .xlsx, .slk or .dbf (the XML export is the whole "
+                 "experiment; leave --report out for it)")
+    rows, cols = _report_table(p, a.report)
+    try:
+        if a.wide:
+            info = set(p.info_columns())
+            wide = wide_rows(rows, [c for c in cols if c not in info])
+            write_table(wide, out, result_columns(wide), sheet="By animal")
+        elif out.lower().endswith(".xlsx"):
+            sheets, colmap = results_workbook(p, rows, cols, find_report(p.reports, a.report)["segmented"])
+            write_xlsx(sheets, out, colmap)
+        else:
+            write_table(rows, out, cols)
+    except ValueError as e:  # e.g. more columns than a dBase table can hold
+        sys.exit(str(e))
 
 
 def _change_project(p, a):
@@ -215,6 +286,19 @@ def _change_project(p, a):
                      f"are not marked as tracked: {e}\nFix the problem and run the command again (with --all to "
                      f"track them again).")
         print(f"Tracked {len(res['tracked'])} of {len(todo)} tests ({res['workers']} parallel workers)")
+    elif a.action == "plugins":
+        from .core.plugins import run_analysis_plugins
+
+        if not p.analysis_plugins:
+            sys.exit("The protocol has no analysis plug-ins (Protocol ▸ Analysis ▸ Analysis plug-ins)")
+        res = run_analysis_plugins(p, progress=_progress("plug-ins"))
+        for tid, msg in res["errors"]:
+            print(f"  #{tid}: {msg}", file=sys.stderr)
+        try:
+            p.save()
+        except Exception as e:
+            sys.exit(f"The experiment could not be saved: {e}")
+        print(f"Ran the analysis plug-ins on {len(res['done'])} test(s); {len(res['errors'])} problem(s)")
     elif a.action == "relink":
         from .core.project import relink_videos
 
@@ -273,7 +357,7 @@ def main(argv=None):
     pr = sub.add_parser("project", help="batch operations on a project")
     pr.add_argument("dir")
     pr.add_argument("action", choices=["info", "track", "results", "report", "events", "protocol", "archive",
-                                       "relink"])
+                                       "relink", "plugins"])
     pr.add_argument("--all", action="store_true", help="re-track tests that already have tracks")
     pr.add_argument("--workers", type=int, default=0, help="parallel tracking processes (default: all cores but one)")
     pr.add_argument("--bins", action="store_true", help="include time-bin results")
@@ -281,6 +365,9 @@ def main(argv=None):
     pr.add_argument("--column", action="append", metavar="MEASURE",
                     help="results: export only this measure (repeat for several; the information columns are kept; "
                          "with --wide: these measures only)")
+    pr.add_argument("--report", metavar="NAME",
+                    help="results / report: the columns, time periods and rows of the results report saved under "
+                         "this name on the Data page")
     pr.add_argument("--folder", help="relink: folder holding the moved videos (searched with its subfolders)")
     pr.add_argument("-o", "--output", help="output file; for results and events " + TABLE_OUTPUT_HELP)
     d = sub.add_parser("demo", help="create a demo project with synthetic videos")

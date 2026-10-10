@@ -297,8 +297,8 @@ class MonitorPanel(QWidget):
                         t, y = st.series(param, win)
                     zones = st.current_zones()
                     det, frz, imm = st.detected, st.freezing, st.immobile
-                    dist, spd, unit = st.distance, st.speed, st.unit
-                    points = st.points.rows()
+                    dist, spd, unit = st.distance * st.factor, st.speed * st.factor, st.unit
+                    points = [(n, d * st.factor, *rest) for n, d, *rest in st.points.rows()]
                     visits = [list(v) for v in st.visits]
                     now = session.elapsed
                 if param.startswith(CHART_PREFIX):  # computed from the track so far, outside the lock

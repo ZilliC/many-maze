@@ -13,8 +13,9 @@ from typing import Callable
 
 import numpy as np
 
+from .freezing import fst_states
 from .geometry import point_segment_distance
-from .series import count_rotations, drop_short_runs, ffill, round_result as _r, runs
+from .series import count_rotations, drop_short_runs, ffill, initial_heading_frames, round_result as _r, runs
 
 
 @dataclass
@@ -198,12 +199,12 @@ def _water_maze(d: TemplateData):
         dist = np.hypot((k.x - pc.x) * k.scale, (k.y - pc.y) * k.scale)
         res[f"Mean distance to platform ({u})"] = _r(np.nanmean(dist), 2)
         res[f"Cumulative distance to platform ({u}·s)"] = _r(np.nansum(dist * dur), 1)
-        # initial heading error: direction from start to position after ~1 s vs direction to platform
-        ok = np.flatnonzero(np.isfinite(k.ux))
-        if len(ok) > 2:
-            i0 = ok[0]
-            j = np.searchsorted(t, t[i0] + 1.0)
-            j = min(max(j, i0 + 1), len(t) - 1)
+        # initial heading error: the initial heading (as the point's: the Heading error options) vs the direction
+        # to the platform
+        ij = initial_heading_frames(t, dur, k.ux, k.uy, k.mobile, s.heading_error_by, s.heading_error_time_s,
+                                    s.heading_error_distance)
+        if ij is not None:
+            i0, j = ij
             hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]
             tdx, tdy = pc.x - k.x[i0], pc.y - k.y[i0]
             if math.hypot(hdx, hdy) > 0 and math.hypot(tdx, tdy) > 0:
@@ -306,10 +307,230 @@ def _barnes_maze(d: TemplateData):
     res["Total errors"] = sum(1 for n in names if n != esc_name)
     res["Escape hole visits"] = sum(1 for n in names if n == esc_name)
     res["Hole visit sequence"] = " ".join(n.split()[-1] for n in names)
-    res["Search strategy"] = classify_barnes_strategy(names, esc_name, len(holes))
+    s = d.s
+    method = s.barnes_strategy_method if s.barnes_strategy_method in BARNES_METHODS else "simple"
+    target = _hole_number(esc_name)
+    numbers = [_hole_number(n) for n in holes]
+    if method == "simple" or target is None or None in numbers:
+        res["Search strategy"] = classify_barnes_strategy(names, esc_name, len(holes))
+        return
+    visits = [("hole", _hole_number(zn), t_in) for zn, t_in, _ in seq]
+    centre = s.barnes_centre_zone.strip()
+    if centre and centre not in holes:
+        visits += [("centre", None, t_in) for _, t_in, _ in d.seq([centre])]
+    visits.sort(key=lambda v: v[2])
+    rules = BarnesRules(max(len(holes), max(numbers)), target, s.barnes_target_region, s.barnes_serial_visits,
+                        s.barnes_serial_skip)
+    if method == "classic":
+        res.update(barnes_classic(visits, rules))
+    else:
+        res.update(barnes_unmc(visits, rules, k.t0, k.t0 + k.duration, d.never()))
+
+
+# Barnes maze search strategy (AnalysisSettings.barnes_strategy_method), with ANY-maze's names Direct, Serial and
+# Random. "simple" is mANY-MAZE's earlier rule (classify_barnes_strategy). "classic" is ANY-maze's Barnes maze
+# strategy analysis as revised in 7.54 after Gawel et al. 2018 (help topic T1462): one overall strategy for the
+# test and a primary one up to the first visit to the escape hole. "unmc" is ANY-maze's UNMC method (University of
+# Nebraska Medical Center, T1463): the strategies used in turn, the analysis starting again whenever the animal
+# finds the escape hole. Holes are numbered round the maze ("Hole 1" … "Hole N"); the hole and centre visits are
+# the zone entries (holes by the head when it is tracked).
+BARNES_METHODS = {"simple": "Simple: from the holes visited before the escape hole",
+                  "classic": "ANY-maze (Gawel et al. 2018): overall and primary strategy",
+                  "unmc": "UNMC method: the strategies used in turn"}
+BARNES_STRATEGIES = ("Direct", "Serial", "Random")
+
+
+def _hole_number(name: str | None) -> int | None:
+    """The number of a hole zone ("Hole 7" -> 7), None if its name does not end with one."""
+    tail = (name or "").split()[-1:]
+    return int(tail[0]) if tail and tail[0].isdigit() else None
+
+
+@dataclass
+class BarnesRules:
+    """The settings of ANY-maze's Barnes maze strategy analysis (help topic T1434)."""
+
+    n_holes: int
+    target: int  # the escape hole
+    region: int = 2  # the target region: the escape hole and this many holes either side of it
+    serial_visits: int = 3  # consecutive hole visits that start a serial strategy
+    skip: int = 1  # holes the animal may skip between two visits of a serial strategy
+
+    def gap(self, a: int, b: int) -> int:
+        """Holes from a to b the shorter way round."""
+        return min((a - b) % self.n_holes, (b - a) % self.n_holes)
+
+    def step(self, a: int, b: int) -> int | None:
+        """A move from hole a to hole b: 1 (up the numbers) / -1 (down) when it can continue a serial strategy (to
+        one of the next skip + 1 holes), 0 back to the same hole, None otherwise."""
+        g = self.gap(a, b)
+        if g == 0:
+            return 0
+        if g > max(0, self.skip) + 1:
+            return None
+        return 1 if (b - a) % self.n_holes == g else -1
+
+    def in_region(self, hole: int) -> bool:
+        return self.gap(hole, self.target) <= self.region
+
+
+def _moves(holes: list[int]) -> int:
+    """Holes visited one after another (going back into the same hole is not a new one)."""
+    return 1 + sum(1 for a, b in zip(holes, holes[1:]) if a != b) if holes else 0
+
+
+def _direct(visits: list, r: BarnesRules) -> bool:
+    """Visits [(kind, hole, t)] from the first hole visit that reach the escape hole without a hole outside its
+    target region or the centre."""
+    return any(kind == "hole" and h == r.target for kind, h, _ in visits) and \
+        all(kind == "hole" and r.in_region(h) for kind, h, _ in visits)
+
+
+def classic_strategy(visits: list, r: BarnesRules) -> str:
+    """ANY-maze's strategy (T1462) of hole and centre visits [(kind "hole" | "centre", hole, t)] in time order.
+    Direct: to the escape hole within its target region, without the centre. Serial: one serial strategy from the
+    first hole visit to the end: every move to one of the next holes (skip + 1) either way, reversals allowed (as
+    1, 2, 3, 2, 1), at least serial_visits holes, no centre ("entering the centre always breaks a serial
+    strategy"). Random: the rest, and an animal that never finds the escape hole. "None" without a hole visit."""
+    first = next((i for i, v in enumerate(visits) if v[0] == "hole"), None)
+    if first is None:
+        return "None"
+    visits = visits[first:]  # the centre where the animal starts the test does not count
+    if not any(kind == "hole" and h == r.target for kind, h, _ in visits):
+        return "Random"
+    if _direct(visits, r):
+        return "Direct"
+    holes = [h for kind, h, _ in visits if kind == "hole"]
+    serial = len(holes) == len(visits) and _moves(holes) >= max(2, r.serial_visits) and \
+        all(r.step(a, b) is not None for a, b in zip(holes, holes[1:]))
+    return "Serial" if serial else "Random"
+
+
+def _barnes_errors(holes: list[int], target: int) -> tuple[int, int, int]:
+    """(reference, working, perseverative) errors of hole visits in order (ANY-maze T1464): visits to a hole other
+    than the escape hole, visits to such a hole already visited, and visits to the hole visited just before."""
+    seen: set = set()
+    ref = work = pers = 0
+    for i, h in enumerate(holes):
+        if h != target:
+            ref += 1
+            work += h in seen
+        pers += i > 0 and holes[i - 1] == h
+        seen.add(h)
+    return ref, work, pers
+
+
+def barnes_classic(visits: list, r: BarnesRules) -> dict:
+    """ANY-maze's Barnes maze strategy analysis measures (T1464): the overall strategy (the "Search strategy"), the
+    primary strategy (up to the first visit to the escape hole), the errors and the hole deviation score. The
+    errors and the score are undefined without any hole visit, the primary ones without a visit to the escape
+    hole."""
+    holes = [h for kind, h, _ in visits if kind == "hole"]
+    found = next((i for i, v in enumerate(visits) if v[0] == "hole" and v[1] == r.target), None)
+    nan = (math.nan,) * 3
+    out = {"Search strategy": classic_strategy(visits, r),
+           "Primary strategy": classic_strategy(visits[:found + 1], r) if found is not None else "None"}
+    tot = _barnes_errors(holes, r.target) if holes else nan
+    out["Total reference errors"], out["Total working errors"], out["Total perseverative errors"] = tot
+    out["Hole deviation score"] = r.gap(holes[0], r.target) if holes else math.nan
+    prim = _barnes_errors([h for kind, h, _ in visits[:found] if kind == "hole"], r.target) \
+        if found is not None else nan
+    out["Primary reference errors"], out["Primary working errors"], out["Primary perseverative errors"] = prim
+    return out
+
+
+def _serial_runs(holes: list[int], r: BarnesRules) -> list[tuple[int, int]]:
+    """[first, last] indices of the serial runs of a list of hole visits (UNMC method): moves to one of the next
+    holes in one direction (going back into the same hole does not end them), at least serial_visits holes. A
+    reversal ends a run, and the next one may start from the hole where the animal turned."""
+    out, start, direction = [], 0, 0
+    for i in range(1, len(holes) + 1):
+        st = r.step(holes[i - 1], holes[i]) if i < len(holes) else None
+        if st is not None and (st == 0 or direction in (0, st)):
+            direction = direction or st
+            continue
+        if _moves(holes[start:i]) >= max(2, r.serial_visits):
+            out.append((start, i - 1))
+        start, direction = (i - 1, st) if st else (i, 0)
+    return out
+
+
+def unmc_strategies(visits: list, r: BarnesRules, t0: float) -> list[tuple[str, float, int]]:
+    """The UNMC method's strategies in turn [(strategy, start time, Direct errors)] from hole and centre visits
+    [(kind, hole, t)] in time order (ANY-maze T1463). The analysis starts again at every visit to the escape hole,
+    which ends one stretch of visits and starts the next; a stretch's first strategy starts with it (at t0, the
+    start of the test, or on that visit). Direct (the first stretch only): to the escape hole within its target
+    region, without the centre; its errors are the visits to the other holes of the region. Serial: the serial
+    runs (_serial_runs), one strategy while a run follows another at once ("visits to holes 1, 2, 3 and then to
+    holes 14, 15, 16" are one). Random: the other visits, from the centre entry that ended a serial strategy, else
+    from the first of them. Consecutive uses of one strategy are one use."""
+    holes = [(i, v[1], v[2]) for i, v in enumerate(visits) if v[0] == "hole"]
+    cuts = [j for j, (_, h, _) in enumerate(holes) if h == r.target]
+    stretches, a = [], 0
+    for c in cuts:
+        stretches.append((a, c, True))
+        a = c
+    if not cuts or a < len(holes) - 1:
+        stretches.append((a, len(holes) - 1, False))
+    out: list[list] = []
+
+    def use(strategy, t, errors=0):
+        if out and out[-1][0] == strategy:
+            out[-1][2] += errors
+        else:
+            out.append([strategy, t, errors])
+
+    def random_from(part, j):  # the centre entry after the previous hole visit, else this visit
+        return next((visits[i][2] for i in range(part[j - 1][0] + 1, part[j][0]) if visits[i][0] == "centre"),
+                    part[j][2])
+
+    for n, (a, b, to_target) in enumerate(stretches if holes else []):
+        part = holes[a:b + 1]
+        start = t0 if n == 0 else part[0][2]
+        if n == 0 and to_target and _direct(visits[part[0][0]:part[-1][0] + 1], r):
+            use("Direct", start, sum(1 for _, h, _ in part if h != r.target and r.in_region(h)))
+            continue
+        runs_: list[list[int]] = []
+        for ra, rb in _serial_runs([h for _, h, _ in part], r):
+            if runs_ and ra <= runs_[-1][1] + 1:
+                runs_[-1][1] = max(runs_[-1][1], rb)
+            else:
+                runs_.append([ra, rb])
+        first, last = (1 if n else 0), len(part) - (1 if to_target else 0)  # not just the escape-hole visits
+        j = 0
+        for ra, rb in runs_:
+            if max(j, first) < min(ra, last):
+                use("Random", start if j == 0 else random_from(part, j))
+            use("Serial", start if ra == 0 else part[ra][2])
+            j = rb + 1
+        if max(j, first) < last:
+            use("Random", start if j == 0 else random_from(part, j))
+    return [(st, t, e) for st, t, e in out]
+
+
+def barnes_unmc(visits: list, r: BarnesRules, t0: float, t1: float, never: float) -> dict:
+    """The UNMC method's measures (ANY-maze T1465) of the period [t0, t1]: the initial strategy (also the "Search
+    strategy"), the list, and per strategy the number of times used, the latency and the time using it (a
+    strategy lasts until the next starts or the period ends); Direct also its errors."""
+    used = unmc_strategies(visits, r, t0)
+    out = {"Search strategy": used[0][0] if used else "None",
+           "Initial strategy used": used[0][0] if used else "None",
+           "List of strategies used": ", ".join(st for st, _, _ in used)}
+    ends = [t for _, t, _ in used[1:]] + [t1]
+    for name in BARNES_STRATEGIES:
+        mine = [(t, end, e) for (st, t, e), end in zip(used, ends) if st == name]
+        out[f"{name} strategy - number times used"] = len(mine)
+        if name == "Direct":
+            out["Direct strategy - errors"] = sum(e for _, _, e in mine)
+        else:
+            out[f"{name} strategy - latency (s)"] = _r(mine[0][0] - t0 if mine else never)
+        out[f"{name} strategy - time using (s)"] = _r(sum(max(0.0, end - t) for t, end, _ in mine))
+    return out
 
 
 def classify_barnes_strategy(names: list[str], esc: str | None, n_holes: int) -> str:
+    """The "simple" search strategy: Direct with at most 2 holes visited before the escape hole, Serial when at
+    least 60 % of the moves between the holes visited before it are to an adjacent hole, else Random."""
     if not names:
         return "None"
     if esc is None:
@@ -464,11 +685,25 @@ def _activity_wheel(d: TemplateData):
 
 
 def _forced_swim(d: TemplateData):
-    res = d.res
-    if "Time freezing (s)" in res:
-        res["Immobility (s)"] = res["Time freezing (s)"]
-        res["Immobility (%)"] = res["Freezing (%)"]
-        res["Latency to immobility (s)"] = res["Latency to first freezing (s)"]
+    """Forced swim (Porsolt) and tail suspension tests. Time immobile, immobile episodes, latency to first immobility
+    and the immobile episode durations are the general measures, which come from the struggle seen in the image when
+    immobility_mode is "motion" (as the FST / TST templates set it; freezing.immobility_from_motion). Added here:
+    the time immobile as a % of the period and, in the forced swim test with the three-state split, the time
+    climbing and swimming (freezing.fst_states). An episode under way at the start of a later period is not one of
+    its episodes."""
+    res, k, s = d.res, d.k, d.s
+    T = k.duration
+    if "Time immobile (s)" in res:
+        res["Time immobile (%)"] = _r(100 * res["Time immobile (s)"] / T if T > 0 else math.nan, 2)
+    if d.app.template != "forced_swim" or not s.fst_three_state or k.struggle is None:
+        return
+    for name, m in zip(("climbing", "swimming"), fst_states(k.mobile, k.struggle, k.t, k.dur, s)):
+        ep = [r for r in runs(m) if r[0] > 0 or d.initial]
+        tm = float(k.dur[m].sum())
+        res[f"Time {name} (s)"] = _r(tm)
+        res[f"Time {name} (%)"] = _r(100 * tm / T if T > 0 else math.nan, 2)
+        res[f"{name.capitalize()} episodes"] = len(ep)
+        res[f"Latency to first {name} (s)"] = _r(float(k.t[ep[0][0]] - k.t0) if ep else d.never())
 
 
 TEMPLATE_MEASURES: dict[str, tuple[Callable[[TemplateData], None], ...]] = {
@@ -478,8 +713,11 @@ TEMPLATE_MEASURES: dict[str, tuple[Callable[[TemplateData], None], ...]] = {
     "water_maze": (_water_maze,), "barnes_maze": (_barnes_maze,),
     "light_dark": (_light_dark,), "three_chamber": (_three_chamber,), "novel_tank": (_novel_tank,), "cpp": (_cpp,),
     "hole_board": (_hole_board,), "thermal_gradient": (_thermal_gradient,), "activity_wheel": (_activity_wheel,),
-    "forced_swim": (_forced_swim,),
+    "forced_swim": (_forced_swim,), "tail_suspension": (_forced_swim,),
 }
+# apparatus templates (and protocol types) of the forced swim / tail suspension family: their protocols detect
+# immobility from the struggle in the image (AnalysisSettings.immobility_mode "motion")
+FST_TEMPLATES = ("forced_swim", "tail_suspension")
 
 
 def template_measures(d: TemplateData):

@@ -174,6 +174,43 @@ def test_protocol_mode_template_and_blind(win):
     assert p.detection.threshold == 25 and ex.det_form.editors["threshold"].value() == 25
 
 
+def test_forced_swim_settings_on_the_protocol_page(win):
+    p = win.project
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "protocol")
+    assert ex.fst_box.isHidden() and p.analysis.immobility_mode == "speed"
+    # choosing the forced swim type of test shows its settings and detects immobility from the struggle
+    ex.protocol.setCurrentIndex(ex.protocol.findData("forced_swim"))
+    assert p.protocol == "forced_swim" and p.analysis.immobility_mode == "motion" and not ex.fst_box.isHidden()
+    assert ex.fst_form.editors["immobility_mode"].currentData() == "motion"
+    assert ex.an_form.editors["immobility_mode"].currentData() == "motion"
+    # the settings are the Analysis ones: an edit on either page shows on the other
+    ex.fst_form.editors["fst_threshold_pct"].setValue(3.5)
+    ex.fst_form.editors["fst_three_state"].setChecked(True)
+    assert p.analysis.fst_threshold_pct == 3.5 and p.analysis.fst_three_state
+    assert ex.an_form.editors["fst_threshold_pct"].value() == 3.5
+    ex.an_form.editors["min_fst_immobile_s"].setValue(2.0)
+    assert ex.fst_form.editors["min_fst_immobile_s"].value() == 2.0
+    # the tail suspension template too; another type of test hides them and goes back to the speed
+    ex.apply_template("tail_suspension")
+    assert p.protocol == "tail_suspension" and p.test_duration_s == 360 and not ex.fst_box.isHidden()
+    ex.protocol.setCurrentIndex(ex.protocol.findData("open_field"))
+    assert ex.fst_box.isHidden() and p.analysis.immobility_mode == "speed"
+    assert ex.an_form.editors["immobility_mode"].currentData() == "speed"
+
+
+def test_barnes_strategy_settings(win):
+    p = win.project
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "analysis")
+    assert "Barnes maze strategy" in ex.an_form.forms
+    combo = ex.an_form.editors["barnes_strategy_method"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["simple", "classic", "unmc"]
+    combo.setCurrentIndex(combo.findData("unmc"))
+    ex.an_form.editors["barnes_target_region"].setValue(1)
+    assert p.analysis.barnes_strategy_method == "unmc" and p.analysis.barnes_target_region == 1
+
+
 def test_procedure_editors_stay_in_sync(win):
     p = win.project
     ex = win.goto("ExperimentPage")

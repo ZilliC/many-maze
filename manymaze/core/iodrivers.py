@@ -542,6 +542,27 @@ class LabJackDevice(Device):
         self.outputs[channel] = value
         return True
 
+    SYNC_DEVICE_MAX_S = 0.005  # longer synchronisation pulses are ended by the computer (the call blocks meanwhile)
+
+    def sync_pulse(self, channel, width_s) -> bool | None:
+        """A synchronisation pulse on a digital line timed by the LabJack itself: one eWriteNames call writes the
+        line on, waits ``WAIT_US_BLOCKING`` microseconds on the device and writes it off (pulses up to 5 ms; longer
+        ones are switched on and off by the device manager)."""
+        c = self.channels.get(channel, {})
+        if c.get("kind") != "output" or float(width_s) > self.SYNC_DEVICE_MAX_S:
+            return None
+        if self.handle is None or c.get("pin") is None:
+            return False
+        on = int(not c.get("invert"))
+        try:
+            self.ljm.eWriteNames(self.handle, 3, [str(c["pin"]), "WAIT_US_BLOCKING", str(c["pin"])],
+                                 [on, max(1, int(round(float(width_s) * 1e6))), 1 - on])
+        except Exception as e:  # hardware dependent
+            self._error(f"{self.name}: {channel}: {e}")
+            return False
+        self._count_sync(channel)
+        return True
+
     def _read(self):
         if self.handle is None:
             return

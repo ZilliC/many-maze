@@ -23,6 +23,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
+from .lens import LensCorrection, corrected
 from .track import COLUMNS, Track, simplify_outline
 from .video import DOWNSCALE_FACTORS, FrameReader, VideoSource, downscaled_size
 
@@ -42,12 +43,20 @@ class DetectionSettings:
     background_frame: int = 0  # frame index used when background == "frame"
     background_samples: int = 31
     adaptive_rate: float = 0.01
+    # "Ignore lighting changes": scale each frame so that the median grey level of the arena matches the
+    # background's (per arena) before subtracting it; global changes only, local shadows are not removed
+    lighting_compensation: bool = False
     n_animals: int = 1
     head_tail: bool = True
     tail_strip: float = 0.3  # opening kernel relative to sqrt(area) used to strip the tail before head/tail
     record_outline: bool = True  # store the animal's whole-body outline (a simplified polygon) in each frame
     motion_threshold: int = 20  # grey-level change counted as motion (freezing)
     max_gap_s: float = 1.0  # interpolate gaps up to this length
+    # jump removal (before the gaps are filled): positions implying a speed above max_jump_speed (apparatus units/s,
+    # cm/s when calibrated; 0 = off) from the last good one are removed when the track comes back within max_jump_s
+    # (a reflection or another object detected for a moment); real fast runs do not come back and are kept
+    max_jump_speed: float = 0.0
+    max_jump_s: float = 0.5
     smoothing: int = 0  # moving-average window (frames), 0 = off
     start_time_s: float = 0.0  # analyse from this time in the video
     duration_s: float = 0.0  # analyse this many seconds (0 = to end)
@@ -60,6 +69,7 @@ class DetectionSettings:
     pose_model: str = "topviewmouse_rtmpose_s"  # core.pose.MODELS key or path to a custom .onnx
     pose_min_conf: float = 0.3  # keypoints below this confidence fall back to the contour estimate
     pose_device: str = "auto"  # "auto" (Core ML on macOS) | "cpu"
+    pose_species: str = "mouse"  # the animal the pose model is for (core.pose.SPECIES): "mouse" | "rat" | "other"
     # colour: method "colour" detects pixels of target_colour (a coloured animal, dye mark or collar); with several
     # animals, identity_colours ("#ff0000, #0000ff", one per animal) identifies each animal by its colour mark
     target_colour: str = "#ff0000"
@@ -184,8 +194,10 @@ def _frame_window(settings: DetectionSettings, fps: float, count: int) -> tuple[
     return start, (min(count, end) if count > 0 else end)
 
 
-def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarray:
-    with VideoSource(video_path) as v:
+def compute_background(video_path: str, settings: DetectionSettings, lens: LensCorrection | None = None
+                       ) -> np.ndarray:
+    """The background model of a video (its frames corrected by ``lens``, see core.lens)."""
+    with corrected(VideoSource(video_path), lens) as v:
         if settings.background == "frame":
             f = v.frame_at(settings.background_frame)
             if f is None:
@@ -262,6 +274,74 @@ def upscaled_detection(d: Detection, sx: float, sy: float) -> Detection:
                    keypoints=pts(d.keypoints, False))
 
 
+def median_grey(img: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Median grey level of a uint8 image (within ``mask``), from its histogram; nan when the mask is empty."""
+    hist = cv2.calcHist([img], [0], mask, [256], [0, 256]).ravel()
+    total = float(hist.sum())
+    if total <= 0:
+        return math.nan
+    return float(np.searchsorted(np.cumsum(hist), total / 2.0))
+
+
+LIGHTING_GAIN_RANGE = (0.2, 5.0)  # the most a frame is brightened / darkened to match the background
+
+
+# Animal presets of the detection settings: typical settings for a kind of animal and floor. Sizes are real
+# (cm² of the body seen from above, cm for the blur and the clean-up) and are turned into pixels with the
+# apparatus calibration; without one the clean-up assumes 10 px/cm and the body-size limits are left unchanged.
+ANIMAL_PRESETS: dict[str, dict] = {
+    "mouse": {"title": "Mouse", "body_cm2": (2.0, 40.0), "blur_cm": 0.5, "open_cm": 0.3, "close_cm": 0.7,
+              "settings": {"method": "background", "contrast": "auto", "tail_strip": 0.3, "erase_thin_px": 0,
+                           "lighting_compensation": False}},
+    "rat": {"title": "Rat", "body_cm2": (8.0, 300.0), "blur_cm": 0.5, "open_cm": 0.5, "close_cm": 0.9,
+            "settings": {"method": "background", "contrast": "auto", "tail_strip": 0.35, "erase_thin_px": 0,
+                         "lighting_compensation": False}},
+    # dark hood and white body: the background difference of either sign is the animal ("Darker or lighter"),
+    # and a wider closing joins the two parts where the neck matches the floor
+    "hooded_rat": {"title": "Hooded rat", "body_cm2": (8.0, 300.0), "blur_cm": 0.5, "open_cm": 0.5,
+                   "close_cm": 1.5,
+                   "settings": {"method": "background", "contrast": "auto", "tail_strip": 0.35, "erase_thin_px": 0,
+                                "lighting_compensation": False}},
+    # a light animal on bedding: a stronger blur and clean-up remove the texture of the sawdust; home-cage
+    # recordings often see the room lights change
+    "white_on_sawdust": {"title": "White animal on sawdust", "body_cm2": (2.0, 300.0), "blur_cm": 0.9,
+                         "open_cm": 0.7, "close_cm": 0.9,
+                         "settings": {"method": "background", "contrast": "light", "tail_strip": 0.3,
+                                      "erase_thin_px": 0, "lighting_compensation": True}},
+    # a thin, dark fish on a light (often back-lit) tank: little clean-up, which would erase it
+    "zebrafish": {"title": "Zebrafish", "body_cm2": (0.1, 6.0), "blur_cm": 0.2, "open_cm": 0.0, "close_cm": 0.3,
+                  "settings": {"method": "background", "contrast": "dark", "tail_strip": 0.15, "erase_thin_px": 0,
+                               "lighting_compensation": False}},
+}
+PRESET_NOMINAL_PX_PER_CM = 10.0
+
+
+def animal_preset(key: str, px_per_cm: float | None = None) -> dict:
+    """The detection settings an animal preset sets (DetectionSettings field → value) for an image of
+    ``px_per_cm`` (None / 0: not calibrated, the body-size limits are not included)."""
+    p = ANIMAL_PRESETS[key]
+    scale = float(px_per_cm) if px_per_cm and px_per_cm > 0 else PRESET_NOMINAL_PX_PER_CM
+    out = dict(p["settings"])
+    for name, cm in (("blur", p["blur_cm"]), ("morph_open", p["open_cm"]), ("morph_close", p["close_cm"])):
+        px = int(round(cm * scale))
+        out[name] = _odd(px) if px > 1 else 0
+    if px_per_cm and px_per_cm > 0:
+        lo, hi = p["body_cm2"]
+        out["min_area_px"] = max(1, int(round(lo * px_per_cm ** 2)))
+        out["max_area_px"] = int(round(hi * px_per_cm ** 2))
+    return out
+
+
+def apply_animal_preset(settings: DetectionSettings, key: str, px_per_cm: float | None = None) -> list[str]:
+    """Set an animal preset on ``settings``; returns the names of the fields that changed."""
+    changed = []
+    for k, v in animal_preset(key, px_per_cm).items():
+        if getattr(settings, k) != v:
+            setattr(settings, k, v)
+            changed.append(k)
+    return changed
+
+
 class ArenaTracker:
     """Tracks the animal(s) within one arena mask of a frame.
 
@@ -307,6 +387,9 @@ class ArenaTracker:
         self._history: list[list[tuple[float, float]]] = [[] for _ in range(n)]
         self._single_area: float | None = None
         self.contrast_votes = [0, 0]  # frames in which the animal was lighter / darker than the background
+        self.lighting_gain = 1.0  # last frame's grey-level scale (Ignore lighting changes)
+        self._bg_median_key = None
+        self._bg_median = math.nan
         if settings.method == "colour":
             hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
         for c in settings.identity_colour_list():
@@ -449,6 +532,8 @@ class ArenaTracker:
                 fg = (g < thr).astype(np.uint8) * 255
             return self._clean(fg), g
         bg = self._processed_background(box)
+        if s.lighting_compensation:
+            g = self._match_lighting(g, bg, box)
         g16 = g.astype(np.int16)
         b16 = bg.astype(np.int16)
         if s.contrast == "dark":
@@ -462,6 +547,25 @@ class ArenaTracker:
         if s.contrast not in ("dark", "light"):
             self._vote_contrast(g, bg, fg)
         return fg, g
+
+    def _match_lighting(self, g: np.ndarray, bg: np.ndarray, box) -> np.ndarray:
+        """"Ignore lighting changes": the frame (processed region) scaled so that its median grey level over the
+        arena is the background's.  A global brightening or dimming then leaves the floor where the background
+        has it; local shadows and reflections are not removed."""
+        mask = self._mask_c if self._mask_c is not None and self._mask_c.shape[:2] == g.shape[:2] else None
+        key = (box, self._bg_version, self.s.blur, self.s.erase_thin_px)
+        if self._bg_median_key != key:
+            self._bg_median = median_grey(bg, mask)
+            self._bg_median_key = key
+        m = median_grey(g, mask)
+        if not (m > 0 and self._bg_median > 0):
+            self.lighting_gain = 1.0
+            return g
+        self.lighting_gain = float(np.clip(self._bg_median / m, *LIGHTING_GAIN_RANGE))
+        if abs(self.lighting_gain - 1.0) < 1e-3:
+            self.lighting_gain = 1.0
+            return g
+        return cv2.convertScaleAbs(g, alpha=self.lighting_gain)
 
     def _vote_contrast(self, g: np.ndarray, bg: np.ndarray, fg: np.ndarray):
         """With contrast "auto": count the frames in which the detected pixels are lighter / darker than the
@@ -531,7 +635,11 @@ class ArenaTracker:
             x0, y0, x1, y1 = box
             crop, off = frame[y0:y1, x0:x1], (x0, y0)
             gray = to_gray(crop)  # only the region is converted
+        self.lighting_gain = 1.0
         fg, g = self._foreground(gray, crop, box)
+        if self.lighting_gain != 1.0:
+            # the same scale for the motion index and the adaptive model: a light switched on is not movement
+            gray = cv2.convertScaleAbs(gray, alpha=self.lighting_gain)
         n = max(1, self.s.n_animals)
         contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE, offset=off)
         blobs = []
@@ -1031,8 +1139,13 @@ class ArenaJob:
     mask: np.ndarray | None = None
 
 
-def postprocess(track: Track, settings: DetectionSettings) -> Track:
+def postprocess(track: Track, settings: DetectionSettings, scale: float = 1.0) -> Track:
+    """A track as tracking stores it: jumps removed (settings.max_jump_speed; scale: the apparatus units per pixel,
+    Apparatus.scale; the number removed in meta["jumps_removed"]), gaps filled and positions smoothed."""
     out = track
+    if settings.max_jump_speed and settings.max_jump_speed > 0:
+        out = track.copy()
+        out.meta["jumps_removed"] = out.remove_jumps(settings.max_jump_speed, settings.max_jump_s, scale)
     if settings.max_gap_s and settings.max_gap_s > 0:
         out = out.interpolate(settings.max_gap_s)
     if settings.smoothing and settings.smoothing > 1:
@@ -1044,12 +1157,16 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                 progress: Callable[[float], None] | None = None,
                 should_stop: Callable[[], bool] | None = None,
                 frame_callback: Callable[[int, np.ndarray, list[list[Detection]]], None] | None = None,
-                background: np.ndarray | None = None, decode_threads: int = 0) -> list[list[Track]]:
+                background: np.ndarray | None = None, decode_threads: int = 0,
+                lens: LensCorrection | None = None) -> list[list[Track]]:
     """Track every arena in a video file in a single pass.
 
     Returns tracks[job_index][animal_index].  Times are relative to start_time_s
-    of the first job's settings.
+    of the first job's settings.  With ``lens`` every frame is corrected for lens distortion first (core.lens), so
+    the apparatus and the track are in the coordinates of the corrected image.
     """
+    if lens is not None and lens.is_identity:
+        lens = None
     if not jobs:
         return []
     s0 = jobs[0].settings
@@ -1084,7 +1201,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     key = (job.settings.background, job.settings.background_frame, job.settings.background_samples,
                            job.settings.start_time_s, job.settings.duration_s)
                     if key not in bg_cache:
-                        bg_cache[key] = compute_background(video_path, job.settings)
+                        bg_cache[key] = compute_background(video_path, job.settings, lens)
                     tr.set_background(bg_cache[key])
             trackers.append(tr)
         fps = v.fps
@@ -1102,6 +1219,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         for i, frame in reader:
             if i >= end:
                 break
+            if lens is not None and ((i - start) % step == 0 or (i - start) % step == step - 1):
+                frame = lens.apply(frame)
             if step > 1 and (i - start) % step == step - 1:
                 for tr in trackers:  # the frame before the next analysed one: motion over one frame interval
                     tr.set_motion_reference(frame)
@@ -1133,11 +1252,13 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             tr.meta["decoder"] = reader.backend
             if factor > 1:
                 tr.meta["downscale"] = factor
+            if lens is not None:
+                tr.meta["lens_correction"] = lens.describe()
             est = pose_of(job.settings)
             if est is not None:
                 tr.meta["pose_model"] = job.settings.pose_model
                 tr.meta["pose_device"] = est.provider
-            tracks.append(postprocess(tr, job.settings))
+            tracks.append(postprocess(tr, job.settings, job.apparatus.scale if job.apparatus is not None else 1.0))
         out.append(tracks)
     return out
 

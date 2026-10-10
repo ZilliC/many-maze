@@ -86,7 +86,7 @@ class SetupMixin:
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 4, 0, 4)
         hint = QLabel("Each row is a test panel: the camera or video it uses, its apparatus and the animal, stage "
-                      "and trial tested. Add and remove panels with the ribbon.")
+                      "and trial tested. Add and remove panels with the ribbon.")  # (I/O only: page._update_io_only)
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -140,7 +140,9 @@ class SetupMixin:
         f.addRow("Stage", self.row_stage)
         f.addRow("Trial", self.row_trial)
         f.addRow("I/O device", self.row_device)
+        self.row_form = f
         v.addWidget(self.row_editor)
+        self.panels_hint = hint
         return box
 
     def _build_setup(self) -> QWidget:
@@ -261,14 +263,29 @@ class SetupMixin:
         self.control_input.setPlaceholderText("none")
         self.control_input.setToolTip("Test control switch: an input ([device/]channel). Closing it continues a "
                                       "test that a procedure ended allowing continuation (waiting for test end).")
-        for w in (self.start_keys, self.stop_keys, self.control_input):
+        self.start_input = QLineEdit()
+        self.start_input.setPlaceholderText("[device/]channel")
+        self.start_input.setToolTip("The start switch: an input ([device/]channel, e.g. box/start) whose closing "
+                                    "starts the armed test(s) (The test starts: On a start switch)")
+        self.start_delay = QDoubleSpinBox()
+        self.start_delay.setRange(0, 3600)
+        self.start_delay.setDecimals(1)
+        self.start_delay.setSuffix(" s")
+        self.start_delay.setSpecialValueText("None (at once)")
+        self.start_delay.setToolTip("After the start switch — a start key, a remote or the start switch input — "
+                                    "the test starts this much later, e.g. to put the animal in and step away "
+                                    "(saved with the protocol)")
+        self.start_delay.valueChanged.connect(self._store_start_delay)
+        for w in (self.start_keys, self.stop_keys, self.control_input, self.start_input):
             w.editingFinished.connect(self._save_live_settings)
         self.sched_time.timeChanged.connect(self._save_live_settings)
         self.sched_daily.toggled.connect(self._save_live_settings)
         f.addRow("Test duration", self.duration)
         f.addRow("The test starts", self.start_mode)
         f.addRow("Start time", trow)
+        f.addRow("Start switch", self.start_input)
         f.addRow("Start keys", self.start_keys)
+        f.addRow("Delay after the start switch", self.start_delay)
         f.addRow("Stop keys", self.stop_keys)
         f.addRow("Test control input", self.control_input)
         v.addWidget(sb)

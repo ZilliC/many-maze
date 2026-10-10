@@ -250,6 +250,7 @@ def export_video(project, test, path, options: OverlayOptions | None = None, pro
         raise ValueError("Choose another file name: the overlay video cannot replace the test's own video")
     tracks = project.load_tracks(test) if project.has_track(test) else []
     app = project.apparatus_of(test)
+    lens = project.lens_for(test)  # the track is in the coordinates of the corrected frames
     with VideoSource(video) as src:
         fps, w, h, nframes = src.fps, src.width, src.height, src.frame_count
     video_start = float(tracks[0].meta.get("video_start_s", test.start_s) or 0.0) if tracks else float(test.start_s)
@@ -287,6 +288,8 @@ def export_video(project, test, path, options: OverlayOptions | None = None, pro
                 if should_stop and should_stop():
                     cancelled = True
                     break
+                if lens is not None:
+                    frame = lens.apply(frame)
                 img = rend.render(frame, i / fps - video_start)
                 if img.shape[1] != ow or img.shape[0] != oh:
                     img = img[:oh, :ow]

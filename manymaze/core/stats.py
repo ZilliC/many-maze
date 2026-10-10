@@ -60,6 +60,8 @@ ERROR_TERM_POSTHOC = {"lsd": "Fisher's LSD", "scheffe": "Scheffé", "snk": "Stud
 _TWO_TO_K = {"student": "anova", "welch": "welch_anova", "mannwhitney": "kruskal", "ks": "kruskal",
              "brunnermunzel": "kruskal", "paired_t": "rm_anova", "wilcoxon": "friedman"}
 PAIRED_METHODS = {"paired_t", "wilcoxon", "rm_anova", "friedman"}
+ALPHA = 0.05  # default significance level (the Statistics page sets its own, saved in Project.statistics)
+MIN_ALPHA, MAX_ALPHA = 0.0001, 0.5
 NONPARAMETRIC = {"mannwhitney", "ks", "brunnermunzel", "wilcoxon", "kruskal", "median", "friedman"}
 
 
@@ -765,14 +767,14 @@ def ancova(rows: list[dict], measure: str, covariate: str, factor: str = "Group"
     return out
 
 
-def ancova_text(res: dict, measure: str) -> str:
+def ancova_text(res: dict, measure: str, alpha: float = ALPHA) -> str:
     if "error" in res:
         return f"{measure}: {res['error']}"
-    lines = [anova_text(res, measure), f"  Common slope ({res['covariate']}): {res['slope']:.4g}"]
+    lines = [anova_text(res, measure, alpha), f"  Common slope ({res['covariate']}): {res['slope']:.4g}"]
     if "slopes" in res:
         sl = res["slopes"]
         lines.append(f"  Homogeneity of slopes: F({sl['df']}, {sl['df_error']}) = {sl['F']:.3f}, {format_p(sl['p'])}"
-                     + ("  — slopes differ, ANCOVA assumption violated" if sl["p"] < 0.05 else ""))
+                     + ("  — slopes differ, ANCOVA assumption violated" if sl["p"] < alpha else ""))
     for lv, a in res["adjusted_means"].items():
         lines.append(f"  {lv}: n={a['n']}, mean={a['mean']:.3f}, adjusted mean={a['adjusted_mean']:.3f} ± "
                      f"{a['adjusted_se']:.3f} SE (covariate mean {a['covariate_mean']:.3f})")
@@ -1056,13 +1058,25 @@ def format_p(p: float) -> str:
     return f"p = {p:.3f}"
 
 
-def stars(p: float) -> str:
+def significance_level(alpha) -> float:
+    """A significance level as set by the user (a number from MIN_ALPHA to MAX_ALPHA), else ALPHA."""
+    try:
+        a = float(alpha)
+    except (TypeError, ValueError):
+        return ALPHA
+    return a if math.isfinite(a) and MIN_ALPHA <= a <= MAX_ALPHA else ALPHA
+
+
+def stars(p: float, alpha: float = ALPHA) -> str:
+    """"ns" when p is not below the significance level alpha, else *** (p < 0.001), ** (p < 0.01) or *."""
     if p is None or not math.isfinite(p):
         return ""
-    return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+    if p >= alpha:
+        return "ns"
+    return "***" if p < 0.001 else "**" if p < 0.01 else "*"
 
 
-def summary_text(res: dict, measure: str) -> str:
+def summary_text(res: dict, measure: str, alpha: float = ALPHA) -> str:
     lines = [f"{measure}"]
     for g, d in res.get("descriptive", {}).items():
         lines.append(f"  {g}: n={d['n']}, mean={d['mean']:.3f} ± {d['sem']:.3f} SEM (SD {d['sd']:.3f}), "
@@ -1074,7 +1088,8 @@ def summary_text(res: dict, measure: str) -> str:
     elif isinstance(df, float):
         df = f"{df:.2f}"
     dfs = f", df={df}" if df is not None else ""
-    lines.append(f"  {res.get('test')}: statistic={stat:.3f}{dfs}, {format_p(res.get('p'))} {stars(res.get('p'))}")
+    lines.append(f"  {res.get('test')}: statistic={stat:.3f}{dfs}, {format_p(res.get('p'))} "
+                 f"{stars(res.get('p'), alpha)}")
     if "p_gg" in res:
         lines.append(f"  Greenhouse-Geisser: epsilon={res['epsilon_gg']:.3f}, {format_p(res['p_gg'])}")
     if "effect_size" in res and res["effect_size"] == res["effect_size"]:
@@ -1083,11 +1098,11 @@ def summary_text(res: dict, measure: str) -> str:
         if name != res.get("effect_size_name") and v == v:
             lines.append(f"  {name}: {v:.3f}")
     for ph in res.get("posthoc", []):
-        lines.append(f"    {ph['a']} vs {ph['b']}: {format_p(ph['p'])} {stars(ph['p'])} ({ph['test']})")
+        lines.append(f"    {ph['a']} vs {ph['b']}: {format_p(ph['p'])} {stars(ph['p'], alpha)} ({ph['test']})")
     return "\n".join(lines)
 
 
-def anova_text(res: dict, measure: str) -> str:
+def anova_text(res: dict, measure: str, alpha: float = ALPHA) -> str:
     if "error" in res:
         return f"{measure}: {res['error']}"
     lines = [f"{measure}: {res.get('test', 'ANOVA')} ({' × '.join(res.get('factors', []))})"]
@@ -1095,9 +1110,9 @@ def anova_text(res: dict, measure: str) -> str:
         lines[0] += f", Greenhouse-Geisser epsilon = {res['epsilon_gg']:.3f}"
     for e in res.get("effects", []):
         if "H" in e:
-            lines.append(f"  {e['effect']}: H({e['df']}) = {e['H']:.3f}, {format_p(e['p'])} {stars(e['p'])}")
+            lines.append(f"  {e['effect']}: H({e['df']}) = {e['H']:.3f}, {format_p(e['p'])} {stars(e['p'], alpha)}")
         else:
             lines.append(f"  {e['effect']}: F({e['df']}, {e.get('df_error', res.get('df_residual'))}) = "
-                         f"{e['F']:.3f}, {format_p(e['p'])} {stars(e['p'])}"
+                         f"{e['F']:.3f}, {format_p(e['p'])} {stars(e['p'], alpha)}"
                          + (f" (GG {format_p(e['p_gg'])})" if "p_gg" in e else ""))
     return "\n".join(lines)

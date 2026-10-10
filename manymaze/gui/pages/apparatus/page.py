@@ -13,22 +13,24 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
-from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
-from ....core import plots, templates
-from ....core.apparatus import (Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup, load_apparatus_file,
-                                make_grid, remove_grid, save_apparatus_file, unique_name)
+from ....core import plots, security, templates
+from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
+                                load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
+from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
 from ....core.terminology import term
 from ... import theme
 from ...icons import icon
+from ...live_widgets import LensCorrectionDialog
 from ...widgets import error_box, hint, loading, separator
 from ..base import Page
 from .background import BackgroundController
-from .dialogs import GridDialog, TemplateDialog
+from .dialogs import CalibrationDialog, GridDialog, TemplateDialog
 from .editor_view import EditorView
 from .panel import MAP_KINDS, PropertyPanel
 from .tool_icons import ARENA_HINTS, HINTS, TOOLS, tool_icon
@@ -150,6 +152,10 @@ class ApparatusPage(Page):
                                    self.bg.load_dialog)
         self.testvid_act = self._action("Test video", "video", "Use a frame from the video of one of the tests")
         self.testvid_act.setMenu(self.bg.test_menu)
+        self.lens_act = self._action("Lens correction…", "camera",
+                                     "Correct the distortion of a wide-angle (fish-eye / barrel) lens in the test "
+                                     "videos, so that the map is drawn on straight images and tests are tracked in "
+                                     "them", self.lens_correction)
         # edit
         self.undo_act = self._action("Undo", "undo", "Undo the last change to the map", self.undo, QKeySequence.Undo)
         self.redo_act = self._action("Redo", tool_icon("redo"), "Redo", self.redo,
@@ -178,7 +184,7 @@ class ApparatusPage(Page):
             ("Define", [(t["arena"], "small"), (t["point"], "small"), (self.grid_act, "small"),
                         (self.group_act, "small"), (self.seq_act, "small")]),
             ("Calibration", [(t["calibrate"], "small"), (self.clear_cal_act, "small")]),
-            ("Background", [(self.bg_act, "small"), (self.testvid_act, "small")]),
+            ("Background", [(self.bg_act, "small"), (self.testvid_act, "small"), (self.lens_act, "small")]),
             ("View", [(self.fit_act, "small"), (self.labels_act, "small"), (self.map_img_act, "small")]),
         ]
 
@@ -217,6 +223,12 @@ class ApparatusPage(Page):
         self.app_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         top.addWidget(self.app_info)
         lay.addLayout(top)
+        self.lock_lbl = QLabel("The protocol is locked: only an administrator can change the apparatus (File ▸ "
+                               "Users and security).")
+        self.lock_lbl.setWordWrap(True)
+        self.lock_lbl.setStyleSheet("background:#fff7e0;border:1px solid #f0d58a;padding:6px 8px;")
+        self.lock_lbl.hide()
+        lay.addWidget(self.lock_lbl)
         lay.addWidget(self.view, 1)
         sb = QHBoxLayout()
         self.hint = hint(HINTS["select"], wrap=False)
@@ -259,9 +271,17 @@ class ApparatusPage(Page):
         self.btn_cal_clear = QPushButton("Clear")
         self.btn_cal_clear.setToolTip("Clear the calibration (results in pixels)")
         self.btn_cal_clear.clicked.connect(self.clear_calibration)
+        self.unit_combo = QComboBox()
+        for u in DISTANCE_UNITS:
+            self.unit_combo.addItem(f"Results in {u}", u)
+        self.unit_combo.setToolTip("The unit distances and speeds are reported in, for every apparatus of the "
+                                   "experiment (measure names, charts and exports follow it). The calibration and "
+                                   "the distance settings stay in centimetres.")
+        self.unit_combo.currentIndexChanged.connect(lambda _i: self._unit_chosen())
         row = footer_row("Calibration")
         row.addWidget(self.cal_label, 1)
         row.addWidget(self.ppc_spin)
+        row.addWidget(self.unit_combo)
         row.addWidget(self.btn_cal)
         row.addWidget(self.btn_cal_clear)
         self.bg.add_controls(footer_row("Background"))
@@ -341,25 +361,43 @@ class ApparatusPage(Page):
         self.panel.refresh()
         self.refresh_info()
 
+    @property
+    def locked(self) -> bool:
+        """The protocol is locked for the current user (core.security): the apparatus is shown read-only."""
+        p = self.project
+        return p is not None and not security.can(p, "edit_protocol")
+
     def _set_enabled(self, on: bool):
-        for a in list(self.tool_actions.values()) + [
-                self.undo_act, self.redo_act, self.grid_act, self.copy_act, self.paste_act, self.dup_act,
-                self.ren_act, self.del_act, self.export_act, self.map_img_act, self.bg_act, self.testvid_act,
-                self.clear_cal_act, self.select_all_act, self.delete_sel_act, self.group_act, self.seq_act]:
+        locked = self.locked
+        edit = on and not locked
+        for a in [a for k, a in self.tool_actions.items() if k != "select"] + [
+                self.undo_act, self.redo_act, self.grid_act, self.paste_act, self.dup_act, self.ren_act,
+                self.del_act, self.bg_act, self.testvid_act, self.lens_act, self.clear_cal_act, self.delete_sel_act,
+                self.group_act, self.seq_act]:
+            a.setEnabled(edit)
+        for a in (self.tool_actions["select"], self.copy_act, self.export_act, self.map_img_act, self.select_all_act):
             a.setEnabled(on)
         for w in (self.panel.tabs, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
-            w.setEnabled(on)
-        self.bg.set_enabled(on)
-        self.new_act.setEnabled(self.project is not None)
-        self.import_act.setEnabled(self.project is not None)
-        self.tpl_act.setEnabled(self.project is not None)
+            w.setEnabled(edit)
+        self.bg.set_enabled(edit)
+        self.view.setInteractive(not locked)  # nothing on the map can be selected, moved or reshaped
+        self.lock_lbl.setVisible(locked)
+        for a in (self.new_act, self.import_act, self.tpl_act):
+            a.setEnabled(self.project is not None and not locked)
+
+    def security_changed(self):
+        """Another user, or other security settings: the apparatus is editable or read-only."""
+        if self.locked:
+            self.set_tool("select")
+        self._set_enabled(self.app is not None)
 
     def _names(self, exclude: Apparatus | None = None):
         return [a.name for a in self.project.apparatus if a is not exclude]
 
     def add_apparatus(self, name: str | None = None) -> Apparatus:
         cur = self.app
-        app = Apparatus(name=unique_name(name or f"Apparatus {len(self.project.apparatus) + 1}", self._names()))
+        app = Apparatus(name=unique_name(name or f"Apparatus {len(self.project.apparatus) + 1}", self._names()),
+                        distance_unit=self.project.distance_unit)
         app.frame_size = (cur.frame_size if cur else None) or self.bg.real_frame_size()
         self.bg.inherit(cur, app)
         self.project.apparatus.append(app)
@@ -390,10 +428,14 @@ class ApparatusPage(Page):
                 "Experiments and apparatus files (project.json *.json);;All files (*)")
             if not source:
                 return []
-        try:
-            apps = load_apparatus_file(source)
+        src = Path(source)
+        try:  # another experiment protected by a password asks for it
+            apps = self.main.with_password(lambda pw: load_apparatus_file(source, pw), "Import apparatus",
+                                           f"“{src.stem if src.is_dir() else src.parent.stem}”")
         except Exception as e:
             QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{e}")
+            return []
+        if apps is None:
             return []
         if names is None and len(apps) > 1:
             choices = ["All"] + [a.name for a in apps]
@@ -403,8 +445,10 @@ class ApparatusPage(Page):
             names = None if item == "All" else [item]
         if names is not None:
             apps = [a for a in apps if a.name in names]
+        unit = self.project.distance_unit
         for a in apps:
             a.name = unique_name(a.name, self._names())
+            a.distance_unit = unit  # one unit for the experiment
             self.project.apparatus.append(a)
         if apps:
             self.main.mark_dirty()
@@ -425,6 +469,54 @@ class ApparatusPage(Page):
         out = save_apparatus_file([app], path)
         self.main.status(f"Saved {app.name} to {out}")
         return out
+
+    def lens_correction(self, result: dict | None = None, apply_to: str | None = None) -> int:
+        """Lens distortion correction of video tests (a dialog on the background frame unless ``result`` — a
+        LensCorrection dict, {} for none — and ``apply_to`` are given): "video" the tests that use the background
+        video, "apparatus" the video tests of this apparatus, "all" every video test.  Returns how many tests were
+        changed."""
+        p, app = self.project, self.app
+        if p is None:
+            return 0
+        bg_path = self.bg.path if self.bg.real else None
+        groups = {"video": [t for t in p.tests if t.video and bg_path and same_video(p.abs_path(t.video), bg_path)],
+                  "apparatus": [t for t in p.tests if t.video and app is not None and t.apparatus == app.name],
+                  "all": [t for t in p.tests if t.video]}
+        if not groups["all"]:
+            QMessageBox.information(self, "Lens correction", "No test has a video yet. Lens correction applies to "
+                                    "the videos of tests; for a camera, use Camera options on the Run tests page.")
+            return 0
+        if result is None:
+            labels = {"video": "Tests that use this video", "apparatus": "Video tests of this apparatus",
+                      "all": "All the tests with a video"}
+            choices = [(f"{labels[k]} ({len(v)})", k) for k, v in groups.items() if v]
+            current = self.bg.lens.to_dict() if self.bg.lens is not None else (
+                next((t.undistort for t in groups[choices[0][1]] if t.undistort), {}))
+            dlg = LensCorrectionDialog(self.bg.raw_frame if self.bg.real else None, current,
+                                       video_path=bg_path or "", parent=self,
+                                       title="Lens correction of the test videos", apply_choices=choices)
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+            if not accepted:
+                return 0
+            result, apply_to = dlg.result(), dlg.apply_to()
+        tests = groups.get(apply_to or "video") or []
+        changed = [t for t in tests if (t.undistort or {}) != (result or {})]
+        for t in changed:
+            t.undistort = dict(result or {})
+        if not changed:
+            return 0
+        self.main.mark_dirty()
+        if self.bg.path:
+            self.bg.load(self.bg.path, self.bg.time_spin.value(), quiet=True)
+        tracked = [t for t in changed if p.has_track(t)]
+        what = "removed" if not result else "set"
+        msg = f"Lens correction {what} for {len(changed)} test{'s' if len(changed) != 1 else ''}."
+        if tracked:
+            msg += (f" {len(tracked)} of them {'were' if len(tracked) != 1 else 'was'} tracked without it: check the "
+                    "apparatus map on the corrected image, then track them again.")
+        self.main.status(msg)
+        return len(changed)
 
     def export_map_image(self, path: str | None = None, background: bool | None = None) -> str | None:
         """Save the zone map as an image (PNG / SVG / PDF by extension); background: draw it over the background
@@ -546,16 +638,21 @@ class ApparatusPage(Page):
             if app.px_per_cm:
                 extra = ""
                 if app.calibration_line and app.calibration_length_cm:
-                    extra = f"ruler on a {app.calibration_length_cm:g} cm line"
+                    extra = f"ruler on a {app.length_text(app.calibration_length_cm)} line"
                 elif app.calibration_length_cm:
-                    extra = f"template, {app.calibration_length_cm:g} cm wide"
+                    extra = f"template, {app.length_text(app.calibration_length_cm)} wide"
                 self.cal_label.setText(f"1 cm = {app.px_per_cm:.2f} px"
                                        + (f" <span style='color:{theme.MUTED}'>· {extra}</span>" if extra else ""))
                 self.ppc_spin.setValue(app.px_per_cm)
+                if app.report_unit != "cm":
+                    self.cal_label.setText(self.cal_label.text() + f" <span style='color:{theme.MUTED}'>· "
+                                           f"results in {app.report_unit}</span>")
             else:
                 self.cal_label.setText(f"<span style='color:{theme.WARNING}'>Not calibrated</span> "
                                        f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
                 self.ppc_spin.setValue(0)
+            self.unit_combo.setCurrentIndex(max(0, self.unit_combo.findData(app.distance_unit)))
+            self.unit_combo.setEnabled(bool(app.px_per_cm))
 
     # ================================================================ map
     def _rebuild_map(self, keep_selection: bool = True):
@@ -600,6 +697,8 @@ class ApparatusPage(Page):
 
     def show_context_menu(self, global_pos):
         """Right-click menu of the map (select tool)."""
+        if self.locked:
+            return
         m = QMenu(self)
         has_sel = self.view.selected_key() is not None
         for a, on in ((self.copy_act, has_sel), (self.paste_act, bool(ApparatusPage._clipboard)),
@@ -740,25 +839,42 @@ class ApparatusPage(Page):
         self.set_tool("select")
         self.main.status("Arena boundary set")
 
-    def calibrate_from_line(self, x1, y1, x2, y2, length_cm: float | None = None) -> bool:
+    def calibrate_from_line(self, x1, y1, x2, y2, length_cm: float | None = None, unit: str | None = None) -> bool:
+        """Calibrate the apparatus with a ruler line whose real length is `length_cm` (asked for, in mm, cm or m,
+        when not given). The unit chosen in the dialog (or `unit`) becomes the unit the results are reported in."""
         app = self.app
         px = math.hypot(x2 - x1, y2 - y1)
         if app is None or px < 1:
             return False
         if length_cm is None:
-            length_cm, ok = QInputDialog.getDouble(
-                self, "Calibrate", f"The line is {px:.1f} px long.\nWhat is its real length (cm)?",
-                app.calibration_length_cm or 10.0, 0.01, 1e6, 2)
-            if not ok:
+            dlg = CalibrationDialog(px, app.calibration_length_cm or 10.0, unit or self.project.distance_unit, self)
+            if dlg.exec() != QDialog.Accepted:
                 return False
+            length_cm, unit = dlg.length_cm(), dlg.unit()
         try:
             with self._edit():
                 app.calibrate(float(x1), float(y1), float(x2), float(y2), float(length_cm))
         except ValueError as e:
             QMessageBox.warning(self, "Calibrate", str(e))
             return False
+        if unit and unit != self.project.distance_unit:
+            self.set_distance_unit(unit)
         self.main.status(f"Calibrated: 1 cm = {app.px_per_cm:.2f} px")
         return True
+
+    def set_distance_unit(self, unit: str):
+        """Report distances in `unit` for every apparatus of the experiment."""
+        if self.project is None or unit == self.project.distance_unit and \
+                all(a.distance_unit == unit for a in self.project.apparatus):
+            return
+        self.project.set_distance_unit(unit)
+        self.main.mark_dirty()
+        self.refresh_info()
+        self.main.status(f"Distances are reported in {unit} (speeds in {unit}/s) for every apparatus.")
+
+    def _unit_chosen(self):
+        if not self._loading and self.unit_combo.currentData():
+            self.set_distance_unit(self.unit_combo.currentData())
 
     def set_px_per_cm(self, v: float):
         app = self.app
@@ -1089,9 +1205,9 @@ class ApparatusPage(Page):
         prefix = (name + " ") if multi and name and name != TEMPLATES[key].title and not replace else ""
         if replace and cur is not None:
             self.push_undo()
-        first = None
+        first, unit = None, self.project.distance_unit
         for i, a in enumerate(built):
-            a.frame_size = fs
+            a.frame_size, a.distance_unit = fs, unit
             a.name = prefix + a.name
             if i == 0 and replace and cur is not None:
                 self._replace(cur, a)

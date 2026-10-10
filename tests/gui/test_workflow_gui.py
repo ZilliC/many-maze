@@ -341,6 +341,45 @@ def test_experiment_behaviour_and_criteria_editor(win):
     assert exp.crit.rowCount() == 1 and exp.crit.cellWidget(0, 6).value() == 5
 
 
+def test_stage_end_rules_editor(win):
+    # minimum number of trials and acceptable variability (ANY-maze 7.30) of the selected criterion
+    p = win.project
+    exp = win.goto("ExperimentPage")
+    exp.stages.setPlainText("Training")
+    exp._add_criterion()
+    exp._add_criterion()
+    assert all(exp.crit.isColumnHidden(c) for c in range(8, 12)) and not exp.crit.isColumnHidden(7)
+    exp.crit.setCurrentCell(0, 1)
+    assert not exp.var_measure.isEnabled()  # no variability rule yet
+    exp.crit.cellWidget(0, 2).setCurrentIndex(exp.crit.cellWidget(0, 2).findData("any"))
+    exp.crit.cellWidget(0, 7).setValue(6)
+    exp.var_stat.setCurrentIndex(exp.var_stat.findData("cv"))
+    assert exp.var_measure.isEnabled() and exp.var_trials.value() == 3  # the consecutive trials by default
+    exp.var_trials.setValue(4)
+    exp.var_max.setValue(12.5)
+    exp.var_measure.setText("Total distance (cm)")
+    exp.var_measure.editingFinished.emit()
+    c = p.training_criteria[0]
+    assert c["op"] == "any" and c["min_trials"] == 6
+    assert c["variability"] == {"stat": "cv", "measure": "Total distance (cm)", "trials": 4, "max": 12.5}
+    assert p.training_criteria[1]["variability"] is None and p.training_criteria[1]["min_trials"] == 0
+    text = wf.criterion_text(c)
+    assert "any value" in text and "CV of Total distance (cm) over the last 4 trials ≤ 12.5 %" in text
+    assert "after at least 6 trials" in text
+    # the row follows the selected criterion, and both are shown again from the project
+    exp.crit.setCurrentCell(1, 1)
+    assert exp.var_stat.currentData() == "" and not exp.var_max.isEnabled()
+    exp.on_show()
+    exp.crit.setCurrentCell(0, 0)
+    assert exp.crit.cellWidget(0, 7).value() == 6 and exp.var_stat.currentData() == "cv"
+    assert exp.var_trials.value() == 4 and exp.var_max.value() == 12.5
+    exp.var_stat.setCurrentIndex(0)  # no rule
+    assert p.training_criteria[0]["variability"] is None
+    exp.crit.setCurrentCell(0, 0)
+    exp.crit.remove_current()
+    assert len(p.training_criteria) == 1 and p.training_criteria[0]["min_trials"] == 0
+
+
 # ---------------------------------------------------------------- animals page
 def test_retire_criteria_and_doses(win, monkeypatch):
     p = win.project

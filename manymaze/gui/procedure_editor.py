@@ -629,6 +629,10 @@ class ProcedureEditor(QWidget):
                                       help="optional: the occurrences must fall within this time"))
             self._line_field(st, pr.P("trials", "text", "", "Only in trials",
                                       help="optional: e.g. 1, 3-5, odd, even"))
+            self._line_field(st, pr.P("record_as", "name", "", "Record as the event",
+                                      help="optional: a name; each time this happens during a test it is noted, and "
+                                           "the results give the number of events and the latency to the first "
+                                           "(Event <name>: count, latency)"))
         elif t == "wait" and wait != "seconds":
             if wait == "event":
                 self._alternative_fields(st)

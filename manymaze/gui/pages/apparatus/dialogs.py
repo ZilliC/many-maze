@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QListWidget, QListWidgetItem, QRadioButton, QSpinBox, QVBoxLayout)
 
 from ....core import templates
-from ....core.apparatus import GRID_KINDS, Apparatus, unique_name
+from ....core.apparatus import DISTANCE_UNITS, GRID_KINDS, Apparatus, unique_name
 from ....core.templates import TEMPLATES
 from ...widgets import draw_apparatus
 from ..base import SettingsForm
@@ -279,3 +279,51 @@ class GridDialog(QDialog):
             params.update(sectors=self.sectors.value(), start_deg=self.start.value())
         return {"kind": k, "region": self.region.currentData(), "name": self.name.text().strip() or "Grid",
                 "group": self.group.isChecked(), "params": params}
+
+
+class CalibrationDialog(QDialog):
+    """The real length of the calibration ruler, in mm, cm or m (ANY-maze's ruler units); the unit chosen is also
+    the one the experiment's distances are reported in. ``length_cm()`` gives the length in centimetres, the unit
+    of the calibration."""
+
+    def __init__(self, line_px: float, length_cm: float = 10.0, unit: str = "cm", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Calibrate")
+        unit = unit if unit in DISTANCE_UNITS else "cm"
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"The line is {line_px:.1f} px long. What is its real length?"))
+        row = QHBoxLayout()
+        self.length = QDoubleSpinBox()
+        self.length.setRange(0.001, 1e6)
+        self.length.setDecimals(3)
+        self.units = QComboBox()
+        for u in DISTANCE_UNITS:
+            self.units.addItem(u, u)
+        self.units.setCurrentIndex(self.units.findData(unit))
+        self.length.setValue(length_cm * DISTANCE_UNITS[unit])
+        self._unit = unit
+        self.units.currentIndexChanged.connect(self._unit_changed)
+        row.addWidget(self.length, 1)
+        row.addWidget(self.units)
+        lay.addLayout(row)
+        note = QLabel("Distances and speeds are reported in this unit for every apparatus of the experiment; the "
+                      "distance settings stay in centimetres.")
+        note.setWordWrap(True)
+        note.setObjectName("Hint")
+        lay.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _unit_changed(self):
+        """The same length in the new unit (10 cm becomes 100 mm)."""
+        new = self.units.currentData()
+        self.length.setValue(self.length.value() / DISTANCE_UNITS[self._unit] * DISTANCE_UNITS[new])
+        self._unit = new
+
+    def unit(self) -> str:
+        return self.units.currentData()
+
+    def length_cm(self) -> float:
+        return self.length.value() / DISTANCE_UNITS[self.unit()]

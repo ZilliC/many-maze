@@ -1,5 +1,6 @@
 """Crash recovery of live tests: while a test runs, its track, events and I/O log are rewritten to a side file in
-the recordings folder; tests interrupted by a crash are rebuilt from these files when the experiment opens."""
+the recordings folder; tests interrupted by a crash are rebuilt from these files when the experiment opens. The
+side files of an experiment protected by a password are encrypted with its key (see :mod:`.security`)."""
 
 from __future__ import annotations
 
@@ -42,13 +43,17 @@ def _json_default(o):
     return str(o)
 
 
-def write(path: str, data: dict):
+def write(path: str, data: dict, key=None):
     """Atomically (write + fsync + rename) write a side file, stamped with the program writing it ("owner": host and
-    process) so that another program opening the experiment does not take a running test for a crashed one."""
+    process) so that another program opening the experiment does not take a running test for a crashed one. With
+    ``key`` (the experiment's security.ExperimentKey) the file is encrypted."""
     owner = explock.me()
     data = {**data, "owner": {"host": owner["host"], "pid": owner["pid"]}}
     with atomic_write(path) as fh:
-        json.dump(data, fh, default=_json_default)
+        if key is None:
+            json.dump(data, fh, default=_json_default)
+        else:
+            fh.write(key.encrypt(json.dumps(data, default=_json_default)))
 
 
 def owner_running(d: dict, path=None) -> bool:
@@ -66,9 +71,13 @@ def owner_running(d: dict, path=None) -> bool:
     return explock.pid_alive(owner.get("pid"))
 
 
-def read(path: str) -> dict:
+def read(path: str, password: str | None = None) -> dict:
+    """A side file (decrypted with the experiment password when it is encrypted: security.PasswordRequired
+    without it)."""
+    from .security import loads
+
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        return loads(fh.read(), password, f"The crash-recovery file {Path(path).name}")[0]
 
 
 class Autosaver:
@@ -82,8 +91,9 @@ class Autosaver:
     BACKOFF = 10.0  # at most about a tenth of the time spent writing
     MAX_INTERVAL_S = 300.0
 
-    def __init__(self, path: str, snapshot: Callable[[], dict], on_error: Callable[[str], None]):
+    def __init__(self, path: str, snapshot: Callable[[], dict], on_error: Callable[[str], None], key=None):
         self.path, self.snapshot, self.on_error = path, snapshot, on_error
+        self.key = key  # the experiment's security.ExperimentKey: the side file is encrypted (protected experiment)
         self._lock = threading.Lock()
         self._pending = False
         self._closed = False
@@ -111,7 +121,7 @@ class Autosaver:
                 self._pending = False
             t0 = time.monotonic()
             try:
-                write(self.path, self.snapshot())
+                write(self.path, self.snapshot(), self.key)
             except Exception as e:
                 self.on_error(f"Autosave failed: {e}")
             self.last_write_s = time.monotonic() - t0
@@ -150,6 +160,7 @@ class RecoveredSession(Session):
         self.d = d
         self.io_only = bool(d.get("io_only"))  # an I/O-only test (live.IOSession): no track, its own clock
         self.apparatus = None
+        self.scale = 1.0  # apparatus units per pixel, for jump removal (recover() sets the test's)
         self.fps = float(d.get("fps") or 25.0)
         self.duration_s = float(d.get("duration_s") or 0.0)
         self.settings = DetectionSettings.from_dict(d.get("settings"))
@@ -215,7 +226,8 @@ class RecoveredSession(Session):
         tr = self._track.build(self.fps)
         tr.meta["source"] = "live"
         tr.meta["recovered"] = True
-        return postprocess(tr, self.settings)
+        cal = (self.calibration or {}).get("px_per_cm")
+        return postprocess(tr, self.settings, 1.0 / float(cal) if cal else self.scale)
 
 
 def recover(project) -> list:
@@ -237,8 +249,8 @@ def recover(project) -> list:
     out = []
     for f in sorted(folder.glob(f"*{SUFFIX}")):
         try:
-            d = read(str(f))
-        except Exception:
+            d = read(str(f), getattr(project, "password", None))
+        except Exception:  # unreadable, or encrypted with a password the experiment no longer has: left alone
             continue
         if owner_running(d, f):
             continue
@@ -262,6 +274,8 @@ def recover(project) -> list:
             test = project.add_test("", animal, str(m.get("apparatus") or ""), stage=str(m.get("stage") or ""),
                                     trial=int(m.get("trial") or 1))
         rec = d.get("record_path")
+        app = project.get_apparatus(test.apparatus)
+        s.scale = app.scale if app is not None else 1.0
         try:
             ok = save_live_test(project, test, s, recorded_video(rec))
         except Exception:

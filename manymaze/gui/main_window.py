@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 from .. import APP_NAME, __version__
 from ..core.export import protocol_report
 from ..core import explock
+from ..core import security
 from ..core.project import PROJECT_FILE, Project, same_folder
 from ..core.templates import TEMPLATES
 from ..core.terminology import term
@@ -156,6 +157,7 @@ class WelcomePage(QWidget):
                               ("restore", "Restore a backup", lambda: main.restore_backup()),
                               ("archive", "Archive experiment", lambda: main.archive_experiment()),
                               ("open_archive", "Open archive", lambda: main.open_archive()),
+                              ("protect", "Protect experiment", lambda: main.protect_experiment()),
                               ("folder", "Show in folder", main.reveal_folder),
                               ("programs", "Allowed programs", lambda: main.allowed_programs_dialog()),
                               ("help", "User guide", main._open_guide), ("info", "About", main.about)):
@@ -210,7 +212,7 @@ class WelcomePage(QWidget):
             it.setFlags(Qt.NoItemFlags)
             self.recent.addItem(it)
         has = self.main.project is not None
-        for k in ("save", "save_as", "close", "folder", "import", "protocol_report", "restore", "archive"):
+        for k in ("save", "save_as", "close", "folder", "import", "protocol_report", "restore", "archive", "protect"):
             self.side_buttons[k].setEnabled(has)
 
 
@@ -490,11 +492,13 @@ class MainWindow(QMainWindow):
         act(fm, "Close experiment", self.close_project)
         fm.addSeparator()
         act(fm, "Current user…", lambda: self.choose_user())
+        act(fm, "Users and security…", lambda: self.users_dialog())
         act(fm, "Reveal experiment folder", self.reveal_folder)
         act(fm, "Protocol report…", lambda: self.protocol_report())
         act(fm, "Restore a backup…", lambda: self.restore_backup())
         act(fm, "Archive experiment…", lambda: self.archive_experiment())
         act(fm, "Open archive…", lambda: self.open_archive())
+        act(fm, "Protect experiment…", lambda: self.protect_experiment())
         act(fm, "Allowed programs…", lambda: self.allowed_programs_dialog())
         fm.addSeparator()
         act(fm, "Quit", self.close, QKeySequence.Quit)
@@ -624,15 +628,18 @@ class MainWindow(QMainWindow):
         p = self.project
         if p is not None:
             p.current_user = name
+            self._signed_in = (str(p.path), name)
             if name and name not in p.experimenters:
                 add_experimenter(p, name)
                 self.mark_dirty()
-        self._update_user_button()
+        self.security_changed()
         self.status(f"Current user: {name}" if name else "No current user")
 
     def _update_user_button(self):
         name = self.current_user()
-        self.user_btn.setText(f"User: {name}" if name else "No user")
+        p = self.project
+        admin = p is not None and bool(name) and security.security_on(p) and security.is_admin(p, name)
+        self.user_btn.setText((f"User: {name}" + (" (administrator)" if admin else "")) if name else "No user")
 
     def _fill_user_menu(self):
         m = self.user_menu
@@ -642,21 +649,26 @@ class MainWindow(QMainWindow):
         if cur and cur not in names:
             names.insert(0, cur)
         for n in names:
-            a = m.addAction(n)
+            locked = self.project is not None and security.has_password(self.project, n)
+            a = m.addAction(n + (" (password)" if locked else ""))
             a.setCheckable(True)
             a.setChecked(n == cur)
-            a.triggered.connect(lambda _=False, n=n: self.set_current_user(n))
+            a.triggered.connect(lambda _=False, n=n: self.sign_in(n))
         a = m.addAction("No user")
         a.setCheckable(True)
         a.setChecked(not cur)
         a.triggered.connect(lambda: self.set_current_user(""))
         m.addSeparator()
         m.addAction("New user…", lambda: self.choose_user(new=True))
+        pw = m.addAction("Set password…", lambda: self.set_password_dialog())
+        pw.setEnabled(bool(self.project is not None and cur))
+        m.addAction("Users and security…", lambda: self.users_dialog())
         rm = m.addAction("Remove a user from this experiment…", self._remove_user_dialog)
         rm.setEnabled(bool(self.project is not None and self.project.experimenters))
 
     def choose_user(self, new: bool = False) -> str | None:
-        """Ask for the current user (a name of the experiment's list, or a new one)."""
+        """Ask for the current user (a name of the experiment's list, or a new one); a user with a password is
+        asked for it."""
         names = list(self.project.experimenters) if self.project is not None else []
         if new or not names:
             name, ok = QInputDialog.getText(self, "Current user", "Your name (recorded with the tests you run):")
@@ -666,8 +678,105 @@ class MainWindow(QMainWindow):
                                             names.index(cur) if cur in names else 0, True)
         if not ok:
             return None
-        self.set_current_user(name)
+        if not self.sign_in(name):
+            return None
         return self.current_user()
+
+    def ask_password(self, title: str, label: str) -> str | None:
+        """A password typed by the user (None: cancelled); replaced in tests."""
+        from .security_dialog import ask_password
+
+        return ask_password(self, title, label)
+
+    def sign_in(self, name: str) -> bool:
+        """Make ``name`` the current user; a user with a password in this experiment is asked for it (three
+        tries). Returns False when the password was not given."""
+        p = self.project
+        name = " ".join(str(name or "").split())
+        if p is not None and name and security.has_password(p, name):
+            label = f"Password of {name}:"
+            for _ in range(3):
+                pw = self.ask_password("Current user", label)
+                if pw is None:
+                    return False
+                if security.verify(p, name, pw):
+                    break
+                label = f"Wrong password. Password of {name}:"
+            else:
+                self.status(f"Wrong password for {name}: the current user did not change.")
+                return False
+        self.set_current_user(name)
+        return True
+
+    def security_changed(self):
+        """The current user, the users' roles or the security settings changed: the pages lock or unlock what
+        only administrators may change."""
+        self._update_user_button()
+        self._for_pages("security_changed")
+
+    def set_password_dialog(self):
+        """The current user's password (Set password… in the user menu)."""
+        from .security_dialog import UsersDialog
+
+        if self.project is None or not self.current_user():
+            return None
+        dlg = UsersDialog(self)
+        ok = dlg.set_password(self.current_user())
+        dlg.deleteLater()
+        if ok:
+            self.status(f"Password set for {self.current_user()}.")
+        return ok
+
+    def users_dialog(self, modal: bool = True):
+        """File ▸ Users and security: users, roles, passwords and the security settings."""
+        from .security_dialog import UsersDialog
+
+        if self.project is None:
+            return None
+        dlg = UsersDialog(self)
+        if modal:
+            dlg.exec()
+            dlg.deleteLater()
+        return dlg
+
+    def protect_experiment(self, dlg=None) -> bool:
+        """File ▸ Protect experiment: set, change or remove the experiment password (project.json encrypted)."""
+        from .security_dialog import ProtectDialog
+
+        p = self.project
+        if p is None:
+            return False
+        if not security.can(p, "manage"):
+            QMessageBox.information(self, "Protect experiment", "Only an administrator can change the experiment "
+                                    "password.")
+            return False
+        if p.read_only:
+            QMessageBox.information(self, "Protect experiment", "This experiment was opened read-only.")
+            return False
+        given = dlg is not None
+        dlg = dlg or ProtectDialog(p, self)
+        if not given and dlg.exec() != QDialog.Accepted or given and dlg.problem():
+            return False
+        new = dlg.new.text()
+        p.set_experiment_password(new or None)
+        if not self.save():
+            return False
+        self.status("The experiment is protected by a password." if new else
+                    "The experiment is no longer protected by a password.")
+        return True
+
+    def with_password(self, fn, title: str, what: str):
+        """``fn(password)`` (password None first); when it needs the password of a protected experiment, ask for it
+        until it is right. Returns fn's result, or None when cancelled."""
+        password = None
+        while True:
+            try:
+                return fn(password)
+            except security.PasswordRequired as e:
+                pw = self.ask_password(title, ("Wrong password. " if e.wrong else "") + f"Password of {what}:")
+                if pw is None:
+                    return None
+                password = pw
 
     def _remove_user_dialog(self):
         p = self.project
@@ -675,11 +784,17 @@ class MainWindow(QMainWindow):
             return
         name, ok = QInputDialog.getItem(self, "Remove user", "Remove from this experiment's users (the tests keep "
                                         "their experimenter):", list(p.experimenters), 0, False)
-        if ok and remove_experimenter(p, name):
+        if not ok:
+            return
+        if security.has_password(p, name) and name != self.current_user() and not security.can(p, "manage"):
+            QMessageBox.information(self, "Remove user", f"{name} has a password: only an administrator (or {name}) "
+                                    "can remove this user.")
+            return
+        if remove_experimenter(p, name):
             if self.current_user() == name:
                 self.set_current_user("")  # also the project's: new tests must not be stamped with the removed user
             self.mark_dirty()
-            self._update_user_button()
+            self.security_changed()
 
     # ---------------------------------------------------------------- project
     def recent_projects(self) -> list[str]:
@@ -702,7 +817,18 @@ class MainWindow(QMainWindow):
         self._hold_lock()  # before the pages see it: crash recovery checks the lock
         has = project is not None
         if has:
-            project.current_user = self.current_user()
+            name = self.current_user()
+            if name and security.has_password(project, name) and \
+                    getattr(self, "_signed_in", None) != (str(project.path), name):
+                # the user remembered on this computer has a password in this experiment: ask for it
+                label = f"“{project.name}”: password of {name} (cancel to continue without a user):"
+                pw = self.ask_password("Current user", label)
+                if pw is None or not security.verify(project, name, pw):
+                    name = ""
+                    self.settings.setValue("current_user", "")
+                    self.status("No current user (the password was not given).")
+            project.current_user = name
+            self._signed_in = (str(project.path), name)
             if project.current_user:
                 add_experimenter(project, project.current_user)
         self._update_user_button()
@@ -929,12 +1055,16 @@ class MainWindow(QMainWindow):
             if QMessageBox.question(self, APP_NAME, f"{path} already exists. Open it instead?") == QMessageBox.Yes:
                 self.load_project(str(path), confirmed=True)
             return
-        p = Project(name=dlg.name.text().strip() or "Experiment", protocol=dlg.protocol.currentData(),
-                    test_duration_s=dlg.duration.value())
+        p = Project(name=dlg.name.text().strip() or "Experiment", test_duration_s=dlg.duration.value())
+        p.set_protocol(dlg.protocol.currentData())
         base = dlg.based_on.text().strip()
         if base:
             try:
-                copy_protocol(Project.load(base), p, treatments=dlg.copy_treatments.isChecked())
+                src = self.with_password(lambda pw: Project.load(base, password=pw), "Copy protocol",
+                                         f"“{Project.project_dir(base).stem}”")
+                if src is None:
+                    return
+                copy_protocol(src, p, treatments=dlg.copy_treatments.isChecked())
             except Exception as e:
                 error_box(self, "Copy protocol", e)
                 return
@@ -973,10 +1103,13 @@ class MainWindow(QMainWindow):
         """``confirmed``: the caller already ran maybe_save() (don't ask a second time)."""
         if self.project is not None and not confirmed and not self.maybe_save():
             return
-        try:
-            p = Project.load(path)
+        try:  # an experiment protected by a password asks for it
+            p = self.with_password(lambda pw: Project.load(path, password=pw), "Open experiment",
+                                   f"“{Project.project_dir(path).stem}”")
         except Exception as e:
             error_box(self, "Open experiment", e)
+            return
+        if p is None:
             return
         other = explock.held_by_other(p.path)
         if other is not None:
@@ -1251,8 +1384,11 @@ class MainWindow(QMainWindow):
             if not ok:
                 return None
             backup = str(backups[labels.index(item)])
-        try:
-            restored = p.restore_backup(backup)
+        try:  # a backup encrypted with an earlier experiment password asks for it
+            restored = self.with_password(lambda pw: p.restore_backup(backup, password=pw), "Restore a backup",
+                                          f"the backup {Path(backup).name}")
+            if restored is None:
+                return None
             restored.save()
         except Exception as e:
             error_box(self, "Restore a backup", e)

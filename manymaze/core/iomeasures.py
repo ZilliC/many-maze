@@ -14,6 +14,8 @@ import math
 
 import numpy as np
 
+from .ioconfig import DECIBEL_SENSORS
+
 log = logging.getLogger(__name__)
 
 _STR_VALUES = {"on": 1.0, "true": 1.0, "yes": 1.0, "high": 1.0, "off": 0.0, "false": 0.0, "no": 0.0, "low": 0.0}
@@ -22,6 +24,7 @@ ENCODER_TURN_GAP_S = 1.0  # an encoder is turning between two samples that diffe
 ENCODER_REVERSAL_DEG = 0.0  # turning back by more than this is a reversal (ANY-maze: any pulse the other way)
 ENCODER_IRV_WINDOW_S = 0.2  # instantaneous RPM (as ANY-maze): counts turned over windows of at least this length…
 ENCODER_IRV_AVERAGE = 10  # … averaged over this many windows
+MOVEMENT_TIMEOUT_S = 1.0  # a movement detector's time-out (beam arrays; the channel option timeout_s)
 DEVICE_GROUPS = {"shocker": "Shocker", "speaker": "Speaker", "light": "Light", "dipper": "Dipper",
                  "dripper": "Dripper"}
 # derived channels "<channel>.<suffix>" reported by drivers / controllers / the engine; their measures are part of
@@ -79,7 +82,7 @@ class _Log:
             key = (e.get("kind", "input"), str(e.get("device", "")), str(e.get("channel", "")))
             self.series.setdefault(key, []).append((t, v))
             self.types.setdefault(key, set()).add(e.get("type") or "")
-        io = [k for k in self.series if k[0] != "variable"]
+        io = [k for k in self.series if k[0] not in ("variable", "event")]
         names = [k[2] for k in io]
         self.dup = {n for n in names if names.count(n) > 1 and len({k[1] for k in io if k[2] == n}) > 1}
 
@@ -91,10 +94,10 @@ class _Log:
 
     def kind(self, key) -> str:
         """encoder | analog | sensor | pir | input | weight | output | switch | odour | pump | thermostat | variable |
-        derived."""
+        event | derived."""
         kind, ty, ck = key[0], self.types[key], self.conf(key).get("kind")
-        if kind == "variable":
-            return "variable"
+        if kind in ("variable", "event"):
+            return kind
         if "." in key[2] and key[2].rsplit(".", 1)[1] in DERIVED:
             return "derived"
         for special in ("odour", "pump", "thermostat", "weight", "sensor", "pir"):
@@ -207,9 +210,10 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
                 settings=None, test_end: float | None = None, whole: bool | None = None) -> dict:
     """ANY-maze-style measures from a test's I/O log (``Test.io_events``).
 
-    io_events: [{"t", "device", "channel", "kind": "input"|"output"|"variable", "value", "type"?}] where the optional
-    "type" is "digital", "analog", "encoder", "pwm", "pulse", "train", "pellet", "shock", "light", "sync", "audio",
-    "switch" (virtual switch), "stimulus" (touch screen) or "variable" (a procedure variable's recorded value).
+    io_events: [{"t", "device", "channel", "kind": "input"|"output"|"variable"|"event", "value", "type"?}] where the
+    optional "type" is "digital", "analog", "encoder", "pwm", "pulse", "train", "pellet", "shock", "light", "sync",
+    "audio", "switch" (virtual switch), "stimulus" (touch screen) or "variable" (a procedure variable's recorded
+    value); kind "event": a procedure event recorded as an event measure (channel: its name).
     duration: test duration (s); t_range: optional (t0, t1) restricting the measures to a time period.
     devices: optional ``Project.io_devices`` (encoder counts_per_rev / cm_per_rev, channel kinds, ``role``).
     settings: optional AnalysisSettings (latency_if_never, io_baseline_s, io_deviation_sd, opad_*).
@@ -233,6 +237,12 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
         lab = log.label(key)
         if kind == "variable":
             _variable(res, key[2], ev, t0, t1, end, t_range is None if whole is None else whole)
+        elif kind == "event":
+            # ANY-maze's event measures (21.1 / 21.2): the times the event happened in the period and the latency to
+            # the first - undefined when it never happened (the latency option does not apply)
+            ts = [t for t, _v in ev if _within(t, t0, t1, end)]
+            res[f"Event {key[2]}: count"] = len(ts)
+            res[f"Event {key[2]}: latency (s)"] = _r(ts[0] - t0 if ts else math.nan)
         elif kind == "derived":
             continue
         elif kind in _SPECIAL:
@@ -259,6 +269,8 @@ def io_measures(io_events: list, duration: float, t_range: tuple | None = None, 
         else:
             _output(res, log, key, lab, ev, t0, t1, T, never)
     _index_reversals(res, log, t0, t1)
+    _rapc(res, log, t0, t1)
+    _movement_detectors(res, log, t0, t1, T, never)
     _opad(res, log, t0, t1, settings)
     return res
 
@@ -289,6 +301,86 @@ def _index_reversals(res, log, t0, t1):
         last = i
     res["On/off inputs: positive reversals"] = pos
     res["On/off inputs: negative reversals"] = neg
+
+
+def _rapc(res, log, t0, t1):
+    """ANY-maze's RAPC door measures (2.54-2.56), from 12 on/off inputs with the indices 1-12: the doors, 1-3 from
+    the first chamber, 4-6 from the second, 7-9 from the third and 10-12 from the fourth. A latched door still
+    registers an opening when the animal pushes it, and the last door opened in each chamber is its unlatched door.
+    Type 1 errors: openings of latched doors; type 2 errors: openings of an unlatched door before the last one (the
+    animal opened it without going through); door sequence: the unlatched door of each chamber, 1-3 ("1321"; "-"
+    for a chamber with no door opened). Errors count the openings in the period; the doors are those of the test."""
+    door = {}  # the inputs of the devices' configuration (a door never opened has nothing in the log)
+    for (dev, ch), c in log.cfg.items():
+        if c.get("kind", "input") == "input" and c.get("index") not in (None, ""):
+            try:
+                door.setdefault(float(c["index"]), ("input", str(dev), str(ch)))  # the first input of each index
+            except (TypeError, ValueError):
+                pass
+    if not all(float(i) in door for i in range(1, 13)):
+        return
+    opened = {i: _digital(log.series.get(door[float(i)], []), -math.inf, math.inf)[1] for i in range(1, 13)}
+    t1e = t2e = 0
+    seq = ""
+    for c in range(4):
+        doors = (3 * c + 1, 3 * c + 2, 3 * c + 3)
+        last = max(((t, d) for d in doors for t in opened[d]), default=None)
+        if last is None:
+            seq += "-"
+            continue
+        seq += str(doors.index(last[1]) + 1)
+        for d in doors:
+            n = sum(1 for t in opened[d] if _within(t, t0, t1, log.end) and (d != last[1] or t < last[0]))
+            if d == last[1]:
+                t2e += n
+            else:
+                t1e += n
+    res["RAPC: type 1 errors"] = t1e
+    res["RAPC: type 2 errors"] = t2e
+    res["RAPC: door sequence"] = seq
+
+
+def _movement_detectors(res, log, t0, t1, T, never):
+    """ANY-maze's movement detectors (11.x): the beams of a photobeam array are digital inputs given the option
+    detector=<name>. As ANY-maze, a beam broken again before another beam is not counted (an animal grooming in one
+    place keeps breaking the same beam); each counted break starts or extends a bout of movement that lasts the
+    detector's time-out (option timeout_s, default MOVEMENT_TIMEOUT_S) after it; beams already broken when the test
+    starts are not breaks. Measures as a PIR's ("Movement detector <name>: movements", …)."""
+    beams: dict[str, list] = {}
+    for key in log.series:
+        name = str(log.conf(key).get("detector", "") or "").strip()
+        if name and key[0] == "input" and log.kind(key) in ("input", "pir"):
+            beams.setdefault(name, []).append(key)
+    for name, keys in sorted(beams.items()):
+        timeout = MOVEMENT_TIMEOUT_S
+        for k in keys:
+            try:
+                timeout = float(log.conf(k).get("timeout_s", "") or timeout)
+                break
+            except (TypeError, ValueError):
+                pass
+        breaks = sorted((t, i) for i, k in enumerate(keys) for t in _digital(log.series[k], -math.inf, math.inf)[1]
+                        if t > 0)
+        counted, last = [], None
+        for t, i in breaks:
+            if i != last:
+                counted.append(t)
+            last = i
+        bouts = []  # [start, end] of each bout of movement
+        for t in counted:
+            if bouts and t <= bouts[-1][1]:
+                bouts[-1][1] = t + timeout
+            else:
+                bouts.append([t, t + timeout])
+        stop = min(t1, log.end) if log.end is not None else t1
+        lens = [min(b, stop) - max(a, t0) for a, b in bouts if min(b, stop) > max(a, t0)]
+        inside = [t for t in counted if _within(t, t0, t1, log.end)]
+        g = f"Movement detector {name}"
+        res[f"{g}: movements"] = len(inside)
+        res[f"{g}: time moving (s)"] = _r(sum(lens))
+        res[f"{g}: time not moving (s)"] = _r(max(0.0, T - sum(lens)))
+        res[f"{g}: latency to first movement (s)"] = _r(inside[0] - t0 if inside else never)
+        res[f"{g}: mean movement (s)"] = _r(sum(lens) / len(lens) if lens else 0.0)
 
 
 def _output(res, log, key, lab, ev, t0, t1, T, never):
@@ -386,6 +478,9 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
     res[f"{g}: change"] = _r(last - first)
     if c.get("sensor") == "weight":  # food / liquid intake: what the container lost
         res[f"{g}: intake"] = _r(max(0.0, first - last) if vals else math.nan)
+    if c.get("sensor") in DECIBEL_SENSORS:  # a level in dB: the mean of the sound energy, not of the decibels
+        res[f"{g}: equivalent level (Leq)"] = _r(10 * math.log10(sum(10 ** (v / 10) for v in smp) / len(smp))
+                                                 if smp else math.nan)
     oor = log.derived(key, "out_of_range")
     if oor or c.get("alert_min") not in (None, "") or c.get("alert_max") not in (None, ""):
         spans, onsets, _, _ = _digital(oor, t0, t1, log.end)
@@ -393,9 +488,8 @@ def _sensor(res, log, key, lab, ev, t0, t1, T, never):
         res[f"{g}: times out of range"] = len(onsets)
 
 
-def _pump(res, log, key, lab, ev, t0, t1, T, never):
-    """A syringe pump: the commands (infuse / withdraw at a rate, up to a volume) and, when the pump reports them,
-    the volumes it delivered; without reports the volumes are computed from the rates and times."""
+def _pump_runs(log, key) -> tuple[list, list]:
+    """A syringe pump's commands [(t, event)] and runs [(start, end, direction, rate in ml/min, volume target)]."""
     cmds = sorted(((float(e["t"]), e) for e in log.events
                    if e.get("type") == "pump" and str(e.get("device")) == key[1] and str(e.get("channel")) == key[2]),
                   key=lambda te: te[0])  # stable: same-time commands keep their logged order
@@ -409,6 +503,13 @@ def _pump(res, log, key, lab, ev, t0, t1, T, never):
             cur = (t, e.get("direction", "infuse"), float(e.get("rate", 0) or 0), float(e.get("volume", 0) or 0))
     if cur is not None:
         runs.append((cur[0], math.inf, *cur[1:]))
+    return cmds, runs
+
+
+def _pump(res, log, key, lab, ev, t0, t1, T, never):
+    """A syringe pump: the commands (infuse / withdraw at a rate, up to a volume) and, when the pump reports them,
+    the volumes it delivered; without reports the volumes are computed from the rates and times."""
+    cmds, runs = _pump_runs(log, key)
     g = f"Pump {lab}"
     for direction, word in (("infuse", "infused"), ("withdraw", "withdrawn")):
         rep = log.derived(key, f"{word}_ml")
@@ -512,24 +613,13 @@ def _encoder(res, lab, ev, c, t0, t1, T):
     res[f"{lab}: encoder counts"] = _r(counts, 0)
     bins = np.zeros(max(1, int(math.ceil(T))))
     prev = start
-    t_prev = max((t for t, _ in ev if t <= t0), default=-math.inf)
-    # turning: between two samples that differ and are at most ENCODER_TURN_GAP_S apart; a change after a longer
-    # still spell counts from one typical sample interval before it
-    gaps = np.diff([t for t, _ in ev])
-    gaps = gaps[(gaps > 0) & (gaps <= ENCODER_TURN_GAP_S)]
-    typical = float(np.median(gaps)) if len(gaps) else ENCODER_TURN_GAP_S
-    turning = []  # intervals during which the encoder turned
+    turning = _encoder_turning(ev, t0, t1)  # intervals during which the encoder turned
     deltas = []
     for t, v in inside:
         bins[min(len(bins) - 1, int(t - t0))] += abs(v - prev)
         if v != prev:
             deltas.append(v - prev)
-            ta = max(t0, t_prev if t - t_prev <= ENCODER_TURN_GAP_S else t - typical)
-            if turning and ta <= turning[-1][1]:
-                turning[-1][1] = t
-            else:
-                turning.append([ta, t])
-        prev, t_prev = v, t
+        prev = v
     res[f"{lab}: max rate (counts/s)"] = _r(bins.max() if len(bins) else 0)
     t_turn = sum(b - a for a, b in turning)
     res[f"{lab}: time turning (s)"] = _r(t_turn)
@@ -578,14 +668,38 @@ def _encoder(res, lab, ev, c, t0, t1, T):
                                                              else math.nan)
 
 
-def _encoder_runs(deltas, cpr: float) -> tuple[list, list, int]:
+def _encoder_turning(ev, t0, t1) -> list[list[float]]:
+    """The intervals [a, b] of the period [t0, t1] during which an encoder turned: between two samples that differ
+    and are at most ENCODER_TURN_GAP_S apart; a change after a longer still spell counts from one typical sample
+    interval before it."""
+    before = [(t, v) for t, v in ev if t <= t0]
+    prev = before[-1][1] if before else 0.0
+    t_prev = before[-1][0] if before else -math.inf
+    gaps = np.diff([t for t, _ in ev])
+    gaps = gaps[(gaps > 0) & (gaps <= ENCODER_TURN_GAP_S)]
+    typical = float(np.median(gaps)) if len(gaps) else ENCODER_TURN_GAP_S
+    turning = []
+    for t, v in ev:
+        if not t0 < t <= t1:
+            continue
+        if v != prev:
+            ta = max(t0, t_prev if t - t_prev <= ENCODER_TURN_GAP_S else t - typical)
+            if turning and ta <= turning[-1][1]:
+                turning[-1][1] = t
+            else:
+                turning.append([ta, t])
+        prev, t_prev = v, t
+    return turning
+
+
+def _encoder_runs(deltas, cpr: float, at: list | None = None) -> tuple[list, list, int]:
     """Runs of an encoder in one direction: (counts turned in each clockwise run, in each anticlockwise run, number
     of reversals). The direction changes after turning back by more than ENCODER_REVERSAL_DEG (any change without a
-    counts per revolution)."""
+    counts per revolution). at: optional list receiving the index in deltas of each reversal."""
     hyst = cpr * ENCODER_REVERSAL_DEG / 360 if cpr > 0 else 0.0
     runs_cw, runs_acw = [], []
     pos, ref, ext, direction, reversals = 0.0, 0.0, 0.0, 0, 0
-    for dv in deltas:
+    for k, dv in enumerate(deltas):
         pos += dv
         if direction >= 0 and pos > ext:
             ext = pos
@@ -599,6 +713,10 @@ def _encoder_runs(deltas, cpr: float) -> tuple[list, list, int]:
         elif direction < 0 and pos - ext > hyst:
             runs_acw.append(ref - ext)
             ref, ext, direction, reversals = ext, pos, 1, reversals + 1
+        else:
+            continue
+        if at is not None:
+            at.append(k)
     if direction > 0:
         runs_cw.append(ext - ref)
     elif direction < 0:
@@ -638,12 +756,33 @@ def _encoder_irv(ev, t0, t1, cpr: float) -> list[tuple[float, float]]:
     return out
 
 
+def _analog_samples(ev, t0, t1, end=None) -> tuple[list, list]:
+    """An analogue signal in the period [t0, t1]: its sample-and-hold segments [(ta, tb, value)] and its samples
+    [(t, value)] (none in the period: the value held from before it)."""
+    seg = _steps(ev, t0, t1)
+    smp = [(t, v) for t, v in ev if _within(t, t0, t1, end) and math.isfinite(v)] or [(a, v) for a, _, v in seg[:1]]
+    return seg, smp
+
+
+def _analog_baseline(smp, t0, t1, settings) -> tuple[float, float, float] | None:
+    """(baseline, its SD, end of the baseline period) of an analogue signal's samples in the period [t0, t1]: the
+    average of the samples in its first io_baseline_s seconds; None when off or without a sample there."""
+    base_s = float(_setting(settings, "io_baseline_s", 10.0))
+    if base_s <= 0:
+        return None
+    tb = min(t1, t0 + base_s)
+    bvals = [v for t, v in smp if t < tb]  # the samples in the baseline period
+    if not bvals:
+        return None
+    base = sum(bvals) / len(bvals)
+    return base, math.sqrt(sum((v - base) ** 2 for v in bvals) / len(bvals)), tb
+
+
 def _analog(res, lab, ev, t0, t1, settings, end=None):
     """Analogue signal: mean, min, max and their times, baseline and deviations from it. As ANY-maze, the mean,
     min, max and baseline are over the samples (their simple average); a period without a sample has the value
     held from before it."""
-    seg = _steps(ev, t0, t1)
-    smp = [(t, v) for t, v in ev if _within(t, t0, t1, end) and math.isfinite(v)] or [(a, v) for a, _, v in seg[:1]]
+    seg, smp = _analog_samples(ev, t0, t1, end)
     vals = [v for _, v in smp]
     res[f"{lab}: mean"] = _r(sum(vals) / len(vals) if vals else math.nan)
     res[f"{lab}: min"] = _r(min(vals) if vals else math.nan)
@@ -652,16 +791,11 @@ def _analog(res, lab, ev, t0, t1, settings, end=None):
         return
     res[f"{lab}: time of max (s)"] = _r(next(t for t, v in smp if v == max(vals)) - t0)
     res[f"{lab}: time of min (s)"] = _r(next(t for t, v in smp if v == min(vals)) - t0)
-    base_s = float(_setting(settings, "io_baseline_s", 10.0))
     k_sd = float(_setting(settings, "io_deviation_sd", 2.0))
-    if base_s <= 0:
+    bl = _analog_baseline(smp, t0, t1, settings)
+    if bl is None:
         return
-    tb = min(t1, t0 + base_s)
-    bvals = [v for t, v in smp if t < tb]  # the samples in the baseline period
-    if not bvals:
-        return
-    base = sum(bvals) / len(bvals)
-    sd = math.sqrt(sum((v - base) ** 2 for v in bvals) / len(bvals))
+    base, sd, tb = bl
     res[f"{lab}: baseline"] = _r(base)
     res[f"{lab}: baseline SD"] = _r(sd)
     res[f"{lab}: end of baseline (s)"] = _r(tb - t0)
@@ -728,15 +862,19 @@ def parse_numbers(text: str) -> list[float]:
 
 def io_track_measures(io_events: list, t: np.ndarray, dur: np.ndarray, step: np.ndarray, t_range: tuple,
                       unit: str = "cm", visits: dict | None = None, devices: list | None = None,
-                      latency_if_never: str = "duration", zones: dict | None = None) -> dict:
+                      latency_if_never: str = "duration", zones: dict | None = None, settings=None,
+                      investigating: dict | None = None) -> dict:
     """I/O measures that need the track, for frames t (durations dur, distance travelled into each frame step) of a
     period t_range = (t0, t1):
 
     * virtual switches — distance travelled before the first activation and while the switch is on;
     * analogue inputs, per zone (visits: {zone: [(start, end) frame indices of each entry in the period]}) — mean of
       the maximum and minimum of each visit and of the time from the entry to them, mean value at entry and exit;
-    * inputs, outputs (shockers, speakers, lights, lasers, pellet dispensers…), virtual switches and rotary
-      encoders, per zone (zones: {zone: per-frame bool, in the zone in the period}) — see _zone_device.
+    * inputs, outputs (shockers, speakers, lights, lasers, pellet dispensers…), virtual switches, rotary encoders,
+      analogue signals, sensors, result variables and syringe pumps, per zone (zones: {zone: per-frame bool, in the
+      zone in the period}) — see _zone_device. investigating: {investigation zone: per-frame bool, the animal
+      investigates it}: as ANY-maze, virtual switches use it instead of being in the zone. settings: the
+      AnalysisSettings (analogue baseline).
     """
     res: dict[str, object] = {}
     n = len(t)
@@ -788,20 +926,26 @@ def io_track_measures(io_events: list, t: np.ndarray, dur: np.ndarray, step: np.
                 res[f"{g}: mean time to min (s)"] = _r(np.mean(tmn))
                 res[f"{g}: mean at entry"] = _r(np.mean(ent))
                 res[f"{g}: mean at exit"] = _r(np.mean(ext))
-        if zones and kind in ("input", "output", "switch", "encoder", "analog", "sensor", "variable"):
-            _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never, step, unit)
+        if zones and kind in ("input", "output", "switch", "encoder", "analog", "sensor", "variable", "pump"):
+            zz = {**zones, **{zn: m for zn, m in (investigating or {}).items() if zn in zones}} if kind == "switch" \
+                else zones
+            _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zz, latency_if_never, step, unit, settings)
     return res
 
 
-def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never, step=None, unit="cm"):
+def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_if_never, step=None, unit="cm",
+                 settings=None):
     """A device's activity per zone, as ANY-maze: the activations that start while the animal is in the zone
     (their count, latency, and their rate per minute spent in the zone), the latency to the first deactivation
     in the zone, the time the channel is on while the animal is in the zone and the longest / shortest stretch
     of it; pellets dispensed in the zone and the latency to the first; the distance travelled in the zone while a
-    virtual switch is on; for a rotary encoder the counts turned while the animal is in the zone and, with counts
-    per revolution, the degrees each way, the rotations made entirely in it, the distance (wheels) and the maximum
-    RPM in it. Measures are named "<channel> in <zone>: …" (groups as in io_measures: "Shocker <channel> in
-    <zone>: shocks", …)."""
+    virtual switch is on; for a rotary encoder (8.x) the counts turned while the animal is in the zone, the time
+    turning and the reversals in it and, with counts per revolution, the degrees each way, the rotations, half and
+    quarter rotations made entirely in it, the distance (wheels) and the maximum, minimum and mean RPM in it; for an
+    analogue signal (9.x) the mean, max and min of the samples taken in the zone, the times of the max and min and
+    the integrals above / below the period's baseline over the time in the zone; for a syringe pump (17.x) the
+    volumes infused / withdrawn while the animal was in the zone. Measures are named "<channel> in <zone>: …"
+    (groups as in io_measures: "Shocker <channel> in <zone>: shocks", "Pump <channel> in <zone>: …")."""
     t0, t1 = float(t_range[0]), float(t_range[1])
     T = max(0.0, t1 - t0)
     never = T if latency_if_never == "duration" else math.nan
@@ -812,11 +956,16 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
         j = int(np.searchsorted(t, x, "right")) - 1
         return j if 0 <= j < n and t0 <= x <= t1 else -1
 
+    if kind == "pump":
+        _zone_pump(res, log, key, lab, t, dur, zones, frame)
+        return
     if kind in ("analog", "sensor", "variable"):
         # the values recorded while the animal was in the zone (ANY-maze 9.1-9.3, 10.2-10.4, 20.2-20.7)
+        integrals = _zone_integrals(ev, t, dur, t0, t1, settings) if kind == "analog" else None
         for zn, m in zones.items():
-            vz = [v for x, v in ev if (f := frame(x)) >= 0 and m[f] and math.isfinite(v)
+            tz = [(x, v) for x, v in ev if (f := frame(x)) >= 0 and m[f] and math.isfinite(v)
                   and (kind != "variable" or x < t1)]
+            vz = [v for _, v in tz]
             if kind == "variable":
                 g = f"Variable: {key[2]} in {zn}"
                 res[f"{g} (count)"] = len(vz)
@@ -830,6 +979,14 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
             res[f"{g}: mean"] = _r(sum(vz) / len(vz) if vz else math.nan)
             res[f"{g}: max"] = _r(max(vz) if vz else math.nan)
             res[f"{g}: min"] = _r(min(vz) if vz else math.nan)
+            if kind == "analog":
+                # 9.4 / 9.5 in zones: the time (from the start of the period) of the max / min sample in the zone
+                res[f"{g}: time of max (s)"] = _r(next(x for x, v in tz if v == max(vz)) - t0 if vz else math.nan)
+                res[f"{g}: time of min (s)"] = _r(next(x for x, v in tz if v == min(vz)) - t0 if vz else math.nan)
+                if integrals is not None:  # 9.14 / 9.15 in zones
+                    above, below = integrals(m)
+                    res[f"{g}: integral above baseline"] = _r(above)
+                    res[f"{g}: integral below baseline"] = _r(below)
         return
     if kind == "encoder":
         cpr = float(log.conf(key).get("counts_per_rev", 0) or 0)
@@ -841,30 +998,57 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
                 moved.append((frame(x), v - prev))
             prev = v
         irv = [(frame(x), v) for x, v in _encoder_irv(ev, t0, t1, cpr)] if cpr > 0 else []
+        rev_at = []  # the changes that turn the encoder back (reversals)
+        _encoder_runs([d for _, d in moved], cpr, rev_at)
+        f_turn = _frame_overlap(t, dur, _encoder_turning(ev, t0, t1))  # time turning during each frame
+        half, quarter = max(1, int(cpr) // 2), max(1, int(cpr) // 4)
         for zn, m in zones.items():
             inz = [j >= 0 and bool(m[j]) for j, _ in moved]
-            res[f"{lab} in {zn}: encoder counts"] = _r(sum(abs(d) for (_, d), i in zip(moved, inz) if i), 0)
+            counts = sum(abs(d) for (_, d), i in zip(moved, inz) if i)
+            res[f"{lab} in {zn}: encoder counts"] = _r(counts, 0)
+            t_turn, tz = float(f_turn[m].sum()), float(dur[m].sum())
             if cpr > 0:
                 res[f"{lab} in {zn}: degrees clockwise"] = _r(sum(d for (_, d), i in zip(moved, inz) if i and d > 0)
                                                              * 360 / cpr, 1)
                 res[f"{lab} in {zn}: degrees anticlockwise"] = _r(-sum(d for (_, d), i in zip(moved, inz)
                                                                        if i and d < 0) * 360 / cpr, 1)
-                # a rotation counts in the zone when the animal was in it for the whole rotation: the runs are found
-                # in each stretch of changes made while it was in the zone
-                n_rot, seg = 0, []
+                # a rotation (half, quarter rotation) counts in the zone when the animal was in it for the whole
+                # rotation: the runs are found in each stretch of changes made while it was in the zone
+                n_cw = n_acw = n_half = n_quarter = 0
+                seg = []
                 for (_, d), i in zip(moved + [(-1, 0.0)], inz + [False]):
                     if i:
                         seg.append(d)
                     elif seg:
                         r_cw, r_acw, _ = _encoder_runs(seg, cpr)
-                        n_rot += int(sum(math.floor(x / cpr + 1e-9) for x in r_cw + r_acw))
+                        n_cw += int(sum(math.floor(x / cpr + 1e-9) for x in r_cw))
+                        n_acw += int(sum(math.floor(x / cpr + 1e-9) for x in r_acw))
+                        n_half += int(sum(math.floor(x / half + 1e-9) for x in r_cw + r_acw))
+                        n_quarter += int(sum(math.floor(x / quarter + 1e-9) for x in r_cw + r_acw))
                         seg = []
+                n_rot = n_cw + n_acw
                 res[f"{lab} in {zn}: total rotations"] = n_rot
                 cm = float(log.conf(key).get("cm_per_rev", 0) or 0)
                 if cm > 0:
                     res[f"{lab} in {zn}: distance (cm)"] = _r(n_rot * cm, 2)
                 vz = [v for j, v in irv if j >= 0 and m[j]]
                 res[f"{lab} in {zn}: max rate (rev/min)"] = _r(max(vz) if vz else 0.0)
+            # 8.2 / 8.6 in zones: the time the encoder turned while the animal was in the zone; a reversal counts in
+            # the zone the animal is in when the encoder turns back
+            res[f"{lab} in {zn}: time turning (s)"] = _r(t_turn)
+            res[f"{lab} in {zn}: reversals"] = sum(1 for k in rev_at if inz[k])
+            if cpr > 0:
+                res[f"{lab} in {zn}: clockwise rotations"] = n_cw
+                res[f"{lab} in {zn}: anticlockwise rotations"] = n_acw
+                res[f"{lab} in {zn}: half rotations"] = n_half
+                res[f"{lab} in {zn}: quarter rotations"] = n_quarter
+                # 8.12-8.14 in zones, as the whole test's: the lowest instantaneous RPM in the zone (0 if the encoder
+                # stopped while the animal was in it), the revolutions turned in the zone / the time in it (/ the
+                # time turning in it)
+                res[f"{lab} in {zn}: min rate (rev/min)"] = _r(0.0 if t_turn < tz - 1e-6 or not vz else min(vz))
+                res[f"{lab} in {zn}: mean rate (rev/min)"] = _r(counts / cpr / (tz / 60) if tz > 0 else math.nan)
+                res[f"{lab} in {zn}: mean rate while turning (rev/min)"] = _r(counts / cpr / (t_turn / 60)
+                                                                             if t_turn > 0 else math.nan)
         return
     if kind == "input":
         g, n_name, what = lab, "activations", "activation"
@@ -895,6 +1079,68 @@ def _zone_device(res, log, key, lab, kind, ev, t, dur, t_range, zones, latency_i
             res[f"{p}: latency to first pellet (s)"] = _r(zo[0] - t0 if zo else never)
         if kind == "switch" and step is not None:
             res[f"{p}: distance while active ({unit})"] = _r(step[on & m].sum(), 2)
+
+
+def _frame_overlap(t: np.ndarray, dur: np.ndarray, spans) -> np.ndarray:
+    """Per frame [t, t + dur): the time it overlaps the intervals spans [(a, b)] (b may be inf)."""
+    out = np.zeros(len(t))
+    end = t + dur
+    for a, b in spans:
+        i, j = int(np.searchsorted(end, a, "right")), int(np.searchsorted(t, b, "left"))
+        if j > i:
+            out[i:j] += np.clip(np.minimum(end[i:j], b) - np.maximum(t[i:j], a), 0.0, None)
+    return out
+
+
+def _zone_integrals(ev, t, dur, t0, t1, settings):
+    """For an analogue signal in the period [t0, t1]: a function of a zone's frames (per-frame bool) giving the
+    integrals above and below the period's baseline (as io_measures: the held values × time after the baseline
+    period) over the time in the zone; None without a baseline."""
+    seg, smp = _analog_samples(ev, t0, t1)
+    bl = _analog_baseline(smp, t0, t1, settings)
+    after = [(max(a, bl[2]), b, v) for a, b, v in seg if b > bl[2]] if bl is not None else []
+    if not after:
+        return None
+    base = bl[0]
+    a, b, v = (np.array(x, float) for x in zip(*after))
+    rates = (np.maximum(v - base, 0.0), np.maximum(base - v, 0.0))
+    cums = [np.concatenate([[0.0], np.cumsum((b - a) * r)]) for r in rates]
+
+    def F(x, k):  # the integral from the end of the baseline period to the times x
+        i = np.clip(np.searchsorted(a, x, "right") - 1, 0, len(a) - 1)
+        return np.where(x <= a[0], 0.0, cums[k][i] + np.clip(x - a[i], 0.0, b[i] - a[i]) * rates[k][i])
+
+    def integrals(m):
+        r = _runs(m)
+        if not r:
+            return 0.0, 0.0
+        lo = np.array([t[i] for i, _ in r])
+        hi = np.array([t[j - 1] + dur[j - 1] for _, j in r])
+        return tuple(float((F(hi, k) - F(lo, k)).sum()) for k in (0, 1))
+    return integrals
+
+
+def _zone_pump(res, log, key, lab, t, dur, zones, frame):
+    """Syringe pump per zone (ANY-maze 17.1 / 17.2 in zones): the volumes infused and withdrawn while the animal was
+    in the zone - from the pump's counters when it reports them (each increase in the frame of the report), else
+    from the rates over the time it ran."""
+    cmds, runs = _pump_runs(log, key)
+    for direction, word in (("infuse", "infused"), ("withdraw", "withdrawn")):
+        vol = np.zeros(len(t))
+        rep = log.derived(key, f"{word}_ml")
+        if rep:
+            base = [(x, 0, float(e[f"{word}_ml"])) for x, e in cmds if e.get(f"{word}_ml") is not None]
+            pts = [(x, v) for x, _o, v in sorted(base + [(x, 1, v) for x, v in rep])]
+            for (_xa, va), (xb, vb) in zip(pts, pts[1:]):
+                if vb > va and (f := frame(xb)) >= 0:
+                    vol[f] += vb - va
+        else:
+            for a, b, d, rate, target in runs:
+                if d == direction and rate > 0:
+                    end = min(b, a + target / rate * 60.0) if target > 0 else b
+                    vol += rate / 60.0 * _frame_overlap(t, dur, [(a, end)])
+        for zn, m in zones.items():
+            res[f"Pump {lab} in {zn}: volume {word} (ml)"] = _r(float(vol[m].sum()), 4)
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:

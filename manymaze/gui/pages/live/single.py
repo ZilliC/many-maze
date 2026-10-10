@@ -12,22 +12,24 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
 
 from ....core import autosave, diskspace
-from ....core.camera import CameraView, SourceReader, SourceSpec, camera_settings, set_camera_settings
+from ....core.camera import (CameraView, SourceReader, SourceSpec, camera_lenses, camera_settings, merge_layout,
+                             merged_sources, set_camera_settings)
 from ....core.camhw import CameraHardware
 from ....core.camsources import is_native_source, list_native_cameras
 from ....core.live import IOSession, LiveSession, draw_display_texts
 from ....core.livemonitor import beam_angle
+from ....core.lens import LensCorrection
 from ....core.livegroup import ClockSchedule
 from ....core.procedures import Outputs, test_context
 from ....core.project import INFO_COLUMNS
 from ....core.session import END_SOURCE, END_SOURCE_FAILED, END_USER, finish_live_test
 from ....core.tracking import ArenaTracker, DetectionSettings, draw_tracking
 from ....core.video import VIDEO_EXTENSIONS, VideoSource, list_cameras
-from ...confirm_id import confirm_animal_id
+from ...confirm_id import confirm_animal_id, weigh_before_test
 from ...io_devices_dialog import open_device_manager
 from ...live_widgets import CameraOptionsDialog, short_time
 from ...widgets import Worker, error_box, fmt_time
-from .common import TRAIL_LEN, describe_view, peek_frame, recording_path
+from .common import TRAIL_LEN, camera_options_settings, describe_view, peek_frame, recording_path
 
 
 class _GrabberSignals(QObject):
@@ -102,6 +104,15 @@ def scan_all_cameras() -> tuple[list[tuple[str, object]], list[str]]:
 class SingleTestMixin:
     """One test: its source and preview, frame processing, test setup and run control."""
 
+    @property
+    def _second(self):
+        """The first source merged into the camera image (None: a single camera)."""
+        return self._merge[0] if self._merge else None
+
+    @_second.setter
+    def _second(self, source):
+        self._merge = [source] if source is not None else []
+
     def _source_mode_changed(self, *_):
         cam = self.cam_radio.isChecked()
         for w in (self.camera, self.scan_btn, self.resolution, self.cam_fps):
@@ -157,11 +168,11 @@ class SingleTestMixin:
         self._file_background = None
         self._source_is_file = True
         self._load_single_view()
-        if self.grabber is None and self._second is None:  # show the first image until the preview starts
+        if self.grabber is None and not self._merge:  # show the first image until the preview starts
             f = peek_frame(path)
             if f is not None:
                 try:
-                    self.view.set_frame(self._view.apply(f))
+                    self.view.set_frame(self._view.apply(LensCorrection.from_dict(self._undistort).apply(f)))
                 except Exception:
                     pass
 
@@ -196,10 +207,12 @@ class SingleTestMixin:
         key = self._single_key()
         d = camera_settings(self.project, key) if key else {}
         self._view = CameraView.from_dict(d.get("view"))
-        self._second = d.get("second")
-        self._merge_layout = d.get("layout", "side")
+        self._merge = merged_sources(d)
+        self._merge_layout = merge_layout(d.get("layout", "side"))
+        self._undistort = LensCorrection.from_dict(d.get("undistort")).to_dict()
         self._hardware = CameraHardware.from_dict(d.get("hardware"))
-        self.view_lbl.setText(describe_view(self._view, self._second, self._merge_layout, self._hardware))
+        self.view_lbl.setText(describe_view(self._view, self._merge, self._merge_layout, self._hardware,
+                                            self._undistort))
         self._update_single_title()
 
     def _merge_choices(self, exclude=None) -> list[tuple[str, object]]:
@@ -210,25 +223,30 @@ class SingleTestMixin:
         return [(lbl, s) for lbl, s in out if s != exclude]
 
     def camera_options(self) -> bool:
-        """Region / zoom / rotation / flip / merge options and camera hardware settings of the single-test
-        source (hardware settings change live while the camera image is on)."""
+        """Region / zoom / rotation / flip / merge options, lens correction and camera hardware settings of the
+        single-test source (hardware settings change live while the camera image is on)."""
         src = self._source()
         if src is None:
             QMessageBox.information(self, "Camera options", "Choose a camera or a video file first.")
             return False
-        raw, raw2 = self.grabber.raw_frames() if self.grabber is not None else (None, None)
+        raws = self.grabber.raw_frames_all() if self.grabber is not None else [None] * (1 + len(self._merge))
+        raws += [None] * (1 + len(self._merge) - len(raws))
+        raw = raws[0]
         if raw is None:
             # the last image only when it is of this source, untransformed (never another camera's / file's)
-            raw = self._last_frame if (self._view.is_identity and self._second is None
+            raw = self._last_frame if (self._view.is_identity and not self._merge and not self._undistort
                                        and self._frame_key == self._single_key()) else None
         if raw is None and SourceSpec(src).is_file:
             raw = peek_frame(src)
-        if raw2 is None and self._second is not None and SourceSpec(self._second).is_file:
-            raw2 = peek_frame(self._second)
+        others = [f if f is not None or not SourceSpec(m).is_file else peek_frame(m)
+                  for m, f in zip(self._merge, raws[1:])]
         camera = self.grabber.camera() if self.grabber is not None and not self.simulating else None
-        dlg = CameraOptionsDialog(raw, self._view, self._second, self._merge_layout, self._merge_choices(src),
-                                  raw2, self, hardware=self._hardware, camera=camera, is_camera=not self.simulating,
-                                  genicam=is_native_source(src))
+        g = self.grabber
+        dlg = CameraOptionsDialog(raw, self._view, list(self._merge), self._merge_layout, self._merge_choices(src),
+                                  others, self, hardware=self._hardware, camera=camera, is_camera=not self.simulating,
+                                  genicam=is_native_source(src), lens=self._undistort,
+                                  merge_lenses=camera_lenses(self.project, self._merge),
+                                  frame_source=(lambda: g.raw_frames()[0]) if g is not None else None)
         accepted = dlg.exec() == QDialog.Accepted
         dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
         if not accepted:
@@ -239,23 +257,19 @@ class SingleTestMixin:
     def _apply_single_view(self, res: dict):
         key = self._single_key()
         view = CameraView.from_dict(res.get("view"))
-        second = res.get("second")
-        layout = res.get("layout", "side")
+        merge = merged_sources(res)
+        layout = merge_layout(res.get("layout", "side"))
         hardware = CameraHardware.from_dict(res["hardware"]) if "hardware" in res else self._hardware
-        settings = {}
-        if not view.is_identity:
-            settings["view"] = view.to_dict()
-        if second is not None:
-            settings.update(second=second, layout=layout)
-        if not hardware.is_empty:
-            settings["hardware"] = hardware.to_dict()
-        set_camera_settings(self.project, key, settings)
+        undistort = LensCorrection.from_dict(res["undistort"]).to_dict() if "undistort" in res else self._undistort
+        set_camera_settings(self.project, key, camera_options_settings(view, merge, layout, hardware, undistort))
         self.main.mark_dirty()
-        image_changed = (view, second, layout) != (self._view, self._second, self._merge_layout)
-        self._view, self._second, self._merge_layout, self._hardware = view, second, layout, hardware
+        image_changed = (view, merge, layout, undistort) != (self._view, self._merge, self._merge_layout,
+                                                             self._undistort)
+        self._view, self._merge, self._merge_layout, self._hardware = view, merge, layout, hardware
+        self._undistort = undistort
         if self.grabber is not None:
             self.grabber.spec.hardware = hardware  # already applied live by the dialog
-        self.view_lbl.setText(describe_view(view, second, layout, hardware))
+        self.view_lbl.setText(describe_view(view, merge, layout, hardware, undistort))
         if not image_changed:
             return
         self._file_background = None
@@ -275,8 +289,10 @@ class SingleTestMixin:
         size = self.resolution.currentData() if not self.simulating else None
         fps = self.cam_fps.value() if not self.simulating else None
         self._source_is_file = self.simulating
-        spec = SourceSpec(src, self._second, self._merge_layout, self._view, size, fps or None,
+        spec = SourceSpec(src, None, self._merge_layout, self._view, size, fps or None,
                           hardware=self._hardware if not self.simulating else CameraHardware())
+        spec.merge = self._merge
+        spec.undistort = camera_lenses(self.project, spec.sources)
         g = FrameGrabber(spec, self.process_frame, opener=VideoSource)
         g.speed = (self.sim_speed.currentData() or 1.0) if self.simulating else 1.0
         g.session_of = lambda: self.session
@@ -408,7 +424,7 @@ class SingleTestMixin:
         return {"session": s, "state": state, "elapsed": s.elapsed if state != "waiting" else 0.0,
                 "duration": s.duration_s, "events": len(s.events), "fired": list(s.engine.fired),
                 "outputs": list(s.outputs.log) if s.outputs is not None else [], "proc_log": list(s.log),
-                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance,
+                "phase": s.start_phase, "waiting_end": s.waiting_end, "distance": s.stats.distance * s.stats.factor,
                 "unit": s.stats.unit}
 
     @property
@@ -444,7 +460,7 @@ class SingleTestMixin:
                     self._preview_tracker = self._make_preview_tracker(frame, app)
                 dets, _fg = self._preview_tracker.process(frame) if self._preview_tracker else ([], None)
                 d = dets[0] if dets else None
-                info = {"state": "preview", "distance": 0.0, "unit": app.unit if app else "px"}
+                info = {"state": "preview", "distance": 0.0, "unit": app.report_unit if app else "px"}
             info["detected"] = bool(d is not None and d.detected)
             zones = []
             if s is not None and s.state in ("running", "paused"):
@@ -637,16 +653,18 @@ class SingleTestMixin:
             path = autosave.path_for(p, test)
         except Exception:
             return {}
-        return {"autosave_path": path, "autosave_meta": {
+        return {"autosave_path": path, "autosave_key": p.file_key, "autosave_meta": {
             "test_id": test.id, "animal": test.animal_id, "apparatus": test.apparatus, "stage": test.stage,
             "trial": test.trial}}
 
     def _make_session(self, test, app, bg, size, fps: float, outputs, devices, name: str, entry=None,
                       on_stimulus=None) -> LiveSession:
         """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
-        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
+        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery.
+        In an Input/output only protocol (with several tests: a test panel without a camera) an IOSession."""
         p = self.project
-        if self.io_only:  # no camera: the I/O devices and the procedures on the computer's clock
+        io = self.io_only if entry is None else entry.source_key is None
+        if io:  # no camera: the I/O devices and the procedures on the computer's clock
             mode = self._session_mode()
             if mode in ("on_detection", "experimenter_leaves"):
                 self._log("I/O only: the test starts as soon as it is armed (no camera to detect the animal).",
@@ -657,7 +675,8 @@ class SingleTestMixin:
                              devices=devices, variables=p.variables, name=name, zone_overrides=test.zone_overrides,
                              on_stimulus=on_stimulus, outputs_off_on_pause=self.pause_off.isChecked(),
                              test_info=test_context(p, test), control_input=self.control_input.text().strip(),
-                             **self._autosave_args(test))
+                             sync=p.sync, start_input=self.start_input.text().strip(),
+                             start_delay_s=float(p.start_switch_delay_s or 0.0), **self._autosave_args(test))
         settings = self._detection_settings(test)
         if settings.background == "frame" and bg is None:
             settings.background = "adaptive"
@@ -670,8 +689,9 @@ class SingleTestMixin:
                         split_minutes=self.split_min.value(),
                         name=name, zone_overrides=test.zone_overrides, on_stimulus=on_stimulus,
                         outputs_off_on_pause=self.pause_off.isChecked(), test_info=test_context(p, test),
-                        control_input=self.control_input.text().strip(),
-                        **self._autosave_args(test))
+                        control_input=self.control_input.text().strip(), sync=p.sync,
+                        start_input=self.start_input.text().strip(),
+                        start_delay_s=float(p.start_switch_delay_s or 0.0), **self._autosave_args(test))
         if bg is not None:
             s.set_background(bg)
         if s.record_path:  # room for the recording?
@@ -736,7 +756,7 @@ class SingleTestMixin:
             return False
         self.test = test
         self._new_test = new
-        if not confirm_animal_id(self, test):
+        if not confirm_animal_id(self, test) or not weigh_before_test(self, test, reader=self.scale_reader):
             self._discard_new_test()
             return False
         if self.io_only:

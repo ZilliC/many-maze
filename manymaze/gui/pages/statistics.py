@@ -38,6 +38,10 @@ DESIGNS = [("between", "Between subjects (two-way ANOVA)"), ("mixed", "Repeated 
            ("srh", "Non-parametric (Scheirer-Ray-Hare)"), ("art", "Aligned rank transform ANOVA")]
 GRAPHS = [("bar", "Column (mean ± error)"), ("point", "Points (mean ± error)"), ("box", "Box plot"),
           ("violin", "Violin plot")]
+# the settings kept in the experiment (Project.statistics), as set_inputs names them; "factor" before "control"
+SETTING_KEYS = ("measure", "factor", "period", "filter", "parametric", "paired", "method", "posthoc", "control", "mu",
+                "plot", "error", "points", "tc_x", "tc_by", "design", "tc_plot", "corr_x", "corr_y", "corr_method",
+                "corr_by", "f1", "f2", "f3", "cat_rows", "cat_col", "alpha")
 # analyses (explorer sub-items under "Statistics"): key, label, icon
 VIEWS = [("compare", "Compare groups", "bars"), ("two", "Two factors", "chart"),
          ("correlation", "Correlation", "scatter"), ("grouped", "Grouped", "table"),
@@ -149,7 +153,7 @@ class StatisticsPage(Page):
         self._param_group = QButtonGroup(self)
         self._param_group.addButton(self.param_radio)
         self._param_group.addButton(self.nonparam_radio)
-        self.param_radio.toggled.connect(self._schedule)
+        self.param_radio.toggled.connect(self._changed)
         self.method = _wide_combo()
         for k, v in METHODS:
             self.method.addItem(v, k)
@@ -172,6 +176,15 @@ class StatisticsPage(Page):
         self.paired = QCheckBox("Repeated measures")
         self.paired.setToolTip("Within-animal comparison, e.g. Stage or Period: paired t / Wilcoxon / "
                                "repeated-measures ANOVA / Friedman")
+        self.alpha = QDoubleSpinBox()
+        self.alpha.setRange(st.MIN_ALPHA, st.MAX_ALPHA)
+        self.alpha.setDecimals(4)
+        self.alpha.setSingleStep(0.01)
+        self.alpha.setKeyboardTracking(False)
+        self.alpha.setValue(st.ALPHA)
+        self.alpha.setToolTip("Results with p below this level are marked significant: the green test result, the "
+                              "stars (ns: not significant; * below the level, ** p < 0.01, *** p < 0.001), the "
+                              "graph brackets and the failed assumption checks")
         self.plot_kind = _wide_combo()
         for k, v in GRAPHS:
             self.plot_kind.addItem(v, k)
@@ -205,11 +218,13 @@ class StatisticsPage(Page):
         for w in (self.factor, self.period, self.filter_value, self.plot_kind, self.method, self.posthoc,
                   self.control, self.error, self.tc_x, self.tc_by, self.design, self.tc_plot, self.corr_method,
                   self.corr_by, self.f1, self.f2, self.f3, self.cat_rows, self.cat_col):
-            w.currentIndexChanged.connect(self._schedule)
+            w.currentIndexChanged.connect(self._changed)
         self.filter_field.currentIndexChanged.connect(self._filter_field_changed)
-        self.paired.toggled.connect(self._schedule)
-        self.points.toggled.connect(self._schedule)
-        self.mu.valueChanged.connect(self._schedule)
+        self.paired.toggled.connect(self._changed)
+        self.points.toggled.connect(self._changed)
+        self.mu.valueChanged.connect(self._changed)
+        self.alpha.valueChanged.connect(self._changed)
+        self._pending_settings: dict | None = None  # saved settings waiting for the results (set_project)
 
         # ---- property page -------------------------------------------------------------------------
         props = QWidget()
@@ -259,7 +274,8 @@ class StatisticsPage(Page):
             ("head", "Tests to include", {C, T, G, R, K}),
             ("Select the time period to analyse", self.period, {C, T, G, R, K}),
             ("Optionally only include tests where", filt, {C, T, G, R, K}),
-            ("head", "Options", {C, R}),
+            ("head", "Options", {C, T, R, K}),
+            ("Select the significance level (α)", self.alpha, {C, T, R, K}),
             ("Select the type of statistical tests to use", radios, {C}),
             ("Optionally select a specific statistical test", self.method, {C}),
             ("Optionally select a post-hoc test to use", self.posthoc, {C}),
@@ -479,7 +495,7 @@ class StatisticsPage(Page):
         comp.setFilterMode(Qt.MatchContains)
         comp.setCaseSensitivity(Qt.CaseInsensitive)
         comp.setCompletionMode(QCompleter.PopupCompletion)
-        c.currentIndexChanged.connect(self._schedule)
+        c.currentIndexChanged.connect(self._changed)
         return c
 
     # ------------------------------------------------------------------ project / data
@@ -488,6 +504,10 @@ class StatisticsPage(Page):
         self.rows = []
         self._populate_controls()
         self._clear_outputs()
+        # the experiment's saved settings: those that do not depend on the results now, the rest with the results
+        saved = dict(project.statistics) if project is not None else {}
+        self._apply_settings({"alpha": st.ALPHA, **saved})
+        self._pending_settings = saved or None
 
     def on_show(self):
         if self.project is not None:
@@ -523,6 +543,9 @@ class StatisticsPage(Page):
     def _rows_loaded(self, rows, segmented):
         self.rows = rows
         self._populate_controls()
+        if self._pending_settings is not None and rows:
+            self._apply_settings(self._pending_settings)
+            self._pending_settings = None
         n_tests = len({r.get("Test") for r in rows})
         self.status_lbl.setText(f"{n_tests} tests analysed." if rows else
                                 "No results yet: track tests or score behaviours first.")
@@ -623,7 +646,7 @@ class StatisticsPage(Page):
 
     def _filter_field_changed(self, *_):
         self._fill_filter_values()
-        self._schedule()
+        self._changed()
 
     def _fill_filter_values(self):
         field = self.filter_field.currentData()
@@ -636,48 +659,105 @@ class StatisticsPage(Page):
         if not self._loading:
             self._timer.start()
 
+    def _changed(self, *_):
+        """The user changed a setting: keep the settings in the experiment, then analyse again."""
+        if not self._loading:
+            self._store_settings()
+            self._timer.start()
+
+    # ------------------------------------------------------------------ settings (Project.statistics)
+    def _combos(self) -> dict[str, QComboBox]:
+        return {"measure": self.measure, "factor": self.factor, "period": self.period, "plot": self.plot_kind,
+                "tc_x": self.tc_x, "tc_by": self.tc_by, "corr_x": self.corr_x, "corr_y": self.corr_y,
+                "corr_method": self.corr_method, "method": self.method,
+                "posthoc": self.posthoc, "error": self.error, "design": self.design, "tc_plot": self.tc_plot,
+                "corr_by": self.corr_by, "f1": self.f1, "f2": self.f2, "f3": self.f3, "cat_rows": self.cat_rows,
+                "cat_col": self.cat_col}
+
+    def settings(self) -> dict:
+        """The page's settings as kept in Project.statistics (the keys of set_inputs)."""
+        combos = self._combos()
+        out = {k: c.currentData() for k, c in combos.items() if c.currentIndex() >= 0}
+        for k in ("measure", "corr_x", "corr_y"):  # (a measure chosen by typing in the search box)
+            m = self._combo_measure(combos[k])
+            if m is not None:
+                out[k] = m
+        field, value = self.filter_field.currentData(), self.filter_value.currentData()
+        out["filter"] = [field, value] if field and field != "(all rows)" and value is not None else None
+        out.update(control=self.control.currentData(), parametric=self.is_parametric(), paired=self.paired.isChecked(),
+                   mu=self.mu.value(), points=self.points.isChecked(), alpha=self.alpha.value())
+        return out
+
+    def _store_settings(self):
+        p = self.project
+        if p is None:
+            return
+        s = self.settings()
+        if s != p.statistics:
+            p.statistics = s
+            self.main.mark_dirty()
+
+    def _apply_settings(self, saved: dict):
+        """Show saved settings; those that are not available with these results (e.g. a measure no longer in them)
+        are left as they are."""
+        self.set_inputs(_quiet=True, **{k: saved[k] for k in SETTING_KEYS if k in saved})
+
     # ------------------------------------------------------------------ selection helpers
-    def set_inputs(self, **kw):
+    def set_inputs(self, _quiet: bool = False, **kw):
         """Programmatic setup (tests / scripting): measure, factor, period, filter=(field, value), parametric,
         paired, plot, method, posthoc, control, mu, error, points, tc_x, tc_by, design, tc_plot, corr_x, corr_y,
-        corr_method, corr_by, f1, f2, f3, cat_rows, cat_col."""
+        corr_method, corr_by, f1, f2, f3, cat_rows, cat_col, alpha (the significance level). The settings are kept
+        in the experiment. _quiet: restoring saved settings (values that are not available are skipped)."""
         self._loading = True
-        combos = {"measure": self.measure, "factor": self.factor, "period": self.period, "plot": self.plot_kind,
-                  "tc_x": self.tc_x, "tc_by": self.tc_by, "corr_x": self.corr_x, "corr_y": self.corr_y,
-                  "corr_method": self.corr_method, "method": self.method,
-                  "posthoc": self.posthoc, "error": self.error, "design": self.design, "tc_plot": self.tc_plot,
-                  "corr_by": self.corr_by, "f1": self.f1, "f2": self.f2, "f3": self.f3, "cat_rows": self.cat_rows,
-                  "cat_col": self.cat_col}
-        for k, v in kw.items():
-            if k == "factor":
-                combos[k].setCurrentIndex(combos[k].findData(v))
-                self._fill_control()
-            elif k in combos:
-                i = combos[k].findData(v)
-                if i < 0:
-                    raise ValueError(f"{k}: {v!r} not available")
-                combos[k].setCurrentIndex(i)
-            elif k == "control":
-                self._fill_control()
-                self.control.setCurrentIndex(max(0, self.control.findData(str(v))))
-            elif k == "parametric":
-                (self.param_radio if v else self.nonparam_radio).setChecked(True)
-            elif k == "mu":
-                self.mu.setValue(float(v))
-            elif k == "points":
-                self.points.setChecked(bool(v))
-            elif k == "paired":
-                self.paired.setChecked(bool(v))
-            elif k == "filter":
-                field, value = v if v else ("(all rows)", None)
-                self.filter_field.setCurrentIndex(max(0, self.filter_field.findData(field)))
-                self._fill_filter_values()
-                if value is not None:
-                    self.filter_value.setCurrentIndex(max(0, self.filter_value.findData(str(value))))
-            else:
-                raise ValueError(f"Unknown input {k!r}")
-        self._loading = False
+        try:
+            for k, v in kw.items():
+                try:
+                    self._set_input(k, v, _quiet)
+                except (TypeError, ValueError):
+                    if not _quiet:
+                        raise
+        finally:
+            self._loading = False
+        if not _quiet:
+            self._store_settings()
         self.recompute()
+
+    def _set_input(self, k: str, v, quiet: bool):
+        combos = self._combos()
+        if k == "factor":
+            i = combos[k].findData(v)
+            if i >= 0 or not quiet:
+                combos[k].setCurrentIndex(i)
+            self._fill_control()
+        elif k in combos:
+            i = combos[k].findData(v)
+            if i < 0:
+                if quiet:
+                    return
+                raise ValueError(f"{k}: {v!r} not available")
+            combos[k].setCurrentIndex(i)
+        elif k == "control":
+            self._fill_control()
+            if v is not None:
+                self.control.setCurrentIndex(max(0, self.control.findData(str(v))))
+        elif k == "parametric":
+            (self.param_radio if v else self.nonparam_radio).setChecked(True)
+        elif k == "mu":
+            self.mu.setValue(float(v))
+        elif k == "alpha":
+            self.alpha.setValue(st.significance_level(v))
+        elif k == "points":
+            self.points.setChecked(bool(v))
+        elif k == "paired":
+            self.paired.setChecked(bool(v))
+        elif k == "filter":
+            field, value = v if v else ("(all rows)", None)
+            self.filter_field.setCurrentIndex(max(0, self.filter_field.findData(field)))
+            self._fill_filter_values()
+            if value is not None:
+                self.filter_value.setCurrentIndex(max(0, self.filter_value.findData(str(value))))
+        elif not quiet:
+            raise ValueError(f"Unknown input {k!r}")
 
     def is_parametric(self) -> bool:
         return self.param_radio.isChecked()
@@ -746,29 +826,31 @@ class StatisticsPage(Page):
         """The analysis of the current view with the current settings (None when a measure or factor is missing)."""
         view = self.view()
         graph = dict(error=self.error.currentData(), points=self.points.isChecked())
+        alpha = self.alpha.value()
         if view == "compare":
             factor = self.factor.currentData()
             return an.compare(self.project, self.filtered_rows(use_period=factor != "Period"),
                               self._combo_measure(self.measure), factor, self.method.currentData(),
                               self.is_parametric(), self.paired.isChecked(), self.posthoc.currentData(),
                               self.control.currentData(), self.mu.value(), self.plot_kind.currentData(),
-                              **graph, **self._included())
+                              **graph, **self._included(), alpha=alpha)
         if view == "two":
             x = self.tc_x.currentData()
             return an.two_factor(self.project, self.filtered_rows(use_period=x != "Period"),
                                  self._combo_measure(self.measure), x, self.tc_by.currentData(),
-                                 self.design.currentData(), self.tc_plot.currentData(), **graph, **self._included())
+                                 self.design.currentData(), self.tc_plot.currentData(), **graph, **self._included(),
+                                 alpha=alpha)
         if view == "correlation":
             return an.correlate(self.project, self.filtered_rows(), self._combo_measure(self.corr_x),
                                 self._combo_measure(self.corr_y), self.corr_method.currentData(),
-                                self.corr_by.currentData(), **self._included())
+                                self.corr_by.currentData(), **self._included(), alpha=alpha)
         if view == "grouped":
             factors = self.grouping_factors()
             return an.grouped(self.project, self.filtered_rows(use_period="Period" not in factors),
                               self._combo_measure(self.measure), factors, self.plot_kind.currentData(), **graph,
                               **self._included())
         return an.categorical(self.project, self.filtered_rows(), self.cat_rows.currentData(),
-                              self.cat_col.currentData(), **self._included())
+                              self.cat_col.currentData(), **self._included(), alpha=alpha)
 
     def _render(self, i: int, a: an.Analysis):
         self.analyses[i] = a

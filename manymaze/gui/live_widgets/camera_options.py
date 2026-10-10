@@ -1,6 +1,6 @@
-"""The camera options dialog: region, digital zoom / pan, rotation, flip, merging two cameras and the camera's
-hardware settings (exposure, gain, white balance … changed live while the camera runs); the Industrial cameras
-dialog (GenICam / vendor SDK backends and GenTL producer files)."""
+"""The camera options dialog: region, digital zoom / pan, rotation, flip, merging up to four cameras, lens
+distortion correction and the camera's hardware settings (exposure, gain, white balance … changed live while the
+camera runs); the Industrial cameras dialog (GenICam / vendor SDK backends and GenTL producer files)."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from ...core import camsources
-from ...core.camera import CameraView, merge_frames
+from ...core.camera import MAX_SOURCES, MERGE_LAYOUTS, CameraView, merge_frames, merge_layout, source_key
 from ...core.camhw import (ADJUSTED, CONTROLS, OK, PIXEL_FORMATS, UNSUPPORTED, CameraHardware, describe_report)
+from ...core.lens import LensCorrection, lens_from
 from ..widgets import FrameView
+from .lens import LensCorrectionDialog, lens_text
 
 _SLIDER_STEPS = 1000
 
@@ -340,8 +342,12 @@ class IndustrialCamerasDialog(QDialog):
 
 
 class CameraOptionsDialog(QDialog):
-    """Region of interest (drag a rectangle on the image), digital zoom / pan, rotation, flip and merging with a
-    second camera.  ``second_choices`` is a list of (label, source) for the merge.
+    """Region of interest (drag a rectangle on the image), digital zoom / pan, rotation, flip, merging with up to
+    three more cameras (a montage) and the lens distortion correction of the camera.  ``second_choices`` is a list
+    of (label, source) for the merge; ``second`` (and ``second_frame``) the merged source (and its image), or a
+    list of them.  ``lens`` is the camera's lens correction and ``merge_lenses`` ({source key: correction}) those
+    of the merged cameras, applied in the preview; ``frame_source`` returns the camera's latest original image for
+    the lens correction dialog.
 
     For a camera (``is_camera``, or an open ``camera`` object) a Camera settings tab holds its hardware settings
     (:class:`HardwarePanel`; ``genicam`` adds pixel format and trigger); with an open camera they apply live and
@@ -350,14 +356,22 @@ class CameraOptionsDialog(QDialog):
     def __init__(self, frame: np.ndarray | None, view: CameraView, second=None, layout: str = "side",
                  second_choices=(), second_frame: np.ndarray | None = None, parent=None, title="Camera options",
                  hardware: CameraHardware | dict | None = None, camera=None, is_camera: bool = False,
-                 genicam: bool = False):
+                 genicam: bool = False, lens: LensCorrection | dict | None = None, merge_lenses: dict | None = None,
+                 frame_source=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(900, 560)
         self.raw = frame if frame is not None else np.full((480, 640, 3), 90, np.uint8)
-        self.raw2 = second_frame
+        merged = [s for s in (second if isinstance(second, (list, tuple)) else [second]) if s is not None]
+        frames = list(second_frame) if isinstance(second_frame, (list, tuple)) else [second_frame]
+        # the images of the merged sources, by source (a source chosen in the dialog has none: a placeholder)
+        self._frames = {source_key(s): f for s, f in zip(merged, frames) if f is not None}
+        self.raw2 = frames[0] if frames else None
         self._have_frame = frame is not None  # without one, a grey placeholder: no region can be chosen on it
         self.view = CameraView.from_dict(view.to_dict())
+        self.lens = LensCorrection.from_dict(lens).to_dict()
+        self.merge_lenses = dict(merge_lenses or {})
+        self.frame_source = frame_source
         self._loading = True
 
         self.src_view = FrameView()
@@ -399,22 +413,38 @@ class CameraOptionsDialog(QDialog):
         self.pan_x, self.pan_y = QSlider(Qt.Horizontal), QSlider(Qt.Horizontal)
         for s in (self.pan_x, self.pan_y):
             s.setRange(0, 100)
-        self.second = QComboBox()
-        self.second.addItem("No (single camera)", None)
-        for lbl, src in second_choices:
-            self.second.addItem(lbl, src)
-        if second is not None:
-            i = self.second.findData(second)
-            if i < 0:
-                self.second.addItem(str(second), second)
-                i = self.second.count() - 1
-            self.second.setCurrentIndex(i)
+        # the merged sources: "Merge with", then up to two more ("and with"), each offered once the one before is set
+        self.merge_combos: list[QComboBox] = []
+        for k in range(MAX_SOURCES - 1):
+            cb = QComboBox()
+            cb.addItem("No (single camera)" if k == 0 else "No", None)
+            for lbl, src in second_choices:
+                cb.addItem(lbl, src)
+            if k < len(merged):
+                i = cb.findData(merged[k])
+                if i < 0:
+                    cb.addItem(str(merged[k]), merged[k])
+                    i = cb.count() - 1
+                cb.setCurrentIndex(i)
+            self.merge_combos.append(cb)
+        self.second = self.merge_combos[0]
         self.layout_combo = QComboBox()
-        self.layout_combo.addItem("Side by side", "side")
-        self.layout_combo.addItem("One above the other", "stack")
-        self.layout_combo.setCurrentIndex(max(0, self.layout_combo.findData(layout)))
+        for k, lbl in MERGE_LAYOUTS:
+            self.layout_combo.addItem(lbl, k)
+        self.layout_combo.setCurrentIndex(max(0, self.layout_combo.findData(merge_layout(layout))))
+        self.lens_lbl = QLabel()
+        self.lens_btn = QPushButton("Lens correction…")
+        self.lens_btn.setToolTip("Correct the distortion of a wide-angle (fish-eye / barrel) lens: a strength "
+                                 "slider or a checkerboard calibration")
+        self.lens_btn.clicked.connect(lambda: self.edit_lens())
+        lens_row = QHBoxLayout()
+        lens_row.addWidget(self.lens_lbl, 1)
+        lens_row.addWidget(self.lens_btn)
         form.addRow("Merge with", self.second)
+        for cb in self.merge_combos[1:]:
+            form.addRow("… and with", cb)
         form.addRow("Merged layout", self.layout_combo)
+        form.addRow("Lens correction", lens_row)
         form.addRow("Rotate", self.rotate)
         form.addRow("Flip", self.flip)
         form.addRow("Region", crop_row)
@@ -462,7 +492,7 @@ class CameraOptionsDialog(QDialog):
             for w in (self.cx, self.cy, self.cw, self.ch, self.full_btn):
                 w.setEnabled(False)
                 w.setToolTip("Turn the camera image on (or choose a video file) to choose a region on it")
-        for w in (self.rotate, self.flip, self.second, self.layout_combo):
+        for w in (self.rotate, self.flip, self.layout_combo, *self.merge_combos):
             w.currentIndexChanged.connect(self._geometry_changed)
         for w in (self.cx, self.cy, self.cw, self.ch):
             w.valueChanged.connect(self._changed)
@@ -473,24 +503,54 @@ class CameraOptionsDialog(QDialog):
         self._changed()
 
     # ---- values
+    def merged(self) -> list:
+        """The sources merged into the image, in order (up to the first "No")."""
+        out = []
+        for cb in self.merge_combos:
+            if cb.currentData() is None:
+                break
+            out.append(cb.currentData())
+        return out
+
     def _base(self) -> np.ndarray:
-        """Merged, rotated and flipped image (the crop is selected on it)."""
-        img = self.raw
-        if self.second.currentData() is not None:
-            other = self.raw2 if self.raw2 is not None else np.full_like(self.raw, 60)
-            img = merge_frames(img, other, self.layout_combo.currentData())
+        """Lens-corrected, merged, rotated and flipped image (the crop is selected on it)."""
+        lens = lens_from(self.lens)
+        frames = [lens.apply(self.raw) if lens is not None else self.raw]
+        for s in self.merged():
+            f = self._frames.get(source_key(s))
+            if f is None:
+                f = np.full_like(self.raw, 60)
+            else:
+                other = lens_from(self.merge_lenses.get(source_key(s)))
+                f = other.apply(f) if other is not None else f
+            frames.append(f)
+        img = merge_frames(frames, layout=self.layout_combo.currentData()) if len(frames) > 1 else frames[0]
         return CameraView(rotate=self.rotate.currentData(), flip=self.flip.currentData()).apply(img)
 
     def _base_geometry(self) -> tuple:
         """What the region is chosen on: rotation, flip, merge (and its layout) and the size of that image."""
-        merged = self.second.currentData() is not None
-        return (self.rotate.currentData(), self.flip.currentData(), self.second.currentData(),
+        merged = self.merged()
+        return (self.rotate.currentData(), self.flip.currentData(), tuple(merged) or None,
                 self.layout_combo.currentData() if merged else None, self._base().shape[:2])
 
     def _region_reliable(self) -> bool:
         """The region fields were chosen on the real image (not on the placeholder, nor on a merge with a camera
         whose image is unknown)."""
-        return self._have_frame and (self.second.currentData() is None or self.raw2 is not None)
+        return self._have_frame and all(source_key(s) in self._frames for s in self.merged())
+
+    def edit_lens(self, dialog=None) -> bool:
+        """The lens correction dialog for this camera (``dialog``: a LensCorrectionDialog already set up, for
+        tests)."""
+        dlg = dialog or LensCorrectionDialog(self.raw if self._have_frame else None, self.lens, self.frame_source,
+                                             parent=self, title=f"Lens correction — {self.windowTitle()}")
+        if dialog is None:
+            accepted = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()
+            if not accepted:
+                return False
+        self.lens = dlg.result()
+        self._geometry_changed()
+        return True
 
     def _geometry_changed(self, *_):
         """Rotation, flip or merge changed: the region of the previous image means nothing on the new one — back to
@@ -535,10 +595,12 @@ class CameraOptionsDialog(QDialog):
                                      "pan": [self.pan_x.value() / 100, self.pan_y.value() / 100]})
 
     def result(self) -> dict:
-        """{"view": CameraView dict, "second": source or None, "layout": "side" | "stack", and for cameras
+        """{"view": CameraView dict, "second": the first merged source or None, "merge": [merged sources],
+        "layout": "side" | "stack" | "grid", "undistort": LensCorrection dict ({} = none), and for cameras
         "hardware": CameraHardware dict}."""
-        res = {"view": self.result_view().to_dict(), "second": self.second.currentData(),
-               "layout": self.layout_combo.currentData()}
+        merged = self.merged()
+        res = {"view": self.result_view().to_dict(), "second": merged[0] if merged else None, "merge": merged,
+               "layout": self.layout_combo.currentData(), "undistort": dict(self.lens)}
         if self.hardware is not None:
             res["hardware"] = self.hardware.result().to_dict()
         return res
@@ -565,8 +627,10 @@ class CameraOptionsDialog(QDialog):
 
     def _reset(self):
         self.view = CameraView()
+        self.lens = {}
         self._loading = True
-        self.second.setCurrentIndex(0)
+        for cb in self.merge_combos:
+            cb.setCurrentIndex(0)
         self._load()
         self._loading = False
         self._geometry = self._base_geometry()
@@ -583,7 +647,11 @@ class CameraOptionsDialog(QDialog):
         self.out_view.set_frame(CameraView(crop=v.crop, zoom=v.zoom, pan=v.pan).apply(base))
         self.pan_x.setEnabled(v.zoom > 1.0)
         self.pan_y.setEnabled(v.zoom > 1.0)
-        self.layout_combo.setEnabled(self.second.currentData() is not None)
+        merged = self.merged()
+        self.layout_combo.setEnabled(bool(merged))
+        for k, cb in enumerate(self.merge_combos[1:], start=1):
+            cb.setEnabled(len(merged) >= k)
+        self.lens_lbl.setText(lens_text(self.lens))
 
     # ---- rubber band selection of the region
     def eventFilter(self, obj, ev):

@@ -204,3 +204,108 @@ class LiveIOLog:
 
     def remove(self):
         self.store.remove()
+
+
+# ====================================================================== review of a test without a video
+CONTINUOUS_TYPES = (*SAMPLE_TYPES, "encoder", "weight")  # input types shown as their values, not as on / off
+REVIEW_ROWS = 20000  # at most this many lines in the Review page's list of the I/O log (the timeline shows all)
+_TEXT_VALUES = {"on": 1.0, "true": 1.0, "yes": 1.0, "high": 1.0, "off": 0.0, "false": 0.0, "no": 0.0, "low": 0.0}
+
+
+def _value(v) -> float:
+    if isinstance(v, str):
+        v = _TEXT_VALUES.get(v.strip().lower(), v)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _channel_labels(keys) -> dict:
+    """Channel names, with the device when the same name is used by several devices (as the I/O measures)."""
+    names = [k[2] for k in keys]
+    dup = {n for n in names if len({k[1] for k in keys if k[2] == n}) > 1}
+    return {k: f"{k[1]}/{k[2]}" if k[2] in dup else k[2] for k in keys}
+
+
+def review_channels(io_events, events=(), end: float | None = None) -> list[dict]:
+    """A test's I/O log as the rows of a timeline (the Review page of a test without a video, e.g. an I/O only
+    test): inputs, then outputs, then the scored keys and marks (``test.events``), each {"label", "kind" (input |
+    output | event), "spans": [(on, off)], "points": [t], "values": [(t, value)]}. Digital channels and outputs with
+    a level are their on spans (a pulse logged on and off at the same time is a point; one still on at the end
+    lasts until `end`, else its last event); analogue, encoder, sensor and weight inputs are their values."""
+    series: dict[tuple, list] = {}
+    types: dict[tuple, set] = {}
+    for e in io_events or []:
+        kind = e.get("kind", "input")
+        t = _value(e.get("t"))
+        if kind not in ("input", "output") or not math.isfinite(t):
+            continue
+        key = (kind, str(e.get("device", "")), str(e.get("channel", "")))
+        series.setdefault(key, []).append((t, _value(e.get("value"))))
+        types.setdefault(key, set()).add(e.get("type") or "")
+    labels = _channel_labels(list(series))
+    last = max([t for ev in series.values() for t, _v in ev] + [0.0])
+    stop = float(end) if end is not None and end > 0 else last
+    rows = []
+    for key in sorted(series, key=lambda k: k[0] != "input"):  # inputs first (stable: in order of appearance)
+        ev = sorted(series[key], key=lambda x: x[0])
+        row = {"label": labels[key], "kind": key[0], "spans": [], "points": [], "values": []}
+        finite = [v for _t, v in ev if math.isfinite(v)]
+        if key[0] == "input" and (types[key] & set(CONTINUOUS_TYPES) or any(v not in (0.0, 1.0) for v in finite)):
+            row["values"] = [(t, v) for t, v in ev if math.isfinite(v)]
+        else:
+            since = None
+            for t, v in ev:
+                if v and since is None:
+                    since = t
+                elif not v and since is not None:
+                    if t <= since:
+                        row["points"].append(t)
+                    else:
+                        row["spans"].append((since, t))
+                    since = None
+            if since is not None:
+                row["spans"].append((since, max(stop, since)))
+        rows.append(row)
+    keys: dict[str, dict] = {}
+    for e in sorted(events or [], key=lambda e: e.get("t", 0.0)):
+        name = str(e.get("behaviour", ""))
+        row = keys.setdefault(name, {"label": name, "kind": "event", "spans": [], "points": [], "values": []})
+        t0, t1 = _value(e.get("t")), e.get("t_end")
+        if t1 is None:
+            row["points"].append(t0)
+        else:
+            row["spans"].append((t0, _value(t1)))
+    return rows + list(keys.values())
+
+
+def review_rows(io_events, events=(), limit: int = REVIEW_ROWS) -> tuple[list[tuple], int]:
+    """A test's I/O log as a list for the Review page, in time order: (t, what, name, value) with what = Input,
+    Output, Variable (the procedures' variables) or Event (scored keys and marks, with their duration), and the
+    value as text (on / off for digital channels). Analogue and sensor samples are left out (thousands a minute:
+    the timeline shows them). Returns (the first `limit` lines, how many more there were)."""
+    keys = {(str(e.get("kind", "input")), str(e.get("device", "")), str(e.get("channel", "")))
+            for e in io_events or [] if e.get("kind", "input") in ("input", "output")}
+    labels = _channel_labels(list(keys))
+    out = []
+    for e in io_events or []:
+        kind = str(e.get("kind", "input"))
+        if e.get("type") in SAMPLE_TYPES or e.get(DECIMATED):
+            continue
+        t, v = _value(e.get("t")), e.get("value")
+        if kind == "variable":
+            out.append((t, "Variable", str(e.get("channel", "")), str(v)))
+            continue
+        if kind not in ("input", "output"):
+            continue
+        key = (kind, str(e.get("device", "")), str(e.get("channel", "")))
+        digital = e.get("type") not in (*CONTINUOUS_TYPES, "thermostat") and _value(v) in (0.0, 1.0)
+        text = ("on" if _value(v) else "off") if digital else (f"{v:g}" if isinstance(v, (int, float)) else str(v))
+        out.append((t, kind.capitalize(), labels[key], text))
+    for e in events or []:
+        t1 = e.get("t_end")
+        out.append((_value(e.get("t")), "Event", str(e.get("behaviour", "")),
+                    f"{_value(t1) - _value(e.get('t')):.2f} s" if t1 is not None else ""))
+    out.sort(key=lambda r: r[0] if math.isfinite(r[0]) else math.inf)
+    return out[:limit], max(0, len(out) - limit)

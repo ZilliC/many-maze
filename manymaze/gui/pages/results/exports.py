@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 from pathlib import Path
 
@@ -35,7 +36,9 @@ class ExportsMixin:
 
     def _default_path(self, suffix: str) -> str:
         p = self.project
-        name = f"{p.name} results{' (time periods)' if self.segmented else ''}{suffix}"
+        report = re.sub(r'[\\/:*?"<>|]+', "-", self.report_name or "").strip()  # the saved report shown, if any
+        name = f"{p.name} results{f' - {report}' if report else ''}{' (time periods)' if self.segmented else ''}" \
+               f"{suffix}"
         return str(p.exports_dir() / name) if p.path else name
 
     def save_table(self, path: str | None = None, selection: bool = False, suffix: str = ".csv"):
@@ -314,11 +317,12 @@ class ExportsMixin:
             rows = [r for r in rows if r.get("Period", "Whole test") == "Whole test"]
         plots_on = True if include_plots is None else include_plots
         color_by = self.color_combo.currentData() or "time"
+        report = self.report_name or ""
 
         def work(progress, stop):
             return html_report(p, path, tests=tests, include_plots=plots_on, measures=measures,
                                stats_measures=stats_measures, heatmap_norm=heatmap_norm,
-                               chart_parameters=chart_parameters, color_by=color_by, rows=rows)
+                               chart_parameters=chart_parameters, color_by=color_by, rows=rows, report=report)
 
         def done(out):
             self.main.status(f"Report saved: {out}")

@@ -16,6 +16,7 @@ from ...confirm_id import confirm_animal_id
 from ...scoring_pad import ScoringPad
 from ...widgets import fmt_time
 from .common import _num_item, _ro_item
+from .iolog import has_io_log
 
 
 class ObservationClock:
@@ -278,7 +279,8 @@ class ScoringMixin:
 
     # ---- observation clock (TakeNote mode) ------------------------------------
     def _update_clock_ui(self):
-        no_video = self.test is not None and self.player.source is None
+        # (not for a test run with the I/O devices: its clock was the test's own, its keys scored live)
+        no_video = self.test is not None and self.player.source is None and not has_io_log(self.test)
         self.clock_box.setVisible(no_video)
         st = self.clock.state
         self.clock_start_btn.setText("Resume" if st == "paused" else "Start")

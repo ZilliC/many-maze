@@ -73,7 +73,8 @@ def test_data_page_views_and_ribbon(win, tmp_path):
     pump()
     sec, children = explorer_children(win, page)
     assert children == ["Spreadsheet", "Track plots", "Heat maps", "Charts", "Video export"]
-    assert group_titles(win) == ["Navigation", "Clipboard", "Spreadsheet", "Actions", "Filter", "Time periods"]
+    assert group_titles(win) == ["Navigation", "Clipboard", "Spreadsheet", "Actions", "Report", "Filter",
+                                 "Time periods"]
     for text in ("Back", "Forward", "Copy", "Copy selection", "Print", "Save", "HTML report", "Select data",
                  "View spreadsheet", "Clear settings", "Set segment length", "Recalculate"):
         assert text in ribbon_texts(win), text
