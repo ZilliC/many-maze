@@ -716,7 +716,7 @@ def compute_doses(project: Project, animals: list[Animal] | None = None, write: 
 
 # ---------------------------------------------------------------------------- protocol copy
 # settings_extra entries that belong to the protocol (others, e.g. blind codes and completed stages, are data)
-PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose")
+PROTOCOL_EXTRAS = ("touchscreen", "live", "cameras", "mode", "confirm_id", "dose", "operant_preset")
 
 
 def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Project:

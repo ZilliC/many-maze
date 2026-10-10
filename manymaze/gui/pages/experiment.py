@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
+                               QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ...core import pose
+from ...core import ioconfig, pose
 from ...core import workflow as wf
 from ...core.apparatus import unique_name
+from ...core.ioconfig import PRESET_KEY
 from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
 from ...core.export import display_text
 from ...core.measures import AnalysisSettings
@@ -133,10 +134,22 @@ class ExperimentPage(Page):
         self.mode.currentIndexChanged.connect(self._store_mode)
         for w in (self.name, self.desc, self.protocol, self.mode):
             w.setMinimumWidth(320)
+        # Input/output only mode: the I/O devices of the operant chambers from a preset
+        self.chambers_lbl = hint("")
+        self.chambers_btn = small_button("Operant chambers…", "plug", slot=self.set_up_chambers,
+                                         tip="Set up the I/O devices of the chambers from a preset: levers, nose "
+                                             "pokes, lights, pellet dispenser, house light, shocker")
+        self.chambers_row = QWidget()
+        h = QHBoxLayout(self.chambers_row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(self.chambers_lbl, 1)
+        h.addWidget(self.chambers_btn, 0, Qt.AlignTop)
         f.addRow("Protocol name", self.name)
         f.addRow("Description", self.desc)
         f.addRow("Type of test", self.protocol)
         f.addRow("Mode", self.mode)
+        f.addRow("Chambers", self.chambers_row)
+        self.protocol_form = f
         pg.add(f)
         pg.add(separator())
 
@@ -541,6 +554,54 @@ class ExperimentPage(Page):
                                   "This protocol uses TakeNote mode: tests are scored by hand and these settings "
                                   "are only used if you track a test anyway.")
         self.takenote_lbl.setVisible(mode in ("takenote", "io_only"))
+        self.protocol_form.setRowVisible(self.chambers_row, mode == "io_only")
+        p = self.project
+        preset = ioconfig.OPERANT_PRESETS.get(p.settings_extra.get(PRESET_KEY) or "") if p is not None else None
+        n = len(p.io_devices) if p is not None else 0
+        devs = f"{n} I/O device{'s' if n != 1 else ''}"
+        self.chambers_lbl.setText(f"{preset['label']}; {devs} (Hardware)." if preset else
+                                  f"{devs} (Hardware). Set up the chambers' levers, nose pokes, lights, dispenser and "
+                                  "shocker from a preset: Med Associates-, Coulbourn- or Lafayette-style, or custom."
+                                  if n else
+                                  "No I/O devices yet: set up the chambers' levers, nose pokes, lights, dispenser "
+                                  "and shocker from a preset (Med Associates-, Coulbourn- or Lafayette-style, or "
+                                  "custom).")
+
+    def set_up_chambers(self, preset: str | None = None) -> bool:
+        """Input/output only mode: the I/O devices of the operant chambers from a preset (one device per chamber,
+        its inputs and outputs named and its pins numbered for the interface chosen), replacing the experiment's
+        I/O devices or added to them."""
+        p = self.project
+        if p is None:
+            return False
+        from ..io_devices_dialog import OperantPresetDialog
+        dlg = OperantPresetDialog(self, preset or p.settings_extra.get(PRESET_KEY))
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
+            return False
+        keep = []
+        if p.io_devices:
+            names = ", ".join(str(d.get("name", "?")) for d in p.io_devices)
+            r = QMessageBox.question(self, "Operant chambers", f"The experiment already has I/O devices ({names}). "
+                                     "Replace them with the chambers?\n\nNo adds the chambers to them.",
+                                     QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.No)
+            if r == QMessageBox.Cancel:
+                return False
+            if r == QMessageBox.No:
+                keep = list(p.io_devices)
+        new = dlg.devices([d.get("name") for d in keep])
+        p.io_devices[:] = keep + new
+        p.settings_extra[PRESET_KEY] = dlg.preset()
+        self.main.mark_dirty()
+        self._update_hardware()
+        self._update_mode()
+        self.proc_editor.validate()  # the devices changed
+        self.main.status(f"Set up {len(new)} chamber{'s' if len(new) != 1 else ''} "
+                         f"({ioconfig.OPERANT_PRESETS[dlg.preset()]['label']}, "
+                         f"{ioconfig.DEVICE_TYPES[dlg.device_type()]}): check the ports and pins in Hardware › I/O "
+                         "devices.")
+        return True
 
     def _store_mode(self, *_):
         self._update_mode()
@@ -548,6 +609,10 @@ class ExperimentPage(Page):
             return
         self.project.settings_extra["mode"] = self.mode.currentData()
         self.main.mark_dirty()
+        self.proc_editor.validate()  # (Input/output only: what needs the animal is an error)
+        if self.mode.currentData() == "io_only" and not self.project.io_devices:
+            self.main.status("Input/output only: set up the I/O devices of the chambers from a preset with "
+                             "“Operant chambers…”.")
 
     def _update_hardware(self):
         p = self.project
@@ -853,6 +918,7 @@ class ExperimentPage(Page):
         dlg.changed.connect(self.main.mark_dirty)
         dlg.exec()
         self._update_hardware()
+        self._update_mode()  # (the chambers row: devices and preset)
         self.proc_editor.validate()  # the devices changed
         return dlg
 

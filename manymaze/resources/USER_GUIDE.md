@@ -87,7 +87,9 @@ everything without a camera.
 ### Protocol tab
 
 * **Mode** – *Video tracking*; *TakeNote*, behaviours scored by hand only (§6); or *Input/output only*, tests run
-  with the I/O devices and procedures without a camera, e.g. operant chambers (§7, *Input/output only tests*).
+  with the I/O devices and procedures without a camera, e.g. operant chambers (§7, *Input/output only tests*). In
+  that mode a **Chambers** row offers **Operant chambers…**, which sets up the I/O devices from a chamber preset (§8,
+  *Operant chamber presets*).
 * **Test duration** – analysed length of each test (0 = until the end of the video).
 * **Test starts** – at each test's *start time* (set per test), automatically **when the animal is first
   detected** in the apparatus, or **when the experimenter's hand has left the image**: the tracked object much
@@ -248,6 +250,14 @@ interest is the *novel object* (novel object recognition) and the *social stimul
   **Remove jumps** (Track editing): the jumps of a tracked test are removed with its detection settings (*Remove
   jumps faster than*, below) and filled like gaps, without tracking again; *Undo* reverts it.
 * **Results / plots** for the test: track plot, occupancy heat map, speed and freezing trace.
+
+A test without a video that ran with the I/O devices (an *Input/output only* test, §7) opens with its **I/O log**
+in place of the video, whether from here or from the Test schedule: a line summing the test up (inputs, outputs,
+numbers of I/O and scored events, duration, the procedures' result variables), a **timeline** with a row per input,
+output and scored key or mark (on periods as bars, pulses and point events as ticks, analogue inputs as a line), and
+the **list** of every change in time order (inputs and outputs on / off or their values, procedure variables,
+events with their duration), with a filter. Analogue samples are drawn in the timeline only; the list shows at
+most 20 000 lines. The *Results* tab shows the test's measures from its I/O log.
 
 ### Swapping identities (several animals)
 
@@ -480,8 +490,8 @@ everything can be tried without hardware. Choose a mode with the buttons at the 
 | **Several tests at once** | several apparatus in one camera image and/or several cameras, run together |
 | **Observation only (no camera)** | scoring behaviour by direct observation (a clock and scoring keys) |
 
-With a protocol in **Input/output only** mode, *One test* runs without a camera (see *Input/output only tests*
-below).
+With a protocol in **Input/output only** mode, *One test* and *Several tests at once* run without a camera (see
+*Input/output only tests* below).
 
 ### Starting and ending a test
 
@@ -661,8 +671,24 @@ shows the inputs and the I/O device states instead of the animal. When the test 
 (status *scored*, its duration the time its clock ran) and its results come from the I/O log: the input, output,
 encoder and analogue measures of *I/O results*, the scored keys and the procedures' result variables, also per
 time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark, an
-input or a calculation's time, also for their end). One I/O-only test runs at a time; *Several tests* needs
-cameras.
+input or a calculation's time, also for their end). The Review page shows its I/O log as a timeline and a list (§5).
+
+Procedures that need the animal cannot run without a camera: arming is refused, with the list of the statements
+concerned, when a procedure waits for or reacts to a zone or animal event (*Animal enters zone*, *Freezing
+starts*, *Position changes* …), reads the animal in an expression (`zone()`, `x()`, `speed()`, `distance()` …) or
+records video. The procedure editor shows the same errors as soon as the mode is *Input/output only*.
+
+**Several chambers at once** (operant chambers side by side): choose *Several tests at once*. **Add test panel**
+adds a panel without a camera, which gets the first I/O device (chamber) that no other panel uses and the next
+animal; its apparatus is optional (*None*). The *Test panels* table lists each panel's I/O device, apparatus,
+animal, stage and trial; change them in the editor below it. Every device needs its own box (one device per chamber,
+see *Operant chamber presets* in §8): a procedure written with one chamber's device name acts on each test's own
+chamber. **Arm all / Start all**, **Pause all**, **Resume all**, **Stop all**, the start and stop keys and the
+**scheduled start** at a clock time (once or every day) work as with cameras; each test runs on its own clock and
+is saved as soon as it ends. Each panel shows its inputs (on / off, with the activations so far) and outputs in
+place of the camera image, and its *Inputs* tab the activations, time on and latency of each input; the *Monitor*
+tab follows the selected panel. The panels are saved with the experiment; the camera panels of the same
+experiment are kept, and shown again when the mode goes back to video tracking.
 
 ### Procedures
 
@@ -1181,6 +1207,38 @@ switches a simulated input, *Test* pulses the selected output for 0.5 s or plays
 (`pip install pyserial`) is needed for Arduino and serial devices.
 
 Every input and output change during a test is recorded in the test's I/O log (`Test.io_events`).
+
+### Operant chamber presets
+
+**Add ▾ Operant chamber (preset)…** in the I/O devices dialog, or **Operant chambers…** on the Protocol page in
+*Input/output only* mode, sets up the I/O devices of one or more operant chambers at once. Choose:
+
+* **Chamber** – the preset:
+
+  | Preset | Inputs | Outputs |
+  |---|---|---|
+  | *Med Associates-style* | `left_lever`, `right_lever`, `head_entry` | `left_lever_out`, `right_lever_out` (retractable levers), `left_light`, `right_light`, `house_light`, `pellet`, `tone`, `shocker` |
+  | *Coulbourn-style* | `lever`, `left_poke`, `right_poke`, `head_entry` | `lever_out`, `cue_light`, `left_poke_light`, `right_poke_light`, `house_light`, `pellet`, `tone`, `shocker` |
+  | *Lafayette-style* | `poke_1` … `poke_5` (five-choice wall), `head_entry` | `poke_1_light` … `poke_5_light`, `magazine_light`, `house_light`, `pellet`, `tone` |
+  | *Custom* | — | — (add the channels yourself) |
+
+  Lights get the role *Light*, the tone *Speaker* and the shocker *Shocker* (60 s safety limit), so the results
+  group them as ANY-maze does. The names match the example procedures (*Lever press for food* uses `lever`,
+  `pellet` and `house_light`).
+* **Wired to** – the interface: an Arduino with the mANY-MAZE firmware, a Firmata board, an NI-DAQmx device, a
+  LabJack, or a simulated device to try the protocol without hardware. Pins are numbered in order, inputs first:
+  Arduino / Firmata pins from 2 (on an Uno pins 14–19 are A0–A5), NI lines `port0/line0`… for the inputs and the
+  next port for the outputs, LabJack lines `FIO0`… then `EIO`, `CIO`, `MIO`.
+* **Chambers** – how many: one I/O device per chamber (`chamber`, or `chamber1`, `chamber2` …), so that each test
+  of *Several tests at once* has its own (§7).
+
+A preview lists the channels with their pins. From the Protocol page you choose whether the chambers replace the
+experiment's I/O devices or are added to them; the preset is kept with the protocol (copied with it, and shown in
+the protocol report). A preset only names the inputs and outputs of **your own wiring** of the chamber's levers,
+nose pokes, lights, dispenser and shocker to one of the interfaces above: the chamber makers' own interface cards
+and software (Med Associates' MED-PC interfaces, Coulbourn's Habitest, Lafayette's ABET) are **not** driven. Check
+the pins, *Invert*, the pull-up and the other options against the wiring, then the serial port or device of each
+chamber, and try each output with *Connect* and *Test*.
 
 ### Touch screen
 

@@ -84,7 +84,7 @@ class SetupMixin:
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 4, 0, 4)
         hint = QLabel("Each row is a test panel: the camera or video it uses, its apparatus and the animal, stage "
-                      "and trial tested. Add and remove panels with the ribbon.")
+                      "and trial tested. Add and remove panels with the ribbon.")  # (I/O only: page._update_io_only)
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -138,7 +138,9 @@ class SetupMixin:
         f.addRow("Stage", self.row_stage)
         f.addRow("Trial", self.row_trial)
         f.addRow("I/O device", self.row_device)
+        self.row_form = f
         v.addWidget(self.row_editor)
+        self.panels_hint = hint
         return box
 
     def _build_setup(self) -> QWidget:
