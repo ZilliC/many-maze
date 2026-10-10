@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QGridLayout, QLabel, QMessageBox, QPushButton, QSc
 
 from ....core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_overlay
 from ...widgets import Worker
-from ..base import DETECTION_SPEC, SettingsForm
+from ..base import DETECTION_SPEC, PRESET_TIP, AnimalPresetCombo, SettingsForm, apply_preset_to_form
 
 SPEC_ATTRS = [a for a, *_ in DETECTION_SPEC]
 
@@ -22,6 +22,10 @@ class DetectionMixin:
         lay.addWidget(self.det_lbl)
         self.det_form = SettingsForm(DETECTION_SPEC)
         self.det_form.changed.connect(self._detection_changed)
+        self.preset = AnimalPresetCombo()
+        self.preset.setMinimumWidth(140)
+        self.preset.chosen.connect(self.apply_animal_preset)
+        self.det_form.insert_row("", "Set the detection up for", self.preset, tip=PRESET_TIP)
         sc = QScrollArea()
         sc.setWidget(self.det_form)
         sc.setWidgetResizable(True)
@@ -175,6 +179,18 @@ class DetectionMixin:
             self.chk_preview.setChecked(True)  # refreshes the frame
         else:
             self._refresh_frame()
+
+    def apply_animal_preset(self, key: str) -> list[str]:
+        """Set an animal preset on this test's detection settings (the body-size limits use the calibration of
+        its apparatus).  Returns the fields changed."""
+        if self.test is None or self.det_obj is None:
+            return []
+        app = self.project.apparatus_of(self.test)
+        changed, msg = apply_preset_to_form(self.det_form, key, app.px_per_cm if app is not None else None)
+        if changed:
+            self._detection_changed()
+        self.main.status(msg)
+        return changed
 
     def reset_detection(self):
         if self.test is None:
