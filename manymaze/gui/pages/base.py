@@ -121,6 +121,12 @@ DETECTION_SPEC = [
     ("smoothing", "Smooth positions over (frames, 0 = off)", "int", (0, 51, 1),
      "Moving average applied to positions. 0 = off."),
     ("frame_step", "Analyse every Nth frame", "int", (1, 50, 1), "Speed up tracking of high frame-rate video."),
+    ("downscale", "Downscale the video before tracking", "choice",
+     [(1, "No (full resolution)"), (2, "By 2 (half the width and height)"), (4, "By 4 (a quarter)")],
+     "Speed up tracking of high-resolution video files (e.g. 4K): frames are reduced before the animal is found, "
+     "and positions are scaled back, so results, apparatus and calibration stay in the same units. Sizes in pixels "
+     "above refer to the full-resolution video. Use it when the animal stays large in the image. Live tests are "
+     "tracked at the camera's resolution."),
 ]
 
 ANALYSIS_SPEC = [
@@ -278,7 +284,7 @@ DETECTION_SECTIONS = [
     ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
     ("Jumps", ["max_jump_speed", "max_jump_s"]),  # removed before the gaps are filled (Tracking quality)
-    ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
+    ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step", "downscale"]),
 ]
 
 # the forced swim / tail suspension settings, also shown on the Protocol page for those types of test

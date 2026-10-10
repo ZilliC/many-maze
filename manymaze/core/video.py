@@ -3,6 +3,8 @@
 Random access (player, background sampling) and cameras use OpenCV (AVFoundation on macOS).  Sequential decoding
 for tracking uses PyAV/FFmpeg when available — with Apple VideoToolbox hardware decoding on macOS and greyscale
 taken straight from the luma plane — and recording uses the VideoToolbox H.264 encoder when available.
+Tracking may read the frames downscaled 2 or 4 times (:func:`downscale_frame`) to go faster on high-resolution
+video; :func:`check_video` looks for glitches (duplicate, black and missing frames).
 """
 
 from __future__ import annotations
@@ -10,7 +12,9 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -295,19 +299,41 @@ def hw_decoder_name() -> str | None:
     return None
 
 
+DOWNSCALE_FACTORS = (1, 2, 4)
+
+
+def downscaled_size(width: int, height: int, factor: int) -> tuple[int, int]:
+    """(width, height) of a frame downscaled ``factor`` times (rounded down, at least 1 pixel)."""
+    f = max(1, int(factor))
+    return max(1, int(width) // f), max(1, int(height) // f)
+
+
+def downscale_frame(frame: np.ndarray, factor: int) -> np.ndarray:
+    """A frame reduced ``factor`` times in width and height, each pixel the mean of the block it replaces (a
+    factor of 1 returns the frame itself)."""
+    if factor <= 1 or frame is None:
+        return frame
+    h, w = frame.shape[:2]
+    return cv2.resize(frame, downscaled_size(w, h, factor), interpolation=cv2.INTER_AREA)
+
+
 class FrameReader:
     """Sequential frame decoding for tracking: yields (frame_index, frame).
 
     With ``gray=True`` frames are 2-D greyscale (the luma plane, no colour conversion).  Backends, in order of
     preference: PyAV with VideoToolbox hardware decoding (macOS), PyAV multi-threaded software decoding, OpenCV.
+    ``downscale`` (2 or 4) yields the frames that many times smaller in width and height (:func:`downscale_frame`);
+    ``width`` and ``height`` stay those of the video.
     """
 
-    def __init__(self, path: str, start: int = 0, gray: bool = True, threads: int = 0, hwaccel: bool = True):
+    def __init__(self, path: str, start: int = 0, gray: bool = True, threads: int = 0, hwaccel: bool = True,
+                 downscale: int = 1):
         self.path = str(path)
         self.start = max(0, int(start))
         self.gray = gray
         self.threads = threads or default_threads()
         self.hwaccel = hwaccel
+        self.downscale = max(1, int(downscale or 1))
         self.backend = "opencv"
         self._container = None
         self._cap = None
@@ -394,6 +420,13 @@ class FrameReader:
         return frame.to_ndarray(format="gray")
 
     def __iter__(self):
+        if self.downscale <= 1:
+            yield from self._frames()
+            return
+        for i, f in self._frames():
+            yield i, downscale_frame(f, self.downscale)
+
+    def _frames(self):
         if self._parts is not None:
             while True:
                 off = int(self._offsets[self._part])
@@ -626,3 +659,165 @@ def recorded_video(record_path: str | None) -> str | None:
         return record_path
     pl = Path(record_path).with_suffix(".m3u")
     return str(pl) if pl.exists() else None
+
+
+# ------------------------------------------------------------------ video glitches
+BLACK_MEAN = 10.0  # a frame is black when its mean grey level (0–255) is below this …
+BLACK_SD = 5.0  # … and it is that uniform (standard deviation below this)
+DUPLICATE_MEAN_DIFF = 0.02  # a frame repeats the previous one when they differ by less than this on average
+GAP_FACTOR = 1.5  # frames are missing when the time between two frames exceeds this many frame intervals
+
+
+@dataclass
+class VideoCheck:
+    """Glitches found in a video by :func:`check_video` (frame numbers count from 0)."""
+
+    path: str
+    frames: int = 0
+    fps: float = 0.0
+    duration_s: float = 0.0
+    duplicate: list = field(default_factory=list)  # frames identical to the previous one
+    black: list = field(default_factory=list)  # (nearly) black frames
+    gaps: list = field(default_factory=list)  # [(time of the frame after the gap (s), frames missing)]
+    timestamps: bool = True  # the frames had timestamps (else missing frames cannot be found)
+    stopped: bool = False  # the check was stopped before the end of the video
+    error: str = ""
+
+    @property
+    def missing(self) -> int:
+        return int(sum(n for _, n in self.gaps))
+
+    @property
+    def ok(self) -> bool:
+        return not (self.duplicate or self.black or self.gaps or self.error)
+
+    def summary(self) -> str:
+        """One line: what was found."""
+        if self.error:
+            return f"Could not be checked: {self.error}"
+        parts = []
+        if self.duplicate:
+            parts.append(f"{len(self.duplicate)} duplicate frame{'s' * (len(self.duplicate) != 1)} "
+                         f"({frame_ranges(self.duplicate)})")
+        if self.black:
+            parts.append(f"{len(self.black)} black frame{'s' * (len(self.black) != 1)} ({frame_ranges(self.black)})")
+        if self.gaps:
+            where = ", ".join(f"{t:.2f} s" for t, _ in self.gaps[:5]) + (" …" if len(self.gaps) > 5 else "")
+            parts.append(f"{self.missing} missing frame{'s' * (self.missing != 1)} in {len(self.gaps)} "
+                         f"gap{'s' * (len(self.gaps) != 1)} (at {where})")
+        text = "; ".join(parts) if parts else "No glitches found"
+        if not self.timestamps:
+            text += " (no frame timestamps: missing frames cannot be detected)"
+        if self.stopped:
+            text += f" (stopped after {self.frames} frames)"
+        return text
+
+
+def frame_ranges(frames, limit: int = 6) -> str:
+    """"3, 10–12, 40" for frames [3, 10, 11, 12, 40]: runs of consecutive frames, the first ``limit`` of them."""
+    runs: list[list[int]] = []
+    for f in sorted(frames):
+        if runs and f == runs[-1][1] + 1:
+            runs[-1][1] = f
+        else:
+            runs.append([f, f])
+    text = ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in runs[:limit])
+    return text + (" …" if len(runs) > limit else "")
+
+
+def _frame_stats(check: VideoCheck, i: int, gray: np.ndarray, prev: np.ndarray | None):
+    m, sd = cv2.meanStdDev(gray)
+    if float(m[0][0]) < BLACK_MEAN and float(sd[0][0]) < BLACK_SD:
+        check.black.append(i)  # (black frames in a row are not also counted as duplicates)
+    elif prev is not None and prev.shape == gray.shape and \
+            float(cv2.absdiff(gray, prev).mean()) < DUPLICATE_MEAN_DIFF:
+        check.duplicate.append(i)
+
+
+def check_video(path, progress: Callable[[float], None] | None = None,
+                should_stop: Callable[[], bool] | None = None) -> VideoCheck:
+    """Look through a video file for duplicate frames (a frame repeating the previous one: the camera or the
+    recorder dropped frames and repeated one), black frames, and missing frames (a gap in the frame timestamps
+    longer than :data:`GAP_FACTOR` frame intervals). A playlist (split recording) is checked part by part, frames
+    numbered through. Errors are reported in ``error``, not raised."""
+    path = str(path)
+    if is_playlist(path):
+        out = VideoCheck(path)
+        parts = playlist_parts(path)
+        t_off = 0.0
+        for k, part in enumerate(parts):
+            sub = check_video(part, (lambda f, k=k: progress((k + f) / len(parts))) if progress else None,
+                              should_stop)
+            off = out.frames
+            out.fps = out.fps or sub.fps
+            out.duplicate += [off + i for i in sub.duplicate]
+            out.black += [off + i for i in sub.black]
+            out.gaps += [(t_off + t, n) for t, n in sub.gaps]
+            out.frames += sub.frames
+            out.duration_s += sub.duration_s
+            t_off += sub.duration_s
+            out.timestamps = out.timestamps and sub.timestamps
+            if sub.error:
+                out.error = f"{Path(part).name}: {sub.error}"
+            if sub.stopped or sub.error:
+                out.stopped = sub.stopped
+                break
+        return out
+    check = VideoCheck(path)
+    try:
+        reader = FrameReader(path, 0, gray=True, hwaccel=False)
+    except Exception as e:
+        check.error = str(e)
+        return check
+    with reader:
+        check.fps = float(reader.fps or 0.0) or 25.0
+        dt = 1.0 / check.fps
+        try:
+            with VideoSource(path) as v:
+                total = max(1, v.frame_count)
+        except Exception:
+            total = 1
+        prev, t_prev, i = None, None, 0
+        try:
+            if reader._container is not None:  # PyAV: the frames' own timestamps
+                tb = reader._tb
+                for frame in reader._container.decode(reader._stream):
+                    t = (frame.pts - reader._t0) * tb if frame.pts is not None and tb else None
+                    if t is None:
+                        check.timestamps = False
+                    elif t_prev is not None and t - t_prev > GAP_FACTOR * dt:
+                        check.gaps.append((round(t, 4), int(round((t - t_prev) / dt)) - 1))
+                    gray = reader._to_array(frame)
+                    _frame_stats(check, i, gray, prev)
+                    prev, t_prev, i = gray, (t if t is not None else t_prev), i + 1
+                    if progress and i % 50 == 0:
+                        progress(min(1.0, i / total))
+                    if should_stop and should_stop():
+                        check.stopped = True
+                        break
+            else:  # OpenCV: the timestamps it reports
+                cap = reader._cap
+                while True:
+                    ok, f = cap.read()
+                    if not ok:
+                        break
+                    t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                    if t_prev is not None and t <= t_prev and i > 1:
+                        check.timestamps = False
+                    elif t_prev is not None and t - t_prev > GAP_FACTOR * dt:
+                        check.gaps.append((round(t, 4), int(round((t - t_prev) / dt)) - 1))
+                    gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                    _frame_stats(check, i, gray, prev)
+                    prev, t_prev, i = gray, t, i + 1
+                    if progress and i % 50 == 0:
+                        progress(min(1.0, i / total))
+                    if should_stop and should_stop():
+                        check.stopped = True
+                        break
+        except Exception as e:  # a damaged file: report what was read
+            check.error = str(e) or type(e).__name__
+        check.frames = i
+        check.duration_s = (t_prev + dt) if t_prev is not None else i * dt
+    if progress:
+        progress(1.0)
+    return check

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QGridLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from ....core.tracking import ArenaTracker, DetectionSettings, compute_background, draw_overlay
+from ....core.tracking import DetectionSettings, arena_tracker, compute_background, draw_overlay
+from ... import theme
 from ...widgets import Worker
 from ..base import DETECTION_SPEC, PRESET_TIP, AnimalPresetCombo, SettingsForm, apply_preset_to_form
 
@@ -32,7 +33,7 @@ class DetectionMixin:
         lay.addWidget(sc, 1)
         self.preview_lbl = QLabel()
         self.preview_lbl.setWordWrap(True)
-        self.preview_lbl.setStyleSheet("color:#475569;")
+        theme.style(self.preview_lbl, lambda: f"color:{theme.HINT};")
         lay.addWidget(self.preview_lbl)
         row = QGridLayout()
         reset = QPushButton("Reset to experiment defaults")
@@ -73,7 +74,7 @@ class DetectionMixin:
                 mask = app.arena_or_bounds().mask((h, w))
             except ValueError:
                 mask = None
-        tracker = ArenaTracker(s, mask)
+        tracker = arena_tracker(s, mask, (h, w))  # downscaled as tracking will be (Downscale before tracking)
         if s.method == "background":
             key = self.bg_key(s)
             bg = self._bg_cache.get(key)
@@ -96,7 +97,7 @@ class DetectionMixin:
                              for i, d in enumerate(dets) if d.detected)
             info = f"Detected {len(found)}/{len(dets)} — {info}"
         else:
-            info = "<span style='color:#dc2626'>No animal detected in this frame.</span> Try a lower threshold, " \
+            info = f"<span style='color:{theme.ERROR}'>No animal detected in this frame.</span> Try a lower threshold, " \
                    "a smaller minimum area or a different contrast."
         fg_px = int((fg > 0).sum())
         self._set_preview_info(f"{info}<br>Foreground pixels: {fg_px}")

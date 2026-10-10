@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 from ..core import ioconfig
 from ..core import iodevices as iod
 from ..core.ioconfig import PRESET_KEY
+from . import theme
 from .widgets import loading, run_and_wait, value_text
 
 # channel table columns: (channel field, header); "options" holds the driver options as key=value text; "role" and
@@ -618,10 +619,10 @@ class IODevicesDialog(QDialog):
                 value_text(round(v, 3) if isinstance(v, float) else v)
             if it.text() != text:
                 it.setText(text)
-                it.setForeground(QBrush(QColor("#15803d" if v else "#6b7280")))
+                it.setForeground(QBrush(QColor(theme.OK if v else theme.MUTED)))
         errs = m.errors + self._output_errors
         self.conn_lbl.setText("; ".join(errs[-3:]) if errs else f"Connected: {len(m.devices)} device(s)")
-        self.conn_lbl.setStyleSheet("color:#dc2626" if errs else "color:#15803d")
+        self.conn_lbl.setStyleSheet(f"color:{theme.ERROR if errs else theme.OK}")
 
     def _set_output(self, m, device, channel, value) -> bool:
         """Set an output of the connected manager `m`, unless it was disconnected meanwhile; failures are shown."""

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout)
 
 from ..core import pose
+from . import theme
 from .widgets import error_box, hint, run_with_progress
 
 DEFAULT_MODEL = "topviewmouse_rtmpose_s"
@@ -117,20 +118,21 @@ class PoseModelBox(QGroupBox):
         if m in pose.MODELS:
             info = pose.MODELS[m]
             ok = pose.is_installed(m)
-            state = "<b style='color:#16a34a'>installed</b>" if ok else "<b style='color:#d97706'>not installed</b>"
-            text = (f"{info['title']} — {state}<br><span style='color:#64748b'>{info['description']}. "
+            state = f"<b style='color:{theme.OK}'>installed</b>" if ok else \
+                f"<b style='color:{theme.WARNING}'>not installed</b>"
+            text = (f"{info['title']} — {state}<br><span style='color:{theme.SLATE}'>{info['description']}. "
                     f"Licence: academic, non-commercial use only.</span>")
             self.install_btn.setText("Install…")
             self.install_btn.setVisible(not ok)
             self.remove_btn.setVisible(ok)
         else:
             ok = Path(m).exists()
-            state = "<b style='color:#16a34a'>found</b>" if ok else "<b style='color:#dc2626'>missing</b>"
+            state = f"<b style='color:{theme.OK}'>found</b>" if ok else f"<b style='color:{theme.ERROR}'>missing</b>"
             text = f"Custom model <code>{Path(m).name}</code> — {state}"
             self.install_btn.setVisible(True)
             self.install_btn.setText("Use built-in model")
             self.remove_btn.setVisible(False)
-        text += f"<br><span style='color:#64748b'>Runs on: {accelerator_text()}</span>"
+        text += f"<br><span style='color:{theme.SLATE}'>Runs on: {accelerator_text()}</span>"
         self.status.setText(text)
 
     def _set_model(self, m: str):

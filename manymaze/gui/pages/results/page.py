@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLay
 from ....core.apparatus import unique_name
 from ....core.project import OPTIONAL_INFO_COLUMNS, result_columns
 from ....core.reports import default_report, find_report, set_default
+from ....core.terminology import column_labels, term
 from ... import ribbon, theme
 from ...icons import icon
 from ...ribbon import RibbonHost
@@ -30,17 +31,21 @@ VIEWS = [("spreadsheet", "Spreadsheet", "table", "Data"), ("track", "Track plots
          ("heat", "Heat maps", "heatmap", "Heat maps"), ("charts", "Charts", "chart", "Charts"),
          ("video", "Video export", "video_file", "Video export")]
 
-TABLE_STYLE = f"""
-QTableView#ResultsTable {{ border: none; border-top: 1px solid {theme.BORDER}; background: white; font-size: 13px;
-    gridline-color: #e6e6e6; }}
+def table_style() -> str:
+    """The Data page's style sheet in the colours of the scheme in use."""
+    return f"""
+QTableView#ResultsTable {{ border: none; border-top: 1px solid {theme.BORDER}; background: {theme.BASE};
+    font-size: 13px; gridline-color: {theme.SHEET_GRID}; }}
 QTableView#ResultsTable::item {{ padding: 0 8px; }}
-QTableView#ResultsTable QHeaderView::section {{ background: #fbfbfb; font-size: 13px; font-weight: normal;
-    padding: 7px 8px; border: none; border-right: 1px solid #e6e6e6; border-bottom: 1px solid {theme.BORDER}; }}
-QListWidget#TestList {{ border: none; border-right: 1px solid {theme.BORDER}; background: white; font-size: 13px; }}
-QListWidget#TestList::item {{ padding: 5px 8px; border-bottom: 1px solid #f0f0f0; }}
+QTableView#ResultsTable QHeaderView::section {{ background: {theme.HEADER_BG}; font-size: 13px; font-weight: normal;
+    padding: 7px 8px; border: none; border-right: 1px solid {theme.SHEET_GRID}; border-bottom: 1px solid {theme.BORDER}; }}
+QListWidget#TestList {{ border: none; border-right: 1px solid {theme.BORDER}; background: {theme.BASE};
+    font-size: 13px; }}
+QListWidget#TestList::item {{ padding: 5px 8px; border-bottom: 1px solid {theme.ROW_LINE}; }}
 QListWidget#TestList::item:selected {{ background: {theme.SELECTION}; color: {theme.TEXT}; }}
-QToolButton#ModeButton {{ border: 1px solid #c8c8c8; background: white; padding: 3px 12px; }}
-QToolButton#ModeButton:checked {{ background: {theme.SELECTION}; border-color: #8fb0de; }}
+QToolButton#ModeButton {{ border: 1px solid {theme.INPUT_BORDER}; background: {theme.BASE}; color: {theme.TEXT};
+    padding: 3px 12px; }}
+QToolButton#ModeButton:checked {{ background: {theme.SELECTION}; border-color: {theme.SELECTION_BORDER}; }}
 QLabel#PlotCaption {{ font-size: 14px; color: {theme.TEXT}; }}
 QTreeWidget::item {{ height: 22px; }}
 """
@@ -205,7 +210,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         lay.setSpacing(4)
         lay.addLayout(top)
         lay.addWidget(self.main_tabs, 1)
-        self.setStyleSheet(TABLE_STYLE)
+        theme.style(self, table_style)
         self._build_actions()
         self._update_actions()
 
@@ -246,6 +251,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.save_act.setMenu(m)
         self.report_act = A("HTML report", "report", self.html_report,
                             "Create a report with the results, statistics, track plots, heat maps and charts")
+        self.email_act = A("E-mail report…", "email", lambda: self.email_report(),
+                           "E-mail the results (spreadsheet and / or HTML report) through the e-mail server of an "
+                           "alert device (Protocol ▸ Hardware ▸ I/O devices)", small=True)
         self.reports_act = A("Report", "list", None, "Save what the spreadsheet shows (measures, information "
                              "columns, time periods and filters) as a named report, kept in the experiment")
         m = QMenu(self)
@@ -274,6 +282,9 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.group_heat_act = A("Treatment heat maps", "layers", self.group_heatmaps,
                                 "Average heat map of each treatment (tests shown in the spreadsheet), on a common "
                                 "scale, with each test's alignment applied")
+        self.hot_point_act = A("Add point here", "point", lambda: self.add_hot_spot_point(),
+                               "Add a point to the apparatus at the hottest spot of the heat map shown (this test's "
+                               "map, or the treatment maps')")
         self.video_act = A("Export video", "video_file", self.export_video,
                            "Save the selected test's video with zones, track, behaviours and time stamp drawn on it")
         self.measure_act = A("Measure interval", "ruler", self.charts.measure_check.setChecked,
@@ -302,15 +313,18 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
             return [nav, ("Body part", [host([self.part_combo])]), ("Heat map of", [host([self.heat_of])]),
                     ("Scale", [host([self.heat_norm], [self.heat_max])]), ("Align", [host([self.align_combo])]),
                     ("Treatments", [(self.group_heat_act, "large")]),
+                    ("Hottest spot", [(self.hot_point_act, "large")]),
                     ("Figure", [(self.save_fig_act, "large"), (self.copy_fig_act, "large")])]
         if self.view == "video":
             return [nav, ("Video", [(self.video_act, "large"), (self.open_test_act, "large")])]
         return [nav, ("Clipboard", [(self.copy_act, "large"), (self.copy_sel_act, "small")]),
-                ("Spreadsheet", [(self.print_act, "large"), (self.save_act, "large"), (self.report_act, "large")]),
+                ("Spreadsheet", [(self.print_act, "large"), (self.save_act, "large"), (self.report_act, "large"),
+                                 (self.email_act, "small")]),
                 ("Actions", [(self.select_act, "large"), (self.view_sheet_act, "large"), (self.clear_act, "small"),
                              (self.segment_act, "small"), (self.recalc_act, "small")]),
                 ("Report", [host([self.reports_combo]), (self.reports_act, "large")]),
-                ("Filter", [host(["Treatment", self.group_combo], ["Stage", self.stage_combo])]),
+                ("Filter", [host([term(self.project, "treatment"), self.group_combo],
+                                 [term(self.project, "stage"), self.stage_combo])]),
                 ("Time periods", [host([self.seg_check], [self.period_combo])])]
 
     def _host(self, *rows) -> RibbonHost:
@@ -386,7 +400,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.view_sheet_act.setEnabled(self.view != "spreadsheet")
         has = bool(self.rows)
         for a in (self.copy_act, self.copy_sel_act, self.print_act, self.save_act, self.report_act,
-                  self.group_heat_act):
+                  self.email_act, self.group_heat_act, self.hot_point_act):
             a.setEnabled(has)
         row = self.current_row() if has else None
         self.open_test_act.setEnabled(row is not None)
@@ -401,6 +415,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._detail = None
         self._detail_key = None
         self._names = _names(project)
+        self.model.project = project
         # the experiment's default report is shown once its results are delivered (on_show)
         rep = default_report(project.reports) if project is not None else None
         self.report_name, self._report_pending, self._known_cols = (rep["name"] if rep else None), rep, set()
@@ -642,7 +657,8 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._loading_tree = True
         info = [c for c in info_columns(self.project) if c in self.all_columns() and c != "Test"
                 and (c not in SEGMENT_COLUMNS or self.segmented)]
-        fill_measure_tree(self.tree, measure_groups(self.measure_columns(), self._names, info), self.hidden)
+        fill_measure_tree(self.tree, measure_groups(self.measure_columns(), self._names, info), self.hidden,
+                          labels=column_labels(self.project, info))
         self._loading_tree = False
         self._filter_tree(self.search.text())
 

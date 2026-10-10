@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QC
 from ...core import export, scales, security
 from ...core import workflow as wf
 from ...core.project import Animal
+from ...core.terminology import term
 from ...core.workflow import treatment_code, treatment_text
 from .. import ribbon, theme
 from ..icons import icon
@@ -213,7 +214,7 @@ class AnimalsPage(Page):
         self.blind_lbl = QLabel("Blind testing is on: treatments are shown only as codes and cannot be edited. "
                                 "Click <b>Reveal treatment coding</b> to unblind.")
         self.blind_lbl.setWordWrap(True)
-        self.blind_lbl.setStyleSheet("color:#7c3aed;padding:2px 0 6px 0;")
+        theme.style(self.blind_lbl, lambda: f"color:{theme.NOTE};padding:2px 0 6px 0;")
         self.blind_lbl.hide()
 
         # ---- Animals sheet ---------------------------------------------------------------
@@ -270,10 +271,10 @@ class AnimalsPage(Page):
         t.horizontalHeader().setHighlightSections(False)
         t.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         t.horizontalHeader().setMinimumHeight(34)
-        t.setStyleSheet("QTableWidget{font-size:14px;gridline-color:#e6e6e6;border:none;}"
-                        "QTableWidget::item{padding:0 6px;}"
-                        "QHeaderView::section{font-size:14px;padding:6px 8px;border:none;"
-                        "border-right:1px solid #ececec;border-bottom:1px solid #d6d6d6;}")
+        theme.style(t, lambda: f"QTableWidget{{font-size:14px;gridline-color:{theme.SHEET_GRID};border:none;}}"
+                    "QTableWidget::item{padding:0 6px;}"
+                    "QHeaderView::section{font-size:14px;padding:6px 8px;border:none;"
+                    f"border-right:1px solid {theme.HEADER_LINE};border-bottom:1px solid {theme.BORDER};}}")
 
     # ------------------------------------------------------------------ ribbon / explorer hooks
     def ribbon_groups(self):
@@ -289,7 +290,9 @@ class AnimalsPage(Page):
                             (self.a_field_remove, "small")])]
 
     def explorer_items(self):
-        return [("Treatments", "treatment", "treatments"), ("Animals", "animal", "animals")]
+        p = self.project
+        return [(term(p, "treatment", plural=True), "treatment", "treatments"),
+                (term(p, "animal", plural=True), "animal", "animals")]
 
     def show_item(self, key):
         self.set_view(key)
@@ -300,7 +303,7 @@ class AnimalsPage(Page):
         changed = view != self.view
         self.view = view
         self.stack.setCurrentWidget(self.treatments if view == "treatments" else self.table)
-        self.title_lbl.setText("Treatments" if view == "treatments" else "Animals")
+        self.title_lbl.setText(term(self.project, "treatment" if view == "treatments" else "animal", plural=True))
         for a, on in ((self.a_view_treat, view == "treatments"), (self.a_view_animals, view == "animals")):
             if a.isChecked() != on:
                 a.blockSignals(True)
@@ -347,8 +350,9 @@ class AnimalsPage(Page):
         p = self.project
         self._cols = ([("number", ""), ("id", ""), ("status", ""), ("treatment", "")]
                       + [("field", f) for f in p.animal_fields] + [("sex", ""), ("tests", ""), ("notes", "")])
-        titles = {"number": "Animal", "id": "Animal ID", "status": "Status", "treatment": "Treatment", "sex": "Sex",
-                  "tests": "Tests", "notes": "Notes"}
+        titles = {"number": term(p, "animal"), "id": f"{term(p, 'animal')} ID", "status": "Status",
+                  "treatment": term(p, "treatment"), "sex": "Sex", "tests": term(p, "test", plural=True),
+                  "notes": "Notes"}
         return [f if k == "field" else titles[k] for k, f in self._cols]
 
     def _col_kind(self, c: int) -> str | None:
@@ -372,6 +376,9 @@ class AnimalsPage(Page):
         cols = self._columns()
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
+        self.treatments.setHorizontalHeaderLabels([term(p, "treatment"), "Code", "Colour",
+                                                   f"Number of {term(p, 'animal', plural=True, lower=True)}"])
+        self.title_lbl.setText(term(p, "treatment" if self.view == "treatments" else "animal", plural=True))
         counts = self._test_counts()
         self.table.setRowCount(len(p.animals))
         for r, a in enumerate(p.animals):
@@ -416,7 +423,7 @@ class AnimalsPage(Page):
         ids = counts.get(a.id, [])
         n = self._item(editable=False, align=Qt.AlignRight | Qt.AlignVCenter)
         n.setData(Qt.DisplayRole, len(ids))
-        n.setForeground(QColor("#6b7280"))
+        n.setForeground(QColor(theme.MUTED))
         if ids:
             n.setToolTip("Tests: " + ", ".join(str(i) for i in ids))
         items["tests"] = n
@@ -427,7 +434,7 @@ class AnimalsPage(Page):
                     f"{str(w.get('date', '')).replace('T', ' ')}   {scales.format_grams(w.get('grams', 0))} g"
                     for w in a.weights[-12:]))
             if a.retired:
-                it.setForeground(QColor(MUTED_ROW))
+                it.setForeground(QColor(theme.INACTIVE if theme.is_dark() else MUTED_ROW))
             self.table.setItem(r, c, it)
 
     def _refresh_side(self, counts=None):
@@ -437,8 +444,9 @@ class AnimalsPage(Page):
         n_tests = sum(len(v) for k, v in counts.items() if p.get_animal(k))
         n_ret = sum(1 for a in p.animals if a.retired)
         nt = len(p.groups)
-        self.summary.setText(f"{len(p.animals)} animals · {nt} treatment{'s' if nt != 1 else ''} · {n_tests} tests"
-                             + (f" · {n_ret} retired" if n_ret else ""))
+        self.summary.setText(f"{len(p.animals)} {term(p, 'animal', plural=True, lower=True)} · {nt} "
+                             f"{term(p, 'treatment', plural=nt != 1, lower=True)} · {n_tests} "
+                             f"{term(p, 'test', plural=True, lower=True)}" + (f" · {n_ret} retired" if n_ret else ""))
         self.blind_lbl.setVisible(p.blind)
         self.a_reveal.blockSignals(True)
         self.a_reveal.setChecked(not p.blind)
@@ -456,7 +464,7 @@ class AnimalsPage(Page):
             name = self._item(g.name if not p.blind else "Hidden (blind testing)", editable=not p.blind)
             name.setData(Qt.UserRole, g.name)
             if p.blind:
-                name.setForeground(QColor(MUTED_ROW))
+                name.setForeground(QColor(theme.INACTIVE if theme.is_dark() else MUTED_ROW))
             col = self._item(wf.display_color(p, g.name) if not p.blind else "", editable=False)
             col.setIcon(color_icon(wf.display_color(p, g.name), 16))
             col.setToolTip("Double-click to change the colour")
@@ -683,7 +691,8 @@ class AnimalsPage(Page):
                 for c in range(self.table.columnCount()):
                     it = self.table.item(r, c)
                     if it is not None and self._col_kind(c) != "tests":
-                        it.setForeground(QColor(MUTED_ROW) if a.retired else QColor(theme.TEXT))
+                        it.setForeground(QColor(theme.INACTIVE if theme.is_dark() else MUTED_ROW) if a.retired
+                                         else QColor(theme.TEXT))
                 self._changed()
                 self._refresh_side()
             elif kind == "treatment":

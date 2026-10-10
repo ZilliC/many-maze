@@ -8,6 +8,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QI
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QTreeWidget, QTreeWidgetItem
 
 from ..core import procedures as pr
+from . import theme
 
 PATH_ROLE = Qt.UserRole  # the statement's path (an If's path + ("else",) / ("elif", k) for its Else / else-if)
 TYPE_ROLE = Qt.UserRole + 1  # statement type of a tree item (ELSE / ELIF for an Else branch / else-if clause)
@@ -155,9 +156,9 @@ class StatementTree(QTreeWidget):
         for grp in (QPalette.Active, QPalette.Inactive):
             pal.setColor(grp, QPalette.Highlight, QColor(0, 0, 0, 0))
         self.setPalette(pal)
-        self.setStyleSheet("QTreeWidget{background:white;selection-background-color:transparent;}"
-                           "QTreeWidget::item:selected, QTreeWidget::item:hover, QTreeWidget::branch:selected,"
-                           "QTreeWidget::branch:hover{background:transparent;}")
+        theme.style(self, lambda: f"QTreeWidget{{background:{theme.BASE};selection-background-color:transparent;}}"
+                    "QTreeWidget::item:selected, QTreeWidget::item:hover, QTreeWidget::branch:selected,"
+                    "QTreeWidget::branch:hover{background:transparent;}")
 
     def dropEvent(self, e):
         self.drag_item = self.currentItem()

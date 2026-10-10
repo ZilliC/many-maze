@@ -44,7 +44,9 @@ ENTRY_SENTENCES = {
     "exclusion": "Zone entry: not in any other zone",
 }
 
-PANEL_QSS = f"""
+def panel_qss() -> str:
+    """The property panel's style sheet in the colours of the scheme in use."""
+    return f"""
 QFrame#PropPanel {{ background: {theme.WORK_BG}; border: none; border-left: 1px solid {theme.BORDER}; }}
 QTabWidget#PropTabs::pane {{ border: none; border-top: 1px solid {theme.BORDER}; background: {theme.WORK_BG}; }}
 QTabWidget#PropTabs > QTabBar::tab {{ background: transparent; border: none; border-bottom: 2px solid transparent;
@@ -215,7 +217,7 @@ class PropertyPanel(QFrame):
         self._loading = False
         self.setObjectName("PropPanel")
         self.setFixedWidth(306)
-        self.setStyleSheet(PANEL_QSS)
+        theme.style(self, panel_qss)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(1, 6, 0, 0)
         self.tabs = QTabWidget()

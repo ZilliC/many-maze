@@ -25,7 +25,9 @@ from ...core.project import ERROR_COLUMN, Behaviour, result_columns
 from ...core.sync import sync_from
 from ...core.template_measures import FST_TEMPLATES
 from ...core.templates import TEMPLATES
+from ...core.terminology import TERMS, term, terminology_from
 from ...core.tracking import DetectionSettings
+from .. import theme
 from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
@@ -102,7 +104,8 @@ class ExperimentPage(Page):
         lay.setContentsMargins(0, 0, 0, 0)
         self.lock_lbl = QLabel(LOCKED_TEXT)
         self.lock_lbl.setWordWrap(True)
-        self.lock_lbl.setStyleSheet("background:#fff7e0;border-bottom:1px solid #f0d58a;padding:6px 28px;")
+        theme.style(self.lock_lbl, lambda: f"background:{theme.NOTE_BG};border-bottom:1px solid {theme.NOTE_BORDER};"
+                                          "padding:6px 28px;")
         self.lock_lbl.hide()
         lay.addWidget(self.lock_lbl)
         lay.addWidget(self.stack)
@@ -221,6 +224,28 @@ class ExperimentPage(Page):
         pg.body.addSpacing(10)
         self.summary_lbl = hint("")
         pg.add(self.summary_lbl)
+        pg.add(separator())
+
+        pg.section("Terminology")
+        pg.add(hint("The words this experiment uses for animals, treatments, tests … — in the window, the results "
+                    "and the exported files (e.g. Subject, Condition, Session). Leave a term blank to keep "
+                    "mANY-MAZE's word; the plural is filled in for you. Measure names and formulas are not renamed."))
+        self.terms = QTableWidget(len(TERMS), 3)
+        self.terms.setHorizontalHeaderLabels(["Term", "Called", "Plural"])
+        self.terms.verticalHeader().hide()
+        self.terms.setMaximumWidth(560)
+        self.terms.verticalHeader().setDefaultSectionSize(26)
+        self.terms.setFixedHeight(26 * len(TERMS) + 44)
+        self.terms.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        for c, w in ((0, 160), (1, 190), (2, 190)):
+            self.terms.setColumnWidth(c, w)
+        for r, (one, many) in enumerate(TERMS.values()):
+            it = QTableWidgetItem(one)
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            it.setToolTip(f"mANY-MAZE's word: {one} / {many}")
+            self.terms.setItem(r, 0, it)
+        self.terms.itemChanged.connect(self._store_terminology)
+        pg.add(self.terms)
         pg.finish()
 
     def _build_tracking(self):
@@ -230,7 +255,8 @@ class ExperimentPage(Page):
         self.takenote_lbl = QLabel("This protocol uses TakeNote mode: tests are scored by hand and these settings "
                                    "are only used if you track a test anyway.")
         self.takenote_lbl.setWordWrap(True)
-        self.takenote_lbl.setStyleSheet("background:#fff7e0;border:1px solid #f0d58a;padding:6px 8px;")
+        theme.style(self.takenote_lbl, lambda: f"background:{theme.NOTE_BG};border:1px solid {theme.NOTE_BORDER};"
+                    "padding:6px 8px;")
         self.takenote_lbl.hide()
         pg.add(self.takenote_lbl)
         self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS)
@@ -258,7 +284,7 @@ class ExperimentPage(Page):
         f.addRow("Enter the stages, one per line", self.stages)
         pg.add(f)
         self.stages_lbl = QLabel()
-        self.stages_lbl.setStyleSheet("color:#dc2626;")
+        theme.style(self.stages_lbl, lambda: f"color:{theme.ERROR};")
         self.stages_lbl.hide()
         pg.add(self.stages_lbl)
         pg.add(separator())
@@ -337,7 +363,7 @@ class ExperimentPage(Page):
         left.addWidget(self.beh, 1)
         self.beh_lbl = QLabel()
         self.beh_lbl.setWordWrap(True)
-        self.beh_lbl.setStyleSheet("color:#dc2626;")
+        theme.style(self.beh_lbl, lambda: f"color:{theme.ERROR};")
         self.beh_lbl.hide()
         left.addWidget(self.beh_lbl)
         left.addLayout(button_row(small_button("New key", "add", slot=self._add_behaviour),
@@ -455,7 +481,7 @@ class ExperimentPage(Page):
     def _error_label() -> QLabel:
         lbl = QLabel()
         lbl.setWordWrap(True)
-        lbl.setStyleSheet("color:#dc2626;")
+        theme.style(lbl, lambda: f"color:{theme.ERROR};")
         lbl.hide()
         return lbl
 
@@ -589,7 +615,8 @@ class ExperimentPage(Page):
         return groups
 
     def explorer_items(self):
-        return [(label, ic, key) for key, label, ic in ELEMENTS]
+        p = self.project
+        return [(term(p, "stage", plural=True) if key == "stages" else label, ic, key) for key, label, ic in ELEMENTS]
 
     def show_item(self, key: str):
         """Show a protocol element (explorer sub-item)."""
@@ -696,6 +723,40 @@ class ExperimentPage(Page):
         self._update_fst()
         self._fill_calculations()
         self._fill_plugins()
+        self._load_terminology(p)
+
+    def _load_terminology(self, p):
+        for r, key in enumerate(TERMS):
+            t = p.terminology.get(key) or {}
+            for c, k in ((1, "singular"), (2, "plural")):
+                text, it = str(t.get(k, "")), self.terms.item(r, c)
+                if it is None:  # (items are kept: this also runs while one of them is being edited)
+                    self.terms.setItem(r, c, QTableWidgetItem(text))
+                elif it.text() != text:
+                    it.setText(text)
+
+    def _store_terminology(self, item=None):
+        """Protocol ▸ Terminology edited: keep the changed terms (a new singular gets a new plural unless one was
+        typed) and rename the window's labels."""
+        if self._loading or self.project is None:
+            return
+        p = self.project
+        d = {}
+        for r, key in enumerate(TERMS):
+            one = (self.terms.item(r, 1).text() if self.terms.item(r, 1) else "").strip()
+            many = (self.terms.item(r, 2).text() if self.terms.item(r, 2) else "").strip()
+            old = p.terminology.get(key) or {}
+            if item is not None and item.row() == r and item.column() == 1 and many == old.get("plural"):
+                many = ""  # the singular changed: its plural follows
+            if one:
+                d[key] = {"singular": one, "plural": many}
+        new = terminology_from(d)
+        if new != p.terminology:
+            p.terminology = new
+            self.main.mark_dirty()
+            self.main.apply_terminology()
+        with loading(self):
+            self._load_terminology(p)
 
     def _update_summary(self):
         p = self.project

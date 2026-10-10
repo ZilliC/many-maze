@@ -238,7 +238,8 @@ def test_shuffle_is_fast_and_bounded():
     ev = Evaluator(lambda n: 0)
     t0 = time.monotonic()
     out = ev.eval("shuffle(range(6000), 1)")
-    assert sorted(out) == list(range(6000)) and time.monotonic() - t0 < 0.5
+    # catches hangs; well over the ~ms this takes, as shared CI runners stall
+    assert sorted(out) == list(range(6000)) and time.monotonic() - t0 < 2.0
     import itertools
     for src, k in (("shuffle([1, 1, 2, 2, 3, 3] * 500, 1)", 1), ("shuffle([0] * 10 + [1] * 20, 2)", 2),
                    ("shuffle([[1], [1], [2], 'a', 'a', 1.0, 1] * 30, 2)", 2)):

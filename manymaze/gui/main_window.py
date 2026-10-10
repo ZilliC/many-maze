@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
@@ -24,10 +24,11 @@ from ..core import explock
 from ..core import security
 from ..core.project import PROJECT_FILE, Project, same_folder
 from ..core.templates import TEMPLATES
+from ..core.terminology import term
 from ..core.workflow import add_experimenter, copy_protocol, remove_experimenter
 from . import theme
 from .icons import icon
-from .ribbon import Ribbon
+from .ribbon import Ribbon, two_lines
 from .widgets import Worker, error_box, run_with_progress
 
 # (module, class) of every page
@@ -50,6 +51,10 @@ SECTIONS = [
               ("Review and score", "video", "TestViewPage")]),
     ("Results", [("Data", "table", "ResultsPage"), ("Statistics", "bars", "StatisticsPage")]),
 ]
+# explorer entries and ribbon buttons named after a term (Protocol ▸ Protocol ▸ Terminology)
+TERM_ENTRIES = {"Apparatus": lambda p: term(p, "apparatus"),
+                "Test schedule": lambda p: f"{term(p, 'test')} schedule",
+                "Run tests": lambda p: f"Run {term(p, 'test', plural=True, lower=True)}"}
 
 
 class NewProjectDialog(QDialog):
@@ -133,11 +138,11 @@ class WelcomePage(QWidget):
         side = QWidget()
         side.setObjectName("BackstageSide")
         side.setFixedWidth(250)
-        side.setStyleSheet(f"QWidget#BackstageSide{{background:{theme.ACCENT};}}"
-                           "QPushButton{color:white;background:transparent;border:none;text-align:left;"
-                           "padding:10px 26px;font-size:15px;border-radius:0;}"
-                           "QPushButton:hover{background:rgba(255,255,255,0.18);}"
-                           "QPushButton:disabled{color:rgba(255,255,255,0.45);background:transparent;}")
+        theme.style(side, lambda: f"QWidget#BackstageSide{{background:{theme.ACCENT_BG};}}"
+                    f"QPushButton{{color:{theme.ON_ACCENT};background:transparent;border:none;text-align:left;"
+                    "padding:10px 26px;font-size:15px;border-radius:0;}"
+                    "QPushButton:hover{background:rgba(255,255,255,0.18);}"
+                    "QPushButton:disabled{color:rgba(255,255,255,0.45);background:transparent;}")
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 18, 0, 12)
         sl.setSpacing(0)
@@ -175,10 +180,9 @@ class WelcomePage(QWidget):
         logo = QLabel()
         logo.setPixmap(QIcon(str(Path(__file__).resolve().parent.parent / "resources" / "icon.svg")).pixmap(56, 56))
         head.addWidget(logo)
-        title = QLabel(f"<span style='font-size:26px;color:{theme.HEADING};font-weight:300'>{APP_NAME}</span><br>"
-                       f"<span style='color:{theme.MUTED}'>Libre video tracking and behavioural analysis · "
-                       f"version {__version__}</span>")
-        head.addWidget(title, 1)
+        self.title = QLabel()
+        self.theme_changed()
+        head.addWidget(self.title, 1)
         bl.addLayout(head)
         bl.addSpacing(18)
         cap = QLabel("Recent experiments")
@@ -191,6 +195,11 @@ class WelcomePage(QWidget):
         self.recent.itemClicked.connect(lambda it: main.load_project(it.data(Qt.UserRole)))
         bl.addWidget(self.recent, 1)
         lay.addWidget(body, 1)
+
+    def theme_changed(self):
+        self.title.setText(f"<span style='font-size:26px;color:{theme.HEADING};font-weight:300'>{APP_NAME}</span>"
+                           f"<br><span style='color:{theme.MUTED}'>Libre video tracking and behavioural analysis · "
+                           f"version {__version__}</span>")
 
     def refresh(self):
         self.recent.clear()
@@ -283,6 +292,7 @@ class SectionView(QWidget):
         it = QTreeWidgetItem([label])
         it.setIcon(0, icon(icon_name))
         it.setData(0, Qt.UserRole, len(self.pages))
+        it.setData(0, Qt.UserRole + 2, label)  # the label in mANY-MAZE's terms (see apply_terminology)
         self.explorer.addTopLevelItem(it)
         self.pages.append(page)
         self.stack.addWidget(page)
@@ -398,6 +408,7 @@ class MainWindow(QMainWindow):
                 a.setCheckable(True)
                 a.triggered.connect(lambda _=False, p=page: self.show_page(p))
                 a.page = page
+                a.base_label = label
                 nav.add_large(a)
                 sec.nav_actions.append(a)
             sec.panel = panel
@@ -491,6 +502,19 @@ class MainWindow(QMainWindow):
         act(fm, "Allowed programs…", lambda: self.allowed_programs_dialog())
         fm.addSeparator()
         act(fm, "Quit", self.close, QKeySequence.Quit)
+        vm = mb.addMenu("&View")
+        am = vm.addMenu("Appearance")
+        self.appearance_actions = {}
+        group = QActionGroup(self)
+        for key, text in theme.APPEARANCES:
+            a = QAction(text, self, checkable=True)
+            a.setChecked(key == theme.appearance())
+            a.setToolTip({"system": "Light or dark as macOS is set (System Settings ▸ Appearance)",
+                          "light": "Always the light colours", "dark": "Always the dark colours"}[key])
+            a.triggered.connect(lambda _=False, k=key: self.set_appearance(k))
+            group.addAction(a)
+            am.addAction(a)
+            self.appearance_actions[key] = a
         gm = mb.addMenu("&Go")
         for i, page in enumerate(self.pages):
             a = act(gm, getattr(page, "title", f"Page {i}"), lambda _=False, p=page: self.show_page(p),
@@ -503,6 +527,17 @@ class MainWindow(QMainWindow):
         act(hm, f"About {APP_NAME}", self.about)
         # the ribbon replaces the menu bar, except on macOS where the menu bar lives at the top of the screen
         mb.setVisible(sys.platform == "darwin")
+
+    def set_appearance(self, appearance: str):
+        """View ▸ Appearance: System, Light or Dark, applied at once and kept in the app settings."""
+        theme.apply(QApplication.instance(), appearance, self.settings)
+        for k, a in self.appearance_actions.items():
+            a.setChecked(k == theme.appearance())
+
+    def theme_changed(self):
+        """The colour scheme changed: the shown page fills its tables again in the new colours."""
+        if self._current_page is not None:
+            self.refresh_ribbon()
 
     def _open_guide(self):
         from .help import show_user_guide
@@ -801,8 +836,7 @@ class MainWindow(QMainWindow):
             self.ribbon.tabs.setTabEnabled(i, has)
         self.save_quick.setEnabled(has)
         self._for_pages("set_project", project)
-        for page in self.pages:
-            self.refresh_explorer(page)
+        self.apply_terminology()
         if has:
             self.show_page(self.pages[0])
         else:
@@ -893,6 +927,24 @@ class MainWindow(QMainWindow):
 
     def current_page(self):
         return self._current_page if self.project is not None else None
+
+    def apply_terminology(self):
+        """Name the explorer entries, the ribbon's page buttons and the pages' explorer sub-items in the experiment's
+        terminology (core.terminology); called when an experiment is opened and when its terminology changes."""
+        p = self.project
+        for sec in self.sections:
+            for i in range(sec.explorer.topLevelItemCount()):
+                it = sec.explorer.topLevelItem(i)
+                base = it.data(0, Qt.UserRole + 2)
+                if base in TERM_ENTRIES:
+                    it.setText(0, TERM_ENTRIES[base](p))
+            for a in sec.nav_actions:
+                if a.base_label in TERM_ENTRIES:
+                    text = TERM_ENTRIES[a.base_label](p)
+                    a.setText(text)
+                    a.setIconText(two_lines(text))
+        for page in self.pages:
+            self.refresh_explorer(page)
 
     def refresh_explorer(self, page):
         idx = self._page_section.get(id(page))

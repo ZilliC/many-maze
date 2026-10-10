@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTime, Qt
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
-                               QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QPushButton,
-                               QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTimeEdit, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+                               QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+                               QPushButton, QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTimeEdit, QVBoxLayout,
+                               QWidget)
 
 from ....core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS
 from ...icons import icon
@@ -13,6 +14,7 @@ from ...live_widgets import PanelGrid, TestPanel
 from ...procedure_editor import ProcedureEditor
 from ...scoring_pad import ScoringPad
 from .common import RESOLUTIONS, START_MODES
+from .recording_names import RecordingNamesDialog, describe as describe_names
 
 
 class SetupMixin:
@@ -312,6 +314,17 @@ class SetupMixin:
                                   "listed in a playlist that plays and tracks as one video. A crash loses at most "
                                   "the end of the current file.")
         self.split_min.valueChanged.connect(self._save_live_settings)
+        self.rec_names_lbl = QLabel()
+        self.rec_names_lbl.setObjectName("Hint")
+        self.rec_names_lbl.setWordWrap(True)
+        self.rec_names_btn = QPushButton("File names…")
+        self.rec_names_btn.setToolTip("Choose the fields the recorded video files are named after (test number, "
+                                      "animal, treatment, stage, trial, date, time)")
+        self.rec_names_btn.clicked.connect(lambda: self.recording_names_dialog())
+        rec_names = QHBoxLayout()
+        rec_names.setContentsMargins(0, 0, 0, 0)
+        rec_names.addWidget(self.rec_names_lbl, 1)
+        rec_names.addWidget(self.rec_names_btn)
         self.lost_warn = QDoubleSpinBox()
         self.lost_warn.setRange(0, 3600)
         self.lost_warn.setDecimals(1)
@@ -335,6 +348,7 @@ class SetupMixin:
         f.addRow(self.record)
         f.addRow(self.record_overlay)
         f.addRow("Start a new video file every", self.split_min)
+        f.addRow("Name the video files after", rec_names)
         f.addRow("Warn if the animal is lost for", self.lost_warn)
         f.addRow(self.pause_off)
         f.addRow("Serial port", self.serial)
@@ -353,6 +367,30 @@ class SetupMixin:
         self._source_mode_changed()
         self._start_mode_changed()
         return scroll
+
+    def recording_names_dialog(self, modal: bool = True) -> RecordingNamesDialog | None:
+        """Setup ▸ File names…: the fields recorded videos are named after (Project.recording_name_fields)."""
+        p = self.project
+        if p is None:
+            return None
+        dlg = RecordingNamesDialog(p, self)
+        if not modal:  # (tests)
+            return dlg
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()
+        if accepted:
+            self.set_recording_name_fields(dlg.stored_fields())
+        return None
+
+    def set_recording_name_fields(self, fields: list[str]):
+        p = self.project
+        if p is not None and list(fields) != list(p.recording_name_fields):
+            p.recording_name_fields = list(fields)
+            self.main.mark_dirty()
+        self._update_recording_names()
+
+    def _update_recording_names(self):
+        self.rec_names_lbl.setText(describe_names(self.project) if self.project is not None else "")
 
     def _build_procedures(self) -> QWidget:
         self.proc_editor = ProcedureEditor()  # it also converts the trigger → action rules of older experiments

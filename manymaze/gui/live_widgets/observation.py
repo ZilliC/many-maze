@@ -9,7 +9,7 @@ from .. import theme
 from ..icons import icon
 from ..scoring_pad import ScoringPad
 from ..widgets import fmt_time
-from .panels import PANEL_QSS, STATE_STYLE, ElidedLabel
+from .panels import STATE_STYLE, ElidedLabel, panel_qss
 
 
 class ObservationPanel(QFrame):
@@ -24,7 +24,7 @@ class ObservationPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("TestPanel")
-        self.setStyleSheet(PANEL_QSS)
+        theme.style(self, panel_qss)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
@@ -84,11 +84,11 @@ class ObservationPanel(QFrame):
         left.addStretch(1)
         self.clock = QLabel("00:00.00")
         self.clock.setAlignment(Qt.AlignCenter)
-        self.clock.setStyleSheet(f"font-size:64px;font-weight:300;color:{theme.TEXT}")
+        theme.style(self.clock, lambda: f"font-size:64px;font-weight:300;color:{theme.TEXT}")
         left.addWidget(self.clock)
         self.state = QLabel("Not started")
         self.state.setAlignment(Qt.AlignCenter)
-        self.state.setStyleSheet(f"font-size:15px;color:{theme.MUTED}")
+        theme.style(self.state, lambda: f"font-size:15px;color:{theme.MUTED}")
         left.addWidget(self.state)
         left.addStretch(1)
         kt = QLabel("Keys")

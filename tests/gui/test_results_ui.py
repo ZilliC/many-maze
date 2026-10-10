@@ -103,7 +103,7 @@ def test_data_page_views_and_ribbon(win, tmp_path):
     pump()
     assert page.tabs.currentIndex() == 1 and page.title_lbl.text() == "Heat maps" and in_ribbon(page.part_combo)
     assert group_titles(win) == ["Navigation", "Body part", "Heat map of", "Scale", "Align", "Treatments",
-                                 "Figure"]
+                                 "Hottest spot", "Figure"]
     assert sec.explorer.currentItem() is sec.item_for(page, "heat")
     page.show_item("charts")
     pump()

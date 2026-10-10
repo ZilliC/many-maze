@@ -805,9 +805,10 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     Copies the apparatus, stages, keys, test duration and start, animal tracking and analysis settings,
     calculations, results reports, statistics settings, procedures, I/O devices, the synchronisation element,
     analysis plug-ins, training criteria, blind testing, weighing, start delay and animal ID options, the animal
-    columns and the experimenters (users, with their roles and passwords, and the security settings); I/O device
-    passwords and tokens are not copied (enter them again), nor is the experiment password; with ``treatments``
-    also the treatments (groups). Animals, tests and results are not copied.
+    columns, the terminology, the recorded video file names and the experimenters (users, with their roles and
+    passwords, and the security settings); I/O device passwords and tokens are not copied (enter them again), nor
+    is the experiment password; with ``treatments`` also the treatments (groups). Animals, tests and results are
+    not copied.
     """
     import copy as _copy
 
@@ -829,6 +830,8 @@ def copy_protocol(src: Project, dst: Project, treatments: bool = False) -> Proje
     dst.io_devices = [without_secrets(d) for d in _copy.deepcopy(src.io_devices)]  # passwords stay behind
     dst.training_criteria = _copy.deepcopy(src.training_criteria)
     dst.blind = src.blind
+    dst.terminology = _copy.deepcopy(src.terminology)
+    dst.recording_name_fields = list(src.recording_name_fields)
     dst.animal_fields = list(src.animal_fields)
     dst.experimenters += [u for u in src.experimenters if u not in dst.experimenters]
     have = {u.get("name") for u in dst.users}

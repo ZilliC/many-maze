@@ -436,15 +436,46 @@ def group_heatmap_figure(data: list[tuple[str, list, object]], norm: str = "auto
     return fig
 
 
+def hottest_spot(H, extent, region=None) -> tuple[float, float] | None:
+    """The centre of the hottest bin of a heat map (as :func:`occupancy` returns it and imshow draws it: rows = y
+    from the top, extent (x0, x1, y1, y0)) in apparatus coordinates (pixels). Only bins whose centre is inside
+    ``region`` (a shape, e.g. the arena the map is clipped to) count when any is. None for an empty map."""
+    V = np.asarray(H, float)
+    if V.ndim != 2 or V.size == 0:
+        return None
+    x0, x1, y1, y0 = (float(v) for v in extent)
+    ny, nx = V.shape
+    X, Y = np.meshgrid(x0 + (np.arange(nx) + 0.5) * (x1 - x0) / nx, y0 + (np.arange(ny) + 0.5) * (y1 - y0) / ny)
+    V = np.where(np.isfinite(V), V, -np.inf)
+    if region is not None:
+        try:
+            inside = np.asarray(region.contains(X.ravel(), Y.ravel()), bool).reshape(V.shape)
+        except Exception as e:  # a shape that cannot say: the whole map
+            log.debug("hottest spot: no region test (%s)", e)
+            inside = None
+        if inside is not None and inside.any():
+            V = np.where(inside, V, -np.inf)
+    if not np.isfinite(V).any() or V.max() <= 0:
+        return None
+    r, c = np.unravel_index(int(np.argmax(V)), V.shape)
+    return float(X[r, c]), float(Y[r, c])
+
+
+def group_order(project, groups) -> list[str]:
+    """Treatment labels in experiment order (others, e.g. "No group" or blind codes, after them)."""
+    known = [g.name for g in project.groups]
+    return sorted(groups, key=lambda g: known.index(g) if g in known else len(known))
+
+
 def group_heatmap(project, tests_by_group: dict[str, list], heat_of: str | None = None, period: str | None = None,
                   part: str = "centre", norm: str = "auto", vmax: float | None = None, progress=None) -> Figure:
     """Average heat map of each group's tests ({label: [Test]}; treatments in experiment order) on a common scale.
 
     The first animal of each test is drawn, aligned (Test.variables["heatmap_transform"]) onto the apparatus of the
-    first test. heat_of: only the frames where this state parameter is on (e.g. "Freezing"); period: only this time
-    period of each test (tests without it are left out). progress(fraction) is called after each test."""
-    known = [g.name for g in project.groups]
-    order = sorted(tests_by_group, key=lambda g: known.index(g) if g in known else len(known))
+    first test (of the first group: the reference apparatus). heat_of: only the frames where this state parameter is
+    on (e.g. "Freezing"); period: only this time period of each test (tests without it are left out).
+    progress(fraction) is called after each test."""
+    order = group_order(project, tests_by_group)
     ref = project.apparatus_of(tests_by_group[order[0]][0])
     n, k = sum(len(v) for v in tests_by_group.values()), 0
     data, masks = [], {}

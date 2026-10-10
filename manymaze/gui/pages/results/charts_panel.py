@@ -25,7 +25,9 @@ class ChartsPanel(QWidget):
 
     def __init__(self, page):
         super().__init__()
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+
+        from ...figures import ThemedCanvas
 
         self.page = page
         self.data: dict = {}
@@ -82,7 +84,7 @@ class ChartsPanel(QWidget):
 
         # ---- figure -------------------------------------------------------------
         self.figure = Figure(figsize=(8, 5), dpi=100)
-        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas = ThemedCanvas(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.toolbar.setIconSize(self.toolbar.iconSize() * 0.8)

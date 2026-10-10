@@ -23,6 +23,7 @@ from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest
 from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
 from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
+from ....core.terminology import term
 from ... import theme
 from ...icons import icon
 from ...live_widgets import LensCorrectionDialog
@@ -65,7 +66,7 @@ class ApparatusPage(Page):
         lay.setSpacing(0)
         lay.addWidget(self._build_centre(), 1)
         lay.addWidget(self.panel)
-        self.setStyleSheet(f"QLabel#FooterCaption {{ color: {theme.HEADING}; font-size: 13px; }}")
+        theme.style(self, lambda: f"QLabel#FooterCaption {{ color: {theme.HEADING}; font-size: 13px; }}")
         self._set_enabled(False)
 
     # ================================================================ ribbon
@@ -225,7 +226,8 @@ class ApparatusPage(Page):
         self.lock_lbl = QLabel("The protocol is locked: only an administrator can change the apparatus (File ▸ "
                                "Users and security).")
         self.lock_lbl.setWordWrap(True)
-        self.lock_lbl.setStyleSheet("background:#fff7e0;border:1px solid #f0d58a;padding:6px 8px;")
+        theme.style(self.lock_lbl, lambda: f"background:{theme.NOTE_BG};border:1px solid {theme.NOTE_BORDER};"
+                                          "padding:6px 8px;")
         self.lock_lbl.hide()
         lay.addWidget(self.lock_lbl)
         lay.addWidget(self.view, 1)
@@ -308,6 +310,7 @@ class ApparatusPage(Page):
     def on_show(self):
         if self.project is None:
             return
+        self.panel.tabs.setTabText(0, term(self.project, "zone", plural=True))  # the experiment's terminology
         self._refresh_app_list(select=self.app)
         self.bg.refresh_tests()
         self.view.setFocus()
@@ -646,7 +649,7 @@ class ApparatusPage(Page):
                     self.cal_label.setText(self.cal_label.text() + f" <span style='color:{theme.MUTED}'>· "
                                            f"results in {app.report_unit}</span>")
             else:
-                self.cal_label.setText("<span style='color:#c2410c'>Not calibrated</span> "
+                self.cal_label.setText(f"<span style='color:{theme.WARNING}'>Not calibrated</span> "
                                        f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
                 self.ppc_spin.setValue(0)
             self.unit_combo.setCurrentIndex(max(0, self.unit_combo.findData(app.distance_unit)))

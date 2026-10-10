@@ -139,7 +139,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
             if a is None:
                 sep = QFrame()
                 sep.setFrameShape(QFrame.VLine)
-                sep.setStyleSheet(f"color:{theme.BORDER};")
+                theme.style(sep, lambda: f"color:{theme.BORDER};")
                 sep.setFixedHeight(22)
                 tb.addSpacing(4)
                 tb.addWidget(sep)
@@ -151,14 +151,14 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         tb.addWidget(self.test_combo)
         self.title_lbl = QLabel()
         self.title_lbl.setObjectName("TestTitle")
-        self.title_lbl.setStyleSheet(f"font-size:17px;color:{theme.TEXT};padding:4px 2px 0 2px;")
+        theme.style(self.title_lbl, lambda: f"font-size:17px;color:{theme.TEXT};padding:4px 2px 0 2px;")
         self.info_lbl = QLabel()
         self.info_lbl.setObjectName("Hint")
         self.info_lbl.setStyleSheet("padding:0 2px 2px 2px;")
         head = QWidget()
         head.setObjectName("TestPanelHead")
-        head.setStyleSheet(f"QWidget#TestPanelHead{{background:{theme.RIBBON_BG};border-bottom:1px solid "
-                           f"{theme.BORDER};}}")
+        theme.style(head, lambda: f"QWidget#TestPanelHead{{background:{theme.RIBBON_BG};border-bottom:1px solid "
+                    f"{theme.BORDER};}}")
         hl = QVBoxLayout(head)
         hl.setContentsMargins(8, 4, 8, 6)
         hl.setSpacing(2)
@@ -174,12 +174,13 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
             b.hide()
         v = self.player.view
         v.setBackgroundBrush(QColor(theme.WORK_BG))
+        v.theme_changed = lambda v=v: v.setBackgroundBrush(QColor(theme.WORK_BG))
         v.setFrameShape(QFrame.NoFrame)
         v.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         v.setDragMode(QGraphicsView.ScrollHandDrag)
         v.setToolTip("Wheel: zoom · drag: pan · Alt+double-click: fit")
-        self.player.time_lbl.setStyleSheet(f"color:{theme.MUTED};")
+        theme.style(self.player.time_lbl, lambda: f"color:{theme.MUTED};")
         self.hud = QGraphicsTextItem()
         self.hud.setFlag(QGraphicsItem.ItemIgnoresTransformations)
         self.hud.setZValue(100)
@@ -253,13 +254,13 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.tabs = QTabWidget()
         self.tabs.setObjectName("SideTabs")
         self.tabs.setDocumentMode(True)
-        self.tabs.setStyleSheet(
-            "QTabWidget#SideTabs::pane{border:none;border-top:1px solid #d6d6d6;}"
+        theme.style(self.tabs, lambda: (
+            f"QTabWidget#SideTabs::pane{{border:none;border-top:1px solid {theme.BORDER};}}"
             "QTabWidget#SideTabs > QTabBar::tab{background:transparent;border:none;"
             f"border-bottom:2px solid transparent;padding:7px 12px;margin:0 2px;color:{theme.MUTED};font-size:13px;}}"
             f"QTabWidget#SideTabs > QTabBar::tab:selected{{color:{theme.ACCENT};border-bottom:2px solid "
             f"{theme.ACCENT};}}"
-            f"QTabWidget#SideTabs > QTabBar::tab:hover:!selected{{color:{theme.TEXT};background:{theme.HOVER};}}")
+            f"QTabWidget#SideTabs > QTabBar::tab:hover:!selected{{color:{theme.TEXT};background:{theme.HOVER};}}"))
         self.tabs.addTab(self._build_results_tab(), "Results")
         self.tabs.addTab(self._build_plots_tab(), "Plots")
         self.tabs.addTab(self._build_scoring_tab(), "Scoring")
@@ -602,9 +603,9 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         grp = (f"Treatment <span style='color:{wf.display_color(p, a.group)}'>"
                f"{html.escape(wf.treatment_text(p, a.group))}</span>" if a and a.group else "")
         if a is not None and a.retired:
-            grp += " <span style='color:#dc2626'>(animal retired)</span>"
+            grp += f" <span style='color:{theme.ERROR}'>(animal retired)</span>"
         dur = t.duration_s or p.test_duration_s
-        status_col = STATUS_COLORS.get(t.status, "#334155")
+        status_col = STATUS_COLORS.get(t.status, theme.TEXT)
         video = (f"<span title='{html.escape(p.abs_path(t.video))}'>{html.escape(Path(t.video).name)}</span>"
                  if t.video else "no video")
         parts = [f"Test {t.id}" + (f" (attempt {t.attempt})" if t.attempt > 1 else ""), grp, video,
@@ -735,7 +736,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
             try:
                 rows = p.analyse_test(t)
             except Exception as e:
-                self.results_lbl.setText(f"<span style='color:#dc2626'>Analysis failed: {e}</span>")
+                self.results_lbl.setText(f"<span style='color:{theme.ERROR}'>Analysis failed: {e}</span>")
                 return
         if not rows:
             self.results_lbl.setText("Not tracked yet — click <b>Track this test</b>, import a track on the Tests "

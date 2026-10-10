@@ -24,10 +24,11 @@ def measure_groups(columns, names: dict, info=()) -> dict[str, dict[str, list[st
     return cats
 
 
-def fill_measure_tree(tree: QTreeWidget, cats: dict, hidden: set | None = None):
+def fill_measure_tree(tree: QTreeWidget, cats: dict, hidden: set | None = None, labels: dict | None = None):
     """Fill a Select data tree: categories (in CATEGORY_ORDER) > sub-categories > columns (Qt.UserRole holds the
-    column, shown without its sub-category prefix). hidden: tick boxes, unticked for these columns (None: no tick
-    boxes, to pick one measure)."""
+    column, shown without its sub-category prefix, or as ``labels`` names it: the information columns in the
+    experiment's terminology). hidden: tick boxes, unticked for these columns (None: no tick boxes, to pick one
+    measure)."""
     tree.clear()
     tick = hidden is not None
     expanded = len(cats) <= 2
@@ -45,7 +46,7 @@ def fill_measure_tree(tree: QTreeWidget, cats: dict, hidden: set | None = None):
                 if tick:
                     parent.setFlags(parent.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
             for c in cols:
-                label = c.split(": ", 1)[1] if sub and c.startswith(sub + ": ") else c
+                label = c.split(": ", 1)[1] if sub and c.startswith(sub + ": ") else (labels or {}).get(c, c)
                 it = QTreeWidgetItem(parent, [label])
                 it.setData(0, Qt.UserRole, c)
                 it.setToolTip(0, c)

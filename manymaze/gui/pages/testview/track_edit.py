@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGraphicsView, QGridLa
 from ....core import workflow as wf
 from ....core.apparatus import POSITION_KEY, position_args
 from ....core.track import Track, swap_identities
+from ... import theme
 
 
 class TrackEditMixin:
@@ -23,7 +24,7 @@ class TrackEditMixin:
         info = QLabel("Fix tracking errors: mark the animal by clicking on the video, or select a time range and "
                       "interpolate / delete the positions in it. Changes are saved to the track immediately.")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#475569;")
+        theme.style(info, lambda: f"color:{theme.HINT};")
         lay.addWidget(info)
         row = QHBoxLayout()
         row.addWidget(QLabel("Animal"))
@@ -68,7 +69,7 @@ class TrackEditMixin:
         jl.addWidget(self._tool(self.a_jumps))
         jh = QLabel("Positions the animal could not have reached (Detection: Remove jumps faster than)")
         jh.setWordWrap(True)
-        jh.setStyleSheet("color:#475569;")
+        theme.style(jh, lambda: f"color:{theme.HINT};")
         jl.addWidget(jh, 1)
         lay.addWidget(jb)
         sw = QGroupBox("Swap identities")

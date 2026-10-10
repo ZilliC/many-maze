@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QHeade
                                QPlainTextEdit, QPushButton, QTableWidget, QVBoxLayout, QWidget)
 
 from ....core import workflow as wf
+from ... import theme
 from ...confirm_id import confirm_animal_id
 from ...scoring_pad import ScoringPad
 from ...widgets import fmt_time
@@ -62,7 +63,7 @@ class ScoringMixin:
                       "hold behaviours last while the key or button is held, point behaviours are logged at the "
                       "current time. Space = play/pause, ←/→ = step (Shift: 1 s).")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#475569;")
+        theme.style(hint, lambda: f"color:{theme.HINT};")
         lay.addWidget(hint)
 
         self.clock_box = QGroupBox("TakeNote observation clock (no video: score by direct observation)")
@@ -269,11 +270,11 @@ class ScoringMixin:
         now = self.test_time() if self.test is not None and (self.player.source is not None
                                                              or self.clock.state != "stopped") else None
         if self._open_states:
-            parts = [f"<b style='color:#16a34a'>{html.escape(n)}</b> since {t0:.2f} s" +
+            parts = [f"<b style='color:{theme.OK}'>{html.escape(n)}</b> since {t0:.2f} s" +
                      (f" ({now - t0:.1f} s)" if now is not None else "") for n, t0 in self._open_states.items()]
             self.active_lbl.setText("Active: " + ", ".join(parts))
         else:
-            self.active_lbl.setText("<span style='color:#94a3b8'>No state behaviour active.</span>")
+            self.active_lbl.setText(f"<span style='color:{theme.FAINT}'>No state behaviour active.</span>")
         self.pad.set_active(self._open_states)
 
     # ---- observation clock (TakeNote mode) ------------------------------------
@@ -292,7 +293,7 @@ class ScoringMixin:
         if no_video:
             self._update_title(e)
         self.clock_lbl.setStyleSheet("font-size:22px;font-weight:bold;font-family:monospace;color:"
-                                     + {"running": "#16a34a", "paused": "#d97706"}.get(st, "#334155") + ";")
+                                     + {"running": theme.OK, "paused": theme.WARNING}.get(st, theme.TEXT) + ";")
         self._update_observation_hud()
 
     def _update_observation_hud(self):

@@ -12,6 +12,7 @@ from ....core.camera import CameraView, merge_layout
 from ....core.camhw import CONTROL_BY_NAME
 from ....core.camsources import is_native_source
 from ....core.lens import lens_from
+from ....core.recordings import recording_name, reserve_recording
 from ....core.video import VideoRecorder, VideoSource
 
 RESOLUTIONS = [("Camera default", None), ("640 × 480", (640, 480)), ("800 × 600", (800, 600)),
@@ -52,16 +53,18 @@ def serial_ports() -> list[str] | None:
         return []
 
 
-def recording_path(project, test, size=(640, 480), fps=25.0) -> str:
-    """test_<id>_<animal>.mp4 in the recordings folder, or .avi if no mp4 writer is available."""
-    safe = re.sub(r"[^\w.-]+", "_", test.animal_id or "animal")
-    base = project.recordings_dir() / f"test_{test.id:04d}_{safe}"
-    probe = project.recordings_dir() / f".probe_{threading.get_ident()}.mp4"
+def recording_path(project, test, size=(640, 480), fps=25.0, when=None) -> str:
+    """The recording of a test in the recordings folder, named from the experiment's fields (core.recordings:
+    test_<id>_<animal> by default) and never replacing a file: .mp4, or .avi if no mp4 writer is available."""
+    folder = project.recordings_dir()
+    base = reserve_recording(folder, recording_name(project, test, when),
+                             owner=(str(project.path or ""), test.id))
+    probe = folder / f".probe_{threading.get_ident()}.mp4"
     try:
         VideoRecorder(str(probe), fps, size).close()
-        return str(base.with_suffix(".mp4"))
+        return str(base) + ".mp4"
     except Exception:
-        return str(base.with_suffix(".avi"))
+        return str(base) + ".avi"
     finally:
         if probe.exists():
             probe.unlink()

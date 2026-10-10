@@ -20,6 +20,7 @@ from .apparatus import CALIBRATION_KEY, ENTRY_RULES as ENTRY_RULE_TEXT, POSITION
 from .ioconfig import OPERANT_PRESETS, PRESET_KEY, is_secret
 from .project import ERROR_COLUMN, INACTIVE_STATUSES, INFO_COLUMNS, Project, result_columns
 from .stats import is_number
+from .terminology import column_labels, relabel, term
 
 XML_FORMAT_VERSION = 1
 log = logging.getLogger(__name__)
@@ -400,6 +401,11 @@ def results_workbook(project: Project, rows: list[dict], columns: list[str] | No
                            **{f"analysis.{k}": v for k, v in project.analysis.to_dict().items()},
                            "test_duration_s": project.test_duration_s,
                            "software": f"mANY-MAZE {__version__}"}.items()]
+    for name in [n for n in sheets if n != "Settings"]:  # the experiment's terminology in the headings
+        sheet_cols = cols.get(name) or result_columns(sheets[name])
+        sheets[name], new_cols = relabel(project, sheets[name], sheet_cols)
+        if name in cols or new_cols != sheet_cols:
+            cols[name] = new_cols
     return sheets, cols
 
 
@@ -422,6 +428,7 @@ def export_results(project: Project, path, segmented: bool = False, columns: lis
         sheets, cols = results_workbook(project, rows, columns, segmented)
         write_xlsx(sheets, path, cols)
     else:
+        rows, columns = relabel(project, rows, columns or result_columns(rows))  # the experiment's terminology
         write_table(rows, path, columns)
     return path
 
@@ -1080,7 +1087,8 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
     out.append(f"<h1>{html.escape(project.name)}</h1>")
     out.append(f"<p>{html.escape(project.description)}</p>")
     out.append(f"<p>Generated {_dt.datetime.now():%Y-%m-%d %H:%M} by mANY-MAZE {__version__}. "
-               f"{len(tests)} tests, {len(project.animals)} animals.</p>")
+               f"{len(tests)} {term(project, 'test', plural=True, lower=True)}, {len(project.animals)} "
+               f"{term(project, 'animal', plural=True, lower=True)}.</p>")
     if report:
         out.append(f"<p>Results report: <b>{html.escape(report)}</b></p>")
     beh = project.behaviours
@@ -1133,7 +1141,9 @@ def html_report(project: Project, path, tests=None, include_plots: bool = True, 
                 continue
             out.append(f"<div class='card'>{_img(plots.fig_to_png(a.figure), 360)}"
                        f"<pre>{html.escape(a.summary_text)}</pre></div>")
-    out.append("<h2>Results</h2><table><tr>" + "".join(f"<th>{html.escape(str(c))}</th>" for c in cols) + "</tr>")
+    heads = column_labels(project, cols)  # the experiment's terminology
+    out.append("<h2>Results</h2><table><tr>" + "".join(f"<th>{html.escape(str(heads[c]))}</th>" for c in cols)
+               + "</tr>")
     for r in rows:
         out.append("<tr>" + "".join(f"<td>{html.escape(value_text(r.get(c)))}</td>" for c in cols) + "</tr>")
     out.append("</table></body></html>")
@@ -1152,7 +1162,7 @@ def _test_card(project: Project, t, beh, color_by, hm_vmax, heatmap_norm, chart_
     app = project.apparatus_of(t)
     frame = project.start_frame(t)
     an = project.get_animal(t.animal_id)
-    title = f"Test {t.id} · {t.animal_id} · {group_label(project, an.group) if an else ''}"
+    title = f"{term(project, 'test')} {t.id} · {t.animal_id} · {group_label(project, an.group) if an else ''}"
     markers = plots.behaviour_markers(tracks[0], app, project.analysis_for(t), t.events, beh)
     tp = plots.fig_to_png(plots.track_plot(tracks[0], app, frame=frame, size=(3.2, 3.2), color_by=color_by,
                                            markers=markers, settings=project.analysis_for(t)))
