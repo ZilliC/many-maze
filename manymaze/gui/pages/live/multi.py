@@ -9,7 +9,8 @@ import cv2
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QTableWidgetItem
 
-from ....core.camera import CameraView, SourceSpec, camera_settings, set_camera_settings
+from ....core.camera import (CameraView, SourceSpec, camera_lenses, camera_settings, merge_layout, merged_sources,
+                             set_camera_settings)
 from ....core.camhw import CameraHardware
 from ....core.iodevices import DeviceView
 from ....core.livegroup import device_plan
@@ -20,7 +21,7 @@ from ...confirm_id import confirm_animal_id
 from ...icons import icon
 from ...live_widgets import CameraOptionsDialog, TestPanel, short_time
 from ...widgets import fmt_time
-from .common import peek_frame
+from .common import camera_options_settings, peek_frame
 
 
 class MultiTestMixin:
@@ -33,8 +34,10 @@ class MultiTestMixin:
         spec = SourceSpec(source)
         d = camera_settings(self.project, spec.key)
         spec.view = CameraView.from_dict(d.get("view"))
-        spec.second = second if second is not None else d.get("second")
-        spec.layout = d.get("layout", layout) if second is None else layout
+        spec.merge = (list(second) if isinstance(second, (list, tuple)) else [second]) if second is not None \
+            else merged_sources(d)
+        spec.layout = merge_layout(d.get("layout", layout) if second is None else layout)
+        spec.undistort = camera_lenses(self.project, spec.sources)
         spec.hardware = CameraHardware.from_dict(d.get("hardware")) if not spec.is_file else CameraHardware()
         if not spec.is_file:
             spec.size = self.resolution.currentData()
@@ -403,15 +406,20 @@ class MultiTestMixin:
             QMessageBox.information(self, "Camera options", "Stop the tests using this camera first.")
             return False
         r = self.group.runners.get(key)
-        raw, raw2 = r.raw_frames() if r is not None else (None, None)
+        raws = r.raw_frames_all() if r is not None else []
+        raws += [None] * (len(spec.sources) - len(raws))
+        raw = raws[0]
         if raw is None and spec.is_file:
             raw = peek_frame(spec.source)
-        if raw2 is None and spec.second is not None and SourceSpec(spec.second).is_file:
-            raw2 = peek_frame(spec.second)
+        others = [f if f is not None or not SourceSpec(m).is_file else peek_frame(m)
+                  for m, f in zip(spec.merge, raws[1:])]
         camera = r.camera() if r is not None and not spec.is_file else None
-        dlg = CameraOptionsDialog(raw, spec.view, spec.second, spec.layout, self._merge_choices(spec.source), raw2,
+        dlg = CameraOptionsDialog(raw, spec.view, spec.merge, spec.layout, self._merge_choices(spec.source), others,
                                   self, title=f"Camera options — {spec.label}", hardware=spec.hardware,
-                                  camera=camera, is_camera=not spec.is_file, genicam=spec.is_native)
+                                  camera=camera, is_camera=not spec.is_file, genicam=spec.is_native,
+                                  lens=spec.undistort.get(SourceSpec(spec.source).key),
+                                  merge_lenses=camera_lenses(self.project, spec.merge),
+                                  frame_source=(lambda: r.raw_frames()[0]) if r is not None else None)
         accepted = dlg.exec() == QDialog.Accepted
         dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
         if not accepted:
@@ -421,23 +429,20 @@ class MultiTestMixin:
 
     def apply_source_options(self, key: str, res: dict):
         spec = self.group.sources[key]
-        old = (spec.view, spec.second, spec.layout)
+        own = SourceSpec(spec.source).key
+        old = (spec.view, spec.merge, spec.layout, dict(spec.undistort))
         spec.view = CameraView.from_dict(res.get("view"))
-        spec.second = res.get("second")
-        spec.layout = res.get("layout", "side")
+        spec.merge = merged_sources(res)
+        spec.layout = merge_layout(res.get("layout", "side"))
         if "hardware" in res:
             spec.hardware = CameraHardware.from_dict(res["hardware"])  # already applied live by the dialog
-        settings = {}
-        if not spec.view.is_identity:
-            settings["view"] = spec.view.to_dict()
-        if spec.second is not None:
-            settings.update(second=spec.second, layout=spec.layout)
-        if not spec.hardware.is_empty:
-            settings["hardware"] = spec.hardware.to_dict()
-        set_camera_settings(self.project, SourceSpec(spec.source).key, settings)
+        lens = res["undistort"] if "undistort" in res else spec.undistort.get(own)
+        set_camera_settings(self.project, own, camera_options_settings(spec.view, spec.merge, spec.layout,
+                                                                       spec.hardware, lens))
+        spec.undistort = camera_lenses(self.project, spec.sources)
         self.main.mark_dirty()
         self._save_group_layout()
-        if old == (spec.view, spec.second, spec.layout):
+        if old == (spec.view, spec.merge, spec.layout, spec.undistort):
             return
         self._group_bgs.pop(key, None)
         if key in self.group.runners:

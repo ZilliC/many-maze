@@ -510,7 +510,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._update_range_lbl()
         self._enable(True)
         path = p.abs_path(t.video) if t.video else ""
-        if path and Path(path).exists() and self.player.open(path):
+        if path and Path(path).exists() and self.player.open(path, p.lens_for(t)):
             self.player.seek_time(t.start_s)
         else:
             self.player.close_video()

@@ -8,9 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ....core.camera import CameraView
+from ....core.camera import CameraView, merge_layout
 from ....core.camhw import CONTROL_BY_NAME
 from ....core.camsources import is_native_source
+from ....core.lens import lens_from
 from ....core.video import VideoRecorder, VideoSource
 
 RESOLUTIONS = [("Camera default", None), ("640 × 480", (640, 480)), ("800 × 600", (800, 600)),
@@ -79,12 +80,16 @@ def peek_frame(path) -> np.ndarray | None:
         return None
 
 
-def describe_view(view: CameraView, second, layout: str, hardware=None) -> str:
+def describe_view(view: CameraView, second, layout: str, hardware=None, undistort=None) -> str:
+    """One line describing the camera options (``second``: the merged source, or the list of merged sources)."""
     parts = []
-    if second is not None:
-        other = second if not isinstance(second, str) or is_native_source(second) else Path(second).name
-        parts.append(f"merged with {other} "
-                     f"({'side by side' if layout == 'side' else 'stacked'})")
+    merged = [m for m in (second if isinstance(second, (list, tuple)) else [second]) if m is not None]
+    if undistort and lens_from(undistort) is not None:
+        parts.append("lens corrected")
+    if merged:
+        names = [m if not isinstance(m, str) or is_native_source(m) else Path(m).name for m in merged]
+        how = {"side": "side by side", "stack": "stacked", "grid": "in a grid"}.get(merge_layout(layout), "")
+        parts.append(f"merged with {', '.join(str(n) for n in names)} ({how})")
     if view.rotate:
         parts.append(f"rotated {view.rotate}°")
     if view.flip:
@@ -97,3 +102,20 @@ def describe_view(view: CameraView, second, layout: str, hardware=None) -> str:
         names = [CONTROL_BY_NAME[k].label.lower() for k in hardware.to_dict() if k in CONTROL_BY_NAME]
         parts.append("camera settings" + (f" ({', '.join(names)})" if names else ""))
     return ", ".join(parts) if parts else "Whole image"
+
+
+def camera_options_settings(view: CameraView, merge: list, layout: str, hardware, undistort: dict | None) -> dict:
+    """The saved options of a camera (core.camera.camera_settings): only what differs from the defaults; a montage
+    keeps ``second`` (read by older versions) and, with more than two cameras, ``merge``."""
+    settings = {}
+    if not view.is_identity:
+        settings["view"] = view.to_dict()
+    if merge:
+        settings.update(second=merge[0], layout=merge_layout(layout))
+        if len(merge) > 1:
+            settings["merge"] = list(merge)
+    if hardware is not None and not hardware.is_empty:
+        settings["hardware"] = hardware.to_dict()
+    if undistort and lens_from(undistort) is not None:
+        settings["undistort"] = dict(undistort)
+    return settings

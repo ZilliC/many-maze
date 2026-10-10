@@ -55,8 +55,9 @@ class DetectionMixin:
 
     def bg_key(self, s: DetectionSettings) -> tuple:
         b = self._bg_settings(s)
+        lens = self.project.lens_for(self.test)
         return (self.project.abs_path(self.test.video), b.background, b.background_frame, b.background_samples,
-                round(b.start_time_s, 3), round(b.duration_s, 3))
+                round(b.start_time_s, 3), round(b.duration_s, 3), lens.key() if lens is not None else None)
 
     def _preview(self, frame, app, draw_zones=True, hud=None):
         hud = hud if hud is not None else []
@@ -112,8 +113,9 @@ class DetectionMixin:
         if self._bg_worker is not None:  # one at a time; re-requested when the current one finishes
             return
         video = key[0]
+        lens = self.project.lens_for(self.test)
         self._bg_key = key
-        w = Worker(lambda progress, stop: (key, compute_background(video, s)), self)
+        w = Worker(lambda progress, stop: (key, compute_background(video, s, lens)), self)
         w.signals.done.connect(self._bg_done)
         w.signals.failed.connect(self._bg_failed)
         w.finished.connect(w.deleteLater)

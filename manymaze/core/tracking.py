@@ -23,6 +23,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
+from .lens import LensCorrection, corrected
 from .track import COLUMNS, Track, simplify_outline
 from .video import FrameReader, VideoSource
 
@@ -181,8 +182,10 @@ def _frame_window(settings: DetectionSettings, fps: float, count: int) -> tuple[
     return start, (min(count, end) if count > 0 else end)
 
 
-def compute_background(video_path: str, settings: DetectionSettings) -> np.ndarray:
-    with VideoSource(video_path) as v:
+def compute_background(video_path: str, settings: DetectionSettings, lens: LensCorrection | None = None
+                       ) -> np.ndarray:
+    """The background model of a video (its frames corrected by ``lens``, see core.lens)."""
+    with corrected(VideoSource(video_path), lens) as v:
         if settings.background == "frame":
             f = v.frame_at(settings.background_frame)
             if f is None:
@@ -937,12 +940,16 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                 progress: Callable[[float], None] | None = None,
                 should_stop: Callable[[], bool] | None = None,
                 frame_callback: Callable[[int, np.ndarray, list[list[Detection]]], None] | None = None,
-                background: np.ndarray | None = None, decode_threads: int = 0) -> list[list[Track]]:
+                background: np.ndarray | None = None, decode_threads: int = 0,
+                lens: LensCorrection | None = None) -> list[list[Track]]:
     """Track every arena in a video file in a single pass.
 
     Returns tracks[job_index][animal_index].  Times are relative to start_time_s
-    of the first job's settings.
+    of the first job's settings.  With ``lens`` every frame is corrected for lens distortion first (core.lens), so
+    the apparatus and the track are in the coordinates of the corrected image.
     """
+    if lens is not None and lens.is_identity:
+        lens = None
     if not jobs:
         return []
     s0 = jobs[0].settings
@@ -974,7 +981,7 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     key = (job.settings.background, job.settings.background_frame, job.settings.background_samples,
                            job.settings.start_time_s, job.settings.duration_s)
                     if key not in bg_cache:
-                        bg_cache[key] = compute_background(video_path, job.settings)
+                        bg_cache[key] = compute_background(video_path, job.settings, lens)
                     tr.set_background(bg_cache[key])
             trackers.append(tr)
         fps = v.fps
@@ -992,6 +999,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
         for i, frame in reader:
             if i >= end:
                 break
+            if lens is not None and ((i - start) % step == 0 or (i - start) % step == step - 1):
+                frame = lens.apply(frame)
             if step > 1 and (i - start) % step == step - 1:
                 for tr in trackers:  # the frame before the next analysed one: motion over one frame interval
                     tr.set_motion_reference(frame)
@@ -1021,6 +1030,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             if trk.animal_contrast():
                 tr.meta["animal_contrast"] = trk.animal_contrast()
             tr.meta["decoder"] = reader.backend
+            if lens is not None:
+                tr.meta["lens_correction"] = lens.describe()
             est = pose_of(job.settings)
             if est is not None:
                 tr.meta["pose_model"] = job.settings.pose_model

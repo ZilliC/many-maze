@@ -81,8 +81,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self._outputs: Outputs | None = None
         self._schedule: ClockSchedule | None = None  # single-test scheduled start
         self._view = CameraView()  # single-test camera options
-        self._second = None
+        self._merge: list = []  # sources merged into the single-test camera image (a montage)
         self._merge_layout = "side"
+        self._undistort: dict = {}  # lens correction of the single-test camera (core.lens)
         self._hardware = CameraHardware()  # single-test camera hardware settings
         self.devices = None  # core.iodevices.DeviceManager while tests run
         self.mode = "single"

@@ -1,4 +1,5 @@
-"""The background image of the apparatus map: a frame of a test's (or any) video, remembered per apparatus."""
+"""The background image of the apparatus map: a frame of a test's (or any) video, remembered per apparatus, corrected
+for lens distortion like the frames tracked (the correction of the tests that use the video)."""
 
 from __future__ import annotations
 
@@ -46,6 +47,8 @@ class BackgroundController(QObject):
         self.path: str | None = None
         self.real = False  # a video frame is shown (not the placeholder)
         self.frame = None  # that frame (BGR), for exporting the zone map over it
+        self.raw_frame = None  # the same frame before the lens correction (for the lens correction dialog)
+        self.lens = None  # the lens correction applied (core.lens), from the tests that use the video
         self._loading = False
         self.test_combo = QComboBox()
         self.test_combo.setToolTip("Use a frame from the video of one of the experiment's tests")
@@ -99,6 +102,8 @@ class BackgroundController(QObject):
         self.path = None
         self.real = False
         self.frame = None
+        self.raw_frame = None
+        self.lens = None
 
     # ---- showing ------------------------------------------------------------------------
     def show(self):
@@ -139,6 +144,9 @@ class BackgroundController(QObject):
                 f = src.frame_at(0)
             if f is None:
                 raise IOError("cannot read a frame from this video")
+            p = self.page.project
+            self.lens = p.lens_for_video(path) if p is not None else None
+            raw, f = f, (self.lens.apply(f) if self.lens is not None else f)
         except Exception as e:
             self.close()
             msg = f"Cannot load background from {Path(path).name}: {e}"
@@ -149,6 +157,7 @@ class BackgroundController(QObject):
             return False
         self.real = True
         self.frame = f
+        self.raw_frame = raw
         self.page.view.set_frame(f)
         h, w = f.shape[:2]
         app = self.page.app
@@ -164,8 +173,9 @@ class BackgroundController(QObject):
             self.time_slider.setValue(idx)
             self.time_spin.setRange(0, max(0.0, src.duration))
             self.time_spin.setValue(tt)
-        self.label.setText(f"{Path(path).name} · {fmt_time(tt)} · {w}×{h} px")
-        self.label.setToolTip(path)
+        self.label.setText(f"{Path(path).name} · {fmt_time(tt)} · {w}×{h} px"
+                           + (" · lens corrected" if self.lens is not None else ""))
+        self.label.setToolTip(path + (f"\nLens correction: {self.lens.describe()}" if self.lens is not None else ""))
         return True
 
     def load_dialog(self):
