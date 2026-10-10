@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import keyword
 import re
 
@@ -9,8 +10,18 @@ from .. import ioconfig
 from ..operant import parse_spec
 from .catalog import (ACTION_SPECS, CONSTANTS, EVENT_SPECS, KEEP_SCOPES, LOCAL_NAMES, STATEMENT_TYPES, STOP_WHAT,
                       WHEN_MODES)
-from .expr import _INTERP, check_expr
+from .expr import _INTERP, ExprError, check_expr, compile_expr
 from .model import iter_statements, normalize_procedures, path_text, statement_fields, wait_alternatives, wait_mode
+
+# What needs the animal tracked by a camera: refused in a protocol in Input/output only mode (project_context gives
+# "io_only"), where tests run without a camera and these events would never happen (or the values stay 0).
+CAMERA_EVENT_GROUPS = ("Zones", "Animal")
+CAMERA_ACTION_GROUPS = ("Video",)
+ANIMAL_FUNCTIONS = frozenset({
+    "zone", "head_zone", "zone_time", "zone_entries", "detected", "freezing", "immobile", "speed", "distance", "x",
+    "y", "freezing_time", "immobile_time", "zone_distance", "point_distance", "head_x", "head_y", "tail_x", "tail_y",
+    "x_percent", "y_percent", "sequence_duration"})
+NO_CAMERA = "needs the animal tracked by a camera, which Input/output only mode does not have (Protocol ▸ Mode)"
 
 
 def _names(lst) -> list[str]:
@@ -34,12 +45,39 @@ def _context(context) -> dict:
             "points": set(_names(c.get("points"))) if c.get("points") is not None else None,
             "devices": set(_names(devs)) if devs is not None else None,
             "channels": channels or None,
-            "areas": set(_names(c.get("areas"))) if c.get("areas") else None}
+            "areas": set(_names(c.get("areas"))) if c.get("areas") else None,
+            "io_only": bool(c.get("io_only"))}
+
+
+def animal_functions(src) -> list[str]:
+    """The functions of an expression that read the animal's position or movement (ANIMAL_FUNCTIONS), in order."""
+    try:
+        node = compile_expr(src)
+    except ExprError:
+        return []
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ANIMAL_FUNCTIONS \
+                and n.func.id not in out:
+            out.append(n.func.id)
+    return out
+
+
+def _camera_functions(v, typ: str) -> list[str]:
+    """Input/output only mode: the animal functions used by a parameter value (an expression, or the {…} parts of
+    a text), as error messages."""
+    if typ == "text":
+        srcs = [m.group(1) for m in _INTERP.finditer(str(v).replace("{{", "").replace("}}", ""))]
+    else:
+        srcs = [v]
+    names = [f for s in srcs for f in animal_functions(s)]
+    return [f"{f}() {NO_CAMERA}" for f in dict.fromkeys(names)]
 
 
 def project_context(project) -> dict:
     """The validation context of a project: the zones and groups of all its apparatus, its I/O devices (None when
-    there are none: device names are then not checked) and its touch-screen areas."""
+    there are none: device names are then not checked) and its touch-screen areas; "io_only" when its tests run
+    without a camera (Input/output only mode: events, actions and functions that need the animal are errors)."""
     zones = [n for a in project.apparatus for n in a.names()]
     areas = [a.get("name") for a in (project.settings_extra.get("touchscreen", {}) or {}).get("areas", [])
              if a.get("name")]
@@ -49,6 +87,8 @@ def project_context(project) -> dict:
         ctx["points"] = sorted(set(points))
     if areas:
         ctx["areas"] = areas
+    if (project.settings_extra or {}).get("mode") == "io_only":
+        ctx["io_only"] = True
     return ctx
 
 
@@ -131,6 +171,8 @@ def _check_param(p, v, names, ctx, st) -> list[str]:
     elif typ == "text":
         for m in _INTERP.finditer(str(v).replace("{{", "").replace("}}", "")):
             errs += check_expr(m.group(1), names)
+    if ctx.get("io_only") and typ in ("number", "int", "expr", "text") and not errs:
+        errs = _camera_functions(v, typ)
     elif typ == "zone":
         if ctx["zones"] is not None and str(v) not in ctx["zones"]:
             errs = [f"unknown zone '{v}'"]
@@ -223,8 +265,9 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
     Messages that are warnings (:func:`is_warning`: "Run a program" runs a command on this computer, a loop with
     nothing in it) are included unless ``warnings`` is False; the others are errors.
 
-    context: {"zones": [...], "devices": [names or io_devices configs], "areas": [...]} — optional; names are
-    only checked against the lists that are given."""
+    context: {"zones": [...], "devices": [names or io_devices configs], "areas": [...], "io_only": bool} —
+    optional; names are only checked against the lists that are given; with io_only (Input/output only mode)
+    what needs the animal tracked by a camera is an error."""
     procs = normalize_procedures(procedures)
     ctx = _context(context)
     names = declared_names(procs)
@@ -232,6 +275,16 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
     seen_vars: dict[str, int] = {}
     proc_names = [p.get("name") for p in procs]
     subs = {p.get("name") for p in procs if p.get("sub")}
+
+    def camera_event(ev) -> str | None:
+        """Input/output only mode: the error of an event that needs the animal (a zone or the animal's movement)."""
+        spec = EVENT_SPECS.get(ev)
+        if ctx["io_only"] and spec is not None and spec["group"] in CAMERA_EVENT_GROUPS:
+            return f"“{spec['label']}” {NO_CAMERA}"
+        return None
+
+    def camera_expr(src) -> list[str]:
+        return _camera_functions(src, "expr") if ctx["io_only"] and src not in (None, "") else []
 
     def block(pi, stmts, path, top, in_loop, visible=(), event=None):
         """visible: the label names of the enclosing blocks of the same thread (a Go to may jump to a label of its
@@ -268,6 +321,8 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
             if t == "when":
                 if st.get("event") not in EVENT_SPECS:
                     err(f"unknown event '{st.get('event')}'")
+                elif camera_event(st.get("event")):
+                    err(camera_event(st.get("event")))
                 check(statement_fields(st))
                 if st.get("mode", "ignore") not in WHEN_MODES:
                     err(f"unknown mode '{st.get('mode')}'")
@@ -283,7 +338,7 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
                     if n in seen_vars:
                         err(f"'{n}' is declared more than once")
                     seen_vars[n] = pi
-                for m in check_expr(st.get("value", 0), names):
+                for m in check_expr(st.get("value", 0), names) or camera_expr(st.get("value", 0)):
                     err(f"initial value: {m}")
                 if st.get("keep") not in (None, False, True, 0, 1) and str(st.get("keep")) not in KEEP_SCOPES:
                     err(f"unknown keep option '{st.get('keep')}'")
@@ -294,6 +349,8 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
                 elif wait_mode(st) == "event" and ev in ("test_start", "test_waiting"):
                     err("cannot wait for the test to start")
                 else:
+                    if wait_mode(st) == "event" and camera_event(ev):
+                        err(camera_event(ev))
                     check(statement_fields(st))
                 if wait_mode(st) == "event":
                     for k, alt in enumerate(wait_alternatives(st)):
@@ -306,11 +363,13 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
                         elif a_ev in ("test_start", "test_waiting"):
                             err3("cannot wait for the test to start")
                         else:
+                            if camera_event(a_ev):
+                                err3(camera_event(a_ev))
                             for prm in EVENT_SPECS[a_ev]["params"]:
                                 for m in _check_param(prm, alt.get(prm["name"], prm["default"]), names, ctx, alt):
                                     err3(m)
                 if st.get("timeout") not in (None, "", 0):
-                    for m in check_expr(st["timeout"], names):
+                    for m in check_expr(st["timeout"], names) or camera_expr(st["timeout"]):
                         err(f"timeout: {m}")
             elif t == "if":
                 check(statement_fields(st))
@@ -355,7 +414,7 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
                     err(e)
                 check(statement_fields(st))
                 if st.get("index") not in (None, ""):
-                    for m in check_expr(st["index"], names):
+                    for m in check_expr(st["index"], names) or camera_expr(st["index"]):
                         err(f"index: {m}")
             elif t == "do":
                 a = st.get("action")
@@ -368,6 +427,8 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
                     def err2(msg, p=p, lab2=lab2):
                         issues.append((pi, p, f"{lab2}: {msg}"))
 
+                    if ctx["io_only"] and spec["group"] in CAMERA_ACTION_GROUPS:
+                        err2("there is no camera to record in Input/output only mode (Protocol ▸ Mode)")
                     check(statement_fields(st), err2)
                     if a in ("enable_procedure", "disable_procedure") and st.get("procedure") \
                             and st["procedure"] not in proc_names:

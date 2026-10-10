@@ -644,9 +644,11 @@ class SingleTestMixin:
     def _make_session(self, test, app, bg, size, fps: float, outputs, devices, name: str, entry=None,
                       on_stimulus=None) -> LiveSession:
         """A live session of `test` in `app` with the page's settings: detection (an adaptive background without
-        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery."""
+        an empty-arena image `bg`), duration and start, procedures, recording, warnings, pausing, crash recovery.
+        In an Input/output only protocol (with several tests: a test panel without a camera) an IOSession."""
         p = self.project
-        if self.io_only:  # no camera: the I/O devices and the procedures on the computer's clock
+        io = self.io_only if entry is None else entry.source_key is None
+        if io:  # no camera: the I/O devices and the procedures on the computer's clock
             mode = self._session_mode()
             if mode in ("on_detection", "experimenter_leaves"):
                 self._log("I/O only: the test starts as soon as it is armed (no camera to detect the animal).",

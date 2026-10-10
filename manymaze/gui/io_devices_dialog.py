@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 
 from ..core import ioconfig
 from ..core import iodevices as iod
+from ..core.ioconfig import PRESET_KEY
 from .widgets import loading, run_and_wait, value_text
 
 # channel table columns: (channel field, header); "options" holds the driver options as key=value text; "role" and
@@ -89,6 +90,7 @@ class IODevicesDialog(QDialog):
         self.setWindowTitle("I/O devices")
         self.project = project
         self.configs = copy.deepcopy(list(project.io_devices or []))
+        self.preset: str | None = None  # the operant chamber preset last added (stored with the protocol on OK)
         self.manager: iod.DeviceManager | None = None  # while connected
         self._output_errors: list[str] = []  # outputs that could not be set while connected
         self._loading = False
@@ -117,6 +119,8 @@ class IODevicesDialog(QDialog):
         m = QMenu(add)
         for t, label in ioconfig.DEVICE_TYPES.items():
             m.addAction(label, lambda t=t: self.add_device(t))
+        m.addSeparator()
+        m.addAction("Operant chamber (preset)…", self.add_chambers)
         add.setMenu(m)
         rm = QToolButton()
         rm.setText("Remove")
@@ -303,6 +307,22 @@ class IODevicesDialog(QDialog):
     def add_device(self, type_: str = "virtual"):
         self.configs.append(ioconfig.new_device(type_, [c.get("name") for c in self.configs]))
         self._refresh_list(len(self.configs) - 1)
+
+    def add_chambers(self, preset: str | None = None) -> bool:
+        """Add the I/O devices of operant chambers from a preset (OperantPresetDialog): one device per chamber,
+        its inputs and outputs named and its pins numbered for the chosen interface."""
+        self._save_device()
+        self._save_channels()
+        dlg = OperantPresetDialog(self, preset)
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()  # (when control returns to the event loop: its values are read below)
+        if not accepted:
+            return False
+        n = len(self.configs)
+        self.configs += dlg.devices([c.get("name") for c in self.configs])
+        self.preset = dlg.preset()
+        self._refresh_list(n)
+        return True
 
     def remove_device(self):
         i = self.dev_list.currentRow()
@@ -665,8 +685,12 @@ class IODevicesDialog(QDialog):
             return
         if not self.check_bandwidth():
             return
-        if self.configs != list(self.project.io_devices or []):
+        extra = self.project.settings_extra
+        if self.configs != list(self.project.io_devices or []) or \
+                self.preset is not None and extra.get(PRESET_KEY) != self.preset:
             self.project.io_devices[:] = copy.deepcopy(self.configs)
+            if self.preset is not None:
+                extra[PRESET_KEY] = self.preset
             self.changed.emit()
         self.disconnect_devices()
         super().accept()
@@ -707,6 +731,77 @@ class IODevicesDialog(QDialog):
 
     def sizeHint(self):
         return QSize(860, 640)
+
+
+class OperantPresetDialog(QDialog):
+    """Operant chambers from a preset (core.ioconfig.OPERANT_PRESETS): the chamber type, the interface its levers,
+    nose pokes, lights, dispenser and shocker are wired to, and how many chambers (one I/O device each); a preview
+    lists the channels of a chamber with their pins."""
+
+    def __init__(self, parent=None, preset: str | None = None, n: int = 1):
+        super().__init__(parent)
+        self.setWindowTitle("Operant chambers")
+        v = QVBoxLayout(self)
+        f = QFormLayout()
+        self.f_preset = QComboBox()
+        for k, d in ioconfig.OPERANT_PRESETS.items():
+            self.f_preset.addItem(d["label"], k)
+        self.f_preset.setCurrentIndex(max(0, self.f_preset.findData(preset)))
+        self.f_type = QComboBox()
+        for t in ioconfig.PRESET_DEVICE_TYPES:
+            self.f_type.addItem(ioconfig.DEVICE_TYPES[t], t)
+        self.f_n = QSpinBox()
+        self.f_n.setRange(1, 40)
+        self.f_n.setValue(max(1, int(n)))
+        self.f_n.setToolTip("One I/O device per chamber: each test of Several tests at once uses its own")
+        f.addRow("Chamber", self.f_preset)
+        f.addRow("Wired to", self.f_type)
+        f.addRow("Chambers", self.f_n)
+        v.addLayout(f)
+        self.desc = QLabel()
+        self.desc.setWordWrap(True)
+        v.addWidget(self.desc)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Name", "Kind", "Pin", "Role"])
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.table, 1)
+        note = QLabel("A preset names the inputs and outputs of your own wiring of the chamber to the interface "
+                      "chosen above (pins numbered in order: check them, and Invert or the options, against your "
+                      "wiring in Experiment › I/O devices). It does not drive the chamber makers' own interface "
+                      "cards or software.")
+        note.setWordWrap(True)
+        note.setObjectName("Hint")
+        v.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        for w in (self.f_preset, self.f_type):
+            w.currentIndexChanged.connect(lambda *_: self._preview())
+        self._preview()
+        self.resize(520, 520)
+
+    def preset(self) -> str:
+        return self.f_preset.currentData()
+
+    def device_type(self) -> str:
+        return self.f_type.currentData()
+
+    def devices(self, taken=()) -> list[dict]:
+        """The I/O device configurations of the chambers (names not in `taken`)."""
+        return ioconfig.operant_devices(self.preset(), self.device_type(), self.f_n.value(), taken)
+
+    def _preview(self):
+        self.desc.setText(ioconfig.OPERANT_PRESETS[self.preset()]["description"])
+        chans = ioconfig.operant_device(self.preset(), self.device_type())["channels"]
+        self.table.setRowCount(len(chans))
+        for r, c in enumerate(chans):
+            for col, text in enumerate((c["name"], ioconfig.CHANNEL_KINDS.get(c["kind"], c["kind"]),
+                                        value_text(c.get("pin", "")) if c.get("pin") is not None else "—",
+                                        CH_ROLES.get(c.get("role", ""), c.get("role", "")))):
+                self.table.setItem(r, col, QTableWidgetItem(text))
 
 
 class CalibrationDialog(QDialog):
