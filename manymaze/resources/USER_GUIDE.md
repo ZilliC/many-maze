@@ -87,7 +87,9 @@ everything without a camera.
 ### Protocol tab
 
 * **Mode** – *Video tracking*; *TakeNote*, behaviours scored by hand only (§6); or *Input/output only*, tests run
-  with the I/O devices and procedures without a camera, e.g. operant chambers (§7, *Input/output only tests*).
+  with the I/O devices and procedures without a camera, e.g. operant chambers (§7, *Input/output only tests*). In
+  that mode a **Chambers** row offers **Operant chambers…**, which sets up the I/O devices from a chamber preset (§8,
+  *Operant chamber presets*).
 * **Test duration** – analysed length of each test (0 = until the end of the video).
 * **Test starts** – at each test's *start time* (set per test), automatically **when the animal is first
   detected** in the apparatus, or **when the experimenter's hand has left the image**: the tracked object much
@@ -101,7 +103,8 @@ everything without a camera.
   *Radio*; *Event* for instantaneous events — see §6). Old wording: *state* with a duration, e.g. grooming; *point*
   for instantaneous events, e.g. defecation).
 * **Analysis ▸ Time periods** – named time windows (e.g. *Tone 1: 120–150 s*) that override regular time bins;
-  ideal for fear-conditioning CS periods.
+  ideal for fear-conditioning CS periods. *Time periods based on a time marker* start at an event (or a
+  calculation's time) and end after a duration, at another event or at a calculation's time (§9, *Time periods*).
 * **Animal tracking** (detection settings) – defaults for all tests (each test can override them, see §5). *Body parts from*
   chooses how head, body centre and tail base are found: from the animal's shape (fast, no model) or with the
   **pose model** (deep learning, see §5.1).
@@ -266,8 +269,18 @@ interest is the *novel object* (novel object recognition) and the *social stimul
 * **Test start**: set the start to the current video time.
 * **Manual scoring**: press a behaviour's key during playback to start/stop a state behaviour (or add a point
   event) at the current time. Space = play/pause, ←/→ = frame step (Shift = 1 s).
-* **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges.
+* **Track corrections**: click to set the animal position on a frame, delete or interpolate ranges, or
+  **Remove jumps** (Track editing): the jumps of a tracked test are removed with its detection settings (*Remove
+  jumps faster than*, below) and filled like gaps, without tracking again; *Undo* reverts it.
 * **Results / plots** for the test: track plot, occupancy heat map, speed and freezing trace.
+
+A test without a video that ran with the I/O devices (an *Input/output only* test, §7) opens with its **I/O log**
+in place of the video, whether from here or from the Test schedule: a line summing the test up (inputs, outputs,
+numbers of I/O and scored events, duration, the procedures' result variables), a **timeline** with a row per input,
+output and scored key or mark (on periods as bars, pulses and point events as ticks, analogue inputs as a line), and
+the **list** of every change in time order (inputs and outputs on / off or their values, procedure variables,
+events with their duration), with a filter. Analogue samples are drawn in the timeline only; the list shows at
+most 20 000 lines. The *Results* tab shows the test's measures from its I/O log.
 
 ### Swapping identities (several animals)
 
@@ -291,7 +304,15 @@ when no range is set. *Undo* reverts the swap.
    The **whole-body outline** (a simplified polygon of the animal's blob, up to 24 points) is stored too and drawn
    in the test view, live images and exported videos (*Record the animal's whole-body outline*, on by default;
    tracks from older versions simply have no outline).
-6. Gaps up to *Interpolate gaps* seconds are filled; optional smoothing.
+6. **Jumps are removed** (when *Remove jumps faster than* is set, *Animal tracking ▸ Jumps*): a position the animal
+   could not have reached from its last good one at that speed (cm/s when the apparatus is calibrated, else pixels
+   per second) is a jump — a reflection, a shadow or another object detected for a moment — when the track comes
+   back (to less than half the jump's distance, at a plausible speed) within *… when the track comes back within*
+   seconds (0.5 by default). Its frames become missing. A genuine fast run does not come back to where it started,
+   so it is kept; choose a limit well above the animal's top speed (e.g. 150 cm/s for a mouse, 300 cm/s for a rat).
+   The number removed is the *Jumps removed* information column. Off (0) by default, so tracks made before keep
+   their positions.
+7. Gaps up to *Fill gaps in the track of up to* seconds are filled (jumps included); optional smoothing.
 
 ### Tracking by colour
 
@@ -445,7 +466,9 @@ experiment…** takes a name off the list (tests keep their experimenter).
 On the Protocol tab (*Training criteria*) add, per stage, a condition on a result measure, e.g.
 *Training: Escape latency (s) < 10 on 3 consecutive trials; retire after 10 trials*:
 
-- **Measure** — any column of the results (or a procedure result variable), whole-test value.
+- **Measure** — any column of the results (or a procedure result variable), whole-test value; also a
+  calculation's result (e.g. a discrimination index, or `count_trials` across the animal's trials), by its column
+  name, e.g. `Discrimination index` or `Open arms (%)`.
 - **Op / Value / Consecutive** — the condition and the number of consecutive trials on which it must hold.
 - **When met** — *Stage completed*: the animal's remaining trials of the stage are skipped and new schedules do not
   include the stage again for it; *Report only*.
@@ -491,8 +514,8 @@ everything can be tried without hardware. Choose a mode with the buttons at the 
 | **Several tests at once** | several apparatus in one camera image and/or several cameras, run together |
 | **Observation only (no camera)** | scoring behaviour by direct observation (a clock and scoring keys) |
 
-With a protocol in **Input/output only** mode, *One test* runs without a camera (see *Input/output only tests*
-below).
+With a protocol in **Input/output only** mode, *One test* and *Several tests at once* run without a camera (see
+*Input/output only tests* below).
 
 ### Starting and ending a test
 
@@ -671,8 +694,25 @@ do the *test is waiting to start* procedures, pausing (the test clock stops), th
 shows the inputs and the I/O device states instead of the animal. When the test ends it is saved without a track
 (status *scored*, its duration the time its clock ran) and its results come from the I/O log: the input, output,
 encoder and analogue measures of *I/O results*, the scored keys and the procedures' result variables, also per
-time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark or an
-input). One I/O-only test runs at a time; *Several tests* needs cameras.
+time period (time bins, custom periods and event-anchored periods that need no track: test start, a key mark, an
+input or a calculation's time, also for their end). The Review page shows its I/O log as a timeline and a list (§5).
+
+Procedures that need the animal cannot run without a camera: arming is refused, with the list of the statements
+concerned, when a procedure waits for or reacts to a zone or animal event (*Animal enters zone*, *Freezing
+starts*, *Position changes* …), reads the animal in an expression (`zone()`, `x()`, `speed()`, `distance()` …) or
+records video. The procedure editor shows the same errors as soon as the mode is *Input/output only*.
+
+**Several chambers at once** (operant chambers side by side): choose *Several tests at once*. **Add test panel**
+adds a panel without a camera, which gets the first I/O device (chamber) that no other panel uses and the next
+animal; its apparatus is optional (*None*). The *Test panels* table lists each panel's I/O device, apparatus,
+animal, stage and trial; change them in the editor below it. Every device needs its own box (one device per chamber,
+see *Operant chamber presets* in §8): a procedure written with one chamber's device name acts on each test's own
+chamber. **Arm all / Start all**, **Pause all**, **Resume all**, **Stop all**, the start and stop keys and the
+**scheduled start** at a clock time (once or every day) work as with cameras; each test runs on its own clock and
+is saved as soon as it ends. Each panel shows its inputs (on / off, with the activations so far) and outputs in
+place of the camera image, and its *Inputs* tab the activations, time on and latency of each input; the *Monitor*
+tab follows the selected panel. The panels are saved with the experiment; the camera panels of the same
+experiment are kept, and shown again when the mode goes back to video tracking.
 
 ### Procedures
 
@@ -1200,6 +1240,38 @@ switches a simulated input, *Test* pulses the selected output for 0.5 s or plays
 
 Every input and output change during a test is recorded in the test's I/O log (`Test.io_events`).
 
+### Operant chamber presets
+
+**Add ▾ Operant chamber (preset)…** in the I/O devices dialog, or **Operant chambers…** on the Protocol page in
+*Input/output only* mode, sets up the I/O devices of one or more operant chambers at once. Choose:
+
+* **Chamber** – the preset:
+
+  | Preset | Inputs | Outputs |
+  |---|---|---|
+  | *Med Associates-style* | `left_lever`, `right_lever`, `head_entry` | `left_lever_out`, `right_lever_out` (retractable levers), `left_light`, `right_light`, `house_light`, `pellet`, `tone`, `shocker` |
+  | *Coulbourn-style* | `lever`, `left_poke`, `right_poke`, `head_entry` | `lever_out`, `cue_light`, `left_poke_light`, `right_poke_light`, `house_light`, `pellet`, `tone`, `shocker` |
+  | *Lafayette-style* | `poke_1` … `poke_5` (five-choice wall), `head_entry` | `poke_1_light` … `poke_5_light`, `magazine_light`, `house_light`, `pellet`, `tone` |
+  | *Custom* | — | — (add the channels yourself) |
+
+  Lights get the role *Light*, the tone *Speaker* and the shocker *Shocker* (60 s safety limit), so the results
+  group them as ANY-maze does. The names match the example procedures (*Lever press for food* uses `lever`,
+  `pellet` and `house_light`).
+* **Wired to** – the interface: an Arduino with the mANY-MAZE firmware, a Firmata board, an NI-DAQmx device, a
+  LabJack, or a simulated device to try the protocol without hardware. Pins are numbered in order, inputs first:
+  Arduino / Firmata pins from 2 (on an Uno pins 14–19 are A0–A5), NI lines `port0/line0`… for the inputs and the
+  next port for the outputs, LabJack lines `FIO0`… then `EIO`, `CIO`, `MIO`.
+* **Chambers** – how many: one I/O device per chamber (`chamber`, or `chamber1`, `chamber2` …), so that each test
+  of *Several tests at once* has its own (§7).
+
+A preview lists the channels with their pins. From the Protocol page you choose whether the chambers replace the
+experiment's I/O devices or are added to them; the preset is kept with the protocol (copied with it, and shown in
+the protocol report). A preset only names the inputs and outputs of **your own wiring** of the chamber's levers,
+nose pokes, lights, dispenser and shocker to one of the interfaces above: the chamber makers' own interface cards
+and software (Med Associates' MED-PC interfaces, Coulbourn's Habitest, Lafayette's ABET) are **not** driven. Check
+the pins, *Invert*, the pull-up and the other options against the wiring, then the serial port or device of each
+chamber, and try each output with *Connect* and *Test*.
+
 ### Touch screen
 
 A full-screen stimulus window on a second display (the ANY-maze Touch equivalent) divided into response areas
@@ -1582,6 +1654,7 @@ unticked):
 | Animal lighter / darker | Whether the animal is lighter or darker than the apparatus: the detection *contrast* setting, or with *auto* what tracking found in most frames. Blank for colour tracking. |
 | Animal length | The animal's median body length (nose–tail, or from its area), in the apparatus unit (cm when calibrated). |
 | Frames tracked (%) | Percentage of the test's frames in which the animal was detected. |
+| Jumps removed | The jumps removed from the track by tracking or by Review's *Remove jumps* (blank when jump removal was off; see *How tracking works*). |
 | Source video file | The video a test was tracked from. |
 | Recorded video file | The video recorded during a live test. |
 | Video time at test start (s) | Where in the video the test starts (0 for recordings). |
@@ -1592,12 +1665,56 @@ unticked):
 *Day of week*, *Time of day*, *User* and *Animal lighter / darker* can also be used to group results in Statistics.
 In the *one row per animal* export, *Treatment code* and *Animal notes* are kept when they are shown.
 
+### Results reports
+
+A **report** is a named selection of the spreadsheet, kept in the experiment: the measures and information columns
+ticked in *Select data*, whether the time periods are shown (and which one) and the *Treatment* / *Stage* filters.
+Keep one per question, e.g. *Anxiety* (open-arm measures, whole tests) and *Habituation* (distance per 1-minute
+bin). The **Report** group of the ribbon lists them; choosing one shows it, *- None -* leaves the spreadsheet as it
+is. **Report ▾** offers:
+
+- **New report…** — a report showing every measure (whole tests, no filter); tick what it needs, then *Save report*.
+- **Save report** — keep what the spreadsheet shows in the report shown (changes are not kept until you save).
+- **Save report as…** — keep it as a new report (a report of the same name is replaced).
+- **Delete report**.
+- **Default report** — the report shown when the experiment is opened (without one the Data page opens with every
+  measure, as before).
+
+A report that lists its measures keeps showing only those: measures that appear later (a new zone, a new
+calculation) are not added to it. *Clear settings* shows everything again and leaves the report. The exports, the
+copied and printed spreadsheet and the HTML report contain what the report shows; their file names include the
+report's name, and the HTML report names it. From the command line, `manymaze project DIR results --report NAME -o
+FILE` exports a report (with `--wide`, one row per animal) and `manymaze project DIR report --report NAME` makes its
+HTML report. A new experiment based on this one's protocol gets its reports.
+
 ### Time periods
 
-Besides regular time bins and custom periods, **event-anchored periods**: anchored on test start, first entry to /
-exit from a zone, a manual mark, or an input switching on; with offset, duration (0 = to the end) and occurrence
-(1 = first, 0 = every occurrence). Example: *the 30 s after the animal first left the start box*. Paused time is
-excluded from all times and distances.
+Besides regular time bins and custom periods, **event-anchored periods** (*Protocol ▸ Analysis ▸ Time periods
+based on a time marker*, one row each):
+
+- **The period starts at** test start, an entry into / exit from a zone, a manual mark (key), an input switching on,
+  or the **time given by a calculation** (its whole-test result, in seconds from the start of the test; ANY-maze's
+  *time periods defined by a calculation*) — plus an *Offset*. *Occurrence* picks which event (1 = first, 2 =
+  second…, 0 = one period for every occurrence). Periods whose start never happens are left out.
+- **The period ends** *after the duration* (*Duration*, 0 = at the end of the test), or at an event — an entry into /
+  exit from a zone, a mark, an input — or at a calculation's time, plus an *End offset*. *End occurrence* counts the
+  events after the period's start event and start (1 = the first one after it), so *from each tone to the next* or
+  *from the exit from the start box until the goal box is reached* are one row each.
+
+Examples: *the 30 s after the animal first left the start box*; *from the first entry into the open arm until the
+animal leaves it* (start: entry into, end: exit from, the same zone; occurrence 0 gives one period per visit);
+*from the platform's latency onwards* (a calculation `{Platform: latency to first entry (s)}`). As in ANY-maze, **a
+period whose end never happens** (the event does not occur, the calculation's result is blank) **ends at the end of
+the test**, and its results say so in the *Warnings* column (*Back: the end of the period (entry into Start box) did
+not happen; it ends at the end of the test*).
+
+A calculation that defines a period must be worked out from the test's own results — not from other trials
+(`mean_trials` …) or information columns — and must not use that period itself with `result_for_period`, directly or
+through other calculations (that would be circular). Both are reported in red under the table, and the circular
+reference also on the calculation's property page; such a period is left out (or ends at the end of the test). A
+calculation may use, with `result_for_period({m}, 'name')`, a period defined by another calculation: it is worked
+out after that one. Renaming a calculation updates the periods that use it; deleting one names them. The protocol
+report describes every period in words. Paused time is excluded from all times and distances.
 
 ### Calculations
 
@@ -1629,8 +1746,9 @@ A formula whose values are blank (a measure missing in a test, a division by zer
 `is_undefined({m})` tests for it. Unlike ANY-maze, which works a formula out strictly from left to right, the usual
 precedence applies (`2 + 3 * 4` is 14). The property page shows mistakes as you type, and the result for the first
 test. The results are listed under **Calculation results** in *Select data*, exported, compared in Statistics and
-printed in the protocol report; renaming a calculation updates the formulas that use it, and a new experiment based
-on this one's protocol gets its calculations.
+printed in the protocol report; a time period can start or end at a calculation's result (*Time periods*) and a
+training criterion can use one (§6); renaming a calculation updates the formulas, time periods and criteria that
+use it, and a new experiment based on this one's protocol gets its calculations.
 
 ### Track plots (Results ▸ Data ▸ Track plots)
 
@@ -1881,6 +1999,17 @@ values can be shown or hidden.
 
 **Copy summary**, **Save figure…** and **Copy figure** work on every tab.
 
+**Significance level.** *Options ▸ Select the significance level (α)* (0.05 by default) decides what is marked
+significant: the result shown in green, *ns* (not significant) or the stars — * below the level, ** p < 0.01, ***
+p < 0.001 — in the tables and summaries, the brackets drawn between groups on the graphs and the assumption checks
+reported as failed (non-normal, unequal variances, slopes that differ). A level other than 0.05 is named under the
+analysis' title and in its summary. The p-values themselves do not change; the confidence intervals stay 95 %.
+
+**Saved settings.** The page's settings (measure, factors, time period, filter, test, post-hoc test, graph, the
+significance level …) are kept in the experiment and shown again when it is opened (settings that no longer apply,
+e.g. a measure that is gone, are left at their defaults). The statistics of the HTML report use the same
+significance level, and a new experiment based on this one's protocol gets the settings.
+
 #### Supported procedures (47: 35 tests and 12 post-hoc tests)
 
 | Category | Procedures |
@@ -1904,7 +2033,8 @@ manymaze track video.mp4 --template epm --bbox 100,40,520,520 --size-cm 75 -o re
 manymaze project ~/exp.mmaze track        # batch-track untracked tests in parallel (--workers N)
 manymaze project ~/exp.mmaze results -o results.xlsx --bins   # also .csv .tsv .slk (SYLK) .dbf (dBase) .xml
 manymaze project ~/exp.mmaze results --wide -o by_animal.xlsx   # one row per animal
-manymaze project ~/exp.mmaze report -o report.html
+manymaze project ~/exp.mmaze results --report Anxiety -o anxiety.csv   # a results report saved on the Data page
+manymaze project ~/exp.mmaze report -o report.html    # (--report NAME: that report's tests and measures)
 manymaze project ~/exp.mmaze events -o events.csv     # event log of every test
 manymaze project ~/exp.mmaze protocol -o protocol.html
 manymaze project ~/exp.mmaze archive -o exp.zip       # experiment + all videos in one file

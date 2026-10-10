@@ -22,7 +22,7 @@ from .apparatus import Apparatus  # noqa: E402
 from .occupancy import occupancy_map  # noqa: E402
 from .pauses import period_frames, to_recording_time  # noqa: E402
 from .project import Behaviour  # noqa: E402
-from .stats import descriptive, error_value, stars  # noqa: E402
+from .stats import ALPHA, descriptive, error_value, stars  # noqa: E402
 from .track import Track  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -498,6 +498,55 @@ def speed_trace(track: Track, app: Apparatus, freezing: np.ndarray | None = None
     return fig
 
 
+IO_TIMELINE_COLORS = {"input": "#2563eb", "output": "#ea580c", "event": "#16a34a"}
+
+
+def io_timeline(channels: list[dict], end: float | None = None, title: str = "", size=None,
+                fig: Figure | None = None) -> Figure:
+    """The I/O log of a test as a timeline (iolog.review_channels): one row per input, output and scored key or
+    mark, with its on spans as bars, pulses and point events as ticks and analogue values as a line scaled to the
+    row (the Review page of a test without a video)."""
+    n = len(channels)
+    fig = fig or Figure(figsize=size or (7, max(1.6, 0.32 * n + 0.9)), dpi=100)
+    if not n:
+        return message_figure("No inputs, outputs or events were logged in this test.", fig=fig)
+    ax = fig.add_subplot(111)
+    stop = float(end) if end else 0.0
+    for i, ch in enumerate(channels):
+        y = n - 1 - i  # the first channel at the top
+        col = IO_TIMELINE_COLORS.get(ch.get("kind"), "#475569")
+        spans = [(a, max(b - a, 0.0)) for a, b in ch.get("spans") or []]
+        if spans:
+            ax.broken_barh(spans, (y - 0.3, 0.6), facecolors=col, alpha=0.75, linewidth=0)
+        pts = ch.get("points") or []
+        if pts:
+            ax.vlines(pts, y - 0.38, y + 0.38, colors=col, linewidth=1.2)
+        vals = ch.get("values") or []
+        if vals:
+            t = np.array([p[0] for p in vals], float)
+            v = np.array([p[1] for p in vals], float)
+            if len(t) > 4000:  # the line need not have more points than the figure has pixels
+                k = int(math.ceil(len(t) / 4000))
+                t, v = t[::k], v[::k]
+            lo, hi = float(np.nanmin(v)), float(np.nanmax(v))
+            scaled = (v - lo) / (hi - lo) if hi > lo else np.full_like(v, 0.5)
+            ax.step(t, y - 0.35 + 0.7 * scaled, where="post", color=col, linewidth=0.9)
+        stop = max([stop] + [b for _a, b in ch.get("spans") or []] + list(pts) + [p[0] for p in vals])
+    ax.set_yticks(range(n))
+    ax.set_yticklabels([c["label"] for c in reversed(channels)], fontsize=8)
+    ax.set_ylim(-0.7, n - 0.3)
+    ax.set_xlim(0, stop if stop > 0 else 1.0)
+    ax.set_xlabel("time (s)")
+    ax.grid(axis="x", color="#e2e8f0", linewidth=0.6)
+    ax.set_axisbelow(True)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    if title:
+        ax.set_title(title, fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------------------- group graphs
 def _jitter(n, width=0.12, seed=0):
     return np.random.default_rng(seed).uniform(-width, width, n)
@@ -535,8 +584,9 @@ def _draw_dist(ax, pos, v, c, kind, error, width, points, seed=0):
 
 def group_plot(groups: dict, measure: str, colors: dict | None = None, kind: str = "bar", posthoc=None,
                p_value: float | None = None, size=(4.2, 3.6), error: str = "sem", points: bool = True,
-               ref_value: float | None = None) -> Figure:
-    """Column (mean ± SEM/SD/CI), point, box or violin graph per group with individual points."""
+               ref_value: float | None = None, alpha: float = ALPHA) -> Figure:
+    """Column (mean ± SEM/SD/CI), point, box or violin graph per group with individual points; the differences
+    significant at the level alpha are marked with brackets and stars."""
     fig = Figure(figsize=size, dpi=100)
     ax = fig.add_subplot(111)
     names = list(groups)
@@ -561,15 +611,15 @@ def group_plot(groups: dict, measure: str, colors: dict | None = None, kind: str
     if posthoc:
         level = top + step
         for ph in posthoc:
-            if ph.get("p", 1) >= 0.05 or ph["a"] not in names or ph["b"] not in names:
+            if ph.get("p", 1) >= alpha or ph["a"] not in names or ph["b"] not in names:
                 continue
             i, j = names.index(ph["a"]), names.index(ph["b"])
             ax.plot([i, i, j, j], [level, level + step / 3, level + step / 3, level], color="black", lw=0.8)
-            ax.text((i + j) / 2, level + step / 3, stars(ph["p"]), ha="center", va="bottom", fontsize=8)
+            ax.text((i + j) / 2, level + step / 3, stars(ph["p"], alpha), ha="center", va="bottom", fontsize=8)
             level += step * 1.3
-    elif p_value is not None and len(names) == 2 and p_value < 0.05:
+    elif p_value is not None and len(names) == 2 and p_value < alpha:
         ax.plot([0, 0, 1, 1], [top + step, top + 1.33 * step, top + 1.33 * step, top + step], color="black", lw=0.8)
-        ax.text(0.5, top + 1.33 * step, stars(p_value), ha="center", va="bottom", fontsize=8)
+        ax.text(0.5, top + 1.33 * step, stars(p_value, alpha), ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
     return fig
 

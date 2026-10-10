@@ -101,6 +101,14 @@ DETECTION_SPEC = [
     ("motion_threshold", "A pixel is moving when it changes by (grey levels)", "int", (1, 255, 1),
      "Pixel change counted as movement for freezing / immobility."),
     ("max_gap_s", "Fill gaps in the track of up to (s)", "float", (0.0, 60.0, 0.1, 2), ""),
+    ("max_jump_speed", "Remove jumps faster than (units/s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
+     "A position the animal could not have reached at this speed (cm/s when the apparatus is calibrated, else "
+     "pixels/s) is a jump — a reflection, a shadow or another object detected for a moment — when the track comes "
+     "back within the time below: it is removed and filled like a gap. A real fast run does not come back and is "
+     "kept. Choose well above the animal's top speed, e.g. 150 cm/s for a mouse. The number removed is the "
+     "information column Jumps removed. 0 = off."),
+    ("max_jump_s", "… when the track comes back within (s)", "float", (0.0, 10.0, 0.1, 2),
+     "The longest jump: a track that stays away longer is kept (the animal really went there)."),
     ("smoothing", "Smooth positions over (frames, 0 = off)", "int", (0, 51, 1),
      "Moving average applied to positions. 0 = off."),
     ("frame_step", "Analyse every Nth frame", "int", (1, 50, 1), "Speed up tracking of high frame-rate video."),
@@ -228,6 +236,7 @@ DETECTION_SECTIONS = [
     ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
     ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
+    ("Jumps", ["max_jump_speed", "max_jump_s"]),  # removed before the gaps are filled (Tracking quality)
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step"]),
 ]
 

@@ -1,6 +1,7 @@
 """Several live tests at once: one or more camera sources (each read in its own thread), each feeding one or more
-sessions (one per apparatus / arena in the image), with collective start / pause / stop, keyboard and remote
-start / stop keys and scheduled starts at a clock time."""
+sessions (one per apparatus / arena in the image), and tests without a camera (Input/output only mode, e.g.
+operant chambers side by side: each session runs on its own clock), with collective start / pause / stop,
+keyboard and remote start / stop keys and scheduled starts at a clock time."""
 
 from __future__ import annotations
 
@@ -60,9 +61,17 @@ class ClockSchedule:
         return f"{'every day at' if self.daily else 'at'} {self.at} (next {self.next_fire:%a %H:%M})"
 
 
+def has_data(session) -> bool:
+    """A finished session recorded something worth saving (camera sessions: track rows; I/O-only sessions: the
+    test started)."""
+    v = getattr(session, "has_data", None)
+    return bool(v) if v is not None else bool(len(getattr(session, "cols", {}).get("t", ())))
+
+
 @dataclass
 class LiveEntry:
-    """One test in the group: a session bound to a source (None for observation-only)."""
+    """One test in the group: a session bound to a source, or to none (``source_key`` None): a test run with the
+    I/O devices only (live.IOSession, ticked by its own clock from when it is armed) or an observation."""
 
     id: int
     source_key: str | None
@@ -124,10 +133,13 @@ class LiveGroup:
     """Coordinates live sessions fed by one or more sources.
 
     Frames can be pushed synchronously with :meth:`process` (tests, custom drivers) or read by per-source threads
-    started with :meth:`start_sources`.  Call :meth:`tick` regularly to run clock schedules.
+    started with :meth:`start_sources`.  Sessions without a source (I/O only) run on their own clock thread from
+    when they are added or armed (``io_clock`` False: the caller ticks them, e.g. tests).  Call :meth:`tick`
+    regularly to run clock schedules.
     """
 
-    def __init__(self, start_keys=None, stop_keys=None, clock: Callable[[], _dt.datetime] = _dt.datetime.now):
+    def __init__(self, start_keys=None, stop_keys=None, clock: Callable[[], _dt.datetime] = _dt.datetime.now,
+                 io_clock: bool = True):
         self.sources: dict[str, SourceSpec] = {}
         self.runners: dict[str, SourceRunner] = {}
         self._stopping: dict[str, SourceRunner] = {}  # stopped runners whose thread had not ended yet
@@ -136,6 +148,7 @@ class LiveGroup:
         self.start_keys = list(DEFAULT_START_KEYS if start_keys is None else start_keys)
         self.stop_keys = list(DEFAULT_STOP_KEYS if stop_keys is None else stop_keys)
         self.clock = clock
+        self.io_clock = io_clock
         self.warnings: list[tuple[str, str]] = []  # (time of day, message) for source-level problems
         self.on_schedule: Callable[[ClockSchedule, list[LiveEntry]], None] | None = None
         self._lock = threading.RLock()
@@ -163,7 +176,9 @@ class LiveGroup:
                 e.apparatus = session.apparatus
             self._next_id += 1
             self.entries += (e,)
-            return e
+        if session is not None:
+            self._start_clock(session)
+        return e
 
     def add_session(self, source_key: str | None, session, label: str = "", meta: dict | None = None) -> LiveEntry:
         return self.add_entry(source_key, session.apparatus, label, meta, session)
@@ -174,6 +189,13 @@ class LiveGroup:
             entry.aborted = entry.saved = False
             if session.apparatus is not None:
                 entry.apparatus = session.apparatus
+        self._start_clock(session)
+
+    def _start_clock(self, session):
+        """A session without a camera (I/O only) runs on its own clock: no source feeds it frames."""
+        start = getattr(session, "start_clock", None)
+        if start is not None and self.io_clock:
+            start()
 
     def remove(self, entry: LiveEntry):
         with self._lock:
@@ -277,7 +299,7 @@ class LiveGroup:
         if s is None or s.state == "finished":
             return
         try:
-            e.aborted = s.state == "waiting" or not len(getattr(s, "cols", {}).get("t", ()))
+            e.aborted = s.state == "waiting" or not has_data(s)
             s.finish(END_ERROR)
         except Exception as ex2:  # finishing failed too: at least its outputs off
             self.warnings.append((f"{_dt.datetime.now():%H:%M:%S}", f"{e.label}: could not end the test: {ex2}"))
