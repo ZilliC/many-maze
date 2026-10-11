@@ -363,7 +363,7 @@ def test_firmware_source_has_the_protocol_fixes():
     assert "noInterrupts" not in dht  # no 5 ms with the interrupts off
     hx = src[src.index("uint8_t hxPulse"):src.index("bool readHX")]
     assert "noInterrupts" in hx and "interrupts();" in hx  # off for one clock pulse only
-    assert 'err("line too long")' in src and "overflow = true" in src
+    assert 'err(F("line too long"))' in src and "overflow = true" in src
     w = src[src.index("case 'W'"):src.index("case 'P'")]
     t = src[src.index("case 'T'"):src.index("case 'X'")]
     p = src[src.index("case 'P'"):src.index("case 'T'")]
