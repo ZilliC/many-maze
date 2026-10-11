@@ -1256,13 +1256,22 @@ class MainWindow(QMainWindow):
         self.show_page(self.page("AnimalsPage" if kind == "animals" else "TestsPage"))
         return dlg.result
 
+    def protocol_locked(self, title: str) -> bool:
+        """Whether the protocol is locked for the current user (core.security), saying so: imports that add or
+        change apparatus are refused."""
+        if self.project is None or security.can(self.project, "edit_protocol"):
+            return False
+        QMessageBox.information(self, title, "The protocol is locked: only an administrator can add or change "
+                                             "apparatus (File ▸ Users and security).")
+        return True
+
     def import_anymaze_xml(self, path: str | None = None, origin: str = "auto"):
         """ANY-maze ▸ File ▸ Export ▸ Export experiment as XML: its animals, tests and tracks (see core.anymaze;
         ANY-maze's own .szd experiment files are in an undocumented binary format and cannot be read)."""
         from ..core.anymaze import import_anymaze_xml, is_anymaze_xml
 
         p = self.project
-        if p is None:
+        if p is None or self.protocol_locked("Import from ANY-maze"):
             return None
         if p.path is None and not self.save():
             return None
@@ -1313,7 +1322,7 @@ class MainWindow(QMainWindow):
         from ..core.anymaze import zone_maps_apparatus
 
         p = self.project
-        if p is None:
+        if p is None or self.protocol_locked("Import zone maps"):
             return None
         if paths is None:
             paths, _ = QFileDialog.getOpenFileNames(self, "Zone maps exported by ANY-maze", self._last_dir(),

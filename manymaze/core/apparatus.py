@@ -47,6 +47,17 @@ def rename_unit(name: str, old: str, new: str) -> str:
     return f"{name[:m.start(2)]}{new}{name[m.end(2):]}"
 
 
+def rename_factor(name: str, old: str, new: str) -> float:
+    """The factor the values of the result `name` are multiplied by when its distance unit changes from `old` to
+    `new` (as :func:`rename_unit`): 0.01 for "Total distance (cm)" from cm to m, 1e-4 for an area, 100 for
+    "Meander (deg/cm)"; 1.0 for names without a distance unit."""
+    m = _DISTANCE_UNIT_AT_END.search(name)
+    if m is None or rename_unit(name, old, new) == name:
+        return 1.0
+    power = -1 if m.group(1) else 2 if m.group(3) == "²" else 1
+    return (DISTANCE_UNITS[new] / DISTANCE_UNITS[old]) ** power
+
+
 def unit_conversion(unit_text: str, unit: str) -> tuple[str, float] | None:
     """A unit in centimetres ("cm", "cm/s", "cm/s²", "cm²", "cm·s", "deg/cm") in another distance unit: (its text,
     the factor its values are multiplied by), e.g. ("m/s", 0.01); None for other units, or unit "cm"."""
@@ -504,7 +515,7 @@ class Apparatus:
             "arena": self.arena.to_dict() if self.arena else None,
             "zones": [z.to_dict() for z in self.zones],
             "points": [p.to_dict() for p in self.points],
-            "lines": [l.to_dict() for l in self.lines],
+            "lines": [ln.to_dict() for ln in self.lines],
             "groups": [g.to_dict() for g in self.groups],
             "sequences": [q.to_dict() for q in self.sequences],
             "grids": [g.to_dict() for g in self.grids],
@@ -524,7 +535,7 @@ class Apparatus:
             arena=shape_from_dict(d["arena"]) if d.get("arena") else None,
             zones=[Zone.from_dict(z) for z in d.get("zones", [])],
             points=[PointOfInterest.from_dict(p) for p in d.get("points", [])],
-            lines=[Line.from_dict(l) for l in d.get("lines", [])],
+            lines=[Line.from_dict(ln) for ln in d.get("lines", [])],
             groups=[ZoneGroup.from_dict(g) for g in d.get("groups", [])],
             sequences=[Sequence.from_dict(q) for q in d.get("sequences", [])],
             grids=[Grid.from_dict(g) for g in d.get("grids", [])],

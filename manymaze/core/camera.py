@@ -310,8 +310,10 @@ class SourceSpec:
         if self.name:
             return self.name
         from pathlib import Path
-        one = lambda s: (native_label(s) if is_native_source(s) else Path(s).name if _is_file(s) else
-                         f"Camera {int(s)}")
+
+        def one(s):
+            return native_label(s) if is_native_source(s) else Path(s).name if _is_file(s) else f"Camera {int(s)}"
+
         sep = {"side": " | ", "stack": " / "}.get(merge_layout(self.layout), " + ")
         return sep.join(one(s) for s in self.sources)
 
@@ -349,8 +351,13 @@ class SourceSpec:
         if opener is None:
             from .video import VideoSource as opener
         w, h = self.size or (None, None)
-        conv = lambda s: int(s) if not isinstance(s, str) or s.isdigit() else s
-        open_one = lambda s: (NativeCamera if is_native_source(s) else opener)(conv(s), w, h, self.fps or None)
+
+        def conv(s):
+            return int(s) if not isinstance(s, str) or s.isdigit() else s
+
+        def open_one(s):
+            return (NativeCamera if is_native_source(s) else opener)(conv(s), w, h, self.fps or None)
+
         src = open_one(self.source)
         merged = []
         try:

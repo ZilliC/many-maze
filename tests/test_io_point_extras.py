@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from manymaze.core import templates
-from manymaze.core.apparatus import Apparatus, PointOfInterest, Sequence, Zone, ZoneGroup
+from manymaze.core.apparatus import Apparatus, PointOfInterest, Sequence, Zone
 from manymaze.core.geometry import rect
 from manymaze.core.iomeasures import io_measures, io_track_measures, parse_numbers
 from manymaze.core.measures import AnalysisSettings, analyse, analyse_segmented, behaviour_measures

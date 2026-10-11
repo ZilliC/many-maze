@@ -563,7 +563,11 @@ def protocol_report(project: Project, path) -> Path:
     from . import plots
     from .measures import AnalysisSettings
     from .periods import describe_period
+    from .analyses import significance_level
     from .procedures import describe_statement, normalize_procedures
+    from .recordings import field_label, name_fields
+    from .security import security_from
+    from .terminology import TERMS, is_custom, term
     from .tracking import DetectionSettings
     from .workflow import criterion_text
 
@@ -601,8 +605,16 @@ def protocol_report(project: Project, path) -> Path:
             p.start_mode, "at the test's start time")),
         ("Blind testing", "yes" if p.blind else "no"),
         ("Confirm the animal's ID", "yes" if p.settings_extra.get("confirm_id") else "no"),
+        ("Delay after the start switch (s)", f"{p.start_switch_delay_s:g}" if p.start_switch_delay_s else "none"),
+        ("Block the test until the animal is weighed", "yes" if p.require_weight_before_test else "no"),
+        ("Recorded video file names", ", ".join(field_label(p, f) for f in name_fields(p))),
         ("Stages", ", ".join(p.stages) or "—"), ("Treatments", ", ".join(g.name for g in p.groups) or "—"),
         ("Animal columns", ", ".join(p.animal_fields) or "—"),
+        ("Terminology", ", ".join(f"{TERMS[k][0]} → {term(p, k)}" for k in TERMS if is_custom(p, k)) or "standard"),
+        ("Saved results reports", ", ".join(r.get("name", "") for r in p.reports) or "—"),
+        ("Significance level (Statistics)", f"{significance_level(p):g}"),
+        ("Protocol locked", "yes (only an administrator can change it)" if security_from(p.security)["lock_protocol"]
+         else "no"),
         ("Animals / tests", f"{len(p.animals)} / {len(p.tests)}")]))
     if p.behaviours:
         out.append("<h2>Keys</h2>" + table(("Behaviour", "Key", "Type", "Exclusive set"),

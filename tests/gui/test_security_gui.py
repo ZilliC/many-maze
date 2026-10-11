@@ -11,7 +11,7 @@ from manymaze.core import security as sec
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import PROJECT_FILE, Project
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.security_dialog import PasswordDialog, ProtectDialog, UsersDialog
+from manymaze.gui.security_dialog import PasswordDialog, ProtectDialog
 
 app = QApplication.instance() or QApplication([])
 
@@ -100,7 +100,7 @@ def test_only_administrators_reveal_the_treatment_coding(win):
     assert page.a_reveal.isEnabled()
 
 
-def test_locked_protocol_is_read_only_for_other_users(win):
+def test_locked_protocol_is_read_only_for_other_users(win, monkeypatch):
     p = win.project
     sec.set_security(p, lock_protocol=True)
     win.answers = ["bob-pw"]
@@ -112,11 +112,23 @@ def test_locked_protocol_is_read_only_for_other_users(win):
     assert appar.locked and not appar.new_act.isEnabled() and not appar.tool_actions["polygon"].isEnabled()
     assert appar.tool_actions["select"].isEnabled() and not appar.view.isInteractive()
     live = win.goto("LivePage")
-    assert not live.proc_editor.isEnabled()
+    assert not live.proc_editor.isEnabled() and not live.rec_names_btn.isEnabled()
+    live.set_recording_name_fields(["animal"])  # the file names are part of the protocol
+    assert p.recording_name_fields != ["animal"]
+    assert not live.start_delay.isEnabled()
+    live._store_start_delay(5.0)
+    assert not p.start_switch_delay_s
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[1]))
+    assert win.import_zone_maps(["x.csv"]) is None and win.import_anymaze_xml("x.xml") is None
+    assert shown == ["Import zone maps", "Import from ANY-maze"]
     win.answers = ["ann-pw"]
     win.sign_in("Ann")  # the administrator: everything editable again (the pages follow at once)
     assert not proto.locked and proto.elements["protocol"].widget().isEnabled() and proto.add_item_act.isEnabled()
-    assert appar.view.isInteractive() and live.proc_editor.isEnabled()
+    assert appar.view.isInteractive() and live.proc_editor.isEnabled() and live.rec_names_btn.isEnabled()
+    assert live.start_delay.isEnabled() and not win.protocol_locked("x")
+    live.set_recording_name_fields(["animal"])
+    assert p.recording_name_fields == ["animal"]
 
 
 def test_users_dialog(win):

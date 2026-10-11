@@ -7,7 +7,7 @@ import re
 
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QColor, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QColorDialog, QComboBox, QDialog, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QDialog, QFileDialog,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QStackedWidget,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout)
 

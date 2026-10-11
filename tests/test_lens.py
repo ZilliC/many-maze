@@ -193,6 +193,29 @@ def test_tracking_reads_corrected_frames(bent_video):
     assert np.nanmedian(np.abs(a.motion - b.motion)) <= 0.1 * max(1.0, float(np.nanmedian(b.motion)))
 
 
+def test_corrected_and_downscaled_tracking(bent_video):
+    """Lens correction together with tracking downscaled frames: the (downscaled) frames are corrected with maps
+    scaled to their size, the background is corrected at full size, and the track is in the corrected video's
+    pixels."""
+    paths, lens = bent_video
+    app = templates.build("open_field", 60, 40, 520, 400)
+    [[ref]] = track_video(paths["fixed"], [ArenaJob(app, DetectionSettings())])
+    for factor in (2, 4):
+        [[tr]] = track_video(paths["bent"], [ArenaJob(app, DetectionSettings(downscale=factor))], lens=lens)
+        assert tr.meta["downscale"] == factor and tr.meta["lens_correction"] == lens.describe()
+        assert tr.detected.mean() > 0.95 and len(tr) == len(ref)
+        err = np.hypot(tr.x - ref.x, tr.y - ref.y)
+        assert np.nanmedian(err) < 1.0 + factor / 2  # (a downscaled frame loses some precision)
+        assert np.nanmedian(tr.area / ref.area) == pytest.approx(1.0, abs=0.15)
+    [[raw]] = track_video(paths["bent"], [ArenaJob(app, DetectionSettings(downscale=2))])
+    assert np.nanpercentile(np.hypot(raw.x - ref.x, raw.y - ref.y), 90) > 3  # without the correction: bent
+    # preview frames are given at the video's size, corrected
+    sizes = []
+    track_video(paths["bent"], [ArenaJob(app, DetectionSettings(downscale=2, duration_s=0.2))], lens=lens,
+                frame_callback=lambda i, f, d: sizes.append(f.shape[:2]))
+    assert sizes and set(sizes) == {(H, W)}
+
+
 def test_video_test_correction(bent_video, tmp_path):
     paths, lens = bent_video
     p = Project(name="Lens")

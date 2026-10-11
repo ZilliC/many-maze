@@ -28,7 +28,7 @@ from typing import Callable
 
 import numpy as np
 
-from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_unit
+from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_factor, rename_unit
 from .atomicfile import write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
@@ -633,26 +633,58 @@ class Project:
         """The unit distances are reported in ("mm" | "cm" | "m"): that of the first apparatus, "cm" without one."""
         return self.apparatus[0].distance_unit if self.apparatus else "cm"
 
-    def set_distance_unit(self, unit: str):
+    def set_distance_unit(self, unit: str) -> list[str]:
         """Report distances and speeds in `unit` for every apparatus of the experiment (ANY-maze: one unit for the
         protocol). The calibration and the distance settings stay in centimetres. The measures named in the
-        calculations' formulas, the training criteria and the measure filter follow ("Total distance (cm)" becomes
-        "Total distance (m)")."""
+        calculations' formulas, the training criteria, the saved results reports, the Statistics settings and the
+        measure filter follow ("Total distance (cm)" becomes "Total distance (m)"), and so do the numbers compared
+        with them: a criterion's value and an SD variability limit, and a calculation's units and Y axis range when
+        its units are a distance unit. Returns the calculations whose formulas use a renamed measure, whose
+        constants may need changing by hand."""
         if unit not in DISTANCE_UNITS:
             raise ValueError(f"Unknown distance unit: {unit}")
         old = self.distance_unit
         for a in self.apparatus:
             a.distance_unit = unit
         if old == unit:
-            return
+            return []
+
+        def ren(m):
+            return rename_unit(m, old, unit) if isinstance(m, str) else m
+
+        def scaled(v, factor):
+            return v * factor if isinstance(v, (int, float)) and not isinstance(v, bool) and factor != 1.0 else v
+
+        check = []
         for c in self.calculations:
-            c.formula = re.sub(r"\{([^{}]*)\}", lambda m: "{" + rename_unit(m.group(1), old, unit) + "}", c.formula)
+            formula = re.sub(r"\{([^{}]*)\}", lambda m: "{" + ren(m.group(1)) + "}", c.formula)
+            if formula != c.formula:
+                c.formula = formula
+                check.append(c.column)
+            u = rename_unit(f"({c.units})", old, unit)
+            if c.units and u != f"({c.units})":
+                factor = rename_factor(f"({c.units})", old, unit)
+                c.units, c.y_min, c.y_max = u[1:-1], scaled(c.y_min, factor), scaled(c.y_max, factor)
         for c in self.training_criteria:
-            for d in (c, c.get("variability") if isinstance(c, dict) else None):
-                if isinstance(d, dict) and isinstance(d.get("measure"), str):
-                    d["measure"] = rename_unit(d["measure"], old, unit)
-        self.analysis.measure_filter = [rename_unit(m, old, unit) if isinstance(m, str) else m
-                                        for m in self.analysis.measure_filter]
+            if not isinstance(c, dict):
+                continue
+            measure = c.get("measure") if isinstance(c.get("measure"), str) else ""
+            c["value"] = scaled(c.get("value"), rename_factor(measure, old, unit))
+            c["measure"] = ren(c.get("measure"))
+            v = c.get("variability")
+            if isinstance(v, dict):
+                vm = v.get("measure") or measure  # ("": the criterion's measure)
+                if v.get("stat") == "sd":  # (a range % or a CV does not depend on the unit)
+                    v["max"] = scaled(v.get("max"), rename_factor(vm, old, unit))
+                v["measure"] = ren(v.get("measure"))
+        for r in self.reports:
+            if isinstance(r, dict) and isinstance(r.get("measures"), list):
+                r["measures"] = [ren(m) for m in r["measures"]]
+        for k in ("measure", "corr_x", "corr_y"):
+            if k in self.statistics:
+                self.statistics[k] = ren(self.statistics[k])
+        self.analysis.measure_filter = [ren(m) for m in self.analysis.measure_filter]
+        return check
 
     def set_protocol(self, key: str):
         """Make this a protocol of a type of test (templates.TEMPLATES key). The forced swim and tail suspension
@@ -715,7 +747,8 @@ class Project:
 
     def rename_calculation(self, old: str, new: str, formulas: bool = True, skip: Calculation | None = None):
         """A calculation's results column was renamed: the formulas of the other calculations (but `skip`; not with
-        formulas=False), the time periods it starts or ends and the training criteria on it follow."""
+        formulas=False), the time periods it starts or ends, the training criteria on it, the saved results reports
+        and the Statistics settings follow."""
         if not old or not new or old == new:
             return
         if formulas:
@@ -729,6 +762,12 @@ class Project:
         for c in self.training_criteria:
             if isinstance(c, dict) and c.get("measure") == old:
                 c["measure"] = new
+        for r in self.reports:  # the saved results reports and the Statistics settings showing it
+            if isinstance(r, dict) and isinstance(r.get("measures"), list):
+                r["measures"] = [new if m == old else m for m in r["measures"]]
+        for k in ("measure", "corr_x", "corr_y"):
+            if self.statistics.get(k) == old:
+                self.statistics[k] = new
 
     def calculation_users(self, column: str) -> list[str]:
         """What uses a calculation's results: other calculations, time periods and training criteria (as text)."""

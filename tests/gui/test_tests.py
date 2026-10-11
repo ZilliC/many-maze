@@ -51,7 +51,8 @@ def wait_tracking(page, timeout=60):
         app.processEvents()  # qWait holds the GIL, starving the worker thread
         time.sleep(0.03)
     if page._tracking:
-        import faulthandler, sys
+        import faulthandler
+        import sys
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
     assert not page._tracking
     QTest.qWait(50)

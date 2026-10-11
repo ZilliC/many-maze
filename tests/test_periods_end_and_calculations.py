@@ -13,7 +13,7 @@ from manymaze.core.apparatus import Zone
 from manymaze.core.calculations import Calculation, check_calculation, plan
 from manymaze.core.export import protocol_report
 from manymaze.core.geometry import rect
-from manymaze.core.measures import AnalysisSettings, all_periods, analyse, analyse_segmented
+from manymaze.core.measures import all_periods, analyse, analyse_segmented
 from manymaze.core.periods import (NO_END_WARNING, anchor_times, check_periods, describe_period, event_periods,
                                    resolve_periods)
 from manymaze.core.project import Project
@@ -266,3 +266,13 @@ def test_training_criterion_on_a_calculation(tmp_path):
     assert rows[("A1", "Speed")]["values"] == [speed, speed]
     assert rows[("A2", "Trials")]["met_at_trial"] == 1  # (the animal has 3 trials: Count is 3 in each)
     assert rep["completed"] == {"A1": ["Day 1"], "A2": ["Day 1"]}
+
+
+def test_zone_anchors_are_flagged_in_io_only_mode():
+    defs = [{"label": "After entry", "anchor": "first_entry", "zone": "Start", "duration_s": 10},
+            {"label": "To exit", "anchor": "start", "end": {"anchor": "first_exit", "zone": "Start"}},
+            {"label": "Lever", "anchor": "input", "input": "lever", "duration_s": 5}]
+    assert check_periods(defs, []) == []
+    problems = check_periods(defs, [], io_only=True)
+    assert [lbl for lbl, _ in problems] == ["After entry", "To exit"]
+    assert "left out" in problems[0][1] and "end of the test" in problems[1][1]

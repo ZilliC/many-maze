@@ -10,3 +10,5 @@ dist/
 packaging/*.iconset/
 packaging/*.icns
 .claude/
+.coverage
+htmlcov/

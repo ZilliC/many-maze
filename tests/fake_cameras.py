@@ -7,7 +7,6 @@ from __future__ import annotations
 import sys
 import types
 
-import cv2
 import numpy as np
 
 
@@ -353,7 +352,7 @@ def install_pylon(monkeypatch, devices, tmp_path=None):
 
 # ====================================================================== PySpin
 def install_spin(monkeypatch, devices, tmp_path=None):
-    F, I, B, E, S, C = range(6)
+    F, INT, B, E, S, C = range(6)
 
     class Node:
         def __init__(self, dev, name):
@@ -361,7 +360,7 @@ def install_spin(monkeypatch, devices, tmp_path=None):
 
         def GetPrincipalInterfaceType(self):
             v = self.dev.get(self.name)
-            return E if self.name in ENUMS else B if isinstance(v, bool) else I if isinstance(v, int) else \
+            return E if self.name in ENUMS else B if isinstance(v, bool) else INT if isinstance(v, int) else \
                 F if isinstance(v, float) else S
 
     class Entry:
@@ -499,7 +498,7 @@ def install_spin(monkeypatch, devices, tmp_path=None):
         def ReleaseInstance(self):
             System.instances = 0
 
-    spin = _module("PySpin", System=System, SpinnakerException=SpinnakerException, intfIFloat=F, intfIInteger=I,
+    spin = _module("PySpin", System=System, SpinnakerException=SpinnakerException, intfIFloat=F, intfIInteger=INT,
                    intfIBoolean=B, intfIEnumeration=E, intfIString=S, intfICommand=C, CFloatPtr=Ptr,
                    CIntegerPtr=Ptr, CBooleanPtr=Ptr, CEnumerationPtr=Ptr,
                    CStringPtr=lambda n: n if isinstance(n, StrNode) else Ptr(n), CCommandPtr=Ptr,

@@ -296,7 +296,10 @@ def test_entry_requires_orientation():
     fwd = make_track(pts, angle=np.zeros(len(pts)))
     back = make_track(pts, angle=np.full(len(pts), 180.0))
     turn = make_track(pts, angle=np.r_[np.full(80, 180.0), np.zeros(20)])  # backs in, turns round at frame 80
-    first = lambda m: int(np.flatnonzero(m)[0]) if m.any() else None
+
+    def first(m):
+        return int(np.flatnonzero(m)[0]) if m.any() else None
+
     m_fwd = occupancy(fwd, app, S)[0]["Z"]
     plain = occupancy(fwd, box_app(Zone("Z", rect(200, 150, 100, 100))), S)[0]["Z"]
     assert first(m_fwd) == first(plain)  # walking in facing the zone: the usual entry

@@ -969,7 +969,10 @@ class ArenaTracker:
             d.keypoints = k
             parts = self.pose.body_parts(k)
             nose, centre, tail = parts.get("nose"), parts.get("centre"), parts.get("tail_base")
-            ok = lambda p: p is not None and p[2] >= thr and math.isfinite(p[0]) and 0 <= p[0] < W and 0 <= p[1] < H
+
+            def ok(p):
+                return p is not None and p[2] >= thr and math.isfinite(p[0]) and 0 <= p[0] < W and 0 <= p[1] < H
+
             if not d.detected:
                 if not ok(centre):
                     continue
@@ -1362,8 +1365,8 @@ def draw_overlay(frame: np.ndarray, dets: Sequence[Detection], apparatus: Appara
             cv2.polylines(img, [np.round(z.shape.polygon()).astype(np.int32)], True, c, 1, cv2.LINE_AA)
         for p in apparatus.points:
             cv2.circle(img, (int(p.x), int(p.y)), 4, hex_to_bgr(p.color), -1, cv2.LINE_AA)
-        for l in apparatus.lines:
-            cv2.line(img, (int(l.x1), int(l.y1)), (int(l.x2), int(l.y2)), hex_to_bgr(l.color), 1, cv2.LINE_AA)
+        for ln in apparatus.lines:
+            cv2.line(img, (int(ln.x1), int(ln.y1)), (int(ln.x2), int(ln.y2)), hex_to_bgr(ln.color), 1, cv2.LINE_AA)
     if trail is not None and len(trail) > 1:
         pts = np.array([p for p in trail if np.isfinite(p[0])], np.int32)
         if len(pts) > 1:

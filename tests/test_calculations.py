@@ -287,8 +287,22 @@ def test_protocol_copy_report_and_export(tmp_path):
     p.calculations = [C("{Total distance (cm)} / 100", "Distance", 2, units="m")]
     q = copy_protocol(p, Project())
     assert q.calculations == p.calculations and q.calculations[0] is not p.calculations[0]
-    html = protocol_report(p, tmp_path / "protocol.html").read_text()
+    html = protocol_report(p, tmp_path / "protocol.html").read_text(encoding="utf-8")
     assert "<h2>Calculations</h2>" in html and "Distance (m)" in html and "{Total distance (cm)} / 100" in html
+    # the protocol settings added later are listed too
+    p.start_switch_delay_s, p.require_weight_before_test = 2.5, True
+    p.terminology = {"animal": {"singular": "Fish", "plural": "Fish"}}
+    p.recording_name_fields = ["animal", "date"]
+    p.reports = [{"name": "Main", "measures": None}]
+    p.statistics = {"alpha": 0.01}
+    p.security = {"reveal_codes": "anyone", "lock_protocol": True}
+    html = protocol_report(p, tmp_path / "protocol.html").read_text(encoding="utf-8")
+    for row in ("<td>Delay after the start switch (s)</td><td>2.5</td>",
+                "<td>Block the test until the animal is weighed</td><td>yes</td>", "<td>Animal → Fish</td>",
+                "<td>Saved results reports</td><td>Main</td>", "<td>Significance level (Statistics)</td><td>0.01</td>",
+                "<td>Protocol locked</td><td>yes"):
+        assert row in html, row
+    assert "<td>Recorded video file names</td><td>Fish, " in html
     out = export_results(p, tmp_path / "results.csv")
     header = out.read_text().splitlines()[0]
     assert "Distance (m)" in header

@@ -363,3 +363,54 @@ Still open:
   is compiled in CI for the Uno, Mega, Zero and MKR Zero (#13; the Uno uses 73 % of its RAM).
 - The signed / notarised build has not been run with a real Developer ID certificate (the release builds are
   ad-hoc signed).
+
+---
+
+## 18. Beyond parity (2026-10-10)
+
+Feature parity with ANY-maze is done; what is left is proof, real use, distribution and code health. Roughly in
+order of impact within each group.
+
+Proof that the numbers match ANY-maze:
+- [ ] Same videos through both programs for every measure (distance, speed, immobility, freezing, rotations, zones;
+      only zone occupancy is verified, §15): ask a lab with an ANY-maze licence to run 5–10 videos and share the
+      results, or convert the 27 EPM videos of OSF uzm97 from `.szv` to MP4 with ANY-maze on Windows (zone measures
+      only)
+- [ ] Forced swim / tail suspension thresholds (2 %, 1 s, climbing 8 %) checked on real FST / TST videos; they are
+      tuned on synthetic signals only (#8)
+
+Real hardware (see §7 and §17 for the full list):
+- [ ] Arduino firmware 1.3 on a real Uno with a logic analyser: the protocol and the `SYNC` pulse timing (#9, #13)
+- [ ] A USB camera in a live test; any balance, syringe pump or NI / LabJack device available
+
+Real users:
+- [ ] A pilot lab running a real experiment (no issues have been filed yet)
+
+Distribution:
+- [ ] Apple Developer ID ($99 / year) for signed and notarised builds without the first-launch warning
+- [ ] Release 0.2.1 with the Uno RAM fix (#13; v0.2.0 does not have it)
+- [ ] Revisit Windows: ANY-maze runs on Windows only, so most lab rigs are Windows PCs and a macOS-only app limits
+      who can switch (the code is portable; CI already tests on Ubuntu)
+- [ ] Interface translations (English only, no translation framework), e.g. Spanish
+
+Code health (done on 2026-10-10, #14):
+- [x] A review pass across phases 3–7 for gaps where features meet. Fixed:
+  - [x] The protocol lock (#9) did not cover *Run tests ▸ File names…* (#11), the delay after the start switch or
+        the ANY-maze imports (they add or change apparatus). Camera options stay open to operators on purpose
+  - [x] Lens correction (#10) together with downscaling before tracking (#11) had no test (it works)
+  - [x] Changing the distance unit (#8) renamed the measures in criteria and calculations but left the numbers in the
+        old unit; saved reports and Statistics settings (#6) did not follow unit changes or calculation renames
+  - [x] Statistics and the command line's `--report` exports ignored the terminology (#11)
+  - [x] Input/output only mode (#4) silently dropped time periods at zone entries / exits (#6): now flagged
+  - [x] The protocol report left out the settings added in #6–#11
+- [x] Ruff clean at 0.11.13, with a lint job in CI
+- [x] Test coverage measured: 91 % of the lines (coverage.py, reported in CI); lowest: app start-up, live
+      calibration, the results export dialogs, the command line
+- [x] Split the largest modules: `core/measures.py` → `extra_measures.py`; `core/iodevices.py` → `iobase.py`,
+      `audio.py`; `core/live.py` → `liveanalysis.py`; `gui/pages/experiment.py` → `experiment_calcs.py`,
+      `experiment_keys.py` (the old modules re-export the moved names)
+- [x] Windows groundwork: a non-blocking Windows test job in CI and sound through PowerShell on Windows (no player
+      was found there); whether to ship for Windows is still open (Distribution above). First Windows run: 1245 of
+      1252 tests passed. Fixed: playlists of split recordings were written with "\\" (they would not open on a
+      Mac), and tests that assumed "/" or a fast timer. Left: the main window and the Apparatus ribbon are wider than
+      the layout tests allow with Windows' fonts, and the 48-camera test gets too few frames on the 2-core runner

@@ -138,6 +138,16 @@ def test_report_table_and_command_line(tmp_path, capsys):
     text = html.read_text(encoding="utf-8")
     assert "Results report: <b>Whole</b>" in text and "<th>Mean speed (cm/s)</th>" in text
     assert "<th>Total distance (cm)</th>" not in text
+    # the experiment's terms head the columns of every format, and the statistics name the factors with them
+    p.terminology = {"animal": {"singular": "Fish", "plural": "Fish"}, "treatment": {"singular": "Condition"}}
+    p.save()
+    cli.main(["project", str(p.path), "results", "--report", "Whole", "-o", str(out)])
+    assert out.read_text(encoding="utf-8").splitlines()[0].startswith("Test,Fish,Condition,")
+    cli.main(["project", str(p.path), "results", "--report", "Whole", "--wide", "-o", str(wide)])
+    assert "Condition" in wide.read_text(encoding="utf-8").splitlines()[0]
+    from manymaze.core import analyses
+    assert analyses.label("Group", p) == "Condition" and analyses.label("Animal", p) == "Fish"
+    assert analyses.label("Group") == "Treatment" and analyses.label("Stage", p) == "Stage"
 
 
 # ------------------------------------------------------------------ significance level

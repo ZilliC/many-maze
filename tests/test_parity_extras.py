@@ -345,6 +345,9 @@ def test_playlist_videos(tmp_path):
     pl = write_playlist(tmp_path / "joined.m3u", parts)
     assert is_playlist(pl) and pl.read_text().splitlines()[1] == "rec/part0.avi"
     assert playlist_parts(pl) == [str(tmp_path / "rec" / f"part{i}.avi") for i in range(3)]
+    old = tmp_path / "old.m3u"  # written on Windows by an older version: opens everywhere
+    old.write_text("#EXTM3U\nrec\\part0.avi\n", encoding="utf-8")
+    assert playlist_parts(old) == [str(tmp_path / "rec" / "part0.avi")]
     with VideoSource(str(pl)) as v:
         assert v.frame_count == 15 and v.fps == pytest.approx(10) and (v.width, v.height) == (160, 120)
         for k in (0, 4, 5, 9, 12, 14):  # random access across the part boundaries
@@ -376,7 +379,7 @@ def test_split_recorder(tmp_path):
         rec.write(f)
     rec.close()
     assert rec.path.endswith("test_0001.m3u") and rec.frames == 10
-    assert [p.rsplit("/", 1)[-1] for p in playlist_parts(rec.path)] == \
+    assert [Path(p).name for p in playlist_parts(rec.path)] == \
         ["test_0001_part001.avi", "test_0001_part002.avi", "test_0001_part003.avi"]
     with VideoSource(rec.path) as v:
         assert v.frame_count == 10 and abs(float(v.frame_at(9)[5, 5, 0]) - 72) < 6

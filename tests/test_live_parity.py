@@ -362,13 +362,17 @@ def test_live_occupancy_rules_and_moveable_zones():
     from manymaze.core.measures import AnalysisSettings
     from manymaze.core.tracking import Detection
 
-    sq = lambda x0, y0, x1, y1: Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    def sq(x0, y0, x1, y1):
+        return Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+
     app = Apparatus(zones=[Zone("Arena", sq(0, 0, 200, 200)), Zone("Food", sq(150, 0, 200, 50), entry_rule="head"),
                            Zone("Nest", sq(0, 150, 50, 200), hidden=True),
                            Zone("Object", sq(90, 90, 110, 110), investigation_distance_cm=10.0)])
     occ = LiveOccupancy(app, AnalysisSettings())
-    det = lambda x, y, hx, hy: Detection(x=x, y=y, hx=hx, hy=hy, tx=2 * x - hx, ty=2 * y - hy, area=300.0,
-                                         angle=0.0, detected=True)
+
+    def det(x, y, hx, hy):
+        return Detection(x=x, y=y, hx=hx, hy=hy, tx=2 * x - hx, ty=2 * y - hy, area=300.0, angle=0.0, detected=True)
+
     z, h = occ.update(det(140, 30, 160, 30))  # centre outside "Food", head inside: head entry rule
     assert z["Food"] and h["Food"] and not z["Object"]
     z, _ = occ.update(det(70, 100, 85, 100))  # head 5 px from the object (< 10 px investigation distance)
