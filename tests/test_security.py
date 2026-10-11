@@ -30,10 +30,16 @@ def _project(tmp_path, name="Secret study") -> Project:
     return p
 
 
+def _in_clear(value: str, text: str) -> bool:
+    """`value` appears as a JSON string in `text`. A bare substring test would flake on encrypted files: their
+    base64 ciphertext is random and holds short words such as "M1" now and then, but never a double quote."""
+    return json.dumps(value) in text
+
+
 # ---------------------------------------------------------------------------------- passwords and roles
 def test_password_hashes_are_salted_scrypt():
     a, b = sec.hash_password("hunter2"), sec.hash_password("hunter2")
-    assert a != b and a.startswith("scrypt$") and "hunter2" not in a
+    assert a != b and a.startswith("scrypt$") and "hunter2" not in a.split("$")  # no field is the password
     assert sec.check_password("hunter2", a) and sec.check_password("hunter2", b)
     assert not sec.check_password("hunter3", a)
     assert not sec.check_password("hunter2", "") and not sec.check_password("x", "md5$abc")
@@ -128,7 +134,7 @@ def test_protected_experiment_round_trip(tmp_path):
     text = (p.path / PROJECT_FILE).read_text()
     env = json.loads(text)
     assert env["format"] == sec.ENCRYPTED_FORMAT and env["cipher"] == "AES-256-GCM"
-    assert env["kdf"]["name"] == "scrypt" and "Secret study" not in text and "Drug" not in text
+    assert env["kdf"]["name"] == "scrypt" and not _in_clear("Secret study", text) and not _in_clear("Drug", text)
     assert is_protected_file(p.path) and is_protected_file(p.path / PROJECT_FILE)
     with pytest.raises(sec.PasswordRequired) as e:
         Project.load(p.path)
@@ -147,7 +153,8 @@ def test_protected_experiment_round_trip(tmp_path):
     # the protection removed: plain JSON again
     q.set_experiment_password(None)
     q.save()
-    assert json.loads((p.path / PROJECT_FILE).read_text())["name"] == "Secret study"
+    plain = (p.path / PROJECT_FILE).read_text()
+    assert json.loads(plain)["name"] == "Secret study" and _in_clear("Secret study", plain) and _in_clear("Drug", plain)
     assert not Project.load(p.path).protected
 
 
@@ -186,7 +193,7 @@ def test_archive_and_crash_recovery_files_stay_encrypted(tmp_path):
     zp = archive_project(p, tmp_path / "a.zip")
     with zipfile.ZipFile(zp) as z:
         inner = z.read(f"Secret study.mmaze/{PROJECT_FILE}").decode()
-    assert sec.is_encrypted(json.loads(inner)) and "Drug" not in inner
+    assert sec.is_encrypted(json.loads(inner)) and not _in_clear("Drug", inner)
     out = extract_archive(zp, tmp_path / "unpacked")
     with pytest.raises(sec.PasswordRequired):
         Project.load(out)
@@ -194,7 +201,7 @@ def test_archive_and_crash_recovery_files_stay_encrypted(tmp_path):
     # crash-recovery side file
     side = tmp_path / "side.autosave.json"
     autosave.write(str(side), {"meta": {"animal": "M1"}, "events": []}, p.file_key)
-    assert sec.is_encrypted(json.loads(side.read_text())) and "M1" not in side.read_text()
+    assert sec.is_encrypted(json.loads(side.read_text())) and not _in_clear("M1", side.read_text())
     with pytest.raises(sec.PasswordRequired):
         autosave.read(str(side))
     assert autosave.read(str(side), "pw")["meta"] == {"animal": "M1"}

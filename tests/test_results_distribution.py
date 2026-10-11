@@ -618,8 +618,13 @@ def test_list_cameras_scans_beyond_six():
 
 def test_48_cameras_40_apparatus():
     """A live group of 48 cameras (fake, threaded) and 40 simultaneous tests: 32 cameras with one apparatus and 4
-    cameras with two (shared image), the other 12 cameras streaming without a test."""
+    cameras with two (shared image), the other 12 cameras streaming without a test.
+
+    The tests run until every one of them has tracked enough frames and are then stopped together: camera frames
+    are timestamped by the wall clock, so a fixed test duration gives a slow runner only a few frames per test
+    (4 in 1.5 s on Windows CI). Every test is still running when the last one reaches the count, so all 40 overlap."""
     FakeCamera.instances = 0
+    min_frames = 8
     g = LiveGroup()
     keys = [g.add_source(SourceSpec(i)) for i in range(48)]
     assert len(set(keys)) == 48
@@ -628,7 +633,7 @@ def test_48_cameras_40_apparatus():
     sessions = []
     for k, key in enumerate(keys[:36]):
         for app in ((left, right) if k < 4 else (left,)):
-            s = LiveSession(app, DetectionSettings(background="adaptive"), duration_s=1.5, start_mode="immediate")
+            s = LiveSession(app, DetectionSettings(background="adaptive"), duration_s=0, start_mode="immediate")
             s.set_background(np.full((200, 400), 200, np.uint8))
             g.add_session(key, s, f"{key}:{'L' if app is left else 'R'}")
             sessions.append((s, app))
@@ -636,8 +641,10 @@ def test_48_cameras_40_apparatus():
     g.start_sources(opener=FakeCamera)
     try:
         t0 = time.monotonic()
-        while time.monotonic() - t0 < 90 and not all(s.state == "finished" for s, _ in sessions):
+        while time.monotonic() - t0 < 90 and not all(len(s.cols["t"]) >= min_frames for s, _ in sessions):
             time.sleep(0.1)
+        assert all(s.state == "running" for s, _ in sessions), [s.state for s, _ in sessions]
+        g.stop_all()
         running = len(g.runners)
     finally:
         g.close()
@@ -645,7 +652,7 @@ def test_48_cameras_40_apparatus():
     assert all(s.state == "finished" for s, _ in sessions), [s.state for s, _ in sessions]
     for s, app in sessions:
         tr = s.track()
-        assert len(tr) >= 5 and tr.detected.mean() > 0.8
+        assert len(tr) >= min_frames and tr.detected.mean() > 0.8
         x0, y0, x1, y1 = app.arena_or_bounds().bounds()
         xs = tr.x[tr.detected]
         assert np.all((xs > x0 - 5) & (xs < x1 + 5))  # each test tracks the animal of its own apparatus

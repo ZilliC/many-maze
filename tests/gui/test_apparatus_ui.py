@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 from PySide6.QtCore import QPointF
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontInfo
 from PySide6.QtWidgets import QApplication, QMessageBox, QToolBar
 
 from manymaze.core.demo import create_demo_project
@@ -69,6 +69,7 @@ def test_ribbon_groups_and_tools(page):
     assert {"Select objects", "Multiline tool", "From template"} <= big
     # the in-page toolbar is gone and everything fits the 1400 px window
     assert not page.findChildren(QToolBar)
+    assert QFontInfo(app.font()).family()  # a real font, not Qt's placeholder (tests/conftest.py)
     assert panel.sizeHint().width() <= 1400 and page.main.width() <= 1400
     assert page.view.width() > 700 and page.panel.tabs.width() <= 320
     # the drawing tools are an exclusive group of checkable actions
