@@ -276,7 +276,11 @@ def _angle_diff(a, b) -> np.ndarray:
 
 
 def body_length(track: Track, scale: float) -> float:
-    L = np.nanmedian(np.hypot(track.hx - track.tx, track.hy - track.ty)) if track.has_head() else math.nan
+    L = math.nan
+    if track.has_head():
+        d = np.hypot(track.hx - track.tx, track.hy - track.ty)
+        if np.isfinite(d).any():  # (nanmedian warns on an all-NaN slice)
+            L = float(np.nanmedian(d))
     if not (math.isfinite(L) and L > 0):
         a = np.nanmedian(track.area) if np.isfinite(track.area).any() else math.nan
         L = 2 * math.sqrt(a) if math.isfinite(a) and a > 0 else math.nan

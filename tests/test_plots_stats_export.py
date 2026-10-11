@@ -134,6 +134,40 @@ def test_heatmaps_and_track_plots(app):
     assert len([a for a in seg.axes if a.get_title()]) == 3
 
 
+def test_track_animation_and_playback_video(app, tmp_path):
+    from manymaze.core.playback import TrackAnimation, render_track_video
+    from manymaze.core.video import VideoSource
+
+    tr = _circle_track(n=250)  # 10 s at 25 fps
+    mk = plots.behaviour_markers(tr, app, AnalysisSettings(), [{"behaviour": "Poop", "t": 6.0, "t_end": None}],
+                                 [Behaviour("Poop", kind="point")])
+    fig = plots.track_plot(tr, app, color_by="speed", colorbar=True, markers=mk)
+    anim = TrackAnimation(fig, tr)
+    assert anim.ok and anim.start == 0 and anim.end == pytest.approx(tr.t[-1])
+    full = len(anim.path.get_segments())
+    anim.show(4.0)
+    assert len(anim.path.get_segments()) == anim.frames_shown(4.0) - 1 < full
+    marker = [a for t, a in anim._markers if t == 6.0][0]
+    assert not marker.get_visible() and anim._now.get_visible()
+    anim.show(anim.end)
+    assert len(anim.path.get_segments()) == full and marker.get_visible() and not anim._now.get_visible()
+    # a trail shows only the last seconds, also at the end; the marker drops out once it is older than the trail
+    anim.trail_s = 2.0
+    anim.show(7.0)
+    assert anim.first_shown(7.0) == 125 and len(anim.path.get_segments()) == 50 and marker.get_visible()
+    anim.show(anim.end)
+    assert len(anim.path.get_segments()) == 49 and not marker.get_visible() and anim._now.get_visible()
+    assert not TrackAnimation(plots.track_plot(Track(np.zeros(0), np.zeros(0), np.zeros(0)), app), None).ok
+    # the playback rendered to a video: 10 s at 8× and 10 fps = 13 frames + the final one, even size
+    out = tmp_path / "play.mp4"
+    seen = []
+    assert render_track_video(fig, tr, out, speed=8.0, fps=10.0, trail_s=0.0, progress=seen.append) == out
+    assert seen[-1] == 1.0 and out.stat().st_size > 0
+    with VideoSource(str(out)) as v:
+        assert v.width % 2 == 0 and v.height % 2 == 0 and 13 <= v.frame_count <= 15
+    assert render_track_video(fig, tr, tmp_path / "stop.mp4", speed=8.0, fps=10.0, should_stop=lambda: True) is None
+
+
 def test_group_graphs():
     rng = np.random.default_rng(0)
     rows = [{"Group": g, "Stage": s, "Sex": x, "v": float(rng.normal(i))} for i, g in enumerate("AB") for s in

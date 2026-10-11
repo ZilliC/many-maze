@@ -285,6 +285,8 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self.hot_point_act = A("Add point here", "point", lambda: self.add_hot_spot_point(),
                                "Add a point to the apparatus at the hottest spot of the heat map shown (this test's "
                                "map, or the treatment maps')")
+        self.playback_act = A("Save playback", "video_file", self.export_playback,
+                              "Save the animated track plot as a video (at the playback bar's speed and trail)")
         self.video_act = A("Export video", "video_file", self.export_video,
                            "Save the selected test's video with zones, track, behaviours and time stamp drawn on it")
         self.measure_act = A("Measure interval", "ruler", self.charts.measure_check.setChecked,
@@ -307,7 +309,8 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         if self.view == "track":
             return [nav, ("Body part", [host([self.part_combo])]), ("Colour by", [host([self.color_combo])]),
                     ("Show", [host([self.markers_check], [self.split_check])]),
-                    ("Figure", [(self.save_fig_act, "large"), (self.copy_fig_act, "large")]),
+                    ("Figure", [(self.save_fig_act, "large"), (self.copy_fig_act, "large"),
+                                (self.playback_act, "large")]),
                     ("Test", [(self.open_test_act, "large"), (self.video_act, "large")])]
         if self.view == "heat":
             return [nav, ("Body part", [host([self.part_combo])]), ("Heat map of", [host([self.heat_of])]),

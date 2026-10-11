@@ -272,6 +272,15 @@ def test_sequence_matching_rules():
     slow = [("A", 0.0, 1.0), ("B", 10.0, 12.0)]
     assert not find_sequences(Sequence("AB", ["A", "B"], max_duration_s=5), slow)[0].completed
     assert find_sequences(Sequence("AB", ["A", "B"], end="exit"), slow)[0].end == 12.0
+    # complete on returning to the first step (ANY-maze's "return to first step"): A B C A
+    ret = [("A", 0, 1), ("B", 2, 3), ("C", 4, 5), ("A", 6, 7), ("B", 8, 9), ("C", 10, 11), ("A", 12, 13)]
+    done = [a for a in find_sequences(Sequence("ABC", ["A", "B", "C"], end="return"), ret) if a.completed]
+    assert [(a.start, a.end) for a in done] == [(0, 6), (6, 12)]  # the return entry starts the next attempt
+    assert [a.end for a in find_sequences(Sequence("ABC", ["A", "B", "C"]), ret) if a.completed] == [4, 10]
+    att = find_sequences(Sequence("AB", ["A", "B"], end="return", allow_other=False), ret, others=["C"])
+    assert not att[0].completed and att[0].errors == 1  # A B then C: no return to A
+    assert find_sequences(Sequence("A", ["A"], end="return"), [("A", 0.0, 1.0)])[0].end == 1.0
+    assert Sequence.from_dict(Sequence("S", ["A"], end="return").to_dict()).end == "return"
     # overlapping: A B A B with pattern A B A → 1 without overlap
     qo = Sequence("ABA", ["A", "B", "A"], overlap=True)
     assert sum(a.completed for a in find_sequences(qo, E("A", "B", "A", "B", "A"))) == 2

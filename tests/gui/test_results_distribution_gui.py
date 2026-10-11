@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from matplotlib.backend_bases import MouseEvent
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 import manymaze.core.video as video_mod
 from manymaze.core import templates
@@ -91,8 +91,17 @@ def test_save_sylk_and_dbase(win, tmp_path, monkeypatch):
     assert page.save_table(str(tmp_path / "sel"), suffix=".dbf").endswith(".dbf")
 
 
+def wait_workers(page, ms=120000):
+    t0 = time.monotonic()
+    while getattr(page, "_workers", None) and (time.monotonic() - t0) * 1000 < ms:
+        for w in list(page._workers):
+            w.wait(50)
+        app.processEvents()
+    app.processEvents()
+
+
 # ====================================================================== animated track playback
-def test_track_playback(win):
+def test_track_playback(win, tmp_path, monkeypatch):
     page = _results(win)
     page.set_view("track")
     page.table.selectRow(0)
@@ -119,6 +128,21 @@ def test_track_playback(win):
     assert pb.time == pytest.approx(pb.start + (pb.end - pb.start) / 2, abs=0.05)
     pb.seek(-5)
     assert pb.time == pb.start and pb.frames_shown() == 1
+    # trail: only the last seconds are drawn, even at the end
+    pb.set_trail(5.0)
+    with pytest.raises(ValueError):
+        pb.set_trail(7.0)
+    pb.seek(pb.end)
+    assert pb.frames_shown() < n and len(path.get_segments()) < full_segments and pb._now.get_visible()
+    pb.set_trail(0.0)
+    assert pb.frames_shown() == n and len(path.get_segments()) == full_segments
+    # the playback saved as a video at 16× (ribbon ▸ Save playback)
+    out = tmp_path / "playback.mp4"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    page.export_playback()
+    wait_workers(page)
+    with VideoSource(str(out)) as v:
+        assert v.width % 2 == 0 and v.frame_count >= (pb.end - pb.start) / 16 * 25
     # single-colour tracks (a plain line) are animated too
     page.set_plot_options(color_by="none")
     page.render_all()

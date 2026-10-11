@@ -667,6 +667,8 @@ def protocol_report(project: Project, path) -> Path:
                 (q.name, " → ".join(q.steps), ", ".join(x for x, on in (
                     ("must begin at the first step", q.from_start), ("other zones allowed", q.allow_other),
                     ("both directions", q.bidirectional), ("overlapping", q.overlap),
+                    ("complete on leaving the last step", q.end == "exit"),
+                    ("complete on returning to the first step", q.end == "return"),
                     (f"time limit {q.max_duration_s:g} s", q.max_duration_s > 0)) if on))
                 for q in app.sequences]))
         out.append("</div>")
