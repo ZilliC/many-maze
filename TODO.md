@@ -388,7 +388,8 @@ Real users:
 
 Distribution:
 - [ ] Apple Developer ID ($99 / year) for signed and notarised builds without the first-launch warning
-- [ ] Release 0.2.1 with the Uno RAM fix (#13; v0.2.0 does not have it)
+- [ ] Release 0.2.1 with the Uno RAM fix (#13; v0.2.0 does not have it) and the code health fixes (#14): the version is
+      bumped (#15); tag `v0.2.1` and publish the release once it is merged
 - [ ] Revisit Windows: ANY-maze runs on Windows only, so most lab rigs are Windows PCs and a macOS-only app limits
       who can switch (the code is portable; CI already tests on Ubuntu)
 - [ ] Interface translations (English only, no translation framework), e.g. Spanish
