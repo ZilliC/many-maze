@@ -5,7 +5,7 @@ import pytest
 
 from manymaze.core import synthetic as syn
 from manymaze.core import templates
-from manymaze.core.apparatus import Apparatus, Line, PointOfInterest, Zone, ZoneGroup
+from manymaze.core.apparatus import Apparatus, Line, PointOfInterest, Zone, ZoneGroup, rename_factor
 from manymaze.core.geometry import circle, rect, segments_intersect, shape_from_dict
 from manymaze.core.measures import AnalysisSettings, analyse, analyse_segmented, count_rotations, runs
 from manymaze.core.procedures import ProcedureEngine
@@ -461,17 +461,35 @@ def test_distance_unit_stored_charts_and_exports(tmp_path):
     # the experiment: one unit for every apparatus; formulas, criteria and the measure filter follow it
     p = Project(name="units")
     p.apparatus = [open_field_app(), open_field_app()]
-    p.calculations = [Calculation("Ratio", "{Total distance (cm)} / {Mean speed (cm/s)} + {Left: entries}")]
-    p.training_criteria = [{"stage": "", "measure": "Total distance (cm)", "op": ">", "value": 1,
-                            "variability": {"stat": "sd", "trials": 3, "max": 1, "measure": "Max speed (cm/s)"}}]
+    p.calculations = [Calculation("Ratio", "{Total distance (cm)} / {Mean speed (cm/s)} + {Left: entries}"),
+                      Calculation("Path", "{Left: entries} * 10", units="cm", y_min=0, y_max=500)]
+    p.training_criteria = [{"stage": "", "measure": "Total distance (cm)", "op": ">", "value": 1000,
+                            "variability": {"stat": "sd", "trials": 3, "max": 1, "measure": "Max speed (cm/s)"}},
+                           {"stage": "", "measure": "Total distance (cm)", "op": ">", "value": 50,
+                            "variability": {"stat": "cv", "trials": 3, "max": 20, "measure": ""}}]
     p.analysis.measure_filter = ["Total distance (cm)", "Left: entries"]
+    p.reports = [{"name": "R", "measures": ["Total distance (cm)", "Ratio"]}]
+    p.statistics = {"measure": "Mean speed (cm/s)", "corr_x": "Ratio", "alpha": 0.05}
     assert p.distance_unit == "cm"
-    p.set_distance_unit("m")
+    assert p.set_distance_unit("m") == ["Ratio"]  # its constants may need changing by hand
     assert [a.distance_unit for a in p.apparatus] == ["m", "m"] and p.distance_unit == "m"
     assert p.calculations[0].formula == "{Total distance (m)} / {Mean speed (m/s)} + {Left: entries}"
     assert p.training_criteria[0]["measure"] == "Total distance (m)"
     assert p.training_criteria[0]["variability"]["measure"] == "Max speed (m/s)"
     assert p.analysis.measure_filter == ["Total distance (m)", "Left: entries"]
+    # the numbers compared with the renamed measures are converted too
+    c0, c1 = p.training_criteria
+    assert c0["value"] == pytest.approx(10) and c0["variability"]["max"] == pytest.approx(0.01)
+    assert c1["value"] == pytest.approx(0.5) and c1["variability"]["max"] == 20  # (a CV has no unit)
+    path = p.calculations[1]
+    assert (path.units, path.y_min, path.y_max) == ("m", 0, pytest.approx(5))
+    assert p.reports[0]["measures"] == ["Total distance (m)", "Ratio"]
+    assert p.statistics == {"measure": "Mean speed (m/s)", "corr_x": "Ratio", "alpha": 0.05}
+    p.rename_calculation("Ratio", "Index")
+    assert p.reports[0]["measures"] == ["Total distance (m)", "Index"] and p.statistics["corr_x"] == "Index"
+    assert rename_factor("Body area (cm²)", "cm", "mm") == pytest.approx(100)
+    assert rename_factor("Meander (deg/cm)", "cm", "m") == pytest.approx(100)
+    assert rename_factor("Left: entries", "cm", "m") == 1.0
     with pytest.raises(ValueError):
         p.set_distance_unit("in")
     q = Project.from_dict(p.to_dict())

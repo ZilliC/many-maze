@@ -47,6 +47,17 @@ def rename_unit(name: str, old: str, new: str) -> str:
     return f"{name[:m.start(2)]}{new}{name[m.end(2):]}"
 
 
+def rename_factor(name: str, old: str, new: str) -> float:
+    """The factor the values of the result `name` are multiplied by when its distance unit changes from `old` to
+    `new` (as :func:`rename_unit`): 0.01 for "Total distance (cm)" from cm to m, 1e-4 for an area, 100 for
+    "Meander (deg/cm)"; 1.0 for names without a distance unit."""
+    m = _DISTANCE_UNIT_AT_END.search(name)
+    if m is None or rename_unit(name, old, new) == name:
+        return 1.0
+    power = -1 if m.group(1) else 2 if m.group(3) == "²" else 1
+    return (DISTANCE_UNITS[new] / DISTANCE_UNITS[old]) ** power
+
+
 def unit_conversion(unit_text: str, unit: str) -> tuple[str, float] | None:
     """A unit in centimetres ("cm", "cm/s", "cm/s²", "cm²", "cm·s", "deg/cm") in another distance unit: (its text,
     the factor its values are multiplied by), e.g. ("m/s", 0.01); None for other units, or unit "cm"."""

@@ -868,10 +868,14 @@ class ApparatusPage(Page):
         if self.project is None or unit == self.project.distance_unit and \
                 all(a.distance_unit == unit for a in self.project.apparatus):
             return
-        self.project.set_distance_unit(unit)
+        check = self.project.set_distance_unit(unit)
         self.main.mark_dirty()
         self.refresh_info()
-        self.main.status(f"Distances are reported in {unit} (speeds in {unit}/s) for every apparatus.")
+        msg = f"Distances are reported in {unit} (speeds in {unit}/s) for every apparatus."
+        if check:
+            msg += (" Check the numbers in the formulas of " + ", ".join(f"“{c}”" for c in check) +
+                    ": the measures they use are now in " + unit + ".")
+        self.main.status(msg)
 
     def _unit_chosen(self):
         if not self._loading and self.unit_combo.currentData():
