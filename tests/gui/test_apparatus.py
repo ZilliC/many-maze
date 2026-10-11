@@ -4,7 +4,7 @@ import shutil
 
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QColor, QMouseEvent
+from PySide6.QtGui import QColor, QFontInfo, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QDialog, QFileDialog, QInputDialog,
                                QMessageBox)
@@ -82,6 +82,7 @@ def approx(a, b, tol=2.0):
 
 # -------------------------------------------------------------------- tests
 def test_layout_and_auto_background(page):
+    assert QFontInfo(app.font()).family()  # a real font, not Qt's placeholder (tests/conftest.py)
     assert page.minimumSizeHint().width() < 1150
     assert page.main.width() <= 1400
     a = page.app
