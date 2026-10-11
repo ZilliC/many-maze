@@ -530,14 +530,16 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.on_show()
 
     def security_changed(self):
-        """The procedures (Procedures tab) and the recorded video file names (Setup ▸ File names…) are part of the
-        protocol: read-only while it is locked for the current user (core.security)."""
+        """The procedures (Procedures tab), the recorded video file names (Setup ▸ File names…) and the delay after
+        the start switch are part of the protocol: read-only while it is locked for the current user
+        (core.security)."""
         p = self.project
         locked = p is not None and not security.can(p, "edit_protocol")
         self.proc_editor.setEnabled(not locked)
         self.proc_editor.setToolTip("The protocol is locked: only an administrator can change the procedures"
                                     if locked else "")
         self.rec_names_btn.setEnabled(not locked)
+        self.start_delay.setEnabled(not locked)
         self.rec_names_btn.setToolTip("The protocol is locked: only an administrator can change the file names"
                                       if locked else self.REC_NAMES_TIP)
 
@@ -854,7 +856,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
     def _store_start_delay(self, value: float):
         """The delay after the start switch is part of the protocol (Project.start_switch_delay_s)."""
         p = self.project
-        if self._loading or p is None or abs(float(p.start_switch_delay_s or 0) - value) < 1e-9:
+        if self._loading or p is None or abs(float(p.start_switch_delay_s or 0) - value) < 1e-9 or \
+                not security.can(p, "edit_protocol"):
             return
         p.start_switch_delay_s = float(value)
         self.main.mark_dirty()
