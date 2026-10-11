@@ -13,12 +13,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDou
                                QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QSpinBox,
                                QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ...core import ioconfig, plugins, pose, security
+from ...core import ioconfig, pose, security
 from ...core import workflow as wf
-from ...core.apparatus import unique_name
 from ...core.ioconfig import PRESET_KEY
-from ...core.calculations import Calculation, check_calculation, evaluate_calc, parse
-from ...core.export import display_text
 from ...core.measures import AnalysisSettings
 from ...core.periods import ANCHORS, END_ANCHORS, TARGET_KEY, check_periods
 from ...core.project import ERROR_COLUMN, Behaviour, result_columns
@@ -30,10 +27,12 @@ from ...core.tracking import DetectionSettings
 from .. import theme
 from ..icons import icon
 from ..pose_model import PoseModelBox
-from ..widgets import ColorButton, RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
-from ._results_cache import cached_rows, get_rows, info_columns
+from ..widgets import RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
+from ._results_cache import get_rows, info_columns
 from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
                    FST_SPEC, PRESET_TIP, AnimalPresetCombo, Page, SettingsForm, apply_preset_to_form, property_form)
+from .experiment_calcs import CalculationsMixin, PluginsMixin
+from .experiment_keys import KeysMixin
 from .protocol_pages import CalculationEditor, ElementPage, KeyEditor, small_button
 from .results.dialogs import MeasurePickerDialog, measure_groups
 from .results.table import _names
@@ -46,10 +45,6 @@ ELEMENTS = [("protocol", "Protocol", "protocol"), ("tracking", "Animal tracking"
 MODES = [("tracking", "Video tracking — the animal is tracked and keys can be scored"),
          ("takenote", "TakeNote — behaviours are scored by hand only (no tracking)"),
          ("io_only", "Input/output only — tests run with the I/O devices and procedures (no video)")]
-# key types of the keys table (the property page offers the full ANY-maze wording)
-KIND_LABELS = [("hold", "Simple"), ("state", "Toggle"), ("state", "Radio"), ("point", "Event")]
-BEH_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#8b5cf6", "#14b8a6", "#ef4444", "#84cc16", "#f97316",
-              "#06b6d4"]
 MET_ACTIONS = [("complete_stage", "Stage completed: skip remaining trials"), ("report", "Report only")]
 FORM_WIDTH = 900  # property pages with only settings stay at a readable width
 LOCKED_TEXT = ("The protocol is locked: only an administrator can change it (File ▸ Users and security). You can look "
@@ -85,7 +80,7 @@ EVENT_PERIOD_COLS = [("label", "Time period", "text", None),
 _TARGET_KEY = {k: v for k, v in TARGET_KEY.items() if k in ANCHORS}
 
 
-class ExperimentPage(Page):
+class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
     title = "Protocol"
 
     def __init__(self, main):
@@ -983,119 +978,6 @@ class ExperimentPage(Page):
         self._goto_element("analysis")
         self._add_event_period()
 
-    # ================================================================== calculations
-    def _fill_calculations(self):
-        p = self.project
-        cur = self.calc_list.currentRow()
-        self.calc_list.blockSignals(True)
-        self.calc_list.clear()
-        for c in p.calculations if p is not None else []:
-            self.calc_list.addItem(QListWidgetItem(icon("calculator"), c.column or "(no name)"))
-        n = self.calc_list.count()
-        if n:
-            self.calc_list.setCurrentRow(min(max(cur, 0), n - 1))
-        self.calc_list.blockSignals(False)
-        self._calc_rows = self._calc_measures = None
-        self._show_calculation()
-
-    def current_calculation(self) -> Calculation | None:
-        r = self.calc_list.currentRow()
-        p = self.project
-        return p.calculations[r] if p is not None and 0 <= r < len(p.calculations) else None
-
-    def _show_calculation(self):
-        self.calc_editor.load(self.current_calculation())
-        self._check_calculation()
-
-    def _calculation_rows(self) -> list[dict] | None:
-        """Results rows to check the formulas against (the cached results, if any: computing them is slow)."""
-        if self._calc_rows is None and self.project is not None:
-            self._set_calculation_rows(cached_rows(self.project, False))
-        return self._calc_rows
-
-    def _set_calculation_rows(self, rows):
-        """Keep results rows (made with the current calculations) and their measure columns."""
-        self._calc_rows = rows
-        calcs = {c.column for c in self.project.calculations} if self.project is not None else set()
-        self._calc_measures = [c for c in result_columns(rows) if c not in calcs] if rows is not None else None
-
-    def _check_calculation(self):
-        """Show the problems of the selected calculation, or its result for the first test."""
-        c, p = self.current_calculation(), self.project
-        if c is None:
-            self.calc_editor.set_status([])
-            return
-        rows = self._calculation_rows()
-        reserved = info_columns(p) + [ERROR_COLUMN, "Warnings"]
-        measures = [m for m in self._calc_measures or [] if m not in reserved] if rows else None
-        errs = check_calculation(c, measures, p.calculations, reserved, p.analysis.event_periods)
-        text = "The results are worked out when they are shown on the Data page."
-        row = next((r for r in rows or [] if ERROR_COLUMN not in r), None)
-        if not errs and row is not None:
-            if parse(c.formula).functions:
-                text = "Worked out for every test when the results are calculated (it uses other trials or periods)."
-            else:
-                v = evaluate_calc(c, row)
-                v = f"{v:.{c.decimals}f}" if isinstance(v, float) and v == v else display_text(v) or "undefined"
-                text = f"Result for test {row.get('Test')} (animal {row.get('Animal')}): {v}"
-        self.calc_editor.set_status(errs, text)
-
-    def _calculation_edited(self, new: Calculation):
-        r = self.calc_list.currentRow()
-        p = self.project
-        if p is None or not 0 <= r < len(p.calculations) or p.calculations[r] == new:
-            return
-        old = p.calculations[r].column
-        p.calculations[r] = new
-        # renamed: the other formulas (unless the old name is a measure's: theirs may mean the measure), the time
-        # periods it defines and the training criteria on it follow
-        if new.column and old and new.column != old:
-            p.rename_calculation(old, new.column, formulas=old not in (self._calc_measures or ()), skip=new)
-        self.calc_list.item(r).setText(new.column or "(no name)")
-        self.main.mark_dirty()
-        self._check_calculation()
-
-    def new_calculation(self):
-        p = self.project
-        if p is None:
-            return
-        self._goto_element("calculations")
-        name = unique_name("Calculation 1" if not p.calculations else f"Calculation {len(p.calculations) + 1}",
-                           [c.name for c in p.calculations])
-        p.calculations.append(Calculation(name, ""))
-        self.main.mark_dirty()
-        self._fill_calculations()
-        self.calc_list.setCurrentRow(len(p.calculations) - 1)
-        self.calc_editor.name.setFocus()
-        self.calc_editor.name.selectAll()
-
-    def duplicate_calculation(self):
-        c, p = self.current_calculation(), self.project
-        if c is None:
-            return
-        d = Calculation.from_dict(c.to_dict())
-        d.name = unique_name(f"{c.name} copy", [x.name for x in p.calculations])
-        p.calculations.insert(self.calc_list.currentRow() + 1, d)
-        self.main.mark_dirty()
-        row = self.calc_list.currentRow() + 1
-        self._fill_calculations()
-        self.calc_list.setCurrentRow(row)
-
-    def delete_calculation(self, confirm: bool = True):
-        c, p = self.current_calculation(), self.project
-        if c is None:
-            return
-        users = p.calculation_users(c.column) if c.column else []
-        msg = f"Delete the calculation “{c.column or c.name}”?"
-        if users:
-            msg += ("\n\nIts result is used by: " + ", ".join(users) + " (their results will be blank, the time "
-                    "periods it defines left out).")
-        if confirm and QMessageBox.question(self, "Delete calculation", msg) != QMessageBox.Yes:
-            return
-        p.calculations.remove(c)
-        self.main.mark_dirty()
-        self._fill_calculations()
-
     def _pick_measure(self, done):
         """Choose a results column for a formula (the Select data tree of the Data page) and pass it to done();
         the results are calculated first if none are at hand (editing the calculations does not change the
@@ -1200,100 +1082,6 @@ class ExperimentPage(Page):
         form.load(obj)
         self.main.mark_dirty()
 
-    # ================================================================== analysis plug-ins
-    def _fill_plugins(self):
-        p = self.project
-        row = self.plugin_list.currentRow()
-        self.plugin_list.clear()
-        for c in (p.analysis_plugins if p is not None else []):
-            pl = plugins.analysis_plugin(c.get("plugin", ""))
-            kind = pl.title if pl is not None else f"{c.get('plugin')} (not installed)"
-            off = "" if c.get("enabled", True) else " — not run"
-            self.plugin_list.addItem(QListWidgetItem(icon("chart"), f"{c.get('name') or kind}  ·  {kind}{off}"))
-        if self.plugin_list.count():
-            self.plugin_list.setCurrentRow(min(max(row, 0), self.plugin_list.count() - 1))
-
-    def _fill_plugin_menu(self):
-        self.plugin_menu.clear()
-        for name in plugins.analysis_names():
-            pl = plugins.analysis_plugin(name)
-            a = self.plugin_menu.addAction(pl.title)
-            a.setToolTip(pl.description)
-            a.triggered.connect(lambda _=False, n=name: self.add_plugin(n))
-
-    def add_plugin(self, name: str, dlg=None) -> dict | None:
-        """Add a configured analysis plug-in to the protocol (its settings are asked first)."""
-        p = self.project
-        if p is None:
-            return None
-        cfg = plugins.new_config(name, [c.get("name") for c in p.analysis_plugins])
-        cfg = self._plugin_dialog(cfg, dlg)
-        if cfg is None:
-            return None
-        p.analysis_plugins.append(cfg)
-        self.main.mark_dirty()
-        self._fill_plugins()
-        self.plugin_list.setCurrentRow(self.plugin_list.count() - 1)
-        return cfg
-
-    def _plugin_dialog(self, cfg: dict, dlg=None) -> dict | None:
-        from ..plugin_dialog import PluginOptionsDialog
-
-        given = dlg is not None
-        dlg = dlg or PluginOptionsDialog(self.project, cfg, self)
-        if not given and dlg.exec() != QDialog.Accepted:
-            return None
-        return dlg.values()
-
-    def edit_plugin(self, dlg=None) -> dict | None:
-        p = self.project
-        i = self.plugin_list.currentRow()
-        if p is None or not 0 <= i < len(p.analysis_plugins):
-            return None
-        cfg = self._plugin_dialog(p.analysis_plugins[i], dlg)
-        if cfg is None:
-            return None
-        p.analysis_plugins[i] = cfg
-        self.main.mark_dirty()
-        self._fill_plugins()
-        return cfg
-
-    def remove_plugin(self):
-        p = self.project
-        i = self.plugin_list.currentRow()
-        if p is None or not 0 <= i < len(p.analysis_plugins):
-            return
-        del p.analysis_plugins[i]
-        self.main.mark_dirty()
-        self._fill_plugins()
-
-    def run_plugins(self, wait: bool = False):
-        """Run the analysis plug-ins on every test performed (in the background), then save the experiment."""
-        p = self.project
-        if p is None or not p.analysis_plugins:
-            return None
-        if p.path is None and not self.main.save():
-            return None
-
-        def done(res):
-            self.main.mark_dirty()
-            self.main.save()
-            msg = f"Ran the analysis plug-ins on {len(res['done'])} test(s)."
-            self.main.status(msg)
-            if res["errors"]:
-                lines = [f"Test {tid}: {m}" for tid, m in res["errors"][:20]]
-                QMessageBox.warning(self, "Analysis plug-ins", msg + "\n\n" + "\n".join(lines))
-            self.last_plugin_run = res
-
-        w = run_with_progress(self, "Running the analysis plug-ins",
-                              lambda progress, stop: plugins.run_analysis_plugins(p, progress=progress),
-                              on_done=done, on_fail=lambda m: QMessageBox.warning(self, "Analysis plug-ins", m),
-                              cancellable=False)
-        if wait:
-            w.wait()
-            QApplication.processEvents()
-        return w
-
     def edit_io_devices(self):
         if self.project is None:
             return None
@@ -1360,162 +1148,6 @@ class ExperimentPage(Page):
             if prev and cur != prev and lines.count(cur) == 1 and prev not in lines and cur not in p.stages:
                 p.rename_stage(prev, cur)
             self._stage_names[i] = cur
-
-    # ================================================================== keys (manually scored behaviours)
-    def _append_behaviour_row(self, b: Behaviour):
-        with loading(self):
-            self._add_behaviour_cells(b)
-
-    def _add_behaviour_cells(self, b: Behaviour):
-        r = self.beh.rowCount()
-        self.beh.insertRow(r)
-        self._key_names.insert(r, b.name)
-        it = QTableWidgetItem(b.name)
-        it.setData(Qt.UserRole, bool(b.activity))  # counts as activity (the Key property page)
-        self.beh.setItem(r, 0, it)
-        k = QTableWidgetItem(b.key.upper() if len(b.key) == 1 else b.key)
-        k.setTextAlignment(Qt.AlignCenter)
-        self.beh.setItem(r, 1, k)
-        kind = QComboBox()
-        for v, label in KIND_LABELS:
-            kind.addItem(label, v)
-        kind.setToolTip("Simple: while the key is held down · Toggle: first press starts, second press ends · "
-                        "Radio: a toggle that also ends when another key of its radio set is pressed · Event: "
-                        "an instant")
-        kind.setCurrentIndex(self._kind_index(b.kind, b.group))
-        kind.currentIndexChanged.connect(lambda _i, w=kind: self._kind_changed(w))
-        self.beh.setCellWidget(r, 2, kind)
-        self.beh.setItem(r, 3, QTableWidgetItem(b.group))
-        col = ColorButton(b.color or BEH_COLORS[r % len(BEH_COLORS)], "Key colour")
-        col.setFixedSize(52, 22)
-        col.setToolTip("Colour of the on-screen scoring button")
-        col.color_changed.connect(lambda _c: self._store_behaviours())
-        holder = QWidget()
-        hl = QHBoxLayout(holder)
-        hl.setContentsMargins(6, 0, 6, 0)
-        hl.addWidget(col)
-        holder.setProperty("color", col.color())
-        holder.button = col
-        col.color_changed.connect(lambda c, h=holder: h.setProperty("color", c))
-        self.beh.setCellWidget(r, 4, holder)
-
-    @staticmethod
-    def _kind_index(kind: str, group: str) -> int:
-        mode = wf.key_mode(kind, group)
-        return {"simple": 0, "toggle": 1, "radio": 2, "event": 3}[mode]
-
-    def _kind_changed(self, combo: QComboBox):
-        """The table's "How it works" changed: Radio keys need a radio set, Toggle keys have none."""
-        if self._loading:
-            return
-        r = next((r for r in range(self.beh.rowCount()) if self.beh.cellWidget(r, 2) is combo), -1)
-        if r < 0:
-            return
-        it = self.beh.item(r, 3)
-        group = it.text().strip() if it else ""
-        mode = ("simple", "toggle", "radio", "event")[combo.currentIndex()]
-        _kind, new_group = wf.mode_to_kind(mode, group)
-        if new_group != group:
-            with loading(self):
-                self.beh.setItem(r, 3, QTableWidgetItem(new_group))
-        self._store_behaviours()
-
-    def _add_behaviour(self):
-        if self.project is None:
-            return
-        key = wf.free_key(self.project.behaviours)
-        self._append_behaviour_row(Behaviour(f"Behaviour {self.beh.rowCount() + 1}", key, "state"))
-        self.beh.setCurrentCell(self.beh.rowCount() - 1, 0)
-        self._store_behaviours()
-
-    def _remove_behaviour(self, confirm: bool = True):
-        r = self.beh.currentRow()
-        if r < 0:
-            return
-        b = self._row_behaviour(r)
-        n, n_tests = self.project.key_events(b.name) if b is not None and self.project is not None else (0, 0)
-        if n and confirm and QMessageBox.question(
-                self, "Delete key", f"The key “{b.name}” has {n} scored event{'s' if n != 1 else ''} in {n_tests} "
-                f"test{'s' if n_tests != 1 else ''}. Delete the key?\n\nThe events stay in the tests but are no longer "
-                "analysed (a key of the same name analyses them again).") != QMessageBox.Yes:
-            return
-        if r < len(self._key_names):
-            self._key_names.pop(r)
-        self.beh.removeRow(r)
-        self._store_behaviours()
-
-    def _row_behaviour(self, r) -> Behaviour | None:
-        name = self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else ""
-        if not name:
-            return None
-        key = self.beh.item(r, 1).text().strip()[:1].lower() if self.beh.item(r, 1) else ""
-        kind = self.beh.cellWidget(r, 2).currentData() if self.beh.cellWidget(r, 2) else "state"
-        group = self.beh.item(r, 3).text().strip() if self.beh.item(r, 3) else ""
-        color = self.beh.cellWidget(r, 4).property("color") if self.beh.cellWidget(r, 4) else ""
-        return Behaviour(name, key, kind, group, color or "", bool(self.beh.item(r, 0).data(Qt.UserRole)))
-
-    def _store_behaviours(self, *_):
-        if self._loading or self.project is None:
-            return
-        self._follow_key_renames()
-        out = [b for b in (self._row_behaviour(r) for r in range(self.beh.rowCount())) if b is not None]
-        self.project.behaviours = out
-        with loading(self):
-            for r in range(self.beh.rowCount()):  # Toggle ⇄ Radio follows the radio set
-                combo, b = self.beh.cellWidget(r, 2), self._row_behaviour(r)
-                if combo is not None and b is not None:
-                    combo.setCurrentIndex(self._kind_index(b.kind, b.group))
-        self._validate_behaviours()
-        self._show_key()
-        self._update_summary()
-        self.main.mark_dirty()
-
-    def _follow_key_renames(self):
-        """A renamed key keeps its data: scored events, marked time periods and criteria follow the new name
-        (p.rename_key). Rows are matched by position (the table's rows are the keys)."""
-        names = [self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else "" for r in range(self.beh.rowCount())]
-        if len(names) != len(self._key_names):
-            self._key_names = names
-            return
-        for r, (prev, cur) in enumerate(zip(self._key_names, names)):
-            if not cur:
-                continue
-            if prev and cur != prev and names.count(cur) == 1 and prev not in names:
-                self.project.rename_key(prev, cur)
-            self._key_names[r] = cur
-
-    def _validate_behaviours(self) -> list[str]:
-        errs = wf.validate_behaviours(self.project.behaviours) if self.project is not None else []
-        self.beh_lbl.setText("<br>".join(errs))
-        self.beh_lbl.setVisible(bool(errs))
-        return errs
-
-    def _show_key(self):
-        """Show the selected key on the "Key" property page."""
-        r = self.beh.currentRow()
-        b = self._row_behaviour(r) if 0 <= r < self.beh.rowCount() else None
-        if b is None:
-            self.key_editor.load(None)
-        else:
-            self.key_editor.load(b.name, b.key, b.kind, b.group, b.color, b.activity)
-
-    def _key_edited(self, v: dict):
-        r = self.beh.currentRow()
-        if not 0 <= r < self.beh.rowCount():
-            return
-        with loading(self):
-            if v["name"]:
-                self.beh.item(r, 0).setText(v["name"])
-            self.beh.item(r, 0).setData(Qt.UserRole, bool(v.get("activity")))
-            key = v["key"]
-            self.beh.item(r, 1).setText(key.upper() if len(key) == 1 else key)
-            self.beh.cellWidget(r, 2).setCurrentIndex(self._kind_index(v["kind"], v["group"]))
-            self.beh.setItem(r, 3, QTableWidgetItem(v["group"]))
-            holder = self.beh.cellWidget(r, 4)
-            if holder is not None and v["color"]:
-                holder.setProperty("color", v["color"])
-                holder.button.set_color(v["color"])
-        self._store_behaviours()
 
     # ================================================================== workflow
     def _blind_toggled(self, on):
