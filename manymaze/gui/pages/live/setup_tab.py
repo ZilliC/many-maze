@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QPushButton, QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTimeEdit, QVBoxLayout,
                                QWidget)
 
+from ....core import security
 from ....core.livegroup import DEFAULT_START_KEYS, DEFAULT_STOP_KEYS
 from ...icons import icon
 from ...live_widgets import PanelGrid, TestPanel
@@ -20,6 +21,9 @@ from .recording_names import RecordingNamesDialog, describe as describe_names
 class SetupMixin:
     """Building the page's widgets: the single test panel, the grid of test panels and the report tabs (Setup,
     Procedures, Results, Log)."""
+
+    REC_NAMES_TIP = ("Choose the fields the recorded video files are named after (test number, animal, treatment, "
+                     "stage, trial, date, time)")
 
     def _build_single(self) -> QWidget:
         p = TestPanel(single=True)
@@ -318,8 +322,7 @@ class SetupMixin:
         self.rec_names_lbl.setObjectName("Hint")
         self.rec_names_lbl.setWordWrap(True)
         self.rec_names_btn = QPushButton("File names…")
-        self.rec_names_btn.setToolTip("Choose the fields the recorded video files are named after (test number, "
-                                      "animal, treatment, stage, trial, date, time)")
+        self.rec_names_btn.setToolTip(self.REC_NAMES_TIP)
         self.rec_names_btn.clicked.connect(lambda: self.recording_names_dialog())
         rec_names = QHBoxLayout()
         rec_names.setContentsMargins(0, 0, 0, 0)
@@ -384,6 +387,8 @@ class SetupMixin:
 
     def set_recording_name_fields(self, fields: list[str]):
         p = self.project
+        if p is not None and not security.can(p, "edit_protocol"):
+            return
         if p is not None and list(fields) != list(p.recording_name_fields):
             p.recording_name_fields = list(fields)
             self.main.mark_dirty()

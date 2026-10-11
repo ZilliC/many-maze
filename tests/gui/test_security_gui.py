@@ -112,11 +112,15 @@ def test_locked_protocol_is_read_only_for_other_users(win):
     assert appar.locked and not appar.new_act.isEnabled() and not appar.tool_actions["polygon"].isEnabled()
     assert appar.tool_actions["select"].isEnabled() and not appar.view.isInteractive()
     live = win.goto("LivePage")
-    assert not live.proc_editor.isEnabled()
+    assert not live.proc_editor.isEnabled() and not live.rec_names_btn.isEnabled()
+    live.set_recording_name_fields(["animal"])  # the file names are part of the protocol
+    assert p.recording_name_fields != ["animal"]
     win.answers = ["ann-pw"]
     win.sign_in("Ann")  # the administrator: everything editable again (the pages follow at once)
     assert not proto.locked and proto.elements["protocol"].widget().isEnabled() and proto.add_item_act.isEnabled()
-    assert appar.view.isInteractive() and live.proc_editor.isEnabled()
+    assert appar.view.isInteractive() and live.proc_editor.isEnabled() and live.rec_names_btn.isEnabled()
+    live.set_recording_name_fields(["animal"])
+    assert p.recording_name_fields == ["animal"]
 
 
 def test_users_dialog(win):

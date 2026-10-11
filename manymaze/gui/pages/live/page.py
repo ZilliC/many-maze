@@ -530,13 +530,16 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.on_show()
 
     def security_changed(self):
-        """The procedures (Procedures tab) are part of the protocol: read-only while it is locked for the current
-        user (core.security)."""
+        """The procedures (Procedures tab) and the recorded video file names (Setup ▸ File names…) are part of the
+        protocol: read-only while it is locked for the current user (core.security)."""
         p = self.project
         locked = p is not None and not security.can(p, "edit_protocol")
         self.proc_editor.setEnabled(not locked)
         self.proc_editor.setToolTip("The protocol is locked: only an administrator can change the procedures"
                                     if locked else "")
+        self.rec_names_btn.setEnabled(not locked)
+        self.rec_names_btn.setToolTip("The protocol is locked: only an administrator can change the file names"
+                                      if locked else self.REC_NAMES_TIP)
 
     def _recover_interrupted(self, project):
         """Live tests interrupted by a crash leave an autosave side file: store what they recorded."""
