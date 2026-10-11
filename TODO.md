@@ -366,7 +366,7 @@ Still open:
 
 ---
 
-## 18. Beyond parity (2026-10-11)
+## 18. Beyond parity (2026-10-10)
 
 Feature parity with ANY-maze is done; what is left is proof, real use, distribution and code health. Roughly in
 order of impact within each group.
@@ -393,12 +393,21 @@ Distribution:
       who can switch (the code is portable; CI already tests on Ubuntu)
 - [ ] Interface translations (English only, no translation framework), e.g. Spanish
 
-Code health:
-- [ ] A review pass across phases 3–7, written in parallel in two days and checked only by the tests and the
-      merges, for gaps where features meet:
-  - [ ] The protocol lock (#9) does not cover *Run tests ▸ File names…* (#11), which is part of the protocol
-  - [ ] Lens correction (#10) together with downscaling before tracking (#11) has no test
-- [ ] Ruff: 85 findings at 0.11.13 (71 unused imports, 8 lambda assignments, 6 ambiguous names)
-- [ ] Measure test coverage (no coverage tool yet)
-- [ ] Split the largest modules (`core/measures.py` 2,300 lines; `core/live.py`, `core/iodevices.py`,
-      `gui/pages/experiment.py` 1,700–1,900)
+Code health (done on 2026-10-10, #14):
+- [x] A review pass across phases 3–7 for gaps where features meet. Fixed:
+  - [x] The protocol lock (#9) did not cover *Run tests ▸ File names…* (#11), the delay after the start switch or
+        the ANY-maze imports (they add or change apparatus). Camera options stay open to operators on purpose
+  - [x] Lens correction (#10) together with downscaling before tracking (#11) had no test (it works)
+  - [x] Changing the distance unit (#8) renamed the measures in criteria and calculations but left the numbers in the
+        old unit; saved reports and Statistics settings (#6) did not follow unit changes or calculation renames
+  - [x] Statistics and the command line's `--report` exports ignored the terminology (#11)
+  - [x] Input/output only mode (#4) silently dropped time periods at zone entries / exits (#6): now flagged
+  - [x] The protocol report left out the settings added in #6–#11
+- [x] Ruff clean at 0.11.13, with a lint job in CI
+- [x] Test coverage measured: 91 % of the lines (coverage.py, reported in CI); lowest: app start-up, live
+      calibration, the results export dialogs, the command line
+- [x] Split the largest modules: `core/measures.py` → `extra_measures.py`; `core/iodevices.py` → `iobase.py`,
+      `audio.py`; `core/live.py` → `liveanalysis.py`; `gui/pages/experiment.py` → `experiment_calcs.py`,
+      `experiment_keys.py` (the old modules re-export the moved names)
+- [x] Windows groundwork: a non-blocking Windows test job in CI and sound through PowerShell on Windows (no player
+      was found there); whether to ship for Windows is still open (Distribution above)
