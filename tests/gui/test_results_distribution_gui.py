@@ -353,6 +353,9 @@ class FakeCamera:
         idx = int(source)
         a = syn.random_walk(30, (20, 20, 180, 180), speed=3, seed=idx)
         b = syn.random_walk(30, (220, 20, 380, 180), speed=3, seed=100 + idx)
+        # there and back: looping the walk would make the mice jump back to its start (as fast as 300 cm/s, an
+        # implausible jump that tracking removes)
+        a, b = np.vstack([a, a[::-1]]), np.vstack([b, b[::-1]])
         self.frames = []
         for (ax, ay), (bx, by) in zip(a, b):
             img = np.full((200, 400), 200, np.uint8)

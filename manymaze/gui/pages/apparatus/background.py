@@ -1,5 +1,6 @@
 """The background image of the apparatus map: a frame of a test's (or any) video, remembered per apparatus, corrected
-for lens distortion like the frames tracked (the correction of the tests that use the video)."""
+for lens distortion like the frames tracked (the correction of the tests that use the video). A background can be
+loaded before the experiment has an apparatus, to draw the first one on: the apparatus created then starts with it."""
 
 from __future__ import annotations
 
@@ -16,6 +17,9 @@ from ...icons import icon
 from ...widgets import fmt_time, hint, loading
 
 
+NO_APPARATUS = None  # BackgroundController.memory key of the background shown while there is no apparatus
+
+
 def placeholder_frame(w: int, h: int) -> np.ndarray:
     """Light grey stand-in for the video frame until a background image is loaded."""
     img = np.full((h, w, 3), (236, 234, 232), np.uint8)
@@ -27,7 +31,7 @@ def placeholder_frame(w: int, h: int) -> np.ndarray:
     font = cv2.FONT_HERSHEY_SIMPLEX
     sc = max(0.5, w / 900)
     for i, (txt, col) in enumerate((("No background image", (110, 104, 98)),
-                                    ("Background > Load image from video", (150, 144, 138)))):
+                                    ("Background > Video file... or Test video", (150, 144, 138)))):
         (tw, th), _ = cv2.getTextSize(txt, font, sc * (1.0 if i == 0 else 0.7), 1)
         cv2.putText(img, txt, ((w - tw) // 2, h // 2 + i * int(36 * sc)), font, sc * (1.0 if i == 0 else 0.7),
                     col, 1, cv2.LINE_AA)
@@ -36,13 +40,15 @@ def placeholder_frame(w: int, h: int) -> np.ndarray:
 
 class BackgroundController(QObject):
     """The map's background frame for the page's current apparatus: the video and time last shown for it, else
-    the video of a test that uses it, else a placeholder. Owns the open video and the background controls (a
-    test video menu and combo box, a time slider and spin box)."""
+    the video of a test that uses it, else a placeholder. With no apparatus (a new experiment) a background can be
+    loaded all the same, and the first apparatus created inherits it. Owns the open video and the background
+    controls (a test video menu and combo box, a time slider and spin box)."""
 
     def __init__(self, page):
         super().__init__(page)
         self.page = page
-        self.memory: dict[int, tuple[str, float]] = {}  # id(apparatus) -> (video, time) last shown
+        # id(apparatus) -> (video, time) last shown; NO_APPARATUS: the one shown while there is no apparatus
+        self.memory: dict[int | None, tuple[str, float]] = {}
         self.src: VideoSource | None = None
         self.path: str | None = None
         self.real = False  # a video frame is shown (not the placeholder)
@@ -80,14 +86,21 @@ class BackgroundController(QObject):
         row.addWidget(self.time_spin)
 
     def set_enabled(self, on: bool):
-        for w in (self.test_combo, self.time_slider, self.time_spin):
+        """The background can be changed (with or without an apparatus): the experiment is open and not locked."""
+        for w in (self.time_slider, self.time_spin):
             w.setEnabled(on)
+        self.test_combo.setEnabled(on and self.test_combo.count() > 1)
 
     # ---- per-apparatus memory -----------------------------------------------------------
+    @staticmethod
+    def _key(app: Apparatus | None) -> int | None:
+        return id(app) if app is not None else NO_APPARATUS
+
     def inherit(self, src: Apparatus | None, dst: Apparatus):
-        """A new apparatus made from `src` starts with its background."""
-        if src is not None and id(src) in self.memory:
-            self.memory[id(dst)] = self.memory[id(src)]
+        """A new apparatus made from `src` starts with its background (with no `src`: the background loaded while
+        there was no apparatus)."""
+        if self._key(src) in self.memory:
+            self.memory[id(dst)] = self.memory[self._key(src)]
 
     def forget(self, app: Apparatus):
         self.memory.pop(id(app), None)
@@ -109,10 +122,10 @@ class BackgroundController(QObject):
     def show(self):
         """The background of the page's current apparatus."""
         app, p = self.page.app, self.page.project
+        mem = self.memory.get(self._key(app)) if p is not None else None
+        if mem and self.load(mem[0], mem[1], quiet=True):
+            return
         if app is not None:
-            mem = self.memory.get(id(app))
-            if mem and self.load(mem[0], mem[1], quiet=True):
-                return
             for t in p.tests:
                 if t.apparatus == app.name and t.video:
                     path = p.abs_path(t.video)
@@ -162,8 +175,8 @@ class BackgroundController(QObject):
         h, w = f.shape[:2]
         app = self.page.app
         tt = idx / src.fps if src.fps else 0.0
+        self.memory[self._key(app)] = (path, tt)
         if app is not None:
-            self.memory[id(app)] = (path, tt)
             if tuple(app.frame_size or ()) != (w, h):
                 app.frame_size = (w, h)
                 self.page.main.mark_dirty()
@@ -224,7 +237,7 @@ class BackgroundController(QObject):
         for t in p.tests:
             if t.video:
                 self.test_combo.addItem(f"Test {t.id}: {t.animal_id or '—'} · {Path(t.video).name}", t.id)
-        self.test_combo.setEnabled(self.page.app is not None and self.test_combo.count() > 1)
+        self.test_combo.setEnabled(self.page.can_edit_background and self.test_combo.count() > 1)
 
     def _test_chosen(self, i: int):
         tid = self.test_combo.itemData(i)

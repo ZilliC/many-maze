@@ -378,6 +378,7 @@ class TestsPage(Page):
     def __init__(self, main):
         super().__init__(main)
         self._tracking = False
+        self.track_warning_box: QMessageBox | None = None  # the last tracks that looked wrong (show_track_warnings)
         self.model = TestsModel(self)
         self.proxy = QSortFilterProxyModel(self)
         self.proxy.setSourceModel(self.model)
@@ -1095,9 +1096,31 @@ class TestsPage(Page):
         msg += f" ({res['workers']} videos in parallel)." if res.get("workers", 1) > 1 else "."
         if res["cancelled"]:
             msg += " Cancelled — the remaining tests were left untouched."
+        warnings = res.get("warnings") or []
+        if warnings:
+            msg += f" {len(warnings)} track{'s look' if len(warnings) != 1 else ' looks'} wrong (implausible jumps)."
         self.main.status(msg)
         if res["errors"]:
             error_box(self, "Tracking", "\n".join(res["errors"]))
+        if warnings:
+            self.show_track_warnings(warnings)
+
+    def show_track_warnings(self, warnings: list[str], limit: int = 15):
+        """Tracks that look wrong after tracking (core.batch.track_warnings), in a message box that does not wait."""
+        lines = warnings[:limit] + ([f"… and {len(warnings) - limit} more"] if len(warnings) > limit else [])
+        box = QMessageBox(QMessageBox.Warning, "Tracking", "", QMessageBox.Ok, self)
+        box.setText(f"{len(warnings)} track{'s look' if len(warnings) != 1 else ' looks'} wrong: the tracked "
+                    "position moves faster than the animal can, usually to a reflection, a shadow or another "
+                    "object and back. Distances and speeds of these tests are too high.")
+        box.setInformativeText("\n".join(lines) + "\n\nCheck the tracks in Review. To fix them, improve the "
+                               "detection (contrast, detection method, colour tracking, or an arena that leaves "
+                               "out the reflection) and track again, or set Remove jumps faster than (Protocol ▸ "
+                               "Animal tracking ▸ Jumps); Review's Remove jumps applies it without tracking again. "
+                               "Tracking quality and Implausible jumps in the results show how much is wrong.")
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.open()
+        self.track_warning_box = box
+        return box
 
     def _tracking_failed(self, msg):
         self._tracking = False

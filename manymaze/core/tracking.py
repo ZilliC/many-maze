@@ -57,6 +57,9 @@ class DetectionSettings:
     # (a reflection or another object detected for a moment); real fast runs do not come back and are kept
     max_jump_speed: float = 0.0
     max_jump_s: float = 0.5
+    # with max_jump_speed off and a calibrated apparatus, still remove the jumps faster than any lab animal moves
+    # (PLAUSIBLE_SPEED_CM_S); experiments saved before this setting existed keep it off (from_dict)
+    remove_implausible_jumps: bool = True
     smoothing: int = 0  # moving-average window (frames), 0 = off
     start_time_s: float = 0.0  # analyse from this time in the video
     duration_s: float = 0.0  # analyse this many seconds (0 = to end)
@@ -91,6 +94,8 @@ class DetectionSettings:
     def from_dict(cls, d: dict | None) -> "DetectionSettings":
         d = d or {}
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        if d and "remove_implausible_jumps" not in d:  # saved before it existed: tracked as it was then
+            known["remove_implausible_jumps"] = False
         return cls(**known)
 
 
@@ -284,6 +289,12 @@ def median_grey(img: np.ndarray, mask: np.ndarray | None = None) -> float:
 
 
 LIGHTING_GAIN_RANGE = (0.2, 5.0)  # the most a frame is brightened / darkened to match the background
+
+# Faster than any animal tracked in an apparatus moves (a rat's sprint is about 2 m/s, a mouse's 1 m/s): a tracked
+# position that implies more, from the last one, is a tracking error (a reflection, a shadow, another object).
+# Uncalibrated, PLAUSIBLE_BODY_LENGTHS_S body lengths per second stands for it (core.measures.plausible_speed).
+PLAUSIBLE_SPEED_CM_S = 300.0
+PLAUSIBLE_BODY_LENGTHS_S = 25.0
 
 
 # Animal presets of the detection settings: typical settings for a kind of animal and floor. Sizes are real
@@ -1142,13 +1153,23 @@ class ArenaJob:
     mask: np.ndarray | None = None
 
 
-def postprocess(track: Track, settings: DetectionSettings, scale: float = 1.0) -> Track:
-    """A track as tracking stores it: jumps removed (settings.max_jump_speed; scale: the apparatus units per pixel,
-    Apparatus.scale; the number removed in meta["jumps_removed"]), gaps filled and positions smoothed."""
-    out = track
+def jump_speed_limit(settings: DetectionSettings, calibrated: bool) -> float:
+    """The speed (apparatus units/s) above which tracking removes jumps: settings.max_jump_speed, else, for a
+    calibrated apparatus with settings.remove_implausible_jumps, PLAUSIBLE_SPEED_CM_S; 0 = no jump removal."""
     if settings.max_jump_speed and settings.max_jump_speed > 0:
+        return float(settings.max_jump_speed)
+    return PLAUSIBLE_SPEED_CM_S if calibrated and settings.remove_implausible_jumps else 0.0
+
+
+def postprocess(track: Track, settings: DetectionSettings, scale: float = 1.0, calibrated: bool = False) -> Track:
+    """A track as tracking stores it: jumps removed (jump_speed_limit; scale: the apparatus units per pixel,
+    Apparatus.scale; calibrated: the apparatus is calibrated, scale is in cm; the number removed in
+    meta["jumps_removed"]), gaps filled and positions smoothed."""
+    out = track
+    limit = jump_speed_limit(settings, calibrated)
+    if limit > 0:
         out = track.copy()
-        out.meta["jumps_removed"] = out.remove_jumps(settings.max_jump_speed, settings.max_jump_s, scale)
+        out.meta["jumps_removed"] = out.remove_jumps(limit, settings.max_jump_s, scale)
     if settings.max_gap_s and settings.max_gap_s > 0:
         out = out.interpolate(settings.max_gap_s)
     if settings.smoothing and settings.smoothing > 1:
@@ -1261,7 +1282,9 @@ def track_video(video_path: str, jobs: list[ArenaJob],
             if est is not None:
                 tr.meta["pose_model"] = job.settings.pose_model
                 tr.meta["pose_device"] = est.provider
-            tracks.append(postprocess(tr, job.settings, job.apparatus.scale if job.apparatus is not None else 1.0))
+            app = job.apparatus
+            tracks.append(postprocess(tr, job.settings, app.scale if app is not None else 1.0,
+                                      app is not None and bool(app.px_per_cm)))
         out.append(tracks)
     return out
 

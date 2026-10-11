@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGraphicsView, QGridLa
 from ....core import workflow as wf
 from ....core.apparatus import POSITION_KEY, position_args
 from ....core.track import Track, swap_identities
+from ....core.tracking import jump_speed_limit
 from ... import theme
 
 
@@ -333,13 +334,14 @@ class TrackEditMixin:
         if self.test is None or ai >= len(self.tracks):
             return None
         s = self.project.detection_for(self.test)
-        if not s.max_jump_speed or s.max_jump_speed <= 0:
+        app = self.project.apparatus_of(self.test)
+        limit = jump_speed_limit(s, app is not None and bool(app.px_per_cm))
+        if limit <= 0:
             self.edit_lbl.setText("Set “Remove jumps faster than” in the Detection tab (or in Protocol ▸ Animal "
                                   "tracking) first.")
             return None
-        app = self.project.apparatus_of(self.test)
         tr = self.tracks[ai].copy()
-        n = tr.remove_jumps(s.max_jump_speed, s.max_jump_s, app.scale if app is not None else 1.0)
+        n = tr.remove_jumps(limit, s.max_jump_s, app.scale if app is not None else 1.0)
         if not n:
             self.edit_lbl.setText("No jumps found.")
             return 0

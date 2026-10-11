@@ -118,6 +118,10 @@ DETECTION_SPEC = [
      "information column Jumps removed. 0 = off."),
     ("max_jump_s", "… when the track comes back within (s)", "float", (0.0, 10.0, 0.1, 2),
      "The longest jump: a track that stays away longer is kept (the animal really went there)."),
+    ("remove_implausible_jumps", "Otherwise remove jumps faster than 300 cm/s (calibrated apparatus)", "bool", None,
+     "When the limit above is off (0) and the apparatus is calibrated, remove the jumps faster than any animal "
+     "moves in an apparatus (300 cm/s) — almost always a reflection or a shadow tracked for a moment. On for new "
+     "experiments; experiments made before this setting existed keep it off so that their tracks do not change."),
     ("smoothing", "Smooth positions over (frames, 0 = off)", "int", (0, 51, 1),
      "Moving average applied to positions. 0 = off."),
     ("frame_step", "Analyse every Nth frame", "int", (1, 50, 1), "Speed up tracking of high frame-rate video."),
@@ -283,7 +287,8 @@ DETECTION_SECTIONS = [
     ("Colour", ["target_colour", "colour_tolerance", "min_saturation", "identity_colours"]),
     ("Body parts", ["head_tail", "tail_strip", "record_outline", "body_parts", "pose_min_conf", "pose_device"]),
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
-    ("Jumps", ["max_jump_speed", "max_jump_s"]),  # removed before the gaps are filled (Tracking quality)
+    # removed before the gaps are filled (Tracking quality)
+    ("Jumps", ["max_jump_speed", "max_jump_s", "remove_implausible_jumps"]),
     ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step", "downscale"]),
 ]
 

@@ -409,3 +409,43 @@ def test_screenshot(page):
     for _ in range(5):
         app.processEvents()
     page.main.grab().save(shot_path("shot_apparatus.png"))
+
+
+def test_background_before_any_apparatus(demo_dir, tmp_path, monkeypatch):
+    """A new experiment without an apparatus: the background is loaded from a test's video or a video file (the
+    first apparatus is drawn on it), and the first apparatus created starts with it."""
+    demo = Project.load(demo_dir)
+    vid = demo.abs_path(demo.tests[0].video)
+    p = Project(name="New")
+    p.path = tmp_path / "n.mmaze"
+    p.add_test(vid, "A1")
+    w = MainWindow()
+    w.resize(1400, 880)
+    w.show()
+    w.set_project(p)
+    try:
+        page = w.goto("ApparatusPage")
+        app.processEvents()
+        assert page.app is None and not page.bg.real
+        assert page.bg_act.isEnabled() and page.testvid_act.isEnabled() and page.bg.test_combo.isEnabled()
+        assert not page.lens_act.isEnabled() and not page.tool_actions["arena"].isEnabled()
+        page.bg.test_combo.setCurrentIndex(1)
+        page.bg.test_combo.activated.emit(1)
+        assert page.bg.real and page.bg.path == vid and page.view.frame_size == (400, 400)
+        page.bg.time_spin.setValue(2.0)
+        page.bg.seek()
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (vid, ""))
+        page.bg.load_dialog()  # Background ▸ Video file…
+        assert page.bg.real and page.bg.time_spin.value() == 0
+        page.bg.time_spin.setValue(3.0)
+        page.bg.seek()
+        a = page.add_apparatus()
+        assert page.app is a and a.frame_size == (400, 400)
+        assert page.bg.real and page.bg.path == vid and page.bg.time_spin.value() == pytest.approx(3.0)
+        # locked protocol: no background either
+        monkeypatch.setattr(type(page), "locked", property(lambda self: True))
+        page._set_enabled(False)
+        assert not page.bg_act.isEnabled() and not page.bg.test_combo.isEnabled()
+    finally:
+        w.dirty = False
+        w.close()

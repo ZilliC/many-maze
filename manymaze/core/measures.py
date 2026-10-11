@@ -35,6 +35,7 @@ from .extra_measures import behaviour_measures, grid_measures, social_measures  
 from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides
 from .track import Track
+from .tracking import PLAUSIBLE_BODY_LENGTHS_S, PLAUSIBLE_SPEED_CM_S
 
 if TYPE_CHECKING:
     from .project import Behaviour
@@ -1613,15 +1614,53 @@ def _tracking_quality(res, p: _Period):
         res["Head tracked (% of tracked frames)"] = _r(100 * n_h / n_c if n_c else math.nan, 1)
     q = p.P.cached("quality", lambda: _quality_mask(p.P))[p.sl]
     res["Tracking quality (%)"] = _r(100 * q.mean() if p.n else math.nan, 1)
+    res["Implausible jumps"] = int(p.P.cached("implausible", lambda: _implausible_mask(p.P))[p.sl].sum())
+
+
+def plausible_speed(track: Track, app: Apparatus | None) -> float:
+    """The fastest the animal can move, in the track's units per second (px × app.scale): PLAUSIBLE_SPEED_CM_S when
+    the apparatus is calibrated, else PLAUSIBLE_BODY_LENGTHS_S body lengths per second (nan: no body length)."""
+    if app is not None and app.px_per_cm:
+        return PLAUSIBLE_SPEED_CM_S
+    L = body_length(track, app.scale if app is not None else 1.0)
+    return PLAUSIBLE_BODY_LENGTHS_S * L if math.isfinite(L) and L > 0 else math.nan
+
+
+def implausible_jumps(track: Track, app: Apparatus | None) -> tuple[int, float]:
+    """How much of a track is made of moves faster than the animal can move (plausible_speed): the number of such
+    moves between consecutive detected positions (a jump to a reflection and back is two) and the share (0–1) of
+    the distance between detected positions that they make up. A sound track has none; the share is how much of
+    the distance travelled is probably tracking errors."""
+    lim = plausible_speed(track, app)
+    if not (math.isfinite(lim) and lim > 0):
+        return 0, 0.0
+    scale = app.scale if app is not None else 1.0
+    bad = track.implausible_steps(lim, scale)
+    idx = np.flatnonzero(track.detected & np.isfinite(track.x) & np.isfinite(track.y))
+    if len(idx) < 2:
+        return 0, 0.0
+    d = np.hypot(np.diff(track.x[idx]), np.diff(track.y[idx]))
+    total = float(d.sum())
+    return int(bad.sum()), float(d[bad[idx[1:]]].sum()) / total if total > 0 else 0.0
+
+
+def _implausible_mask(P: _Prepared) -> np.ndarray:
+    """Frames the animal is detected at a position it could not have reached from the previous one
+    (Track.implausible_steps at plausible_speed); not where it is seen again after a pause or after being hidden."""
+    lim = plausible_speed(P.track, P.app)
+    if not (math.isfinite(lim) and lim > 0):
+        return np.zeros(len(P.track), bool)
+    return P.track.implausible_steps(lim, P.app.scale) & ~P.cuts()
 
 
 def _quality_mask(P: _Prepared) -> np.ndarray:
     """Frames tracked soundly: the animal detected (not interpolated or lost), its head found when the head is
-    tracked at all, and its body area within half to twice its usual area (a larger or smaller blob is usually a
-    shadow, a reflection, part of the animal or a merge with another object). Frames where the animal is hidden
-    in a hidden zone count as sound."""
+    tracked at all, its body area within half to twice its usual area (a larger or smaller blob is usually a
+    shadow, a reflection, part of the animal or a merge with another object) and its position one it could have
+    reached from the previous one (_implausible_mask: not a jump to or from a reflection or another object).
+    Frames where the animal is hidden in a hidden zone count as sound."""
     tr = P.track
-    ok = tr.detected & np.isfinite(tr.x) & np.isfinite(tr.y)
+    ok = tr.detected & np.isfinite(tr.x) & np.isfinite(tr.y) & ~P.cached("implausible", lambda: _implausible_mask(P))
     if P.clean.has_head():
         ok &= np.isfinite(tr.hx) & np.isfinite(tr.hy)
     a = tr.area

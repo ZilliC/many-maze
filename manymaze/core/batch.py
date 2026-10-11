@@ -76,11 +76,38 @@ def default_workers(n_batches: int, pose: bool = False) -> int:
     return max(1, min(n, 2) if pose else n)
 
 
-def _track_batch(project, batch, progress, should_stop):
+# a track with this share of its distance in moves faster than the animal can move (measures.implausible_jumps) is
+# reported after tracking: the animal was probably confused with a reflection, a shadow or another object
+JUMP_WARNING_SHARE = 0.05
+
+
+def track_warnings(project, test, tracks) -> list[str]:
+    """What looks wrong in a test's new tracks (one line per animal): many implausible jumps (JUMP_WARNING_SHARE)."""
+    from .measures import implausible_jumps, plausible_speed
+
+    app = project.apparatus_of(test)
+    out = []
+    for i, tr in enumerate(tracks):
+        n, share = implausible_jumps(tr, app)
+        if share < JUMP_WARNING_SHARE:
+            continue
+        unit = "cm/s" if app is not None and app.px_per_cm else "px/s"
+        who = f"Test {test.id}" + (f" ({test.animal_id})" if test.animal_id else "")
+        if len(tracks) > 1:
+            who += f", animal {i + 1}"
+        removed = tr.meta.get("jumps_removed")
+        out.append(f"{who}: {share:.0%} of the distance is in {n} moves faster than "
+                   f"{plausible_speed(tr, app):.0f} {unit}" + (f" ({removed} jumps already removed)" if removed else ""))
+    return out
+
+
+def _track_batch(project, batch, progress, should_stop) -> list[str]:
+    """Track the tests of one video; returns the warnings about their tracks (track_warnings)."""
     if len(batch) == 1:
-        project.track_test(batch[0], progress, should_stop)
+        tracks = {batch[0].id: project.track_test(batch[0], progress, should_stop)}
     else:
-        project.track_video_tests(batch, progress, should_stop)
+        tracks = project.track_video_tests(batch, progress, should_stop)
+    return [w for t in batch for w in track_warnings(project, t, tracks.get(t.id) or [])]
 
 
 # ---------------------------------------------------------------- worker process side
@@ -109,10 +136,10 @@ def _run_batch(project_dict: dict, project_path: str, test_ids: list[int], bi: i
             q.put((bi, float(f)))
 
     try:
-        _track_batch(p, batch, prog, _stopper(stop.is_set))
+        warnings = _track_batch(p, batch, prog, _stopper(stop.is_set))
     except TrackingCancelled:
         return {"cancelled": True}
-    return {"tracked": test_ids}
+    return {"tracked": test_ids, "warnings": warnings}
 
 
 # ---------------------------------------------------------------- public API
@@ -120,12 +147,13 @@ def track_tests(project, tests, progress: Callable[[float], None] | None = None,
                 should_stop: Callable[[], bool] | None = None, workers: int = 0) -> dict:
     """Track tests (in parallel when there are several videos).
 
-    Returns {"tracked": [test ids], "cancelled": bool, "errors": [str], "workers": n}.  Track files are written
-    by the workers; the statuses of ``project``'s tests are updated here.
+    Returns {"tracked": [test ids], "cancelled": bool, "errors": [str], "warnings": [str], "workers": n}; the
+    warnings are tracks that look wrong (track_warnings).  Track files are written by the workers; the statuses of
+    ``project``'s tests are updated here.
     """
     progress = progress or (lambda f: None)
     batches = tracking_batches(project, tests)
-    out = {"tracked": [], "cancelled": False, "errors": [], "workers": 1}
+    out = {"tracked": [], "cancelled": False, "errors": [], "warnings": [], "workers": 1}
     if not batches:
         progress(1.0)
         return out
@@ -147,7 +175,7 @@ def _track_serial(project, batches, progress, should_stop, out):
     n = len(batches)
     for bi, batch in enumerate(batches):
         try:
-            _track_batch(project, batch, lambda f, bi=bi: progress((bi + min(1.0, f)) / n), stop)
+            out["warnings"] += _track_batch(project, batch, lambda f, bi=bi: progress((bi + min(1.0, f)) / n), stop)
             out["tracked"].extend(t.id for t in batch)
         except TrackingCancelled:
             out["cancelled"] = True
@@ -183,6 +211,7 @@ def _track_parallel(project, batches, progress, should_stop, out, n_workers):
                     continue
                 if r.get("cancelled"):
                     out["cancelled"] = True
+                out["warnings"] += r.get("warnings", [])
                 for tid in r.get("tracked", []):
                     t = project.get_test(tid)
                     t.status = "tracked"

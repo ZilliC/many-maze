@@ -281,6 +281,8 @@ def _change_project(p, a):
             sys.exit(str(e))
         for e in res["errors"]:
             print(e, file=sys.stderr)
+        for w in res.get("warnings", []):
+            print(f"Warning: {w} (implausible jumps: a reflection or another object tracked?)", file=sys.stderr)
         try:
             p.save()
         except Exception as e:

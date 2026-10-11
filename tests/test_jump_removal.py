@@ -107,3 +107,73 @@ def test_tracking_a_video_with_jumps(tmp_path):
         assert not tr.detected[i] and abs(tr.y[i] - 200) < 15 and abs(tr.x[i] - path[i, 0]) < 15
     plain = track_video(str(video), [ArenaJob(None, DetectionSettings())])[0][0]
     assert plain.y[20] == pytest.approx(340, abs=15)  # without jump removal the reflection is in the track
+
+
+# ---------------------------------------------------------------- implausible jumps: quality, warnings, automatic
+def test_implausible_jumps_lower_tracking_quality():
+    from manymaze.core.measures import analyse, implausible_jumps, plausible_speed
+
+    app = box_app()  # 10 px/cm, like SCALE
+    tr, bad = _jumpy()
+    steps = tr.implausible_steps(300.0, SCALE)  # into each jump and back out of it
+    assert np.array_equal(np.flatnonzero(steps), [40, 41, 120, 123, 200, 202])
+    assert plausible_speed(tr, app) == 300.0
+    n, share = implausible_jumps(tr, app)
+    assert n == 6 and share > 0.5  # most of the distance is the jumps
+    r = analyse(tr, app)
+    clean = analyse(_track(_walk()), app)
+    assert r["Implausible jumps"] == 6 and clean["Implausible jumps"] == 0
+    assert clean["Tracking quality (%)"] == 100.0
+    assert r["Tracking quality (%)"] == pytest.approx(100 * (1 - 6 / 250), abs=0.1)
+    assert implausible_jumps(_track(_walk()), app) == (0, 0.0)
+    # once removed, the jumps are gone from the measure too
+    tr.remove_jumps(300.0, 0.5, SCALE)
+    assert analyse(tr, app)["Implausible jumps"] == 0
+    # uncalibrated: 25 body lengths per second (body length 10 px here: head and tail 5 px from the centre)
+    px = box_app()
+    px.px_per_cm = None
+    assert plausible_speed(_track(_walk()), px) == pytest.approx(250.0)
+    assert implausible_jumps(_jumpy()[0], px)[0] == 9  # (the reflection's own moves, 30 px a frame, as well)
+
+
+def test_jump_removal_is_automatic_for_calibrated_apparatus():
+    tr, bad = _jumpy()
+    out = postprocess(tr, DetectionSettings(), SCALE, calibrated=True)  # faster than 300 cm/s
+    assert out.meta["jumps_removed"] == 3 and not out.detected[bad].any()
+    assert "jumps_removed" not in postprocess(tr, DetectionSettings(), 1.0, calibrated=False).meta  # pixels: off
+    off = DetectionSettings(remove_implausible_jumps=False)
+    assert "jumps_removed" not in postprocess(tr, off, SCALE, calibrated=True).meta
+    # a slower limit set by the user takes over
+    slow = postprocess(tr, DetectionSettings(max_jump_speed=100.0), SCALE, calibrated=True)
+    assert slow.meta["jumps_removed"] == 3
+    # new experiments have it; experiments saved before the setting existed keep tracking as they did
+    assert DetectionSettings().remove_implausible_jumps and DetectionSettings.from_dict(None).remove_implausible_jumps
+    assert not DetectionSettings.from_dict({"max_gap_s": 2}).remove_implausible_jumps
+    assert DetectionSettings.from_dict(DetectionSettings().to_dict()).remove_implausible_jumps
+
+
+def test_tracking_warns_about_implausible_jumps(tmp_path):
+    from manymaze.core.batch import track_tests, track_warnings
+
+    p = Project(name="J")
+    p.path = tmp_path / "j.mmaze"
+    p.apparatus.append(box_app())
+    t = p.add_test(animal_id="A1")
+    jumpy, _ = _jumpy()
+    w = track_warnings(p, t, [jumpy])
+    assert len(w) == 1 and w[0].startswith("Test 1 (A1): ") and "faster than 300 cm/s" in w[0]
+    assert track_warnings(p, t, [_track(_walk())]) == []
+    # a video where a reflection is tracked every 10th frame, with jump removal off
+    path = line_path((80, 200), (320, 200), 100)
+    shown = path.copy()
+    shown[5::10] = (200, 340)
+    video = tmp_path / "reflection.mp4"
+    make_video(video, shown, fps=FPS)
+    p.detection.remove_implausible_jumps = False
+    t.video = str(video)
+    res = track_tests(p, [t], workers=1)
+    assert res["tracked"] == [t.id] and len(res["warnings"]) == 1 and "Test 1 (A1)" in res["warnings"][0]
+    # with the automatic jump removal they are removed and the track is fine
+    p.detection.remove_implausible_jumps = True
+    res = track_tests(p, [t], workers=1)
+    assert res["warnings"] == [] and int(float(p.load_tracks(t)[0].meta["jumps_removed"])) == 10

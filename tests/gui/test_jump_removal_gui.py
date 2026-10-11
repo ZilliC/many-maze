@@ -53,8 +53,12 @@ def test_remove_jumps_in_review(tmp_path):
         assert v.remove_jumps() == 0 and v.edit_lbl.text() == "No jumps found."
         v.undo_edit()
         assert p.load_tracks(t)[0].x[i] == pytest.approx(far, abs=1e-3)  # (CSV precision)
-        # without the setting, Review says where to set it
+        # off, the calibrated apparatus still removes the implausible ones (faster than 300 cm/s)
         t.detection = {"max_jump_speed": 0.0}
+        assert v.remove_jumps() == 1
+        v.undo_edit()
+        # without either, Review says where to set it
+        t.detection = {"max_jump_speed": 0.0, "remove_implausible_jumps": False}
         assert v.remove_jumps() is None and "Remove jumps faster than" in v.edit_lbl.text()
         assert np.isfinite(p.load_tracks(t)[0].x).all()
     finally:
