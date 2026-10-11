@@ -236,7 +236,8 @@ class Sequence:
     steps: zone or zone-group names, in order. from_start: the pattern must begin at the first step (otherwise
     any rotation of a cyclic pattern counts, e.g. ABC, BCA, CAB). allow_other: entering other zones between
     steps does not break the sequence. bidirectional: the reverse order also counts. end: "entry" (complete on
-    entering the last step) or "exit" (on leaving it). max_duration_s: attempts longer than this fail (0 = no
+    entering the last step), "exit" (on leaving it) or "return" (on re-entering the first step after the last,
+    as ANY-maze's "return to the first step"). max_duration_s: attempts longer than this fail (0 = no
     limit). overlap: sequences may overlap (sliding window, e.g. ABCA contains ABC and BCA).
     """
 

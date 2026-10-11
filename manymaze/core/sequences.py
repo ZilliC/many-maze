@@ -119,8 +119,8 @@ def find_sequences(seq: Sequence, entries: list[tuple[str, float, float]], other
         if cur is None:
             if zn in starts:
                 cur = begin(i)
-                if len(steps) == 1:
-                    attempts.append(Attempt(a, b if seq.end == "exit" else a, [zn]))
+                if len(steps) == 1:  # (one step: "return" to it means leaving it first, so completes on exit)
+                    attempts.append(Attempt(a, b if seq.end in ("exit", "return") else a, [zn]))
                     cur = None
             i += 1
             continue
@@ -129,11 +129,12 @@ def find_sequences(seq: Sequence, entries: list[tuple[str, float, float]], other
             fail(cur, visited, errs + 1)
             cur = None
             continue  # re-process this entry as a possible new start
-        ok = [(p, d) for p, d in cands if p[prog] == zn]
+        # "return": after the last step the pattern completes on re-entering its first step
+        ok = [(p, d) for p, d in cands if (p + [p[0]] if seq.end == "return" else p)[prog] == zn]
         if ok:
             prog += 1
             visited = visited + [zn]
-            if prog >= len(steps):
+            if prog >= len(steps) + (1 if seq.end == "return" else 0):
                 p, d = ok[0]
                 end = b if seq.end == "exit" else a
                 attempts.append(Attempt(t_start, end, visited, errs, d))
@@ -141,8 +142,9 @@ def find_sequences(seq: Sequence, entries: list[tuple[str, float, float]], other
                 if seq.overlap:
                     last_done = i
                     i = i0 + 1  # sliding window: the next pattern may start at the following entry
-                else:
+                elif seq.end != "return":
                     i += 1
+                # ("return": the re-entry into the first step that completed this one may start the next)
                 continue
             cur = [ok, prog, t_start, visited, errs, i0]
             i += 1

@@ -22,7 +22,8 @@ KINDS = ("zone", "point", "line", "group", "sequence")  # one tab each, in this 
 MAP_KINDS = ("zone", "point", "line")  # objects drawn on the map (selected there too)
 NO_COLOR = "#94a3b8"
 
-SEQ_END = {"entry": "Complete on entering the last step", "exit": "Complete on leaving the last step"}
+SEQ_END = {"entry": "Complete on entering the last step", "exit": "Complete on leaving the last step",
+           "return": "Complete on returning to the first step"}
 
 # ANY-maze style sentences for the zone and sequence options: attribute -> (text when False, text when True)
 ZONE_SENTENCES = {

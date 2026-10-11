@@ -321,7 +321,8 @@ all cells.
 
 Ordered steps of zones/groups. Options: must begin at the first step (off = rotations such as ABC/BCA/CAB count —
 spontaneous alternation), other zones allowed between steps, both directions, overlapping, complete on entering or
-leaving the last step, time limit. Entering a step zone out of order is an error and ends the attempt. Measures:
+leaving the last step or on returning to the first step (ANY-maze's "return to first step": A → B → C → A), time
+limit. Entering a step zone out of order is an error and ends the attempt. Measures:
 completed, attempts, incomplete, errors, completion %, latency to first (to its completion) and latency to the
 start of the first (entry into its first step), first/mean/min/max duration, mean time
 between, rate, total time in sequences, completed reversed, and the distance travelled during the completed
@@ -2079,8 +2080,12 @@ Selecting a time-period row (with *Time periods* shown — ribbon ▸ Time perio
 
 **Animated playback**: the bar under the track plot replays the track — ▶ draws the path progressively with the
 animal's current position as an orange dot (markers appear when their time is reached), at **0.25× to 16×** real
-time; drag the **time slider** to show the track up to any moment. At the end (or when paused at the end) the whole
-track is shown again. Playback is not available with *Split by period*.
+time; drag the **time slider** to show the track up to any moment. **Trail**: *Whole track* draws everything up to
+the current moment; *Last 2–60 s* shows only the track and markers of the last seconds, as ANY-maze's "only show
+the track for a certain duration". At the end (or when paused at the end) the whole track is shown again (with a
+trail, only its last seconds). Playback is not available with *Split by period*. **Save playback** (ribbon ▸
+Figure) writes the animation to an MP4 / AVI file at the chosen speed and trail (25 frames per second, the
+figure's size), for presentations.
 
 ### Heat maps (Results ▸ Data ▸ Heat maps)
 

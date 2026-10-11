@@ -15,6 +15,7 @@ from ....core import charts, plots
 from ....core.apparatus import PointOfInterest, unique_name
 from ....core.measures import kinematics
 from ....core.pauses import period_frames
+from ....core.playback import render_track_video
 from ....core.videoexport import export_video
 from ...figures import FIG_FILTER, figure_to_clipboard
 from ...widgets import PlotCanvas, cv_to_qpixmap, error_box
@@ -251,6 +252,47 @@ class PlotViewsMixin:
 
         return self._run(f"Exporting video of test {test.id}", work, on_done=done)
 
+    @staticmethod
+    def _track_figure(tr, app, frame, o: dict, markers, settings):
+        return plots.track_plot(tr, app, frame=frame, size=(4.2, 4), color_by=o["color_by"], part=o["part"],
+                                markers=markers, colorbar=o["color_by"] != "none", settings=settings)
+
+    def export_playback(self, path: str | None = None, speed: float | None = None, fps: float = 25.0):
+        """Save the animated track plot of the selected test as a video (ANY-maze's "save plot-playback as a
+        video"): the current colour, markers and trail options at the playback bar's speed (or `speed`)."""
+        d = self._detail
+        if d is None or self.project is None or self.plot_options()["split"]:
+            error_box(self, "Export playback", "Select a test with a (single, not split) track plot first.")
+            return
+        tr, app, test = d["track"], d["app"], d["test"]
+        if tr is None or len(tr) < 2:
+            error_box(self, "Export playback", "This test has no track to play.")
+            return
+        self.playback.pause()
+        if path is None:
+            base = str(self.project.exports_dir() / f"test_{test.id:04d}_track.mp4") if self.project.path else ""
+            path, _ = QFileDialog.getSaveFileName(self, "Save the playback as a video", base,
+                                                  "MPEG-4 video (*.mp4);;AVI video (*.avi)")
+            if not path:
+                return
+        if Path(path).suffix.lower() not in (".mp4", ".m4v", ".mov", ".avi"):
+            path += ".mp4"
+        o = self.plot_options()
+        s = self.project.analysis_for(test)
+        markers = plots.behaviour_markers(tr, app, s, d["events"], self.project.behaviours) if o["markers"] else None
+        fig = self._track_figure(tr, app, self._frame(test), o, markers, s)  # a figure of its own: rendered off the GUI thread
+        speed = self.playback.speed if speed is None else float(speed)
+        trail = self.playback.trail_s
+
+        def work(progress, stop):
+            return render_track_video(fig, tr, path, speed=speed, fps=fps, trail_s=trail, progress=progress,
+                                      should_stop=stop)
+
+        def done(out):
+            self.main.status(f"Playback video saved: {out}" if out else "Playback export cancelled")
+
+        return self._run(f"Saving the playback of test {test.id}", work, on_done=done)
+
     def _frame(self, test):
         if test.id not in self._frames:
             self._frames[test.id] = self.project.start_frame(test)
@@ -438,9 +480,7 @@ class PlotViewsMixin:
                     fig = plots.segmented_track_plot(full, app, periods, frame=frame, color_by=o["color_by"],
                                                      part=o["part"], markers=fm, settings=s, pauses=test.pauses)
                 else:
-                    fig = plots.track_plot(tr, app, frame=frame, size=(4.2, 4), color_by=o["color_by"],
-                                           part=o["part"], markers=markers, colorbar=o["color_by"] != "none",
-                                           settings=s)
+                    fig = self._track_figure(tr, app, frame, o, markers, s)
                 self.track_canvas.set_figure(fig)
                 if o["split"]:
                     self.playback.detach()

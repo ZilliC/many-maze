@@ -366,6 +366,14 @@ Still open:
 
 ---
 
+## 17b. Gaps found on 2026-10-10 (ANY-maze feature pages re-read against the code)
+
+- [x] Track-plot playback saved as a video (Results ▸ Track plots ▸ *Save playback*; `core/playback.py`)
+- [x] Playback trail: show only the last 2–60 s of the track and markers while playing
+- [x] Sequences that complete on returning to the first step (A → B → C → A), besides on entering / leaving the
+      last step
+- [x] All-NaN warning in the body length of a test whose head track has no valid point
+
 ## 18. Beyond parity (2026-10-10)
 
 Feature parity with ANY-maze is done; what is left is proof, real use, distribution and code health. Roughly in
