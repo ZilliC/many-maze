@@ -215,3 +215,11 @@ def test_new_device_free_pin_and_watchdog_default():
     assert ioconfig.watchdog_ms(cfg) == 0  # no outputs: off unless set
     cfg["channels"].append({"name": "led", "kind": "output", "pin": 13})
     assert ioconfig.watchdog_ms(cfg) == ioconfig.DEFAULT_WATCHDOG_MS and ioconfig.watchdog_ms({**cfg, "watchdog_ms": 0}) == 0
+
+
+def test_player_command_lines():
+    assert io.player_args("afplay", "/a/b.wav", 0.5) == ["afplay", "-v", "0.5", "/a/b.wav"]
+    assert io.player_args("aplay", "/a/b.wav", 0.5) == ["aplay", "/a/b.wav"]
+    ps = io.player_args("powershell", "C:\\Users\\O'Neil\\t.wav", 1.0)
+    assert ps[:2] == ["powershell", "-NoProfile"] and ps[-1] == \
+        "(New-Object Media.SoundPlayer 'C:\\Users\\O''Neil\\t.wav').PlaySync()"

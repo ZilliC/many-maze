@@ -1,6 +1,6 @@
 """The ``audio`` I/O device: tones, white noise and sound files, once or repeated, on the computer's sound output
-(WAV generated with NumPy and played with ``afplay``/``paplay``/``aplay``, or by a player installed by the GUI in
-``AudioDevice.player``)."""
+(WAV generated with NumPy and played with ``afplay``/``paplay``/``aplay`` or PowerShell on Windows, or by a player
+installed by the GUI in ``AudioDevice.player``)."""
 
 from __future__ import annotations
 
@@ -88,7 +88,8 @@ class AudioDevice(Device):
             return None
         if want not in ("auto", None, ""):
             return want if shutil.which(want) else None
-        cands = ["afplay"] if sys.platform == "darwin" else ["paplay", "aplay"]
+        cands = (["afplay"] if sys.platform == "darwin" else ["powershell"] if sys.platform.startswith("win")
+                 else ["paplay", "aplay"])
         return next((c for c in cands if shutil.which(c)), None)
 
     def audio(self, cmd: str, **kw) -> bool:
@@ -140,9 +141,7 @@ class AudioDevice(Device):
                 return False
         if self.backend is None:
             return False
-        args = [self.backend, path]
-        if self.backend == "afplay":  # pragma: no cover - macOS
-            args = ["afplay", "-v", f"{volume:g}", path]
+        args = player_args(self.backend, path, volume)
         try:  # pragma: no cover - depends on the sound system
             h = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if not track:
@@ -173,6 +172,18 @@ class AudioDevice(Device):
     def close(self):
         self.stop()
         super().close()
+
+
+def player_args(backend: str, path: str, volume: float) -> list[str]:
+    """The command line that plays a WAV file with ``backend``: ``afplay`` (macOS, with the volume), Windows'
+    PowerShell (.NET SoundPlayer; WAV only, at the file's own volume) or ``paplay`` / ``aplay`` (Linux)."""
+    if backend == "afplay":
+        return ["afplay", "-v", f"{volume:g}", path]
+    if backend == "powershell":
+        quoted = "'" + path.replace("'", "''") + "'"
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                f"(New-Object Media.SoundPlayer {quoted}).PlaySync()"]
+    return [backend, path]
 
 
 def _finished(p) -> bool:

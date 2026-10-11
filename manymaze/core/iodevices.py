@@ -22,8 +22,8 @@ Device types:
 * ``serial`` — any device driven by text lines; output channels have ``"on"``/``"off"`` command strings,
   input channels have ``"on"``/``"off"`` strings that are matched against received lines.
 * ``audio`` — the computer's sound output: tones, white noise and sound files, once or repeated (WAV generated
-  with NumPy and played with ``afplay``/``paplay``/``aplay``, or by a player installed by the GUI in
-  ``AudioDevice.player``; :mod:`.audio`).
+  with NumPy and played with ``afplay``/``paplay``/``aplay`` or PowerShell on Windows, or by a player installed
+  by the GUI in ``AudioDevice.player``; :mod:`.audio`).
 * ``serial_lines``, ``firmata``, ``nidaq``, ``labjack`` and ``notify`` (e-mail / SMS alerts): see :mod:`.iodrivers`;
   syringe pumps and balances: :mod:`.pumps` and :mod:`.scales`.
 
@@ -49,7 +49,7 @@ import threading
 import time
 from collections import deque
 
-from .audio import AudioDevice, _Loop, noise_samples, tone_samples, write_wav  # noqa: F401 (re-exported)
+from .audio import AudioDevice, _Loop, noise_samples, player_args, tone_samples, write_wav  # noqa: F401 (re-exported)
 from .iobase import SHOCKER_MAX_ON_S, Device, VirtualDevice  # noqa: F401 (re-exported)
 from .iocontrol import AnalogFilter, Thermostat, sensor_value  # noqa: F401 (re-exported)
 from .ioconfig import INPUT_KINDS, watchdog_ms
