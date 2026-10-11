@@ -702,7 +702,7 @@ def test_split_recording_labels_name_the_part_file():
     s.record_parts.append("/rec/test.mp4")
     s._rec_frames = 600 + 25  # 2nd part (600 frames each), 2.5 s into it
     part, t = s._recording_position()
-    assert part == "/rec/test_part002.mp4" and t == pytest.approx(2.5)
+    assert Path(part) == Path("/rec/test_part002.mp4") and t == pytest.approx(2.5)
     s.finish()
 
 

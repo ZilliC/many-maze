@@ -40,7 +40,7 @@ def playlist_parts(path) -> list[str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        q = Path(line).expanduser()
+        q = Path(line.replace("\\", "/")).expanduser()  # (written on Windows by an older version)
         parts.append(str(q if q.is_absolute() else p.parent / q))
     if not parts:
         raise IOError(f"The playlist {p.name} lists no video files")
@@ -48,13 +48,14 @@ def playlist_parts(path) -> list[str]:
 
 
 def write_playlist(path, parts) -> Path:
-    """Write an M3U playlist of video files (paths relative to the playlist where possible)."""
+    """Write an M3U playlist of video files (paths relative to the playlist where possible, with "/" so that the
+    playlist opens on every system)."""
     p = Path(path)
     lines = ["#EXTM3U"]
     for part in parts:
         q = Path(part).resolve()
         try:
-            lines.append(os.path.relpath(q, p.parent.resolve()))
+            lines.append(Path(os.path.relpath(q, p.parent.resolve())).as_posix())
         except ValueError:  # another drive (Windows)
             lines.append(str(q))
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")

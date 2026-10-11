@@ -410,4 +410,7 @@ Code health (done on 2026-10-10, #14):
       `audio.py`; `core/live.py` → `liveanalysis.py`; `gui/pages/experiment.py` → `experiment_calcs.py`,
       `experiment_keys.py` (the old modules re-export the moved names)
 - [x] Windows groundwork: a non-blocking Windows test job in CI and sound through PowerShell on Windows (no player
-      was found there); whether to ship for Windows is still open (Distribution above)
+      was found there); whether to ship for Windows is still open (Distribution above). First Windows run: 1245 of
+      1252 tests passed. Fixed: playlists of split recordings were written with "\\" (they would not open on a
+      Mac), and tests that assumed "/" or a fast timer. Left: the main window and the Apparatus ribbon are wider than
+      the layout tests allow with Windows' fonts, and the 48-camera test gets too few frames on the 2-core runner

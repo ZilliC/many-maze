@@ -438,8 +438,11 @@ def test_serial_lines_device():
     dm.set_output("ttl", "inv", 1)
     assert port.rts is True and port.dtr is False
     port.cts = True
-    time.sleep(0.01)
-    assert ("ttl", "beam", "input", 1) in dm.read_inputs()
+    got, t0 = [], time.monotonic()
+    while ("ttl", "beam", "input", 1) not in got and time.monotonic() - t0 < 2:  # (Windows' timer: ~15 ms)
+        time.sleep(0.01)
+        got += dm.read_inputs()
+    assert ("ttl", "beam", "input", 1) in got
     dm.close()
     assert port.closed and port.rts is False
 
