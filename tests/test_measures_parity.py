@@ -2,6 +2,7 @@
 
 import math
 
+import cv2
 import numpy as np
 import pytest
 
@@ -567,6 +568,72 @@ def test_tail_suspension_ignores_swinging():
     # without pixel-change data the motion mode cannot work: immobility from the speed, with a warning
     res = analyse(make_track(hold((100, 150), 100), head=False), app, FST)
     assert res["Time immobile (s)"] == pytest.approx(4.0) and "No pixel-change data" in res["Warnings"]
+
+
+def _side_view_swim(kind: str, seconds: float, motion_area: str, repeat: int = 2, seed: int = 4):
+    """Track of a side-view forced swim video made of real images: a light animal in front of water whose surface
+    ripples (a patch of random size and texture in every image, away from the animal), either floating ("float":
+    drifting to and fro, its outline unchanged) or struggling ("swim": its outline changing in every image).
+    Each image is shown `repeat` times with a little codec noise, as in a 30 frames/s video stored at 60."""
+    from manymaze.core.tracking import ArenaTracker, DetectionSettings, TrackBuilder
+
+    rng = np.random.default_rng(seed)
+    app = templates.build("forced_swim", 20, 20, 200, 200)
+    H = W = 240
+    floor = np.full((H, W), 110, np.uint8)
+    s = DetectionSettings(min_area_px=100, blur=3, motion_area=motion_area)
+    tr = ArenaTracker(s, app.arena_or_bounds().mask((H, W)))
+    tr.set_background(floor)
+    fps = 30.0 * repeat
+    b = TrackBuilder()
+    for k in range(int(seconds * 30)):
+        img = floor.astype(np.float32) + rng.normal(0, 3, (H, W))
+        rw, rh = rng.integers(10, 60), rng.integers(4, 14)  # the ripples
+        img[40:40 + rh, 60:60 + rw] += rng.choice([-45.0, 45.0], (rh, rw))
+        axes = (16, 8) if kind == "float" else (int(rng.integers(11, 21)), int(rng.integers(5, 11)))
+        x = 120 + 60 * math.sin(2 * math.pi * k / 120)  # drifting to and fro, up to 3 px per image
+        cv2.ellipse(img, (round(16 * x), 16 * 150), (16 * axes[0], 16 * axes[1]), 0, 0, 360, 230, -1, cv2.LINE_AA, 4)
+        for r in range(repeat):
+            frame = img + (rng.normal(0, 0.5, (H, W)) if r else 0)
+            b.add(len(b) / fps, tr.process(np.clip(frame, 0, 255).astype(np.uint8))[0][0])
+    return b.build(fps), app
+
+
+def test_forced_swim_immobility_from_a_side_view_video():
+    """Real forced swim videos (30 frames/s stored at 60, the water rippling around a floating rat) gave no
+    immobility at all: the motion of every repeated image was ~0, so a steadily drifting animal's alternated
+    between nothing and twice its value — a struggle to the struggle index — and the ripples counted too."""
+    tr, app = _side_view_swim("float", 8, "animal")
+    m = tr.motion[2:]  # (the first image has nothing to change from)
+    assert np.isfinite(m).all() and (m > 0).all()  # a repeated image keeps the motion of the image it repeats
+    res = analyse(tr, app, FST)
+    assert res["Time immobile (s)"] == pytest.approx(8.0, abs=0.1)
+    res = analyse(_side_view_swim("swim", 8, "animal")[0], app, FST)  # struggling still is struggling
+    assert res["Time immobile (s)"] == 0
+    # counted over the whole arena, the ripples of the water are a struggle of their own
+    res = analyse(_side_view_swim("float", 8, "arena")[0], app, FST)
+    assert res["Time immobile (s)"] < 1
+    # a video without repeated images is not affected: no frame takes the previous one's motion
+    tr = _side_view_swim("swim", 4, "animal", repeat=1)[0]
+    assert np.count_nonzero(np.diff(tr.motion[1:]) == 0) <= 2
+    # the forced swim and tail suspension types of test count the pixel change around the animal only …
+    from manymaze.core.project import Project
+
+    p = Project()
+    assert p.detection.motion_area == "arena"
+    p.set_protocol("forced_swim")
+    assert p.detection.motion_area == "animal"
+    p.set_protocol("fear_conditioning")  # … the others in the whole arena
+    assert p.detection.motion_area == "arena"
+    # experiments saved before the setting: forced swim ones count the animal the next time they are tracked
+    d = Project(protocol="tail_suspension").to_dict()
+    del d["detection"]["motion_area"]
+    assert Project.from_dict(d).detection.motion_area == "animal"
+    d["detection"]["motion_area"] = "arena"  # an explicit choice is kept
+    assert Project.from_dict(d).detection.motion_area == "arena"
+    d = Project(protocol="open_field").to_dict()
+    del d["detection"]["motion_area"]
+    assert Project.from_dict(d).detection.motion_area == "arena"
 
 
 def test_forced_swim_protocol_and_live_immobility():

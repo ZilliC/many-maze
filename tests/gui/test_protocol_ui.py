@@ -184,11 +184,13 @@ def test_forced_swim_settings_on_the_protocol_page(win):
     assert p.protocol == "forced_swim" and p.analysis.immobility_mode == "motion" and not ex.fst_box.isHidden()
     assert ex.fst_form.editors["immobility_mode"].currentData() == "motion"
     assert ex.an_form.editors["immobility_mode"].currentData() == "motion"
+    # … from the pixel change around the animal (not the water), shown under Animal tracking
+    assert p.detection.motion_area == "animal" and ex.det_form.editors["motion_area"].currentData() == "animal"
     # the settings are the Analysis ones: an edit on either page shows on the other
-    ex.fst_form.editors["fst_threshold_pct"].setValue(3.5)
+    ex.fst_form.editors["fst_threshold_pct"].setValue(4.5)
     ex.fst_form.editors["fst_three_state"].setChecked(True)
-    assert p.analysis.fst_threshold_pct == 3.5 and p.analysis.fst_three_state
-    assert ex.an_form.editors["fst_threshold_pct"].value() == 3.5
+    assert p.analysis.fst_threshold_pct == 4.5 and p.analysis.fst_three_state
+    assert ex.an_form.editors["fst_threshold_pct"].value() == 4.5
     ex.an_form.editors["min_fst_immobile_s"].setValue(2.0)
     assert ex.fst_form.editors["min_fst_immobile_s"].value() == 2.0
     # the tail suspension template too; another type of test hides them and goes back to the speed
@@ -227,7 +229,7 @@ def test_settings_form_sections():
     form = SettingsForm(DETECTION_SPEC + [("extra_attr", "Some new setting", "int", (0, 9, 1), "")],
                         sections=DETECTION_SECTIONS)
     assert list(form.forms) == [t for t, _a in DETECTION_SECTIONS]
-    assert form.forms["Tracking quality"].rowCount() == 6  # unknown attributes land in the last section
+    assert form.forms["Tracking quality"].rowCount() == 7  # unknown attributes land in the last section
     assert all(w.minimumWidth() >= 200 for a, w in form.editors.items() if a in form.labels)
     s = DetectionSettings()
     s.extra_attr = 3
