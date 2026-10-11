@@ -840,6 +840,7 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
         self.project.settings_extra["mode"] = self.mode.currentData()
         self.main.mark_dirty()
         self.proc_editor.validate()  # (Input/output only: what needs the animal is an error)
+        self._show_event_period_problems([])  # (and time periods at zone entries / exits never happen)
         if self.mode.currentData() == "io_only" and not self.project.io_devices:
             self.main.status("Input/output only: set up the I/O devices of the chambers from a preset with "
                              "“Operant chambers…”.")
@@ -1288,8 +1289,8 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
         out from other trials, circular reference: they are left out or end at the end of the test)."""
         p = self.project
         self._show_rejected(self.ev_periods_lbl, bad, "the offset, duration and occurrence must be numbers")
-        problems = check_periods(p.analysis.event_periods, p.calculations,
-                                 info_columns(p) + [ERROR_COLUMN]) if p is not None else []
+        problems = check_periods(p.analysis.event_periods, p.calculations, info_columns(p) + [ERROR_COLUMN],
+                                 io_only=p.settings_extra.get("mode") == "io_only") if p is not None else []
         if problems:
             text = "\n".join(f"“{label}”: {msg}" for label, msg in problems)
             self.ev_periods_lbl.setText((self.ev_periods_lbl.text() + "\n" if bad else "") + text)

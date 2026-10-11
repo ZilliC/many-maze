@@ -267,11 +267,11 @@ def fixed_period_name(arg_texts: list[str]) -> str | None:
     return v if isinstance(v, str) else None
 
 
-def check_periods(defs, calculations, info=()) -> list[tuple[str, str]]:
-    """Problems of period definitions that use calculations, as (label, message): a calculation that does not
-    exist, one worked out from other trials or the information columns (not known per test), or a circular
-    reference (the calculation uses the period itself through result_for_period, directly or through other
-    calculations)."""
+def check_periods(defs, calculations, info=(), io_only: bool = False) -> list[tuple[str, str]]:
+    """Problems of period definitions, as (label, message): a calculation that does not exist, one worked out from
+    other trials or the information columns (not known per test), or a circular reference (the calculation uses
+    the period itself through result_for_period, directly or through other calculations); with ``io_only`` (tests
+    without a track) a start or end at a zone entry or exit, which never happens."""
     from .calculations import in_loop, plan
 
     calcs = [c for c in calculations or [] if getattr(c, "column", "")]
@@ -284,6 +284,14 @@ def check_periods(defs, calculations, info=()) -> list[tuple[str, str]]:
         if not isinstance(p, dict):
             continue
         label = str(p.get("label") or f"Period {i + 1}")
+        if io_only:
+            end = p.get("end") if isinstance(p.get("end"), dict) else {}
+            if str(p.get("anchor") or "").lower() in _ZONE_ANCHORS:
+                out.append((label, "starts at a zone entry or exit, which input/output only tests (no video) never "
+                                   "have: it is left out"))
+            if str(end.get("anchor") or "").lower() in _ZONE_ANCHORS:
+                out.append((label, "ends at a zone entry or exit, which input/output only tests (no video) never "
+                                   "have: it runs to the end of the test"))
         for col in sorted(calculation_columns(p)):
             if col not in cols:
                 out.append((label, f"no calculation called “{col}”"))
