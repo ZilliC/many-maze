@@ -171,6 +171,24 @@ def test_batches_and_tracking(page):
     assert abs(float(p.load_tracks(p.get_test(2))[0].meta["video_start_s"]) - 1.0) < 1e-6
     assert not page.main.dirty  # saved after tracking
     assert "0 pending" in page.summary.text()
+    assert page.track_warning_box is None  # the demo's tracks are sound
+
+
+def test_tracks_that_look_wrong_are_reported(page):
+    """Tracks with implausible jumps (core.batch.track_warnings) are listed after tracking, in a box that does not
+    wait (tracking may run unattended)."""
+    warning = "Test 1 (A1): 92% of the distance is in 171 moves faster than 300 cm/s"
+    page._tracking_done({"tracked": [1], "cancelled": False, "errors": [], "warnings": [warning], "workers": 1})
+    assert "1 track looks wrong" in page.main.statusBar().currentMessage()
+    box = page.track_warning_box
+    assert box is not None and box.isVisible() and box.icon() == QMessageBox.Warning
+    assert "1 track looks wrong" in box.text() and warning in box.informativeText()
+    assert "Remove jumps faster than" in box.informativeText()
+    box.close()
+    box = page.show_track_warnings([f"Test {i}: …" for i in range(20)], limit=15)
+    assert "20 tracks look wrong" in box.text() and "… and 5 more" in box.informativeText()
+    assert "Test 15" not in box.informativeText()
+    box.close()
 
 
 def test_import_tracks(page, tmp_path, monkeypatch):

@@ -243,7 +243,9 @@ Retirement, the dose calculator and blind testing are described in §6.
 
 ## 3. Apparatus
 
-Load a frame from a video (or a test's video) as background, then either **create from template** — drag a
+Load a frame from a video (*Background ▸ Video file…*) or a test's video (*Background ▸ Test video*, or the
+*Use a test's video…* list under the map) as background — also in a new experiment before there is any apparatus:
+the first apparatus you create starts with that background — then either **create from template** — drag a
 rectangle around the apparatus and the template places all zones, points and lines and calibrates distances
 from the real size you enter — or draw your own:
 
@@ -409,7 +411,10 @@ when no range is set. *Undo* reverts the swap.
    seconds (0.5 by default). Its frames become missing. A genuine fast run does not come back to where it started,
    so it is kept; choose a limit well above the animal's top speed (e.g. 150 cm/s for a mouse, 300 cm/s for a rat).
    The number removed is the *Jumps removed* information column. Off (0) by default, so tracks made before keep
-   their positions.
+   their positions. With it off, **Otherwise remove jumps faster than 300 cm/s** (on for new experiments, off in
+   experiments made before this version) still removes, on a calibrated apparatus, the jumps no animal could make
+   in an apparatus (300 cm/s, about 1.5× a rat's sprint): almost always a reflection or a shadow tracked for a
+   moment. Uncalibrated apparatus (pixels) are left alone.
 7. Gaps up to *Fill gaps in the track of up to* seconds are filled (jumps included); optional smoothing.
 
 **Ignore lighting changes** (Detection settings): before each frame is compared with the background, its
@@ -1740,8 +1745,13 @@ maps, group heat maps, results and statistics.
   animal turns back by more than 90°) of at least the *Partial rotation angle* (default 90°) during which no
   rotation was completed; each counts where the turn stopped.
 * **Tracking quality**: centre and head positions recorded, head tracked (% of tracked frames), tracking quality
-  (% of frames where the animal was detected, its head found when the head is tracked, and its area within half to
-  twice its usual area — larger or smaller blobs are usually shadows, reflections or merges). ANY-maze's own
+  (% of frames where the animal was detected, its head found when the head is tracked, its area within half to
+  twice its usual area — larger or smaller blobs are usually shadows, reflections or merges — and its position one
+  it could have reached from the previous one), and **implausible jumps**: the moves between consecutive detected
+  positions faster than any animal moves in an apparatus (300 cm/s; uncalibrated, 25 body lengths per second) — a
+  jump to a reflection or another object and back counts two. A sound track has none; when, after tracking, such
+  moves make up 5 % or more of a track's distance, the tests are listed in a warning (and by `manymaze track`), as
+  their distances and speeds are too high: check them in Review and improve the detection, or remove the jumps. ANY-maze's own
   *Tracking quality* (Good / Poor) is not available: its reference only says that it weighs the untracked time,
   long gaps more than short ones, against the test duration, without the formula, so it cannot be reproduced; use
   the percentage, *Time not detected* and the track plots instead.

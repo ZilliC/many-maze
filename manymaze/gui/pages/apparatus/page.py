@@ -368,19 +368,26 @@ class ApparatusPage(Page):
         p = self.project
         return p is not None and not security.can(p, "edit_protocol")
 
+    @property
+    def can_edit_background(self) -> bool:
+        """A background image can be loaded: an experiment is open and not locked. No apparatus is needed (the first
+        one is usually drawn on it; it inherits the background, see BackgroundController)."""
+        return self.project is not None and not self.locked
+
     def _set_enabled(self, on: bool):
         locked = self.locked
         edit = on and not locked
         for a in [a for k, a in self.tool_actions.items() if k != "select"] + [
                 self.undo_act, self.redo_act, self.grid_act, self.paste_act, self.dup_act, self.ren_act,
-                self.del_act, self.bg_act, self.testvid_act, self.lens_act, self.clear_cal_act, self.delete_sel_act,
-                self.group_act, self.seq_act]:
+                self.del_act, self.lens_act, self.clear_cal_act, self.delete_sel_act, self.group_act, self.seq_act]:
             a.setEnabled(edit)
+        for a in (self.bg_act, self.testvid_act):
+            a.setEnabled(self.can_edit_background)
         for a in (self.tool_actions["select"], self.copy_act, self.export_act, self.map_img_act, self.select_all_act):
             a.setEnabled(on)
         for w in (self.panel.tabs, self.ppc_spin, self.btn_cal, self.btn_cal_clear):
             w.setEnabled(edit)
-        self.bg.set_enabled(edit)
+        self.bg.set_enabled(self.can_edit_background)
         self.view.setInteractive(not locked)  # nothing on the map can be selected, moved or reshaped
         self.lock_lbl.setVisible(locked)
         for a in (self.new_act, self.import_act, self.tpl_act):

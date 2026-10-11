@@ -195,6 +195,20 @@ class Track:
                 self.outline[drop] = None
         return jumps
 
+    def implausible_steps(self, max_speed: float, scale: float = 1.0) -> np.ndarray:
+        """Per frame: the animal was detected here at a position it could not have reached from the previous detected
+        position (a speed above max_speed, units/s; positions in px × scale): a tracking error, usually the jump to
+        or back from a reflection, a shadow or another object. Gaps count their time (a lost animal may reappear far
+        away)."""
+        out = np.zeros(len(self), bool)
+        idx = np.flatnonzero(self.detected & np.isfinite(self.x) & np.isfinite(self.y))
+        if not max_speed or max_speed <= 0 or len(idx) < 2:
+            return out
+        d = np.hypot(np.diff(self.x[idx]), np.diff(self.y[idx])) * scale
+        dt = np.diff(self.t[idx])
+        out[idx[1:]] = (dt > 0) & (d > max_speed * dt)
+        return out
+
     def smooth(self, window: int = 5) -> "Track":
         """Centred moving-average smoothing of positions (window in frames, odd).  The orientation follows: it is
         recomputed from the smoothed head and tail, or (frames without them) averaged as a direction."""

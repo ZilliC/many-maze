@@ -161,6 +161,7 @@ class RecoveredSession(Session):
         self.io_only = bool(d.get("io_only"))  # an I/O-only test (live.IOSession): no track, its own clock
         self.apparatus = None
         self.scale = 1.0  # apparatus units per pixel, for jump removal (recover() sets the test's)
+        self.calibrated = False  # ... and whether they are centimetres
         self.fps = float(d.get("fps") or 25.0)
         self.duration_s = float(d.get("duration_s") or 0.0)
         self.settings = DetectionSettings.from_dict(d.get("settings"))
@@ -227,7 +228,7 @@ class RecoveredSession(Session):
         tr.meta["source"] = "live"
         tr.meta["recovered"] = True
         cal = (self.calibration or {}).get("px_per_cm")
-        return postprocess(tr, self.settings, 1.0 / float(cal) if cal else self.scale)
+        return postprocess(tr, self.settings, 1.0 / float(cal) if cal else self.scale, bool(cal) or self.calibrated)
 
 
 def recover(project) -> list:
@@ -276,6 +277,7 @@ def recover(project) -> list:
         rec = d.get("record_path")
         app = project.get_apparatus(test.apparatus)
         s.scale = app.scale if app is not None else 1.0
+        s.calibrated = app is not None and bool(app.px_per_cm)
         try:
             ok = save_live_test(project, test, s, recorded_video(rec))
         except Exception:
