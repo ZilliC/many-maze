@@ -40,7 +40,7 @@ def _names(project) -> dict[str, set]:
         zones.update(z.name for z in a.zones)
         zones.update(g.name for g in a.groups)
         points.update(p.name for p in a.points)
-        lines.update(l.name for l in a.lines)
+        lines.update(ln.name for ln in a.lines)
     beh = {b.name for b in (project.behaviours if project else [])}
     io = set()
     for d in getattr(project, "io_devices", None) or []:

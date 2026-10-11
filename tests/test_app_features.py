@@ -315,7 +315,9 @@ def _wait(cond, timeout=5.0):
 
 def test_camera_drop_out_is_recovered():
     _FlakyCamera.opened = 0
-    opener = lambda *a: _FlakyCamera(*a, broken_opens=(2,))  # the first reopening fails, the next works
+    def opener(*a):  # the first reopening fails, the next works
+        return _FlakyCamera(*a, broken_opens=(2,))
+
     r = _Reader(SourceSpec(0), opener=opener)
     r.start()
     assert _wait(lambda: r.frames >= 8)

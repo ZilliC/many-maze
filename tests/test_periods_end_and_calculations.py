@@ -13,7 +13,7 @@ from manymaze.core.apparatus import Zone
 from manymaze.core.calculations import Calculation, check_calculation, plan
 from manymaze.core.export import protocol_report
 from manymaze.core.geometry import rect
-from manymaze.core.measures import AnalysisSettings, all_periods, analyse, analyse_segmented
+from manymaze.core.measures import all_periods, analyse, analyse_segmented
 from manymaze.core.periods import (NO_END_WARNING, anchor_times, check_periods, describe_period, event_periods,
                                    resolve_periods)
 from manymaze.core.project import Project

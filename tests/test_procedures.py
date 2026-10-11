@@ -156,7 +156,9 @@ def test_nested_if_else_loops_and_variables():
 
 
 def test_concurrent_handlers_and_modes():
-    zones = lambda t: {"zones": {"A": 1 <= t < 2 or 3 <= t < 3.5 or 4 <= t < 6}}
+    def zones(t):
+        return {"zones": {"A": 1 <= t < 2 or 3 <= t < 3.5 or 4 <= t < 6}}
+
     body = [DO("mark", name="in"), W(1), DO("mark", name="out")]
     for mode, n_in, n_out in (("ignore", 2, 2), ("parallel", 3, 3), ("restart", 3, 2)):
         pr = proc(WHEN("zone_enter", [dict(b) for b in body], zone="A", mode=mode))

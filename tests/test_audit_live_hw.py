@@ -25,7 +25,7 @@ from manymaze.core.livemonitor import input_rows
 from manymaze.core.project import Project
 from manymaze.core.pumps import NewEraProtocol, SyringePumpDevice, crc16
 from manymaze.core.scales import ScaleDevice, ScaleError, ScaleTimeout, parse_weight
-from manymaze.core.session import END_ERROR, save_live_test
+from manymaze.core.session import END_ERROR
 from manymaze.core.tracking import DetectionSettings
 
 FIRMWARE = Path(__file__).resolve().parents[1] / "firmware" / "manymaze_io" / "manymaze_io.ino"

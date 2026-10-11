@@ -200,9 +200,9 @@ def draw_apparatus(scene: QGraphicsScene, app: Apparatus | None, labels: bool = 
             ring = QGraphicsEllipseItem(p.x - rr, p.y - rr, 2 * rr, 2 * rr)
             ring.setPen(outline(1.0, Qt.DotLine))
             group.addToGroup(ring)
-    for l in app.lines:
-        it = QGraphicsLineItem(l.x1, l.y1, l.x2, l.y2)
-        pen = QPen(QColor(l.color))
+    for ln in app.lines:
+        it = QGraphicsLineItem(ln.x1, ln.y1, ln.x2, ln.y2)
+        pen = QPen(QColor(ln.color))
         pen.setCosmetic(True)
         pen.setWidthF(2)
         it.setPen(pen)

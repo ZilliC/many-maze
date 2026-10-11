@@ -155,7 +155,9 @@ def test_entry_rules_head_body_exclusion():
     tr2 = make_track(np.vstack([line((60, 200), (200, 200), 40), hold((200, 200), 20)]), body_len=40)
     assert occupancy(tr2, app, S)[0]["Body 80"][-1]
     # head rule switches earlier than centre
-    first = lambda m: int(np.flatnonzero(m)[0])
+    def first(m):
+        return int(np.flatnonzero(m)[0])
+
     m2 = occupancy(tr2, app, S)[0]
     assert first(m2["Head zone"]) < first(m2["Centre"]) < first(m2["Body 80"])
     # global body rule from settings

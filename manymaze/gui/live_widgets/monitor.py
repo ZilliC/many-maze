@@ -63,8 +63,13 @@ class LiveChart(QWidget):
         if hi - lo < 1e-9:
             hi = lo + 1.0
         hi += 0.08 * (hi - lo)
-        sx = lambda t: r.left() + (t - t0) / (t1 - t0) * r.width()
-        sy = lambda v: r.bottom() - (v - lo) / (hi - lo) * r.height()
+
+        def sx(t):
+            return r.left() + (t - t0) / (t1 - t0) * r.width()
+
+        def sy(v):
+            return r.bottom() - (v - lo) / (hi - lo) * r.height()
+
         path = QPainterPath()
         started = False
         for t, v in zip(self.t, self.y):

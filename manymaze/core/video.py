@@ -128,7 +128,8 @@ def list_cameras(max_index: int = MAX_CAMERAS, max_gap: int = 4, opener=None) ->
     without a camera (indices can have gaps, e.g. Linux metadata nodes, but probing absent ones is slow).
     opener(i) -> a cv2.VideoCapture-like object (tests)."""
     if opener is None:
-        opener = lambda i: cv2.VideoCapture(i, camera_backend())
+        def opener(i):
+            return cv2.VideoCapture(i, camera_backend())
     found = []
     misses = 0
     for i in range(max_index):

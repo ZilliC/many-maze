@@ -6,10 +6,9 @@ import shutil
 import sys
 
 import pytest
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from manymaze.core import procedures as pr
 from manymaze.core import workflow as wf
 from manymaze.core.demo import create_demo_project
 from manymaze.core.procedures import programs

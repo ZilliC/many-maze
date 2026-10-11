@@ -205,7 +205,7 @@ def main():
         r = track_tests(p, p.tests, workers=w)
         times[r["workers"]] = time.perf_counter() - t0
         assert len(r["tracked"]) == len(p.tests), r
-    (w1, t1), (wn, tn) = sorted(times.items())[0], sorted(times.items())[-1]
+    (_, t1), (wn, tn) = sorted(times.items())[0], sorted(times.items())[-1]
     row(f"batch of {len(p.tests)} videos", f"{t1:.1f} s serial → {tn:.1f} s with {wn} workers "
                                           f"({t1 / tn:.1f}× faster)")
 

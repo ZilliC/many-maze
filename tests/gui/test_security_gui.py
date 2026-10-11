@@ -11,7 +11,7 @@ from manymaze.core import security as sec
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import PROJECT_FILE, Project
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.security_dialog import PasswordDialog, ProtectDialog, UsersDialog
+from manymaze.gui.security_dialog import PasswordDialog, ProtectDialog
 
 app = QApplication.instance() or QApplication([])
 

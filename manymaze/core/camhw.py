@@ -147,8 +147,11 @@ def describe_report(report: dict) -> str:
     """Human summary of an apply report {setting: "ok" | "unsupported" | "adjusted:<value>"}."""
     if not report:
         return ""
-    label = lambda k: (CONTROL_BY_NAME[k].label if k in CONTROL_BY_NAME else
-                       ("Auto " + AUTO_OF[k].label.lower() if k in AUTO_OF else k.replace("_", " ").capitalize()))
+
+    def label(k):
+        return (CONTROL_BY_NAME[k].label if k in CONTROL_BY_NAME else
+                ("Auto " + AUTO_OF[k].label.lower() if k in AUTO_OF else k.replace("_", " ").capitalize()))
+
     ok = [label(k) for k, v in report.items() if v == OK]
     bad = [label(k) for k, v in report.items() if v == UNSUPPORTED]
     adj = [f"{label(k)} ({v.split(':', 1)[1]})" for k, v in report.items() if str(v).startswith(ADJUSTED)]

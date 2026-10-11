@@ -51,8 +51,8 @@ def _draw_apparatus(ax, app: Apparatus, zones=True, labels=False):
                 ax.text(cx, cy, z.name, fontsize=6, ha="center", va="center", color=z.color)
     for p in app.points:
         ax.plot(p.x, p.y, "o", color=p.color, ms=4)
-    for l in app.lines:
-        ax.plot([l.x1, l.x2], [l.y1, l.y2], "-", color=l.color, lw=1)
+    for ln in app.lines:
+        ax.plot([ln.x1, ln.x2], [ln.y1, ln.y2], "-", color=ln.color, lw=1)
 
 
 def _limits(ax, app: Apparatus | None, track: Track | None, frame=None):

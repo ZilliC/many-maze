@@ -6,7 +6,7 @@ import csv
 import time
 
 import pytest
-from PySide6.QtCore import QEvent, QModelIndex, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDoubleSpinBox, QMessageBox, QWidget
