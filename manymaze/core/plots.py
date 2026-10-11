@@ -181,6 +181,7 @@ def _series_for(track: Track, app, color_by: str, settings=None):
 TRACK_PATH_GID = "track-path"
 TRACK_END_GID = "track-end"
 TRACK_MARKER_GID = "track-marker:"
+TRACK_FRAME_GID = "track-frame"  # the video frame under the track (replaced by the playback's frames)
 
 
 def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: str = "", color_by: str = "time",
@@ -199,7 +200,7 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
         ax = fig.add_subplot(111)
     if frame is not None:
         img = frame[..., ::-1] if frame.ndim == 3 else frame
-        ax.imshow(img, cmap="gray", alpha=0.6)
+        ax.imshow(img, cmap="gray", alpha=0.6, gid=TRACK_FRAME_GID)
     _draw_apparatus(ax, app)
     x, y = track.bodypart(part)
     if part != "centre" and not np.isfinite(x).any():
