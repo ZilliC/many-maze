@@ -244,6 +244,7 @@ def _export_report(p, a, out):
     from .core.export import results_workbook, wide_rows, write_table, write_xlsx
     from .core.project import result_columns
     from .core.reports import find_report
+    from .core.terminology import relabel
 
     if a.column or a.bins:
         sys.exit("--report sets the columns and the time periods: leave out --column and --bins")
@@ -255,11 +256,13 @@ def _export_report(p, a, out):
         if a.wide:
             info = set(p.info_columns())
             wide = wide_rows(rows, [c for c in cols if c not in info])
-            write_table(wide, out, result_columns(wide), sheet="By animal")
+            wide, wide_cols = relabel(p, wide, result_columns(wide))
+            write_table(wide, out, wide_cols, sheet="By animal")
         elif out.lower().endswith(".xlsx"):
             sheets, colmap = results_workbook(p, rows, cols, find_report(p.reports, a.report)["segmented"])
             write_xlsx(sheets, out, colmap)
         else:
+            rows, cols = relabel(p, rows, cols)
             write_table(rows, out, cols)
     except ValueError as e:  # e.g. more columns than a dBase table can hold
         sys.exit(str(e))

@@ -22,6 +22,7 @@ from matplotlib.figure import Figure
 from . import plots
 from . import stats as st
 from .stats import ALPHA, format_p, is_number, stars
+from .terminology import column_label
 
 WHOLE = "Whole test"
 NONE = "(none)"
@@ -62,7 +63,13 @@ class Analysis:
 
 
 # ---------------------------------------------------------------- formatting
-def label(v) -> str:
+def label(v, project=None) -> str:
+    """How a factor or choice is shown: with the experiment's terms (core.terminology) for its information
+    columns ("Group" → the treatment term)."""
+    if project is not None and isinstance(v, str):
+        c = column_label(project, v)
+        if c != v:
+            return c
     return DISPLAY.get(v, str(v))
 
 
@@ -253,7 +260,7 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
         if es:
             html += "<div>" + ", ".join(f"{escape(str(k))} = {v:.3f}" for k, v in es.items()) + "</div>"
     n_total = sum(d["n"] for d in res["descriptive"].values())
-    sub = _with(f"by {label(factor)}", context(period, filt, factor))
+    sub = _with(f"by {label(factor, project)}", context(period, filt, factor))
     if paired:
         sub += " · same animals at each level"
     sub = _with(sub, _alpha_note(alpha))
@@ -263,7 +270,7 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
             checks.append([f"{name} (normality)", g, fmt(pv), "non-normal" if pv < alpha else ""])
     for name, pv in st.variance_tests(gv).items():
         checks.append([f"{name} (equal variances)", "all", fmt(pv), "unequal" if pv < alpha else ""])
-    tables = [Table("Descriptive statistics", [label(factor)] + DESC_HEADERS,
+    tables = [Table("Descriptive statistics", [label(factor, project)] + DESC_HEADERS,
                     [[g] + _desc_row(d) for g, d in res["descriptive"].items()]),
               Table("Post-hoc comparisons", ["Comparison", "Difference", "p", "", "Method"],
                     [[f"{x['a']} vs {x['b']}", fmt(x.get("diff")), format_p(x["p"]), stars(x["p"], alpha),
@@ -303,8 +310,8 @@ def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None =
         rows = [r for r in rows if r.get("Period") != WHOLE]
     rows = [r for r in rows if is_number(r.get(measure))]
     by = by if by and by != NONE else None
-    sub = _with(_with(f"by {label(x)}" + (f" and {label(by)}" if by else ""), context(period, filt, x)),
-                _alpha_note(alpha))
+    by_text = f"by {label(x, project)}" + (f" and {label(by, project)}" if by else "")
+    sub = _with(_with(by_text, context(period, filt, x)), _alpha_note(alpha))
     if by is None:
         rows = [{**r, "_all": "All"} for r in rows]
     if not rows:
@@ -321,31 +328,32 @@ def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None =
     _y_range(project, measure, fig, [r.get(measure) for r in rows])
     if by is None:
         if design != "mixed":
-            hint = (f"<b>{escape(measure)}</b> across {escape(label(x))}.<br>Optionally select a 2nd independent "
-                    "variable for a two-factor analysis, or the “Repeated” design for a repeated-measures ANOVA.")
+            hint = (f"<b>{escape(measure)}</b> across {escape(label(x, project))}.<br>Optionally select a 2nd "
+                    "independent variable for a two-factor analysis, or the “Repeated” design for a "
+                    "repeated-measures ANOVA.")
             return Analysis(measure, sub, hint, figure=fig)
         res = st.rm_anova(rows, measure, within=x, levels=order)
         if "error" not in res:
             res["effects"] = [{"effect": x, "SS": res["SS"], "df": res["df"][0], "F": res["F"], "p": res["p"],
                                "p_gg": res["p_gg"], "df_error": res["df"][1]}]
             res["factors"] = [x]
-        title, desc = "Repeated-measures ANOVA", f"Within animals: {label(x)}"
+        title, desc = "Repeated-measures ANOVA", f"Within animals: {label(x, project)}"
     elif design == "mixed":
         res = st.mixed_anova(rows, measure, between=by, within=x, levels=order)
-        desc = f"{label(by)} (between animals) × {label(x)} (within animals)"
+        desc = f"{label(by, project)} (between animals) × {label(x, project)} (within animals)"
     elif design == "srh":
         res = st.scheirer_ray_hare(rows, measure, factor_a=by, factor_b=x)
-        desc = f"{label(by)} × {label(x)}, rank-based (H statistics, χ² p-values)"
+        desc = f"{label(by, project)} × {label(x, project)}, rank-based (H statistics, χ² p-values)"
     elif design == "art":
         res = st.art_anova(rows, measure, factor_a=by, factor_b=x)
-        desc = f"{label(by)} × {label(x)}, aligned rank transform"
+        desc = f"{label(by, project)} × {label(x, project)}, aligned rank transform"
     else:
         res = st.two_way_anova(rows, measure, factor_a=by, factor_b=x)
-        desc = f"{label(by)} × {label(x)} (between-subjects, type II SS)"
+        desc = f"{label(by, project)} × {label(x, project)} (between-subjects, type II SS)"
     if by is not None:
         title = res.get("test", "Two-way ANOVA")
     if "error" in res:
-        err = " ".join(label(w) for w in str(res["error"]).split(" "))
+        err = " ".join(label(w, project) for w in str(res["error"]).split(" "))
         return Analysis(measure, sub, f"<div style='font-size:16px'><b>{escape(title)}</b></div>{escape(err)}",
                         figure=fig, result=res)
     extra = f", residual df = {res['df_residual']}" if res.get("df_residual") is not None else ""
@@ -353,7 +361,8 @@ def two_factor(project, rows: list[dict], measure: str, x: str, by: str | None =
         extra += f", Greenhouse-Geisser ε = {res['epsilon_gg']:.3f}"
     h = any("H" in e for e in res["effects"])
     table = Table("Analysis of variance", ["Effect", "SS", "df", "H" if h else "F", "p", "", "p (GG)"],
-                  [[" × ".join(label(f) for f in str(e["effect"]).split(" × ")), e["SS"], e["df"], e.get("H", e["F"]),
+                  [[" × ".join(label(f, project) for f in str(e["effect"]).split(" × ")), e["SS"], e["df"],
+                    e.get("H", e["F"]),
                     format_p(e["p"]), stars(e["p"], alpha), format_p(e["p_gg"]) if "p_gg" in e else ""]
                    for e in res["effects"]])
     text = st.anova_text(res, measure, alpha)
@@ -406,10 +415,10 @@ def correlate(project, rows: list[dict], mx: str, my: str, method: str = "pearso
         else:
             res["ancova"] = a
             eff = a["effects"][0]
-            anc = (f"<br><b>ANCOVA</b> ({escape(label(by))} adjusted for {escape(mx)})"
+            anc = (f"<br><b>ANCOVA</b> ({escape(label(by, project))} adjusted for {escape(mx)})"
                    f"<div>F({eff['df']}, {eff['df_error']}) = {eff['F']:.3f}, {escape(format_p(eff['p']))} "
                    f"{stars(eff['p'], alpha)}</div>"
-                   + "".join(f"<div>{escape(label(lv))}: adjusted mean {d['adjusted_mean']:.4g} ± "
+                   + "".join(f"<div>{escape(label(lv, project))}: adjusted mean {d['adjusted_mean']:.4g} ± "
                              f"{d['adjusted_se']:.3g} SE</div>" for lv, d in a["adjusted_means"].items()))
             sl = a.get("slopes")
             if sl:
@@ -441,14 +450,14 @@ def grouped(project, rows: list[dict], measure: str, factors: list[str], plot: s
     if "Period" in factors:
         rows = [r for r in rows if r.get("Period") != WHOLE] or rows
     orders = {f: level_order(project, rows, f) for f in factors}
-    sub = _with("by " + " and ".join(label(f) for f in factors),
+    sub = _with("by " + " and ".join(label(f, project) for f in factors),
                 context(period, filt, "Period" if "Period" in factors else None))
     res = st.describe_by(rows, measure, factors, orders)
     fig = plots.factor_plot(rows, measure, factors, kind=plot, error=error, points=points,
                             colors=group_colors(project, factors[1] if len(factors) > 1 else factors[0]),
                             orders=orders, size=(6.4, 3.8))
     _y_range(project, measure, fig, [r.get(measure) for r in rows])
-    table = Table("Descriptive statistics", [label(f) for f in factors] + DESC_HEADERS,
+    table = Table("Descriptive statistics", [label(f, project) for f in factors] + DESC_HEADERS,
                   [[d[f] for f in factors] + _desc_row(d) for d in res])
     lines = [f"{measure} by {' > '.join(factors)}"]
     for d in res:
@@ -470,7 +479,7 @@ def categorical(project, rows: list[dict], rf: str, cf: str, period: str | None 
     rl, cl, T = st.contingency_table(rows, rf, cf)
     res = st.categorical_test(T, rl, cl)
     fig = plots.proportions_figure(rl, cl, T) if len(rl) and len(cl) else plots.message_figure("No data")
-    table = Table("Counts", [label(rf)] + cl + ["Total"],
+    table = Table("Counts", [label(rf, project)] + cl + ["Total"],
                   [[r] + [int(v) for v in row] + [int(row.sum())] for r, row in zip(rl, T)])
     html = f"<div style='font-size:16px'><b>{escape(str(res.get('test')))}</b></div>"
     text = ""
@@ -494,10 +503,10 @@ def categorical(project, rows: list[dict], rf: str, cf: str, period: str | None 
         gof = st.chi_square_gof(T.sum(axis=0))
         res["goodness_of_fit"] = gof
         if gof.get("p") == gof.get("p"):
-            html += (f"<div>Goodness of fit (equal proportions of {escape(label(cf))}): "
+            html += (f"<div>Goodness of fit (equal proportions of {escape(label(cf, project))}): "
                      f"χ²({gof['df']}) = {gof['statistic']:.3f}, {escape(p_text(gof['p'], alpha))}</div>")
             piece = (f"Chi-square goodness of fit (equal proportions): chi-square({gof['df']}) = "
                      f"{gof['statistic']:.3f}, {format_p(gof['p'])}")
             text = f"{text}\n  {piece}" if text else piece
-    return Analysis(f"{label(cf)} by {label(rf)}", _with(context(period, filt), _alpha_note(alpha)), html, [table],
-                    fig, text, res)
+    return Analysis(f"{label(cf, project)} by {label(rf, project)}", _with(context(period, filt), _alpha_note(alpha)),
+                    html, [table], fig, text, res)

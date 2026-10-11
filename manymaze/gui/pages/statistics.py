@@ -583,12 +583,11 @@ class StatisticsPage(Page):
     def levels(self, col: str) -> list[str]:
         return an.level_order(self.project, self.rows, col)
 
-    @staticmethod
-    def _set_items(combo: QComboBox, items: list, current=None, data=None):
+    def _set_items(self, combo: QComboBox, items: list, current=None, data=None):
         combo.blockSignals(True)
         combo.clear()
         for i, it in enumerate(items):
-            combo.addItem(_label(it), data[i] if data else it)
+            combo.addItem(_label(it, self.project), data[i] if data else it)
         idx = combo.findData(current) if current is not None else -1
         combo.setCurrentIndex(idx if idx >= 0 else (0 if items else -1))
         combo.blockSignals(False)
