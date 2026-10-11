@@ -358,10 +358,8 @@ Low impact:
 
 Still open:
 - §15 numerical agreement on a shared video (see above).
-- Every item marked *(untested on hardware)* in §1, §7 and §17: the devices, the Arduino firmware 1.3 (its `SYNC`
-  timer path on AVR has not been compiled on this Apple Silicon Mac, whose Arduino AVR toolchain needs Rosetta), the
-  syringe pumps, balances, capture cards and industrial cameras.
-- A CI job that compiles the firmware for the Uno, Mega, Zero and MKR Zero is ready on the local branch
-  `firmware-ci`; pushing it needs the GitHub CLI's `workflow` scope (`gh auth refresh -h github.com -s workflow`).
+- Every item marked *(untested on hardware)* in §1, §7 and §17: the devices, the Arduino firmware 1.3 on a real
+  board (its `SYNC` pulse timing), the syringe pumps, balances, capture cards and industrial cameras. The firmware
+  is compiled in CI for the Uno, Mega, Zero and MKR Zero (#13; the Uno uses 73 % of its RAM).
 - The signed / notarised build has not been run with a real Developer ID certificate (the release builds are
   ad-hoc signed).

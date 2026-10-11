@@ -363,7 +363,7 @@ void command(char *line) {
       allOff();
       break;
     case 'I': {  // I pin pullup debounce_ms
-      if (argc < 2 || nIn >= MAX_IN) { err("I: bad arguments or too many inputs"); break; }
+      if (argc < 2 || nIn >= MAX_IN) { err(F("I: bad arguments or too many inputs")); break; }
       DIn &d = ins[nIn++];
       d.pin = a1;
       d.pullup = argc > 2 ? a2 : 1;
@@ -375,10 +375,10 @@ void command(char *line) {
       break;
     }
     case 'O': {  // O pin invert
-      if (argc < 2) { err("O: missing pin"); break; }
+      if (argc < 2) { err(F("O: missing pin")); break; }
       DOut *o = findOut(a1);
       if (!o) {
-        if (nOut >= MAX_OUT) { err("O: too many outputs"); break; }
+        if (nOut >= MAX_OUT) { err(F("O: too many outputs")); break; }
         o = &outs[nOut++];
       }
       o->pin = a1;
@@ -390,7 +390,7 @@ void command(char *line) {
     }
     case 'W': {  // W pin 0|1 [max_ms]
       DOut *o = findOut(a1);
-      if (!o || argc < 3) { err("W: pin not configured as an output"); break; }
+      if (!o || argc < 3) { err(F("W: pin not configured as an output")); break; }
       stopTrain(o->pin);
       o->pwm = 0;
       o->timed = 0;  // a previous maximum on-time never applies to this command
@@ -403,7 +403,7 @@ void command(char *line) {
     }
     case 'P': {  // P pin 0..255 [max_ms]
       DOut *o = findOut(a1);
-      if (!o || argc < 3) { err("P: pin not configured as an output"); break; }
+      if (!o || argc < 3) { err(F("P: pin not configured as an output")); break; }
       stopTrain(o->pin);
       o->timed = 0;
       writePwm(o, a2);
@@ -415,12 +415,12 @@ void command(char *line) {
     }
     case 'T': {  // T pin period_ms width_ms count   (count 0 = until X)
       DOut *o = findOut(a1);
-      if (!o || argc < 5) { err("T: pin not configured or missing arguments"); break; }
+      if (!o || argc < 5) { err(F("T: pin not configured or missing arguments")); break; }
       stopTrain(o->pin);
       int8_t slot = -1;
       for (uint8_t i = 0; i < MAX_TRAIN; i++)
         if (!trains[i].active) { slot = i; break; }
-      if (slot < 0) { err("T: too many pulse trains"); break; }
+      if (slot < 0) { err(F("T: too many pulse trains")); break; }
       Train &t = trains[slot];
       double per = atof(argv[2]), wid = atof(argv[3]);
       if (per < wid) per = wid;
@@ -454,7 +454,7 @@ void command(char *line) {
       break;
     }
     case 'A': {  // A channel period_ms deadband [batch]   (deadband -1: every sample)
-      if (argc < 2 || nAn >= MAX_AN) { err("A: bad arguments or too many analogue inputs"); break; }
+      if (argc < 2 || nAn >= MAX_AN) { err(F("A: bad arguments or too many analogue inputs")); break; }
       AIn &a = ans[nAn++];
       a.pin = a1;
       a.period = argc > 2 && a2 > 0 ? a2 : 50;
@@ -467,7 +467,7 @@ void command(char *line) {
       break;
     }
     case 'L': {  // L dout sck period_ms   HX711 load cell
-      if (argc < 3 || nHx >= MAX_HX) { err("L: bad arguments or too many load cells"); break; }
+      if (argc < 3 || nHx >= MAX_HX) { err(F("L: bad arguments or too many load cells")); break; }
       HX &h = hxs[nHx++];
       h.dout = a1;
       h.sck = a2;
@@ -479,7 +479,7 @@ void command(char *line) {
       break;
     }
     case 'U': {  // U pin period_ms   DHT22 temperature / humidity
-      if (argc < 2 || nDht >= MAX_DHT) { err("U: bad arguments or too many DHT sensors"); break; }
+      if (argc < 2 || nDht >= MAX_DHT) { err(F("U: bad arguments or too many DHT sensors")); break; }
       DHT &d = dhts[nDht++];
       d.pin = a1;
       d.fails = 0;
@@ -489,7 +489,7 @@ void command(char *line) {
       break;
     }
     case 'E': {  // E pinA pinB
-      if (argc < 3 || nEnc >= MAX_ENC) { err("E: bad arguments or too many encoders"); break; }
+      if (argc < 3 || nEnc >= MAX_ENC) { err(F("E: bad arguments or too many encoders")); break; }
       Enc &e = encs[nEnc];
       e.pa = a1;
       e.pb = a2;
@@ -519,7 +519,7 @@ void command(char *line) {
       break;
     case 'S': {  // SYNC pin width_us   (SYNC alone: the last pin and width again)
       char *w = argv[0];
-      if (w[1] != 'Y' || w[2] != 'N' || w[3] != 'C' || w[4]) { err("unknown command"); break; }
+      if (w[1] != 'Y' || w[2] != 'N' || w[3] != 'C' || w[4]) { err(F("unknown command")); break; }
       stopSync(-1);  // (before the pin changes)
       if (argc >= 3) {
         syncPin = a1;
@@ -531,7 +531,7 @@ void command(char *line) {
       break;
     }
     default:
-      err("unknown command");
+      err(F("unknown command"));
   }
 }
 
@@ -553,7 +553,7 @@ void loop() {
         blen = 0;
         lastRx = millis();
         wdFired = false;
-        err("line too long");
+        err(F("line too long"));
       } else if (blen) {
         buf[blen] = 0;
         lastRx = millis();
@@ -651,7 +651,7 @@ void loop() {
       Serial.println(now);
     } else if (++d.fails >= 3) {  // a corrupted reading now and then is normal: reported after three in a row
       d.fails = 0;
-      err("U: no reply from the DHT22");
+      err(F("U: no reply from the DHT22"));
     }
   }
   // encoders (polled when the pins have no interrupt)
