@@ -1,5 +1,6 @@
-"""Animated playback of the track plot (Data page ▸ Track plots): the path is drawn progressively at a chosen speed,
-with play / pause, a speed selector, a trail length (show only the last seconds) and a time slider."""
+"""Animated playback of the track plot (Data page ▸ Track plots): the path is drawn progressively at a chosen speed
+over the test's video playing underneath, with play / pause, a speed selector, a trail length (show only the last
+seconds) and a time slider."""
 
 from __future__ import annotations
 
@@ -18,10 +19,11 @@ TICK_MS = 40  # 25 redraws per second
 
 
 class TrackPlayback(QWidget):
-    """Play / pause, speed, trail and time slider under a track plot. attach(canvas, track) after each new figure:
-    the path, the behaviour markers and the end marker are then shown up to the playback time, with the animal's
-    current position as a dot. At the end of the track (and when detached) the whole track is shown, unless a
-    trail length is chosen: then only the last seconds are ever drawn."""
+    """Play / pause, speed, trail and time slider under a track plot. attach(canvas, track, frames) after each new
+    figure: the path, the behaviour markers and the end marker are then shown up to the playback time, with the
+    animal's current position as a dot and, given frames (core.playback.VideoFrames), the video of that moment
+    under the track once playing or scrubbing. At the end of the track (and when detached) the whole track is
+    shown, unless a trail length is chosen: then only the last seconds are ever drawn."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -63,17 +65,21 @@ class TrackPlayback(QWidget):
         self.canvas = None
         self.anim: TrackAnimation | None = None
         self.track = None
+        self.frames = None  # VideoFrames of the attached test's video (closed on detach)
         self.time = 0.0
         self._wall = 0.0
         self._setting_slider = False
         self.setEnabled(False)
 
     # ------------------------------------------------------------------ setup
-    def attach(self, canvas, track):
-        """Animate the track plot on canvas (a PlotCanvas whose figure was made by core.plots.track_plot)."""
+    def attach(self, canvas, track, frames=None):
+        """Animate the track plot on canvas (a PlotCanvas whose figure was made by core.plots.track_plot), over
+        `frames` (a VideoFrames, taken over: closed on detach) when given. The figure keeps its own background
+        frame until the playback plays or is scrubbed."""
         self.pause()
-        self.canvas, self.track = canvas, track
-        self.anim = TrackAnimation(canvas.figure if canvas is not None else None, track, self.trail_s)
+        self._close_frames()
+        self.canvas, self.track, self.frames = canvas, track, frames
+        self.anim = TrackAnimation(canvas.figure if canvas is not None else None, track, self.trail_s, frames)
         if not self.anim.ok:
             self.detach()
             return
@@ -83,10 +89,23 @@ class TrackPlayback(QWidget):
 
     def detach(self):
         self.pause()
+        self._close_frames()
         self.canvas, self.anim, self.track = None, None, None
         self.time = 0.0
         self.time_lbl.setText("")
         self.setEnabled(False)
+
+    def _close_frames(self):
+        if self.frames is not None:
+            try:
+                self.frames.close()
+            except Exception:
+                pass
+        self.frames = None
+
+    @property
+    def plays_video(self) -> bool:
+        return self.anim is not None and self.anim.plays_video
 
     @property
     def t(self) -> np.ndarray:
@@ -204,7 +223,7 @@ class TrackPlayback(QWidget):
     def _show(self, t: float, draw: bool = True):
         if self.anim is None:
             return
-        self.anim.show(t)
+        self.anim.show(t, video=draw)
         span = self.end - self.start
         self._setting_slider = True
         self.slider.setValue(int(round((t - self.start) / span * SLIDER_STEPS)) if span > 0 else SLIDER_STEPS)

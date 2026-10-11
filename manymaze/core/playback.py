@@ -1,7 +1,7 @@
 """Animated track plots: the path of a `plots.track_plot` figure drawn progressively up to a time, optionally
-showing only the last `trail_s` seconds (ANY-maze's "only show the track and markers for a certain duration"), and
-the rendering of such a playback to a video file.  No Qt: used by the Data page's playback bar and by the
-command line / tests."""
+showing only the last `trail_s` seconds (ANY-maze's "only show the track and markers for a certain duration") over
+the test's video playing underneath, and the rendering of such a playback to a video file.  No Qt: used by the Data
+page's playback bar and by the command line / tests."""
 
 from __future__ import annotations
 
@@ -10,19 +10,73 @@ from pathlib import Path
 
 import numpy as np
 
-from .plots import TRACK_END_GID, TRACK_MARKER_GID, TRACK_PATH_GID
+from .lens import corrected
+from .plots import TRACK_END_GID, TRACK_FRAME_GID, TRACK_MARKER_GID, TRACK_PATH_GID
+from .video import VideoSource
 
 TRAILS = (0.0, 2.0, 5.0, 10.0, 30.0, 60.0)  # seconds shown while playing; 0 = the whole track so far
+READ_AHEAD = 30  # frames read on (rather than seeking) to reach a later frame
+
+
+class VideoFrames:
+    """The frames of a test's video by track time, for the background of a playing track plot: the frame shown at
+    track time t is the video's frame at video_start_s + t (as the tracked video is exported with overlays),
+    corrected by `lens` like the tracked frames.  Reading on is cheaper than seeking, so playing forward reads
+    the frames in between.  Call close() (or use it as a context manager) when done."""
+
+    def __init__(self, path, video_start_s: float = 0.0, lens=None):
+        self.src = corrected(VideoSource(str(path)), lens)
+        self._raw = getattr(self.src, "src", self.src)  # frames skipped while reading on need no correction
+        self.fps = self._raw.fps
+        self.frame_count = self._raw.frame_count
+        self.video_start_s = float(video_start_s or 0.0)
+        self._index = -1
+        self._frame = None
+
+    def index_at(self, t: float) -> int:
+        i = int(round((self.video_start_s + float(t)) * self.fps))
+        return max(0, min(i, self.frame_count - 1) if self.frame_count else i)
+
+    def __call__(self, t: float):
+        """The frame at track time t (BGR), or None when it cannot be read."""
+        i = self.index_at(t)
+        if i == self._index:
+            return self._frame
+        try:
+            if self._frame is not None and self._index < i <= self._index + READ_AHEAD:
+                for _ in range(i - self._index - 1):
+                    if not self._raw.read()[0]:
+                        break
+                ok, f = self.src.read()
+            else:
+                f = self.src.frame_at(i)
+                ok = f is not None
+        except Exception:  # e.g. the lens correction of a frame that could not be read
+            ok, f = False, None
+        self._index, self._frame = (i, f) if ok else (-1, None)
+        return self._frame
+
+    def close(self):
+        self.src.release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
 
 
 class TrackAnimation:
     """Drives the artists of a track-plot figure: the path, the behaviour markers and the end marker are shown up
-    to a time, with the animal's current position as a dot.  `ok` is False when the figure has no track path
-    (e.g. an empty track): show() then does nothing."""
+    to a time, with the animal's current position as a dot and, given `frames` (a :class:`VideoFrames` or any
+    callable t -> frame), the video frame of that moment under the track.  `ok` is False when the figure has no
+    track path (e.g. an empty track): show() then does nothing."""
 
-    def __init__(self, fig, track, trail_s: float = 0.0):
+    def __init__(self, fig, track, trail_s: float = 0.0, frames=None):
         self.fig = fig
         self.trail_s = float(trail_s or 0.0)
+        self.frames = frames
+        self._image = None  # the figure's background frame (track_plot draws it with TRACK_FRAME_GID)
         self.t = np.asarray(track.t, float) if track is not None and len(track) else np.zeros(0)
         self._path = self._now = None
         self._full = None  # LineCollection: (segments, values); Line2D: (x, y)
@@ -30,6 +84,9 @@ class TrackAnimation:
         self._markers: list[tuple[float, object]] = []
         self._end = []
         for ax in (fig.axes if fig is not None else []):
+            for im in ax.images:
+                if im.get_gid() == TRACK_FRAME_GID and self._image is None:
+                    self._image = im
             for a in list(ax.collections) + list(ax.lines):
                 gid = a.get_gid() or ""
                 if gid == TRACK_PATH_GID and self._path is None:
@@ -93,11 +150,27 @@ class TrackAnimation:
             return 0
         return int(np.searchsorted(self.t, t - self.trail_s, side="left"))
 
-    def show(self, t: float):
-        """Draw the track up to time t.  With no trail, the whole track (end marker, every marker) is shown when
-        t reaches the end; with a trail only the last trail_s seconds are ever shown."""
+    @property
+    def plays_video(self) -> bool:
+        """Whether show() puts the video frame of the moment under the track."""
+        return self.frames is not None and self._image is not None
+
+    def show_frame(self, t: float):
+        """Put the video frame at time t under the track (nothing without frames or when it cannot be read)."""
+        if not self.plays_video:
+            return
+        f = self.frames(t)
+        if f is not None:
+            self._image.set_data(f[..., ::-1] if f.ndim == 3 else f)
+
+    def show(self, t: float, video: bool = True):
+        """Draw the track up to time t, over the video frame of that moment when `video` (and frames were given).
+        With no trail, the whole track (end marker, every marker) is shown when t reaches the end; with a trail
+        only the last trail_s seconds are ever shown."""
         if self._path is None:
             return
+        if video:
+            self.show_frame(t)
         n = self.frames_shown(t)
         m = self.first_shown(t)
         full = n >= len(self.t) and not self.trail_s
@@ -124,15 +197,16 @@ class TrackAnimation:
 
 
 def render_track_video(fig, track, path, speed: float = 4.0, fps: float = 25.0, trail_s: float = 0.0,
-                       progress=None, should_stop=None) -> Path | None:
+                       progress=None, should_stop=None, frames=None) -> Path | None:
     """Save the playback of a track-plot figure as a video: the track drawn up to each moment at `speed` × real
-    time, `fps` frames per second (ANY-maze's "save plot-playback as a video").  The figure is rendered with Agg
-    at its own size and DPI (made even for the H.264 encoders).  Returns the path, or None when stopped."""
+    time, `fps` frames per second (ANY-maze's "save plot-playback as a video"), over the video playing underneath
+    when `frames` is given (see :class:`TrackAnimation`).  The figure is rendered with Agg at its own size and DPI
+    (made even for the H.264 encoders).  Returns the path, or None when stopped."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
 
     from .video import VideoRecorder
 
-    anim = TrackAnimation(fig, track, trail_s)
+    anim = TrackAnimation(fig, track, trail_s, frames)
     if not anim.ok:
         raise ValueError("The track plot has no track to play")
     speed, fps = float(speed) if speed and speed > 0 else 1.0, float(fps) if fps and fps > 0 else 25.0

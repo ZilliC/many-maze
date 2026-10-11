@@ -15,7 +15,7 @@ from ....core import charts, plots
 from ....core.apparatus import PointOfInterest, unique_name
 from ....core.measures import kinematics
 from ....core.pauses import period_frames
-from ....core.playback import render_track_video
+from ....core.playback import VideoFrames, render_track_video
 from ....core.videoexport import export_video
 from ...figures import FIG_FILTER, figure_to_clipboard
 from ...widgets import PlotCanvas, cv_to_qpixmap, error_box
@@ -285,13 +285,29 @@ class PlotViewsMixin:
         trail = self.playback.trail_s
 
         def work(progress, stop):
-            return render_track_video(fig, tr, path, speed=speed, fps=fps, trail_s=trail, progress=progress,
-                                      should_stop=stop)
+            frames = self._video_frames(test, tr)  # its own reader: in the worker thread
+            try:
+                return render_track_video(fig, tr, path, speed=speed, fps=fps, trail_s=trail, progress=progress,
+                                          should_stop=stop, frames=frames)
+            finally:
+                if frames is not None:
+                    frames.close()
 
         def done(out):
             self.main.status(f"Playback video saved: {out}" if out else "Playback export cancelled")
 
         return self._run(f"Saving the playback of test {test.id}", work, on_done=done)
+
+    def _video_frames(self, test, track) -> VideoFrames | None:
+        """The frames of the test's video by the track's time, played under the track (None without a readable
+        video)."""
+        if not test.video:
+            return None
+        try:
+            start = track.meta.get("video_start_s", test.start_s) if track is not None else test.start_s
+            return VideoFrames(self.project.abs_path(test.video), start, self.project.lens_for(test))
+        except Exception:
+            return None
 
     def _frame(self, test):
         if test.id not in self._frames:
@@ -485,7 +501,8 @@ class PlotViewsMixin:
                 if o["split"]:
                     self.playback.detach()
                 else:
-                    self.playback.attach(self.track_canvas, tr)
+                    self.playback.attach(self.track_canvas, tr, self._video_frames(test, tr) if frame is not None
+                                         else None)
                 self._sync_playback()
             elif i == 1:
                 mask = self._mask(tr, app, o["heat_of"], test, d["events"])

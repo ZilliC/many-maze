@@ -479,3 +479,46 @@ def test_video_export(demo, tmp_path):
                         [{"behaviour": "Rearing", "t": 1.0, "t_end": 2.0}], [Behaviour("Rearing", kind="state")])
     blank = np.zeros((400, 400, 3), np.uint8)
     assert r.render(blank, 1.5).sum() > 0 and r.render(blank, 3.0).sum() == 0
+
+
+def test_playback_plays_the_video_under_the_track(app, tmp_path):
+    """The track-plot playback shows the video frame of each moment under the track (live and saved), with the
+    test's start offset in the video; playing forward reads on instead of seeking."""
+    from manymaze.core.playback import TrackAnimation, VideoFrames, render_track_video
+    from manymaze.core.video import VideoRecorder, VideoSource
+
+    video = tmp_path / "grey.mp4"  # frame i is a flat grey of level 10 * i (25 fps, 4 s)
+    rec = VideoRecorder(str(video), 25.0, (400, 400))
+    for i in range(100):
+        rec.write(np.full((400, 400, 3), 10 * (i % 25), np.uint8))
+    rec.close()
+    tr = _circle_track(n=50)  # 2 s of track, starting 1 s into the video
+    with VideoFrames(video, video_start_s=1.0) as frames:
+        assert frames.index_at(0.0) == 25 and frames.index_at(0.4) == 35 and frames.index_at(99) == 99
+        level = lambda t: float(frames(t).mean())  # noqa: E731
+        assert level(0.4) == pytest.approx(100, abs=4)
+        seeks = []
+        orig = frames.src.frame_at
+        frames.src.frame_at = lambda i: seeks.append(i) or orig(i)
+        assert level(0.6) == pytest.approx(150, abs=4) and not seeks  # read on: no seek
+        assert level(0.2) == pytest.approx(50, abs=4) and seeks == [30]  # backwards: seek
+        frames.src.frame_at = orig
+        fig = plots.track_plot(tr, app, frame=frames(0.0))
+        anim = TrackAnimation(fig, tr, frames=frames)
+        assert anim.plays_video
+        img = anim._image
+        assert float(np.asarray(img.get_array()).mean()) == pytest.approx(0, abs=4)
+        anim.show(0.8, video=False)  # the figure's own frame until the playback plays
+        assert float(np.asarray(img.get_array()).mean()) == pytest.approx(0, abs=4)
+        anim.show(0.8)
+        assert float(np.asarray(img.get_array()).mean()) == pytest.approx(200, abs=4)
+        # without frames (or without a background frame) nothing changes under the track
+        assert not TrackAnimation(fig, tr).plays_video
+        assert not TrackAnimation(plots.track_plot(tr, app), tr, frames=frames).plays_video
+        # saved: the first frame of the playback video shows the video's frame at the track's start
+        out = tmp_path / "play.mp4"
+        fig = plots.track_plot(tr, app, frame=frames(1.5), size=(4, 4))
+        assert render_track_video(fig, tr, out, speed=1.0, fps=5.0, frames=frames) == out
+    with VideoSource(str(out)) as v:
+        first, second = v.frame_at(0), v.frame_at(1)
+    assert np.median(first) < np.median(second)  # level 0 at t = 0, 50 at t = 0.2 s (alpha-blended on white)
