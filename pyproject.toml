@@ -37,7 +37,7 @@ serial = ["pyserial>=3.5"]
 # industrial cameras (optional; FLIR PySpin and IDS ids_peak wheels are installed from their vendors' SDKs)
 genicam = ["harvesters>=1.4"]  # any GigE Vision / USB3 Vision camera, with the vendor's GenTL producer (.cti)
 basler = ["pypylon>=2.0"]
-dev = ["pytest>=7", "pyinstaller>=6.3"]
+dev = ["pytest>=7", "pyinstaller>=6.3", "coverage>=7"]
 
 [project.scripts]
 manymaze = "manymaze.cli:main"
@@ -53,6 +53,12 @@ manymaze = ["resources/*", "resources/icons/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["manymaze"]
+
+[tool.coverage.report]
+skip_empty = true
 
 [tool.ruff]
 line-length = 120
