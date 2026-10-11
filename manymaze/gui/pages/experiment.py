@@ -1121,6 +1121,7 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
         p.description = self.desc.toPlainText()
         if p.protocol != self.protocol.currentData():  # the forced swim / tail suspension immobility follows
             p.set_protocol(self.protocol.currentData())
+            self.det_form.load(p.detection)  # and where the pixel change is counted
             self.an_form.load(p.analysis)
             self.fst_form.load(p.analysis)
             self._update_fst()

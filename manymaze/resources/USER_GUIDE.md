@@ -142,7 +142,8 @@ everything without a camera.
   in the water or swinging on its tail is taken out (each frame minus the average of the ~0.12 s around it) and the
   rest is averaged over a second, so the small paddles that keep the head above water do not count either. The
   animal's position is not used at all. It **struggles** (is mobile) while the index reaches *The animal struggles
-  when its struggle index reaches* (default 2 %), and is **immobile** once it has not struggled for the *Shortest
+  when its struggle index reaches* (default 3.5 %: on side-view videos of rats, floating reached 1.5–3 % and
+  swimming 4 % or more), and is **immobile** once it has not struggled for the *Shortest
   immobile period* (default 1 s). All the immobility measures (time immobile, immobile episodes, latency to first
   immobility, episode durations…) and the *Mobile* / *Immobile* chart states follow, and the forced swim and tail
   suspension apparatus add *Time immobile (%)*. With *Forced swim: split the struggle into climbing and swimming*
@@ -150,7 +151,12 @@ everything without a camera.
   bout around them) is **climbing**, the rest **swimming**: time (s and %), episodes and latency of each. ANY-maze
   itself has no climbing / swimming split, and the split here is by the strength of the movement only. Film the
   animal from the side, at 15 frames/s or more, and look at the *Struggle index* chart of a few tests (Results ▸
-  Charts) to set the thresholds. Live tests use the same index over the last second (so a change shows about half a
+  Charts) to set the thresholds. These types of test count the pixel change around the animal only (*Animal
+  tracking ▸ Tracking quality ▸ Count the pixel change of one animal in*: *The area around the animal*, its bounding
+  box enlarged by 30 %), so the ripples and reflections of the water elsewhere in the cylinder are not taken for a
+  struggle; experiments of these types made with older versions get it the next time their tests are tracked. In
+  videos that show each image twice (30 frames/s stored at 60, or a variable frame rate), a repeated image keeps the
+  motion of the image before it rather than none. Live tests use the same index over the last second (so a change shows about half a
   second later). Tracks without pixel-change data (imported tracks) fall back on the speed, with a warning.
   Experiments of these types made with older versions open with this mode; their former *Immobility (s)*,
   *Immobility (%)* and *Latency to immobility (s)* columns (renamed freezing measures) are no longer reported.

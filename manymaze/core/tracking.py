@@ -51,6 +51,10 @@ class DetectionSettings:
     tail_strip: float = 0.3  # opening kernel relative to sqrt(area) used to strip the tail before head/tail
     record_outline: bool = True  # store the animal's whole-body outline (a simplified polygon) in each frame
     motion_threshold: int = 20  # grey-level change counted as motion (freezing)
+    # where the motion of one animal is counted: "arena" (the whole arena: every change is the animal's) or
+    # "animal" (around the animal only: the forced swim and tail suspension tests, where the water's ripples and
+    # reflections, or the cord, change too); with several animals always around each animal
+    motion_area: str = "arena"
     max_gap_s: float = 1.0  # interpolate gaps up to this length
     # jump removal (before the gaps are filled): positions implying a speed above max_jump_speed (apparatus units/s,
     # cm/s when calibrated; 0 = off) from the last good one are removed when the track comes back within max_jump_s
@@ -353,6 +357,13 @@ def apply_animal_preset(settings: DetectionSettings, key: str, px_per_cm: float 
     return changed
 
 
+# A frame whose mean grey-level change from the previous one is below this share of the previous frame's change is
+# a repeat of it: videos converted to a higher frame rate (30 frames/s stored as 60) or recorded at a variable one
+# show many images twice. Its motion is the previous frame's (the change since the last new image) rather than
+# ~0, which would make the motion of a moving animal alternate between nothing and twice its value.
+REPEAT_CHANGE_RATIO = 0.3
+
+
 class ArenaTracker:
     """Tracks the animal(s) within one arena mask of a frame.
 
@@ -389,6 +400,9 @@ class ArenaTracker:
         self._bootstrapped = False  # the background is the first frame seen (no empty-arena image was given)
         self.prev_gray: np.ndarray | None = None  # previous frame of the processed region (motion)
         self._prev_box = None
+        self._prev_change = math.nan  # mean grey-level change of the previous frame (repeated images)
+        self._repeat = False  # the previous frame repeated the image before it
+        self._last_motion: list[float] = [math.nan] * n
         self.prev: list[Detection] = []
         # identity memory: last-known position, area and age (frames since seen) of every animal
         self._mem_pos: list[tuple[float, float] | None] = [None] * n
@@ -1035,32 +1049,45 @@ class ArenaTracker:
                 d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
 
     def _motion(self, gray: np.ndarray, dets: list[Detection], box=None):
-        """Pixel change since the previous frame (gray is the processed region, box its place in the frame).  The
-        previous frame is the one before this one even when only every Nth frame is analysed
-        (:meth:`set_motion_reference`), so motion — and freezing — do not depend on the analysis frame step."""
+        """Pixel change since the previous frame (gray is the processed region, box its place in the frame): in the
+        whole arena with one animal (settings.motion_area "arena"), else around each animal (its bounding box
+        padded by 30 %).  The previous frame is the one before this one even when only every Nth frame is analysed
+        (:meth:`set_motion_reference`), so motion — and freezing — do not depend on the analysis frame step.  A
+        frame repeating the previous image (REPEAT_CHANGE_RATIO) keeps the previous frame's motion."""
         if self.prev_gray is None or self._prev_box != box or self.prev_gray.shape != gray.shape:
             for d in dets:
                 d.motion = 0.0 if d.detected else math.nan
+            self._prev_change, self._repeat = math.nan, False
             return
         diff = cv2.absdiff(gray, self.prev_gray)
         changed = (diff > self.s.motion_threshold).astype(np.uint8)
+        inside = None
         if self._mask_c is not None:
-            changed &= (self._mask_c > 0).astype(np.uint8)
-        if self.s.n_animals == 1:
+            inside = (self._mask_c > 0).astype(np.uint8)
+            changed &= inside
+        change = cv2.mean(diff, mask=inside)[0]
+        # never two repeats in a row: a still scene after a movement keeps the movement for one frame at most
+        repeat = not self._repeat and change < REPEAT_CHANGE_RATIO * self._prev_change
+        self._prev_change, self._repeat = change, repeat
+        if self.s.n_animals == 1 and self.s.motion_area != "animal":
             total = float(changed.sum())
             for d in dets:
                 d.motion = total
-            return
-        ox, oy = (0, 0) if box is None else (box[0], box[1])
-        for d in dets:
-            if not d.detected or d.contour is None:
-                continue
-            x, y, w, h = cv2.boundingRect(d.contour)
-            x, y = x - ox, y - oy
-            pad = int(0.3 * max(w, h))
-            y0, y1 = max(0, y - pad), min(gray.shape[0], y + h + pad)
-            x0, x1 = max(0, x - pad), min(gray.shape[1], x + w + pad)
-            d.motion = float(changed[y0:y1, x0:x1].sum())
+        else:
+            ox, oy = (0, 0) if box is None else (box[0], box[1])
+            for d in dets:
+                if not d.detected or d.contour is None:
+                    continue
+                x, y, w, h = cv2.boundingRect(d.contour)
+                x, y = x - ox, y - oy
+                pad = int(0.3 * max(w, h))
+                y0, y1 = max(0, y - pad), min(gray.shape[0], y + h + pad)
+                x0, x1 = max(0, x - pad), min(gray.shape[1], x + w + pad)
+                d.motion = float(changed[y0:y1, x0:x1].sum())
+        for i, d in enumerate(dets[:len(self._last_motion)]):
+            if repeat and math.isfinite(self._last_motion[i]) and math.isfinite(d.motion):
+                d.motion = self._last_motion[i]
+            self._last_motion[i] = d.motion
 
 
 class TrackBuilder:

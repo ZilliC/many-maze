@@ -549,6 +549,8 @@ class Project:
         )
         if p.protocol in FST_TEMPLATES and "immobility_mode" not in (d.get("analysis") or {}):
             p.analysis.immobility_mode = "motion"  # forced swim / tail suspension saved before the motion mode
+        if p.protocol in FST_TEMPLATES and "motion_area" not in (d.get("detection") or {}):
+            p.detection.motion_area = "animal"  # saved before the setting: the next tracking counts the animal only
         p.path = pdir
         try:
             p.file_version = int(d.get("version", FORMAT_VERSION))
@@ -689,13 +691,19 @@ class Project:
     def set_protocol(self, key: str):
         """Make this a protocol of a type of test (templates.TEMPLATES key). The forced swim and tail suspension
         tests detect immobility from the struggle in the image (AnalysisSettings.immobility_mode "motion", as ANY-maze's
-        Forced swim / Tail suspension mode); leaving them goes back to immobility from the speed."""
+        Forced swim / Tail suspension mode), from the pixel change around the animal only (DetectionSettings.
+        motion_area "animal": not the water or the cord); leaving them goes back to immobility from the speed and
+        the pixel change of the whole arena."""
         was = self.protocol in FST_TEMPLATES
         self.protocol = key
         if key in FST_TEMPLATES:
             self.analysis.immobility_mode = "motion"
-        elif was and self.analysis.immobility_mode == "motion":
-            self.analysis.immobility_mode = "speed"
+            self.detection.motion_area = "animal"
+        elif was:
+            if self.analysis.immobility_mode == "motion":
+                self.analysis.immobility_mode = "speed"
+            if self.detection.motion_area == "animal":
+                self.detection.motion_area = "arena"
 
     def rename_stage(self, old: str, new: str) -> int:
         """A stage was renamed: its tests, training criteria and the animals' completed stages follow (stages are

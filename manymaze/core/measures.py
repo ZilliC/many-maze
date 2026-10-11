@@ -49,7 +49,9 @@ class AnalysisSettings:
     mobility_threshold: float = 2.0  # speed (units/s) below which the animal is immobile
     min_immobile_s: float = 2.0  # immobile episodes shorter than this count as mobile
     immobility_mode: str = "speed"  # "speed" (above) | "motion": forced swim / tail suspension (freezing.py)
-    fst_threshold_pct: float = 2.0  # motion mode: mobile (struggling) while the struggle index (% of body) reaches this
+    # motion mode: mobile (struggling) while the struggle index (% of body) reaches this; 3.5 % separated floating from
+    # swimming best on real side-view rat videos (720p, 60 frames/s): floating rats reach 1.5–3 %, swimming ones 4 % +
+    fst_threshold_pct: float = 3.5
     min_fst_immobile_s: float = 1.0  # motion mode: immobile spells shorter than this count as mobile
     fst_three_state: bool = False  # forced swim: the struggle split into climbing and swimming
     fst_climbing_pct: float = 8.0  # … climbing while the struggle index reaches this

@@ -109,6 +109,14 @@ DETECTION_SPEC = [
      "Neural Engine / GPU uses Core ML on macOS (CUDA on NVIDIA PCs); falls back to the CPU automatically."),
     ("motion_threshold", "A pixel is moving when it changes by (grey levels)", "int", (1, 255, 1),
      "Pixel change counted as movement for freezing / immobility."),
+    ("motion_area", "Count the pixel change of one animal in", "choice",
+     [("arena", "The whole arena"), ("animal", "The area around the animal")],
+     "Where the motion freezing and the forced swim / tail suspension immobility come from. The whole arena: every "
+     "change in it is the animal's (fear conditioning chambers, where it still works when the animal's outline is "
+     "poor). Around the animal: its bounding box enlarged by 30 % only, so the ripples and reflections of the water "
+     "or a swinging cord elsewhere are not counted; set by the Forced swim and Tail suspension types of test. "
+     "With several animals the change is always counted around each one. Takes effect when the tests are tracked "
+     "again."),
     ("max_gap_s", "Fill gaps in the track of up to (s)", "float", (0.0, 60.0, 0.1, 2), ""),
     ("max_jump_speed", "Remove jumps faster than (units/s, 0 = off)", "float", (0.0, 100000.0, 10.0, 1),
      "A position the animal could not have reached at this speed (cm/s when the apparatus is calibrated, else "
@@ -289,7 +297,7 @@ DETECTION_SECTIONS = [
     ("Clean-up", ["blur", "morph_open", "morph_close", "erase_thin_px"]),
     # removed before the gaps are filled (Tracking quality)
     ("Jumps", ["max_jump_speed", "max_jump_s", "remove_implausible_jumps"]),
-    ("Tracking quality", ["motion_threshold", "max_gap_s", "smoothing", "frame_step", "downscale"]),
+    ("Tracking quality", ["motion_threshold", "motion_area", "max_gap_s", "smoothing", "frame_step", "downscale"]),
 ]
 
 # the forced swim / tail suspension settings, also shown on the Protocol page for those types of test
