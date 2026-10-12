@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import math
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from ....core.terminology import term
 from ... import theme
 from ...icons import icon
 from ...live_widgets import LensCorrectionDialog
-from ...widgets import error_box, hint, loading, separator
+from ...widgets import error_box, hint, loading, separator, user_message
 from ..base import Page
 from .background import BackgroundController
 from .dialogs import CalibrationDialog, GridDialog, TemplateDialog
@@ -441,7 +442,8 @@ class ApparatusPage(Page):
             apps = self.main.with_password(lambda pw: load_apparatus_file(source, pw), "Import apparatus",
                                            f"“{src.stem if src.is_dir() else src.parent.stem}”")
         except Exception as e:
-            QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{e}")
+            traceback.print_exc()
+            QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{user_message(e)}")
             return []
         if apps is None:
             return []
