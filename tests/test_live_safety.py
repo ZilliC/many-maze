@@ -424,7 +424,7 @@ def test_live_freezing_uses_hysteresis():
     s.analysis.freeze_on_pct, s.analysis.freeze_off_pct, s.analysis.min_freeze_s = 2.0, 3.0, 0.0
     out = []
     for i, pct in enumerate([1.0, 2.5, 2.9, 3.5, 2.5, 1.0]):
-        s.cols["t"].append(i / 25)
+        s._track.add(i / 25, Detection())
         out.append(s._freezing_now(Detection(x=1, y=1, area=100.0, motion=pct, detected=True)))
     assert out == [True, True, True, False, False, True]
 
