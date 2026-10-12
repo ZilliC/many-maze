@@ -4,7 +4,6 @@ charts of any per-frame parameter of core.charts (computed from the track record
 
 from __future__ import annotations
 
-import bisect
 import math
 import threading
 import time
@@ -168,33 +167,28 @@ class LiveCharts:
     """Series of core.charts parameters over the track recorded so far by a live session.  Parameters of the
     moment (positions, distances, states …) are computed over the displayed window only; running totals (counts,
     times, distance travelled) over the whole test, at most every `total_every_s` seconds (cached, recomputed in
-    a background thread while the previous result is shown).  Only the frames added since the last call are
-    copied under the session lock (an incremental copy of the track)."""
+    a background thread while the previous result is shown).  The rows are read from the session's track as they
+    are needed (most of a long test is on disk: core.trackstore), not copied."""
 
     def __init__(self, total_every_s: float = 1.0, behaviours=None):
         self.total_every_s = total_every_s
         self.behaviours = behaviours
         self._cache: dict[str, tuple[float, int, np.ndarray, np.ndarray]] = {}
-        self._session = None  # the session the copied columns belong to
-        self._cols: dict[str, list] = {}
+        self._session = None  # the session the cached series belong to
+        self._n = 0  # its rows at the last call
         self._busy: set[str] = set()  # cumulative parameters being recomputed in the background
         self._lock = threading.Lock()
 
     def _sync(self, session) -> tuple[int, object, list]:
-        """Copy the frames recorded since the last call (under the session lock); (frames, apparatus, events)."""
+        """(frames, apparatus, events) of the session now (under its lock)."""
         with session.lock:
-            n = len(session.cols["t"])
+            n = len(session._track)
             app = session.apparatus
-            if session is not self._session or n < len(self._cols.get("t", ())):
+            if session is not self._session or n < self._n:
                 with self._lock:
-                    self._session, self._cols, self._cache = session, {}, {}
-            have = len(self._cols.get("t", ()))
-            new = session._track.snapshot(n) if not have else \
-                {k: v[have:n] for k, v in session._track.cols.items()}
+                    self._session, self._cache = session, {}
+            self._n = n
             events = [dict(e) for e in session.events]
-        new.pop("outline", None)
-        for k, v in new.items():
-            self._cols.setdefault(k, []).extend(v)
         return n, app, events
 
     def series(self, session, name: str, window_s: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
@@ -206,43 +200,47 @@ class LiveCharts:
         p = defs.get(name)
         if p is None:
             return np.zeros(0), np.zeros(0)
-        cols = self._cols
-        ts = cols["t"]
-        t_end = ts[n - 1]
+        try:
+            return self._series(session, session._track, n, app, events, name, p, window_s)
+        except OSError:  # the test was saved and its track's side file removed: nothing more to show
+            return np.zeros(0), np.zeros(0)
+
+    def _series(self, session, track, n, app, events, name, p, window_s):
         if charts.is_cumulative(p):
             with self._lock:
                 hit = self._cache.get(name)
             stale = hit is None or hit[1] > n or time.monotonic() - hit[0] >= self.total_every_s
             if hit is None:  # the first time: computed now
-                tt, vv = self._compute(cols, slice(0, n), session, app, name, events)
+                tt, vv = self._compute(track.read(0, n), session, app, name, events)
                 with self._lock:
                     self._cache[name] = (time.monotonic(), n, tt, vv)
             else:
                 if stale and name not in self._busy:
                     self._busy.add(name)
-                    frozen = {k: v[:n] for k, v in cols.items()}  # (appended to while it computes)
-                    threading.Thread(target=self._recompute, args=(frozen, n, session, app, name, events),
+                    threading.Thread(target=self._recompute, args=(n, session, app, name, events),
                                      name="live-chart", daemon=True).start()
                 tt, vv = hit[2], hit[3]
         else:
-            i0 = bisect.bisect_left(ts, t_end - window_s - 2.0, 0, n)  # a little more: smoothing windows
-            tt, vv = self._compute(cols, slice(i0, n), session, app, name, events)
+            t_end = track.read(n - 1, n, ["t"])["t"][0]
+            i0 = track.index_of_time(t_end - window_s - 2.0, n)  # a little more: smoothing windows
+            tt, vv = self._compute(track.read(i0, n), session, app, name, events)
         keep = tt >= tt[-1] - window_s if len(tt) else np.zeros(0, bool)
         return tt[keep], vv[keep]
 
-    def _recompute(self, cols, n, session, app, name, events):
+    def _recompute(self, n, session, app, name, events):
         try:
-            tt, vv = self._compute(cols, slice(0, n), session, app, name, events)
+            tt, vv = self._compute(session._track.read(0, n), session, app, name, events)
             with self._lock:
                 if session is self._session:
                     self._cache[name] = (time.monotonic(), n, tt, vv)
+        except OSError:  # the test was saved and its track's side file removed meanwhile
+            pass
         finally:
             self._busy.discard(name)
 
     @staticmethod
-    def _compute(cols, sl, session, app, name, events):
-        tr = Track(**{k: np.asarray(v[sl], float if k != "detected" else bool) for k, v in cols.items()},
-                   fps=session.fps)
+    def _compute(cols, session, app, name, events):
+        tr = Track(**cols, fps=session.fps)
         try:
             v = charts.compute(tr, app, [name], session.analysis, events)[name]
         except Exception:

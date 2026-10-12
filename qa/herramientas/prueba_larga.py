@@ -4,11 +4,13 @@ tests), horas de tiempo de prueba, midiendo memoria, coste por cuadro y que al f
     .venv/bin/python qa/herramientas/prueba_larga.py --horas 2 --sesiones 4             # lo más rápido posible
     .venv/bin/python qa/herramientas/prueba_larga.py --horas 0.5 --sesiones 8 --tiempo-real
     .venv/bin/python qa/herramientas/prueba_larga.py --horas 24 --sesiones 1 --salida DIR  # una prueba de 24 h
+    .venv/bin/python qa/herramientas/prueba_larga.py --horas 1 --sesiones 4 --autosave      # con archivos de rescate
 
 Cada sesión recibe cuadros sintéticos (un ratón que camina por un campo abierto, con pausas) a 25 cuadros/s de tiempo
 de prueba. Sin --tiempo-real se procesan tan rápido como se pueda (24 h de prueba tardan bastante menos de 24 h); con
 --tiempo-real se respeta el reloj, como con cámaras. Al terminar, cada sesión se guarda como una prueba de un
-experimento (save_live_test) y se calculan sus resultados.
+experimento (save_live_test) y se calculan sus resultados. Con --autosave cada sesión escribe su archivo de rescate
+(crash recovery) cada 5 s en la carpeta recordings del experimento, como en la página Run tests.
 
 Informe (en --salida, por defecto la carpeta actual): prueba_larga.csv con una fila por minuto de tiempo de prueba
 (memoria, ms por cuadro por sesión) y prueba_larga.txt con el resumen y los criterios:
@@ -98,6 +100,7 @@ def main():
     ap.add_argument("--tamano", default="320x240")
     ap.add_argument("--tiempo-real", action="store_true")
     ap.add_argument("--salida", type=Path, default=Path("."))
+    ap.add_argument("--autosave", action="store_true", help="archivo de rescate cada 5 s, como en Run tests")
     a = ap.parse_args()
     w, h = map(int, a.tamano.lower().split("x"))
     out = a.salida.expanduser()
@@ -105,9 +108,13 @@ def main():
     app = templates.build("open_field", 20, 20, w - 40, h - 40, size_cm=40)
     app.frame_size = (w, h)
     walkers = [Walker((w, h), seed=i) for i in range(a.sesiones)]
+    proj_dir = Path(tempfile.mkdtemp()) / "larga.mmaze"
+    (proj_dir / "recordings").mkdir(parents=True)
     sessions = []
     for i in range(a.sesiones):
-        s = LiveSession(app, DetectionSettings(background="frame"), duration_s=0, name=f"larga{i + 1}")
+        side = {"autosave_path": str(proj_dir / "recordings" / f"test_{i + 1:04d}_L{i + 1}.autosave.json"),
+                "autosave_meta": {"test_id": i + 1, "animal": f"L{i + 1}"}} if a.autosave else {}
+        s = LiveSession(app, DetectionSettings(background="frame"), duration_s=0, name=f"larga{i + 1}", **side)
         s.set_background(cv2.cvtColor(walkers[i].floor, cv2.COLOR_GRAY2BGR))
         sessions.append(s)
     n_frames = int(a.horas * 3600 * FPS)
@@ -151,21 +158,26 @@ def main():
         wtr.writeheader()
         wtr.writerows(rows)
     # guardar cada sesión como una prueba y calcular sus resultados
-    proj_dir = Path(tempfile.mkdtemp()) / "larga.mmaze"
     p = Project(name="Prueba larga", protocol="open_field")
     p.analysis = AnalysisSettings.for_new_experiment()
     p.path = proj_dir
-    proj_dir.mkdir(parents=True)
     p.apparatus.append(app)
     saved = []
+    side_mb, side_s = [], []
     for i, s in enumerate(sessions):
         try:
             s.finish()
+            if a.autosave:
+                s.flush_autosave(60.0)
+                side_mb.append(sum(f.stat().st_size for f in (proj_dir / "recordings").glob(f"test_{i + 1:04d}_*"))
+                               / 2 ** 20)
+                side_s.append(s._autosaver.last_write_s)
             p.ensure_animal(f"L{i + 1}", "G")
             t = p.add_test("", f"L{i + 1}", app.name, stage="S", trial=1)
             ok = save_live_test(p, t, s)
             tr = p.load_tracks(t)[0] if ok else None
             saved.append((ok, len(tr) if tr is not None else 0))
+            s.remove_autosave()
         except Exception as e:  # noqa: BLE001
             errors.append(f"guardar sesión {i + 1}: {type(e).__name__}: {e}")
             saved.append((False, 0))
@@ -177,7 +189,10 @@ def main():
         errors.append(f"resultados: {type(e).__name__}: {e}")
     # resumen
     lines = [f"Prueba larga: {a.sesiones} sesiones × {a.horas:g} h ({'tiempo real' if a.tiempo_real else 'lo más rápido'})",
-             f"reloj: {time.monotonic() - t0_wall:.0f} s"]
+             f"reloj: {time.monotonic() - t0_wall:.0f} s; memoria máxima del proceso (pico) {rss_mb():.0f} MB"]
+    if side_mb:
+        lines.append(f"archivos de rescate al final: {max(side_mb):.1f} MB por sesión; la última escritura tardó "
+                     f"{max(side_s):.2f} s")
     if rows:
         mem = np.array([r["memoria_MB"] for r in rows])
         hours = np.array([r["minuto"] for r in rows]) / 60

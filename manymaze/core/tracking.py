@@ -24,7 +24,8 @@ from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
 from .lens import LensCorrection, corrected
-from .track import COLUMNS, Track, simplify_outline
+from .track import Track, simplify_outline
+from .trackstore import TrackBuilder
 from .video import DOWNSCALE_FACTORS, FrameReader, VideoSource, downscaled_size
 
 
@@ -1153,36 +1154,6 @@ class ArenaTracker:
             if repeat and math.isfinite(self._last_motion[i]) and math.isfinite(d.motion):
                 d.motion = self._last_motion[i]
             self._last_motion[i] = d.motion
-
-
-class TrackBuilder:
-    """The columns of a track (track.COLUMNS, then the body outlines), one detection at a time.  Rows are only ever
-    appended, so a copy of the first n rows (:meth:`snapshot`) is safe while another thread keeps adding."""
-
-    def __init__(self, cols: dict | None = None):
-        cols = cols or {}
-        self.cols: dict[str, list] = {c: list(cols.get(c) or []) for c in COLUMNS}
-        # older side files have no outlines: those frames have none
-        self.cols["outline"] = list(cols.get("outline") or []) + [None] * (len(self.cols["t"])
-                                                                          - len(cols.get("outline") or []))
-
-    def __len__(self) -> int:
-        return len(self.cols["t"])
-
-    def add(self, t: float, d: Detection):
-        self.cols["outline"].append(d.outline)
-        self.cols["t"].append(t)
-        for c in COLUMNS[1:]:
-            self.cols[c].append(getattr(d, c))
-
-    def snapshot(self, n: int | None = None) -> dict[str, list]:
-        n = len(self.cols[COLUMNS[-1]]) if n is None else n  # the last column is appended last
-        return {c: v[:n] for c, v in self.cols.items()}
-
-    def build(self, fps: float) -> Track:
-        cols = self.snapshot()
-        outline = cols.pop("outline")
-        return Track(**cols, fps=fps, outline=outline if any(o is not None for o in outline) else None)
 
 
 class DownscaledTracker:
