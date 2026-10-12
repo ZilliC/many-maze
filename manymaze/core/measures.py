@@ -714,6 +714,11 @@ def turn_series(heading: np.ndarray, speed: np.ndarray, mobility_threshold: floa
     return turn, prev
 
 
+# path rotations: a change of the direction of travel of more than this between two frames is not a turn - backing
+# up turns it by ~180°, clockwise or anticlockwise as rounding decides (H-P04)
+PATH_MAX_STEP_DEG = 90.0
+
+
 def _turns(P: _Prepared) -> dict:
     """Whole test, so that periods add up: the absolute change of the direction of travel into each frame where the
     animal moves (NaN elsewhere) and the previous moving frame it is measured from (-1: none), and the rotations
@@ -734,12 +739,14 @@ def _turns(P: _Prepared) -> dict:
                 sign.append(sa)
             return np.concatenate(at), np.concatenate(sign)
 
-        def partial(angle):
-            return rot(angle, partial_rotation_events, partial_deg=float(s.partial_rotation_deg or 0.0))
+        def partial(angle, **kw):
+            return rot(angle, partial_rotation_events, partial_deg=float(s.partial_rotation_deg or 0.0), **kw)
         # body rotations follow the body (as ANY-maze: the vector from the centre to the head), else the tracked
         # body angle (e.g. an imported orientation); only without either do they follow the direction of travel
         angle = _body_angle(P.track)
-        return {"turn": turn, "prev": prev, "body": angle is not None, "path_rot": rot(h), "path_partial": partial(h),
+        return {"turn": turn, "prev": prev, "body": angle is not None,
+                "path_rot": rot(h, max_step_deg=PATH_MAX_STEP_DEG),
+                "path_partial": partial(h, max_step_deg=PATH_MAX_STEP_DEG),
                 "body_rot": rot(angle) if angle is not None else None,
                 "body_partial": partial(angle) if angle is not None else None}
     return P.cached("turns", make)
@@ -1343,7 +1350,7 @@ def _initial_heading(p: _Period) -> tuple[int, int] | None:
     heading_error_distance away; positions while immobile ignored - see series.initial_heading_frames)."""
     s, k = p.P.s, p.k
     return initial_heading_frames(k.t, k.dur, k.ux, k.uy, k.mobile, s.heading_error_by, s.heading_error_time_s,
-                                  s.heading_error_distance)
+                                  s.heading_error_distance, moving=k.speed > max(s.mobility_threshold, 1e-9))
 
 
 def _zone_turning(res, p: _Period, zn: str, vm: np.ndarray, fm: np.ndarray):

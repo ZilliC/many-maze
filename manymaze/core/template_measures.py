@@ -202,7 +202,7 @@ def _water_maze(d: TemplateData):
         # initial heading error: the initial heading (as the point's: the Heading error options) vs the direction
         # to the platform
         ij = initial_heading_frames(t, dur, k.ux, k.uy, k.mobile, s.heading_error_by, s.heading_error_time_s,
-                                    s.heading_error_distance)
+                                    s.heading_error_distance, moving=k.speed > max(s.mobility_threshold, 1e-9))
         if ij is not None:
             i0, j = ij
             hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]

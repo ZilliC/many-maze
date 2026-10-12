@@ -70,6 +70,15 @@ ERROR_COLUMN = "Analysis error"  # results row of a test whose analysis failed (
 log = logging.getLogger(__name__)
 
 
+class NotAnExperiment(FileNotFoundError):
+    """The path opened as an experiment is missing or is a folder without an experiment file (its message is for
+    the user)."""
+
+
+class DamagedExperiment(ValueError):
+    """The experiment file cannot be read as an experiment (its message is for the user)."""
+
+
 # test status values: "pending" (to do), "tracked" (has a track), "scored" (manually scored, no track),
 # "skipped" (not performed for now, can be resumed), "superseded" (replaced by a re-performed attempt),
 # "excluded" (left out of results)
@@ -503,7 +512,21 @@ class Project:
         """Open an experiment folder. One protected by a password needs it: PasswordRequired without it,
         WrongPassword (a PasswordRequired) when it is not the right one."""
         pdir = cls.project_dir(path)
-        d, key = read_project_file(pdir / PROJECT_FILE, password)
+        if not pdir.exists():
+            raise NotAnExperiment(f"The experiment “{pdir.name}” was not found at {pdir.parent}. It may have been "
+                                  "moved, renamed or deleted, or its drive may not be connected.")
+        if not (pdir / PROJECT_FILE).is_file():
+            raise NotAnExperiment(f"“{pdir.name}” is not a mANY-MAZE experiment: it has no experiment file "
+                                  f"({PROJECT_FILE}).\n\nChoose the experiment's own folder (its name usually ends "
+                                  "in .mmaze), or create one with File ▸ New experiment.")
+        try:
+            d, key = read_project_file(pdir / PROJECT_FILE, password)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            log.warning("Unreadable experiment file %s: %s", pdir / PROJECT_FILE, e)
+            raise DamagedExperiment(f"The experiment file of “{pdir.stem}” ({PROJECT_FILE}) is damaged and cannot "
+                                    f"be read.\n\nEarlier saved copies, if any, are in the experiment's “{BACKUP_DIR}” "
+                                    f"folder (project-<date>.json): copy the newest one over {PROJECT_FILE} to "
+                                    "go back to it.") from e
         p = cls.from_dict(d, pdir)
         if key is not None:
             p._password, p._key = password, key
