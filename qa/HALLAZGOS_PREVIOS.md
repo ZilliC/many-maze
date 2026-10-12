@@ -30,7 +30,44 @@ Antes de abrir un hallazgo nuevo, mira si es uno de estos. Si lo es, **no lo dup
   | OFT `2025-04-22 22-35-14.mov` derecha | **60,3 %** (71,0 %) | 0,0 % (2,0 %) |
 
   «Contra la marcha» incluye los ratos en que la rata retrocede de verdad y los saltos de posición que quedan, por
-  eso no baja a 0. MWM y FST (agua) no se han medido con recorte: pendiente (B13-54).
+  eso no baja a 0.
+
+  **Agua (MWM y FST), con recorte a la piscina / al cilindro** (2026-10-12; recortes en `ARENAS` de
+  `cabeza_real.py`; `mac-ci` medido en un *worktree* aparte con `--codigo`). Las dos primeras columnas son la
+  herramienta tal cual (≥ 2 px/cuadro; sostenida / contra la marcha); la tercera y la cuarta, una medición
+  suplementaria hecha a mano para el MWM (abajo):
+
+  | Video (recorte) | `mac-ci`: sostenida (contra) | arreglada: sostenida (contra) | `mac-ci`: sostenida (contra), rastreo afinado | arreglada: sostenida (contra), rastreo afinado |
+  |---|---|---|---|---|
+  | MWM `2025-04-29 20-00-56.mov` (piscina) | 0,0 % (77,2 %; 92 cuadros) | 0,0 % (21,4 %; 98 cuadros) | 0,0 % (24,2 %; 219 cuadros) | 0,0 % (2,5 %; 158 cuadros) |
+  | MWM `2025-04-29 20-01-42.mov` (piscina) | 0,0 % (37,7 %; 191 cuadros) | 0,0 % (14,6 %; 151 cuadros) | 0,0 % (0,0 %; 276 cuadros) | 0,0 % (2,1 %; 235 cuadros) |
+  | MWM `2025-04-29 20-11-06.mov` (piscina) | 0,0 % (27,3 %; 11 cuadros) | 0,0 % (16,7 %; 12 cuadros) | **37,0 %** (53,4 %; 219 cuadros) | 0,0 % (5,3 %; 228 cuadros) |
+  | FST `2025-06-05 09-19-18.mov` (cilindro) | 0,0 % (49,2 %; 2162 cuadros) | 0,0 % (53,0 %; 2067 cuadros) | no aplica | no aplica |
+  | FST `2025-06-05 09-31-36.mov` (cilindro) | 0,0 % (45,9 %; 1382 cuadros) | 0,0 % (44,0 %; 1324 cuadros) | no aplica | no aplica |
+
+  - **MWM (vista cenital, una piscina por video; la rata nada con la cabeza por delante, visto a ojo en 5 cuadros
+    al azar por video):** el criterio *sí* aplica, pero la herramienta tal cual casi no mide: a 60 cuadros/s una rata
+    que nada avanza 0,6–1,5 px/cuadro, así que solo 11–191 de ~1 600 cuadros pasan el umbral de 2 px/cuadro, y en el
+    24–35 % de los cuadros el rastreo no es la rata sino un reflejo brillante del agua (saltos de cientos de px de un
+    cuadro) o, al final, la mano y el pelo del experimentador que la saca. Por eso el «sostenida 0,0 %» de la herramienta
+    tal cual es en buena parte vacío: no demuestra nada. **Medición suplementaria** (a
+    mano, con el mismo rastreador): detección afinada para el agua (`threshold=40, min_area_px=500, max_area_px=2500`,
+    deja 4–17 % de cuadros con reflejos o sin detección en vez de 24–35 %), dirección de marcha sobre 15 cuadros con
+    desplazamiento > 15 px (≥ 1 px/cuadro), cuadros con saltos descartados con una mediana móvil. Con eso: la versión
+    arreglada da 2–5 % contra la marcha y 0 % sostenida en los tres videos (158–235 cuadros); `mac-ci` da 24 %, 0 %
+    y 53 %, y en el tercer video un 37 % sostenido: la misma inversión de H-P01 también ocurre en el agua. La
+    diferencia entre versiones es real pero la muestra es pequeña (tres videos de ~27 s, una rata cada uno); y el
+    rastreo por defecto en piscina (pendiente, ver abajo) es peor que lo que sugiere la cifra.
+  - **FST (vista lateral de un cilindro de vidrio, rata erguida o colgando, cola hacia abajo):** el criterio *no
+    aplica*. El rastreador modela la rata como un animal visto desde arriba (cabeza y cola sobre el plano del
+    suelo) y aquí se ve de lado: el centro se mueve poco y sobre todo en vertical, mientras la rata bracea sin
+    avanzar, y la «dirección de marcha» no tiene relación con hacia dónde mira. Las dos versiones dan 44–53 % contra
+    la marcha (cara o cruz) y 0,0 % sostenida solo porque el movimiento no avanza ≥ 1 s seguido. En el FST la medida
+    pertinente es la inmovilidad, no la cabeza. A ojo, en 5 cuadros al azar por video, la cabeza unas veces apunta
+    hacia arriba, otras de lado, y otras no se ve (la rata de espaldas a la cámara).
+  - **Hallazgo aparte (agua, no H-P01), por abrir si se quiere:** con los ajustes por defecto el rastreo sobre la
+    piscina del MWM salta a reflejos del agua en 24–35 % de los cuadros (la rata, pequeña, pierde frente a las
+    manchas brillantes). Con `threshold=40` y área 500–2 500 px baja a 4–17 %.
 - **Por qué el oráculo sintético no lo veía:** los animales sintéticos (incluida una «rata» de 110 px que avanza 2,5
   px/cuadro, `rata_grande_lenta`) salían con 0 % de inversiones en las dos versiones; solo una media vuelta en **un**
   cuadro (`novel_object_giro_instantaneo`) lo reproducía (la exploración del objeto nuevo salía 0 s; con el
