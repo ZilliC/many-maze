@@ -5,6 +5,7 @@ import io
 import json
 import math
 
+import cv2
 import numpy as np
 import pytest
 
@@ -125,6 +126,45 @@ def test_rearing_detected_in_tracked_video(tmp_path):
     # off: nothing stored
     tr_off = track_video(str(vp), [ArenaJob(app, DetectionSettings(record_outline=False, duration_s=1))])[0][0]
     assert tr_off.outline is None and not tr_off.has_outline()
+
+
+def test_rearing_detected_with_the_tail_visible(tmp_path):
+    """H-P09: a mouse that rears (its body seen from above at 55 % of its length and width) leaves its tail on the
+    floor. The tail is as wide as before, so it must still be stripped: otherwise the "tail" point jumps to the tip
+    of the tail and the head–tail length does not fall."""
+    n, size = 400, (400, 400)
+    pos = syn.random_walk(n, (50, 50, 350, 350), speed=2.5, seed=3, pause_prob=0)
+    lengths = np.full(n, 36.0)
+    rears = ((100, 150), (250, 300))
+    for a, b in rears:
+        lengths[a:b] = 36.0 * 0.55
+        pos[a:b] = pos[a]
+        pos[b:] += pos[a] - pos[b]
+    pos = np.clip(pos, 90, 310)
+    d = np.diff(pos, axis=0, prepend=pos[:1] - [1, 0])
+    angles = np.degrees(np.arctan2(d[:, 1], d[:, 0]))
+    for i in range(1, n):
+        if np.hypot(*d[i]) < 1e-6:
+            angles[i] = angles[i - 1]
+    vp = tmp_path / "rear_tail.avi"
+    w = cv2.VideoWriter(str(vp), cv2.VideoWriter_fourcc(*"MJPG"), FPS, size)
+    rng = np.random.default_rng(5)
+    for i in range(n):
+        img = np.full(size[::-1], 200, np.uint8)
+        syn.draw_mouse(img, pos[i, 0], pos[i, 1], angles[i], length=float(lengths[i]), width=float(lengths[i]) / 2)
+        img = np.clip(img + rng.normal(0, 2.0, img.shape), 0, 255).astype(np.uint8)
+        w.write(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+    w.release()
+    app = templates.build("open_field", 50, 50, 300, 300, size_cm=40)
+    tr = track_video(str(vp), [ArenaJob(app, DetectionSettings())])[0][0]
+    L = np.hypot(tr.hx - tr.tx, tr.hy - tr.ty)
+    usual = float(np.nanmedian(L))
+    for a, b in rears:
+        assert np.median(L[a + 5:b - 5]) < 0.7 * usual  # the body without the tail
+    r = analyse(tr, app, AnalysisSettings(rearing=True))
+    assert r["Rears"] == 2
+    assert r["Time rearing (s)"] == pytest.approx(100 / FPS, abs=0.2)
+    assert r["Latency to first rear (s)"] == pytest.approx(100 / FPS, abs=0.1)
 
 
 # ---------------------------------------------------------------- outline storage

@@ -205,7 +205,10 @@ everything without a camera.
 * **Analysis ▸ Heading error** – how the *initial heading* of the initial heading errors is found (ANY-maze's
   *Heading error* options): from the first position to the position after the animal has been **mobile for** N s
   (default 1 s), or to the first position **further away than** N units; positions while the animal is immobile
-  are ignored either way.
+  are ignored either way. If, after being mobile for N s, the animal is no more than 0.5 cm from where it started
+  (it paused when released for less than the immobility time, which counts as mobile), the heading would be the
+  tracking jitter's: the position after it has actually moved (faster than the mobility threshold) for N s is used
+  instead, and the heading is blank if it is no further away then either.
 * **Analysis ▸ Movement ▸ Partial rotation angle** – ANY-maze's partial rotations: turns of at least this angle
   (default 90°) that completed no rotation (§9).
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
@@ -1735,7 +1738,9 @@ maps, group heat maps, results and statistics.
   centre, time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the
   body as in ANY-maze — the direction from the centre to the head — or, without a tracked head, a tracked body
   angle (e.g. an imported orientation); only when neither is tracked do they follow the direction of travel (and
-  there are then no separate *path rotations*). As in ANY-maze, the distance travelled does not include where the
+  there are then no separate *path rotations*). A change of the direction of travel of more than 90° in one frame
+  (backing up: ~180°, clockwise or anticlockwise as rounding decides) is not a turn of the path rotations. As in
+  ANY-maze, the distance travelled does not include where the
   animal went while hidden (no distance is counted from where it disappeared to where it reappears), path
   efficiency and tortuosity are blank when the animal was hidden, and the latency to the last mobile / immobile
   episode is blank when there is no such episode. No turn or rotation is counted across a pause or from where the
@@ -1782,8 +1787,11 @@ maps, group heat maps, results and statistics.
   a rearing bout also starts on entering the zone while rearing and ends on leaving it). Seen from above, an animal
   standing on its hind legs looks smaller and shorter: a frame is a rear when the body area falls below *rear area* % (75 %) of the animal's usual (median)
   area and, when the head and tail are tracked (shape or pose model), the head–tail length falls below *rear
-  length* % (80 %) of its usual length. Gaps of up to 0.2 s are bridged and rears shorter than *Shortest rear*
-  (0.3 s) are ignored. Works on tracks made before the option existed (it needs no re-tracking). Check a few tests
+  length* % (80 %) of its usual length. The tail is stripped from the head–tail length with the animal's usual size
+  (not that of the smaller body of a rear), so the tail point stays at the base of a visible tail. Gaps of up to
+  0.2 s are bridged and rears shorter than *Shortest rear* (0.3 s) are ignored. Works on tracks made before the
+  option existed (it needs no re-tracking, but tracks made before October 2026 of an animal whose tail is visible
+  should be re-tracked). Check a few tests
   against manual scoring and adjust the percentages for your camera height and strain.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /

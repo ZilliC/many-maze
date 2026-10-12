@@ -411,6 +411,11 @@ class ArenaTracker:
         self._flip_votes = [0] * n
         self._history: list[list[tuple[float, float]]] = [[] for _ in range(n)]
         self._single_area: float | None = None
+        # the animals' usual blob area (median of the recent detections), which sets the tail-stripping kernel: see
+        # _describe
+        self._areas: list[float] = []
+        self._usual_area = math.nan
+        self._area_frames = 0
         self.contrast_votes = [0, 0]  # frames in which the animal was lighter / darker than the background
         self.lighting_gain = 1.0  # last frame's grey-level scale (Ignore lighting changes)
         self._bg_median_key = None
@@ -685,6 +690,7 @@ class ArenaTracker:
             self._learn_single_area(blobs, n)
             blobs = self._split_merged(blobs, n)
         dets = [self._describe(c, a, shape) for a, c in blobs[:n]]
+        self._learn_usual_area([a for a, _ in blobs[:n]])
         if n == 1 and dets and self._single_area is None:
             self._single_area = dets[0].area
         colours = self.s.identity_colour_list()
@@ -825,6 +831,20 @@ class ArenaTracker:
             out = new + out[1:]
         return out
 
+    USUAL_AREA_FRAMES = 750  # areas the usual area is the median of (30 s at 25 frames/s)
+
+    def _learn_usual_area(self, areas: list[float]):
+        """Remember the areas of this frame's detections; the usual area is their median over the last
+        USUAL_AREA_FRAMES detections, updated every 25 (an animal that rears or is half hidden for a few seconds does
+        not change it)."""
+        if not areas:
+            return
+        self._areas.extend(areas)
+        del self._areas[:-self.USUAL_AREA_FRAMES]
+        self._area_frames += 1
+        if self._area_frames < 25 or self._area_frames % 25 == 0:
+            self._usual_area = float(np.median(self._areas))
+
     def _describe(self, contour, area, shape_hw) -> Detection:
         M = cv2.moments(contour)
         if M["m00"] == 0:
@@ -842,9 +862,16 @@ class ArenaTracker:
         pad = 4
         m = np.zeros((h + 2 * pad, w + 2 * pad), np.uint8)
         cv2.drawContours(m, [contour - [x0 - pad, y0 - pad]], -1, 255, -1)
-        k = _odd(max(3, int(self.s.tail_strip * math.sqrt(max(area, 1)))))
-        body = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-        ys, xs = np.nonzero(body)
+        # the kernel follows the animal's usual size, not this blob's: when the body looks smaller (a rear seen from
+        # above, partly hidden) the tail keeps its width, and a kernel shrunk with the blob would keep it - the "tail"
+        # would then be the tip of the tail (H-P09). If that kernel erases most of the body, the blob's own.
+        ys, xs = (), ()
+        for a in ((self._usual_area, area) if self._usual_area > area else (area,)):
+            k = _odd(max(3, int(self.s.tail_strip * math.sqrt(max(a, 1)))))
+            body = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            ys, xs = np.nonzero(body)
+            if len(xs) >= max(5, area / 4):
+                break
         if len(xs) < 5:
             ys, xs = np.nonzero(m)
         pts = np.column_stack([xs + x0 - pad, ys + y0 - pad]).astype(float)

@@ -15,6 +15,7 @@ from manymaze.core.geometry import rect
 from manymaze.core.iomeasures import io_measures
 from manymaze.core.measures import AnalysisSettings, analyse
 from manymaze.core.project import Behaviour
+from manymaze.core.series import rotation_events
 from manymaze.core.track import Track
 
 from test_zone_measures_extras import FPS, S, box_app, hold, line, make_track, nums
@@ -86,6 +87,28 @@ def test_total_rotations_and_body_orientation():
     res3 = analyse(make_track(pts, head=False), app, S)
     assert res3["Rotations clockwise"] >= 2 and res3["Total rotations"] == res3["Rotations clockwise"]
     assert "Path rotations clockwise" not in res3
+
+
+@pytest.mark.parametrize("noise", [1e-9, -1e-9])
+def test_path_rotations_ignore_backing_up(noise):
+    """H-P04: backing up turns the direction of travel by ~180° in a frame, clockwise or anticlockwise as rounding
+    decides; it is not a turn, so path rotations do not depend on a 1e-9 difference."""
+    # the direction of travel of an animal going back and forth: +180° (just under or just over) every step
+    steps = np.full(20, 180.0 - 1e3 * noise)
+    a = np.cumsum(np.r_[0.0, steps]) % 360.0
+    sign = rotation_events(a, 90.0)[1]  # the plain walk: whole rotations, their side set by the rounding
+    assert len(sign) > 0 and np.all(sign == (1 if noise > 0 else -1))
+    for at in (rotation_events(a, 90.0, max_step_deg=90.0), rotation_events(a + 1e-9, 90.0, max_step_deg=90.0)):
+        assert len(at[0]) == 0
+    # end to end: back and forth along (almost) a line, each reversal 180° ∓ 1e-6°
+    p, legs = np.array([150.0, 200.0]), []
+    for k in range(8):
+        a = np.radians(k * (180.0 - 1e3 * noise))
+        q = p + 100.0 * np.array([np.cos(a), np.sin(a)])
+        legs.append(np.linspace(p, q, 26)[1:])
+        p = q
+    res = analyse(make_track(np.vstack([[150.0, 200.0]] + legs)), box_app(), S)
+    assert res["Path rotations clockwise"] == 0 and res["Path rotations anticlockwise"] == 0
 
 
 # ------------------------------------------------------------------ zones
