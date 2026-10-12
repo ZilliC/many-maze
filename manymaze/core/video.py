@@ -9,6 +9,7 @@ video; :func:`check_video` looks for glitches (duplicate, black and missing fram
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 import threading
@@ -71,7 +72,7 @@ class _PlaylistCapture:
         for part in parts:
             if not Path(part).exists():
                 self.release()
-                raise FileNotFoundError(part)
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(part))
             cap = cv2.VideoCapture(str(part))
             if not cap.isOpened():
                 self.release()
@@ -172,11 +173,15 @@ class VideoSource:
                 self.cap.set(cv2.CAP_PROP_FPS, fps)
         else:
             if not Path(source).exists():
-                raise FileNotFoundError(source)
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(source))
             self.cap = _PlaylistCapture(playlist_parts(source)) if is_playlist(source) else \
                 cv2.VideoCapture(str(source))
         if not self.cap.isOpened():
-            raise IOError(f"Cannot open video source {source!r}")
+            if self.is_camera:
+                raise IOError(f"Camera {source} cannot be opened: check that it is connected and not in use by "
+                              "another program")
+            raise IOError(f"The video “{Path(str(source)).name}” cannot be opened: it is damaged, empty or in a "
+                          "format mANY-MAZE cannot read")
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS)) or 0.0
         if not self.fps or self.fps > 1000 or self.fps != self.fps:
             self.fps = fps or 25.0

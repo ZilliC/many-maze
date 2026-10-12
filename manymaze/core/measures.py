@@ -1238,7 +1238,9 @@ def _zone_head(res, p: _Period, zn: str, z):
     exits = ends[(ends >= p.i0) & (ends < p.i1) & (ends > 0)]
     res[f"{zn}: latency to first head exit (s)"] = _r(float(K.t[exits[0] - 1] + K.dur[exits[0] - 1] - p.t0)
                                                      if len(exits) else p.never)
-    res[f"{zn}: head distance ({u})"] = _r(H[2][p.sl][hin].sum(), 2)
+    # as the centre's distance in a zone: the step out of the zone counts, the step into it not
+    hprev = np.r_[False, hfm[:-1]][p.sl]
+    res[f"{zn}: head distance ({u})"] = _r(H[2][p.sl][hprev].sum(), 2)
     cin = P.cached(("occ", "centre"), lambda: occupancy(P.track, P.app, P.s, part="centre")[0])
     if z is None:
         if zn in cin:
@@ -1264,7 +1266,9 @@ def _zone_head(res, p: _Period, zn: str, z):
     res[f"{zn}: mean head distance to border when inside ({u})"] = _r(mean if math.isfinite(mean)
                                                                       else _undefined(P.s, math.nan), 2)
     res[f"{zn}: max head distance to border when inside ({u})"] = _r(mx, 2)
-    res[f"{zn}: min head distance to border when inside ({u})"] = _r(mn, 2)
+    # as the centre's: 0 once the head has left the zone (in the period)
+    left = bool((hin[:-1] & ~hin[1:]).any())
+    res[f"{zn}: min head distance to border when inside ({u})"] = _r(0.0 if left and (h_in & seen).any() else mn, 2)
 
 
 def _zone_border(res, p: _Period, z, vm: np.ndarray):

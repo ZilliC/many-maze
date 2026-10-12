@@ -11,8 +11,29 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
+from ...core.errors import user_message
+from ...core.video import is_playlist, playlist_parts
 from ...core.workflow import treatment_text
 from .. import theme
+
+
+def video_problems(files: list[str]) -> list[tuple[str, str]]:
+    """Quick checks of video files before adding tests (no decoding): empty files, and playlists that list no
+    videos or videos that do not exist."""
+    out = []
+    for f in files:
+        try:
+            if Path(f).stat().st_size == 0:
+                out.append((f, "the file is empty"))
+            elif is_playlist(f):
+                missing = [q for q in playlist_parts(f) if not Path(q).exists()]
+                if missing:
+                    out.append((f, f"the playlist lists {len(missing)} video{'s' * (len(missing) != 1)} that "
+                                   f"do{'es' * (len(missing) == 1)} not exist ({Path(missing[0]).name}"
+                                   + (", …" if len(missing) > 1 else "") + ")"))
+        except (OSError, UnicodeDecodeError) as e:
+            out.append((f, user_message(e)))
+    return out
 
 
 class AddVideosDialog(QDialog):
@@ -48,6 +69,13 @@ class AddVideosDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.verticalHeader().hide()
         lay.addWidget(self.table, 1)
+        problems = video_problems(files)
+        if problems:
+            warn = QLabel("These videos will not track as they are (the tests can still be added, and the video "
+                          "replaced later):\n" + "\n".join(f"• {Path(f).name}: {why}" for f, why in problems))
+            warn.setWordWrap(True)
+            warn.setStyleSheet(f"color: {theme.WARNING};")
+            lay.addWidget(warn)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)

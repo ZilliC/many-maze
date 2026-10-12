@@ -11,8 +11,11 @@ import multiprocessing as mp
 import os
 import queue
 import time
+import traceback
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from typing import Callable
+
+from .errors import user_message
 
 WORKER_RAM_MB = 700  # rough peak per worker for HD video (background model + decoder + pose session)
 
@@ -167,7 +170,10 @@ def track_tests(project, tests, progress: Callable[[float], None] | None = None,
 
 
 def _err(batch, e) -> str:
-    return f"Test {', '.join(str(t.id) for t in batch)}: {type(e).__name__}: {e}"
+    """The line the user sees for a test that could not be tracked: the error in plain words (the technical details
+    go to the console)."""
+    traceback.print_exception(type(e), e, e.__traceback__)
+    return f"Test {', '.join(str(t.id) for t in batch)}: {user_message(e)}"
 
 
 def _track_serial(project, batches, progress, should_stop, out):

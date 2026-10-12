@@ -159,7 +159,8 @@ def test_head_measures():
     assert t_head_out == pytest.approx((80 + 2) / FPS, abs=0.1)  # head leaves 5 px after the centre starts back
     assert res["Z: head time (s)"] == pytest.approx(res["Z: time head in zone with centre outside (s)"], abs=1e-6)
     assert res["Z: time head in zone with centre outside (s)"] >= 2.0
-    # steps into frames with the head in the zone: 2 on the way in, 1 on the way out (85/29 px each)
+    # steps from frames with the head in the zone (as the centre: the step out counts, the step in not): 1 on the way
+    # in, 2 on the way out (85/29 px each)
     assert res["Z: head distance (cm)"] == pytest.approx(3 * 85 / 29 / 10, abs=0.02)
     assert res["Z: min head distance from zone (cm)"] == 0  # as ANY-maze: the head entered the zone
     assert res["Z: max head distance from zone (cm)"] == pytest.approx(8.0, abs=0.01)  # head 80 px away

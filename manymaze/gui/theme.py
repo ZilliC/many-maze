@@ -153,7 +153,8 @@ def qss() -> str:
     icons = _arrows_dir()
     return f"""
 QMainWindow, QDialog {{ background: {WORK_BG}; }}
-QWidget#Workspace, QStackedWidget#SectionStack > QWidget {{ background: {WORK_BG}; }}
+QWidget#Workspace, QStackedWidget#SectionStack > QWidget,
+QScrollArea#PageScroll > QWidget > QWidget {{ background: {WORK_BG}; }}
 
 /* ribbon */
 QWidget#Ribbon {{ background: {RIBBON_BG}; border-bottom: 1px solid {BORDER}; }}
@@ -166,6 +167,7 @@ QTabBar#RibbonTabs::tab:first {{ background: {ACCENT_BG}; color: {ON_ACCENT}; ma
 QTabBar#RibbonTabs::tab:hover:!selected {{ background: {HOVER}; }}
 QTabBar#RibbonTabs::tab:first:hover {{ background: {ACCENT_BG_HOVER}; }}
 QWidget#RibbonPanel {{ background: {WORK_BG}; border-top: 1px solid {BORDER}; }}
+QScrollArea#RibbonScroll, QScrollArea#RibbonScroll > QWidget {{ background: {WORK_BG}; }}
 QFrame#RibbonGroup {{ background: transparent; border: none; border-right: 1px solid {BORDER}; }}
 QLabel#RibbonGroupTitle {{ color: {MUTED}; font-size: 11px; }}
 QToolButton#RibbonLarge, QToolButton#RibbonSmall {{ background: transparent; border: 1px solid transparent;

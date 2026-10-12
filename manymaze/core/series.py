@@ -173,11 +173,11 @@ def _rotation_walk(angle_deg, reset_deg, partial_deg=0.0, max_step_deg=None) -> 
             ref = v
             hi = lo = v
             full = True
-        elif hi - v > reset_deg and hi > ref:
-            ref = v
+        elif hi - v > reset_deg and hi > ref:  # turned back: the next rotation counts from the furthest point
+            ref = hi                             # reached (as ANY-maze's example), not from where it turned back
             hi = lo = v
         elif v - lo > reset_deg and lo < ref:
-            ref = v
+            ref = lo
             hi = lo = v
     if d:
         end_turn()

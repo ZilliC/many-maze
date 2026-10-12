@@ -211,6 +211,21 @@ everything without a camera.
   instead, and the heading is blank if it is no further away then either.
 * **Analysis ▸ Movement ▸ Partial rotation angle** – ANY-maze's partial rotations: turns of at least this angle
   (default 90°) that completed no rotation (§9).
+* **Default analysis values, and where ANY-maze's differ** (compare with care when matching published ANY-maze
+  results; each can be changed under *Protocol ▸ Analysis*):
+
+  | Setting | mANY-MAZE default | ANY-maze |
+  |---|---|---|
+  | Position smoothing before distance and speed | 0.2 s centred moving average | not published |
+  | Immobility | speed below 2 units/s (cm/s when calibrated) for at least 2 s (shorter spells count as mobile) | the *% of the animal that stays in the same place* (sensitivity ≈ 70 %) for a minimum time: no speed threshold |
+  | Freezing | motion below 2 % of the body starts it, above 3 % ends it; at least 1 s | at least 2 s |
+  | Latency of something that never happens | the test (or period) duration | undefined (blank) unless its option is ticked |
+  | Thigmotaxis band | 25 % of the arena's half-width from the wall | set by the user |
+  | Rotations | a turn back of more than 90° restarts the count | the same, with partial turns back ignored by default |
+  | Automatic rearing | area below 75 % and length below 80 % of the usual, at least 0.3 s | — (from a side view or the pose) |
+
+  None of these is a calculation error: they are choices, and a laboratory comparing with ANY-maze should set them
+  to match (or decide which to use) before the experiment.
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
   every measure, including the test duration, stops there.
@@ -1738,7 +1753,9 @@ maps, group heat maps, results and statistics.
   centre, time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the
   body as in ANY-maze — the direction from the centre to the head — or, without a tracked head, a tracked body
   angle (e.g. an imported orientation); only when neither is tracked do they follow the direction of travel (and
-  there are then no separate *path rotations*). A change of the direction of travel of more than 90° in one frame
+  there are then no separate *path rotations*). A rotation is a turn of 360° in one direction; when the animal
+  turns back by more than 90° the next rotation is counted from the furthest point the turn reached (as in
+  ANY-maze's example), not from where it turned back. A change of the direction of travel of more than 90° in one frame
   (backing up: ~180°, clockwise or anticlockwise as rounding decides) is not a turn of the path rotations. As in
   ANY-maze, the distance travelled does not include where the
   animal went while hidden (no distance is counted from where it disappeared to where it reappears), path
@@ -1819,10 +1836,11 @@ maps, group heat maps, results and statistics.
     first zone investigated*, longest / shortest / mean bout (time / bouts), list of bout durations, distance and
     mean speed while investigating, distance before the first investigation (blank if never), time mobile /
     immobile, immobile episodes, time freezing and freezing episodes (freezing onsets) while investigating;
-  * **head**: latency to the first head exit, distance travelled by the head in the zone, time the head is in the
-    zone while the centre is outside (by position, not the entry rules), mean / max / min head distance from the
-    zone (as the centre's: max 0 if the head never left, min 0 once it entered), mean / max / min head distance
-    to the border when inside;
+  * **head**: latency to the first head exit, distance travelled by the head in the zone (as the centre's: the
+    step out of the zone counts, the step into it not), time the head is in the zone while the centre is outside
+    (by position, not the entry rules), mean / max / min head distance from the zone (as the centre's: max 0 if
+    the head never left, min 0 once it entered), mean / max / min head distance to the border when inside (as the
+    centre's: the min is 0 once the head has left the zone);
   * **distance to the border when inside** (centre): mean / max / min (the min is 0 once the animal has left the
     zone, as ANY-maze);
   * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
@@ -1919,7 +1937,8 @@ there, follow *When an event never occurs, its latency is*.
 
 #### More test-specific measures
 
-* **Water maze**: Whishaw corridor time (s and %), path % and distance (release point → platform, 20 cm wide) and
+* **Water maze**: Whishaw corridor time (s and %), path % and distance (release point → platform, 20 cm wide; as
+  the distance in a zone, the step into the corridor is not counted, the step out of it is) and
   *Left Whishaw corridor*, up to finding the platform (any zone can also have its own Whishaw's corridor, see the
   zone properties).
 * **Novel tank diving test**: latency to top, top entries, top/bottom time %, top/bottom ratio, mean depth, erratic

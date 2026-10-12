@@ -14,9 +14,10 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
-                               QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
+                               QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..core.export import protocol_report
@@ -149,7 +150,7 @@ class WelcomePage(QWidget):
         self.side_buttons = {}
         for key, text, fn in (("new", "New experiment", main.new_project),
                               ("open", "Open experiment", main.open_project_dialog),
-                              ("demo", "Open demo experiment", main.create_demo),
+                              ("demo", "Create demo experiment", main.create_demo),
                               ("save", "Save", main.save), ("save_as", "Save as", main.save_as),
                               ("close", "Close experiment", main.close_project),
                               ("import", "Import from ANY-maze", main.import_menu),
@@ -295,7 +296,14 @@ class SectionView(QWidget):
         it.setData(0, Qt.UserRole + 2, label)  # the label in mANY-MAZE's terms (see apply_terminology)
         self.explorer.addTopLevelItem(it)
         self.pages.append(page)
-        self.stack.addWidget(page)
+        # each page sits in a scroll area, so a page that needs more room than the screen has (Review, Results,
+        # the apparatus editor on a laptop) scrolls instead of making the window bigger than the screen
+        holder = QScrollArea()
+        holder.setObjectName("PageScroll")
+        holder.setWidgetResizable(True)
+        holder.setFrameShape(QFrame.NoFrame)
+        holder.setWidget(page)
+        self.stack.addWidget(holder)
 
     def item_for(self, page, key=None):
         for i in range(self.explorer.topLevelItemCount()):
@@ -341,13 +349,14 @@ class SectionView(QWidget):
                 self.explorer.setCurrentItem(it)
 
     def current_page(self):
-        return self.stack.currentWidget()
+        holder = self.stack.currentWidget()
+        return holder.widget() if isinstance(holder, QScrollArea) else holder
 
     def _item_changed(self, it, _prev=None):
         if it is None:
             return
         page = self.pages[it.data(0, Qt.UserRole)]
-        self.stack.setCurrentWidget(page)
+        self.stack.setCurrentIndex(it.data(0, Qt.UserRole))
         self.page_changed.emit(page)
         key = it.data(0, Qt.UserRole + 1)
         if key is not None:
@@ -366,7 +375,9 @@ class MainWindow(QMainWindow):
         self.dirty = False
         ini = os.environ.get("MANYMAZE_SETTINGS")  # e.g. tests: keep the user's preferences untouched
         self.settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings("manymaze", "mANY-MAZE")
-        self.resize(1400, 880)
+        # never bigger than the screen (the Dock and the menu bar take part of it)
+        avail = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
+        self.resize(min(1400, avail.width()) if avail else 1400, min(880, avail.height()) if avail else 880)
         app_icon = Path(__file__).resolve().parent.parent / "resources" / "icon.svg"
         if app_icon.exists():
             self.setWindowIcon(QIcon(str(app_icon)))
@@ -392,7 +403,12 @@ class MainWindow(QMainWindow):
         self.workspace = QStackedWidget()
         self.workspace.setObjectName("Workspace")
         self.welcome = WelcomePage(self)
-        self.workspace.addWidget(self.welcome)
+        self._welcome_scroll = QScrollArea()  # (see SectionView.add_page)
+        self._welcome_scroll.setObjectName("PageScroll")
+        self._welcome_scroll.setWidgetResizable(True)
+        self._welcome_scroll.setFrameShape(QFrame.NoFrame)
+        self._welcome_scroll.setWidget(self.welcome)
+        self.workspace.addWidget(self._welcome_scroll)
         for title, entries in SECTIONS:
             sec = SectionView(title)
             panel = self.ribbon.add_tab(title)
@@ -849,7 +865,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ navigation
     def _show_backstage(self):
         self.welcome.refresh()
-        self.workspace.setCurrentWidget(self.welcome)
+        self.workspace.setCurrentWidget(self._welcome_scroll)
         if self.ribbon.tabs.currentIndex() != 0:
             self.ribbon.tabs.blockSignals(True)
             self.ribbon.tabs.setCurrentIndex(0)
@@ -861,7 +877,7 @@ class MainWindow(QMainWindow):
             self._hide_current()
             self._current_page = None
             self.welcome.refresh()
-            self.workspace.setCurrentWidget(self.welcome)
+            self.workspace.setCurrentWidget(self._welcome_scroll)
         elif i == self._help_tab:
             pass  # the Help tab only offers its ribbon commands; the work area stays as it is
         elif self.project is None:
