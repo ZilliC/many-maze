@@ -500,8 +500,8 @@ confidence* fall back to the shape estimate.
 * **Parallel tracking** – *Track all* tracks several videos at once in separate processes (all cores but one,
   limited by memory; two when the pose model shares the Neural Engine). Tests filmed in the same video are still
   tracked in a single pass.
-* **Hardware video decoding** – videos are decoded with Apple **VideoToolbox** and tracking reads the luma plane
-  directly (no colour conversion). Set `MANYMAZE_HWACCEL=0` to disable, or `MANYMAZE_DECODER=opencv` to use
+* **Hardware video decoding** – videos are decoded with Apple **VideoToolbox** (the images are the same as with
+  OpenCV, so tracking sees exactly what the detection preview shows). Set `MANYMAZE_HWACCEL=0` to disable, or `MANYMAZE_DECODER=opencv` to use
   OpenCV only.
 * **Hardware recording** – live tests are recorded with VideoToolbox's H.264 encoder (MP4), leaving the CPU for
   tracking.

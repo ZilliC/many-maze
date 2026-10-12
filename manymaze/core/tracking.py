@@ -118,6 +118,9 @@ class Detection:
     contour: np.ndarray | None = field(default=None, repr=False)
     keypoints: np.ndarray | None = field(default=None, repr=False)  # (K, 3) x, y, confidence from the pose model
     outline: np.ndarray | None = field(default=None, repr=False)  # simplified body outline (k, 2) stored in the track
+    # how much further the outline reaches beyond the body (tail stripped) at the tail end than at the head end, in
+    # body lengths: large when the tail is clearly visible, and then the head / tail from the shape is reliable
+    tail_reach: float = field(default=math.nan, repr=False)
 
 
 def hex_to_hsv(colour: str) -> tuple[int, int, int]:
@@ -378,6 +381,9 @@ class ArenaTracker:
     pose_only_max_frames = 75
     # the movement-direction vote on head / tail looks this many frames back at most (slow movement)
     heading_history_frames = 25
+    # a tail sticking out this many body lengths further at one end than at the other is clearly visible: it decides
+    # the head / tail (Detection.tail_reach), and the movement vote is not counted
+    tail_visible = 0.3
 
     def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None = None, pose=None):
         self.s = settings
@@ -871,6 +877,7 @@ class ArenaTracker:
             head, tail = e1, e2
         else:
             head, tail = e2, e1
+        d.tail_reach = abs(ext_hi - ext_lo) / max(hi - lo, 1.0)
         d.hx, d.hy = map(float, head)
         d.tx, d.ty = map(float, tail)
         d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
@@ -1034,11 +1041,12 @@ class ArenaTracker:
                 keep = math.hypot(d.hx - p.hx, d.hy - p.hy) + math.hypot(d.tx - p.tx, d.ty - p.ty)
                 swap = math.hypot(d.tx - p.hx, d.ty - p.hy) + math.hypot(d.hx - p.tx, d.hy - p.ty)
                 flip = swap < keep
-            # movement direction vote: animals mostly move head first.  The displacement is measured over the last
-            # 5 frames, or further back when the animal moves slowly (a slow approach would otherwise never vote and
-            # an inversion caught at the turn before it would last through the approach and the stop after it)
+            # movement direction: animals mostly move head first.  The displacement is measured over the last 5
+            # frames, or further back when the animal moves slowly (a slow approach would otherwise never vote and an
+            # inversion caught at the turn before it would last through the approach and the stop after it)
+            body_len = math.hypot(d.hx - d.tx, d.hy - d.ty)
+            moving = run = False
             if len(hist) >= 4:
-                body_len = math.hypot(d.hx - d.tx, d.hy - d.ty)
                 need = 0.25 * max(body_len, 1)
                 x1, y1 = hist[-1]
                 k0 = k = min(6, len(hist))
@@ -1052,14 +1060,28 @@ class ArenaTracker:
                     # or a turn after older movement (turning in place after a stop is not a wrong head / tail)
                     along = (rx * vx + ry * vy) / math.hypot(vx, vy)
                     moving = along >= 0.5 * math.hypot(vx, vy) * (k0 - 1) / (k - 1)
-                if moving:
-                    hx, hy = (d.tx, d.ty) if flip else (d.hx, d.hy)
-                    tx, ty = (d.hx, d.hy) if flip else (d.tx, d.ty)
-                    dot = (hx - tx) * vx + (hy - ty) * vy
-                    self._flip_votes[i] = self._flip_votes[i] + 1 if dot < 0 else max(0, self._flip_votes[i] - 2)
+                # a run: over a body length the same way within heading_history_frames (an animal backs away less)
+                fx, fy = x1 - hist[0][0], y1 - hist[0][1]
+                run = moving and math.hypot(fx, fy) >= body_len and fx * vx + fy * vy > 0
+            if d.tail_reach >= self.tail_visible and not run:
+                # the tail is clearly visible: the shape is right (d as described) where the frame-to-frame
+                # continuity carried on an inversion, which it would otherwise keep for as long as the animal sits
+                # still.  The movement is not counted: an animal backs away from a wall or out of a stretch
+                if flip:
+                    self._flip_votes[i] += 1
                     if self._flip_votes[i] >= 5:
-                        flip = not flip
+                        flip = False
                         self._flip_votes[i] = 0
+                else:
+                    self._flip_votes[i] = 0
+            elif moving:
+                hx, hy = (d.tx, d.ty) if flip else (d.hx, d.hy)
+                tx, ty = (d.hx, d.hy) if flip else (d.tx, d.ty)
+                dot = (hx - tx) * vx + (hy - ty) * vy
+                self._flip_votes[i] = self._flip_votes[i] + 1 if dot < 0 else max(0, self._flip_votes[i] - 2)
+                if self._flip_votes[i] >= 5:
+                    flip = not flip
+                    self._flip_votes[i] = 0
             if flip:
                 d.hx, d.hy, d.tx, d.ty = d.tx, d.ty, d.hx, d.hy
                 d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))

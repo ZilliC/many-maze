@@ -1,8 +1,8 @@
 """Video file / camera access and recording.
 
 Random access (player, background sampling) and cameras use OpenCV (AVFoundation on macOS).  Sequential decoding
-for tracking uses PyAV/FFmpeg when available — with Apple VideoToolbox hardware decoding on macOS and greyscale
-taken straight from the luma plane — and recording uses the VideoToolbox H.264 encoder when available.
+for tracking uses PyAV/FFmpeg when available — with Apple VideoToolbox hardware decoding on macOS, the frames
+converted as OpenCV converts them — and recording uses the VideoToolbox H.264 encoder when available.
 Tracking may read the frames downscaled 2 or 4 times (:func:`downscale_frame`) to go faster on high-resolution
 video; :func:`check_video` looks for glitches (duplicate, black and missing frames).
 """
@@ -262,10 +262,12 @@ def first_frame(path: str) -> np.ndarray | None:
 
 
 # ------------------------------------------------------------------ fast sequential decoding
-_YUV8 = {"yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "yuv411p", "yuv440p", "yuvj440p",
-         "nv12", "nv21", "nv16", "gray"}
-# limited-range (16–235) luma → full-range grey, matching OpenCV's BGR→grey of the decoded frame
-_LIMITED_TO_FULL = np.clip(np.round((np.arange(256) - 16) * 255.0 / 219.0), 0, 255).astype(np.uint8)
+# the colour matrix OpenCV's FFmpeg backend decodes with whatever the stream's tags say (VideoSource: the player, the
+# detection preview and the background model); tracking decodes the same way so its frames match the background.
+# Not the luma plane: under coloured light (the red light of rodent rooms) a channel clips at 0 or 255 in the
+# conversion to BGR and OpenCV's BGR→grey then differs from the luma by 20 grey levels or more (a whole-image shift
+# relative to the background that loses the tail and the edges of the body)
+_OPENCV_COLORSPACE = "ITU601"
 
 
 def _av():
@@ -322,7 +324,8 @@ def downscale_frame(frame: np.ndarray, factor: int) -> np.ndarray:
 class FrameReader:
     """Sequential frame decoding for tracking: yields (frame_index, frame).
 
-    With ``gray=True`` frames are 2-D greyscale (the luma plane, no colour conversion).  Backends, in order of
+    With ``gray=True`` frames are 2-D greyscale.  Frames are decoded as OpenCV decodes them (VideoSource), so that
+    they match the background model and the detection preview.  Backends, in order of
     preference: PyAV with VideoToolbox hardware decoding (macOS), PyAV multi-threaded software decoding, OpenCV.
     ``downscale`` (2 or 4) yields the frames that many times smaller in width and height (:func:`downscale_frame`);
     ``width`` and ``height`` stay those of the video.
@@ -411,15 +414,10 @@ class FrameReader:
         return int(round((frame.pts - self._t0) * self._tb * self.fps))
 
     def _to_array(self, frame) -> np.ndarray:
-        if not self.gray:
-            return frame.to_ndarray(format="bgr24")
-        fmt = frame.format.name
-        if fmt in _YUV8:
-            p = frame.planes[0]
-            y = np.frombuffer(p, np.uint8).reshape(frame.height, p.line_size)[:, :frame.width]
-            full = fmt.startswith("yuvj") or fmt == "gray" or int(frame.color_range or 0) == 2
-            return y.copy() if full else cv2.LUT(y, _LIMITED_TO_FULL)
-        return frame.to_ndarray(format="gray")
+        if self.gray and frame.format.name == "gray":
+            return frame.to_ndarray()
+        bgr = frame.to_ndarray(format="bgr24", src_colorspace=_OPENCV_COLORSPACE)
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if self.gray else bgr
 
     def __iter__(self):
         if self.downscale <= 1:

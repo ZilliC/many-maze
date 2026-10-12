@@ -192,3 +192,13 @@ def test_head_after_turning_in_place(tmp_path):
     pos, ang = _segments((100, 240), parts)
     herr = _head_error(tmp_path, pos, ang)
     assert np.mean(herr[58:108] < 12) > 0.95  # still after the turn
+
+
+def test_head_while_backing_away_with_tail_visible(tmp_path):
+    # H-P01 in the open field: a rat backs away from the wall or out of a stretch, tail first, then sits still.  The
+    # movement-direction vote counted the backing as "head behind" and moved the head onto the tail, where the
+    # frame-to-frame continuity then kept it for the whole stop.  The tail, plainly visible, says which end is which.
+    pos, ang = _segments((100, 200), [(0, 4, 50), (0, -2, 12), (0, 0, 50), (90, 4, 60)])
+    herr = _head_error(tmp_path, pos, ang)
+    assert np.mean(herr[51:113] < 12) > 0.95  # backing away (2/3 body length) and the stop after it (was 15 %)
+    assert np.mean(herr < 12) > 0.95
