@@ -102,11 +102,15 @@ everything without a camera.
   *Operant chamber presets*).
 * **Test duration** – analysed length of each test (0 = until the end of the video).
 * **Test starts** – at each test's *start time* (set per test), automatically **when the animal is first
-  detected** in the apparatus, or **when the experimenter's hand has left the image**: the tracked object much
-  larger than the animal (more than 3 × its usual area, or above *Ignore objects larger than* when set) is the hand
-  putting the animal in; the test starts at the first frame showing the animal alone after the hand has gone (hand
-  frames up to 1 s apart count as one visit of the hand). Without any hand in the video the test starts at the first
-  detection, as noted in the track (`start`).
+  detected** in the apparatus, or **when the experimenter's hand has left the image**: a tracked object larger than
+  the animal (more than 1.6 × its usual area, or above *Ignore objects larger than* when set) is the hand putting the
+  animal in. Only a hand seen before the animal has been alone for 2 s counts (a hand that lets go in several goes is
+  one release); a hand after that — the experimenter taking the animal out at the end, e.g. off the water-maze
+  platform — is ignored. The test starts at the first frame showing the animal alone after the hand has gone: when
+  the tracked position jumps from the departing arm to the animal (within 1 s of the hand), or when the object is
+  back to the animal's size. Without a hand putting the animal in (a video that starts with the animal already
+  alone) the test starts at the first detection. The track notes how the start was found (`start`), and a start
+  that leaves less than half of the video is listed in the *Warnings* column of the results: check it in Review.
 * **Stages** – e.g. *Habituation, Day 1, Day 2, Probe*. Used for learning curves and repeated-measures
   statistics.
 * **Keys** (manually scored behaviours) – name, key stroke and how the key works (*Simple* while pressed, *Toggle*,
