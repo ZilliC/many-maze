@@ -376,6 +376,8 @@ class ArenaTracker:
     identity_memory_frames = 250
     # a pose-only recovery (blob lost, pose model confident) may continue for at most this many consecutive frames
     pose_only_max_frames = 75
+    # the movement-direction vote on head / tail looks this many frames back at most (slow movement)
+    heading_history_frames = 25
 
     def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None = None, pose=None):
         self.s = settings
@@ -1022,7 +1024,7 @@ class ArenaTracker:
                 hist.clear()
                 continue
             hist.append((d.x, d.y))
-            if len(hist) > 6:
+            if len(hist) > self.heading_history_frames + 1:
                 del hist[0]
             if math.isnan(d.hx) or i in skip:
                 continue
@@ -1032,11 +1034,25 @@ class ArenaTracker:
                 keep = math.hypot(d.hx - p.hx, d.hy - p.hy) + math.hypot(d.tx - p.tx, d.ty - p.ty)
                 swap = math.hypot(d.tx - p.hx, d.ty - p.hy) + math.hypot(d.hx - p.tx, d.hy - p.ty)
                 flip = swap < keep
-            # movement direction vote: animals mostly move head first
+            # movement direction vote: animals mostly move head first.  The displacement is measured over the last
+            # 5 frames, or further back when the animal moves slowly (a slow approach would otherwise never vote and
+            # an inversion caught at the turn before it would last through the approach and the stop after it)
             if len(hist) >= 4:
-                vx, vy = hist[-1][0] - hist[0][0], hist[-1][1] - hist[0][1]
                 body_len = math.hypot(d.hx - d.tx, d.hy - d.ty)
-                if math.hypot(vx, vy) > 0.25 * max(body_len, 1):
+                need = 0.25 * max(body_len, 1)
+                x1, y1 = hist[-1]
+                k0 = k = min(6, len(hist))
+                rx, ry = vx, vy = x1 - hist[-k][0], y1 - hist[-k][1]
+                while math.hypot(vx, vy) <= need and k < len(hist):
+                    k += 1
+                    vx, vy = x1 - hist[-k][0], y1 - hist[-k][1]
+                moving = math.hypot(vx, vy) > need
+                if moving and k > k0:
+                    # still moving that way in the last frames at no less than half the average speed: not a stop
+                    # or a turn after older movement (turning in place after a stop is not a wrong head / tail)
+                    along = (rx * vx + ry * vy) / math.hypot(vx, vy)
+                    moving = along >= 0.5 * math.hypot(vx, vy) * (k0 - 1) / (k - 1)
+                if moving:
                     hx, hy = (d.tx, d.ty) if flip else (d.hx, d.hy)
                     tx, ty = (d.hx, d.hy) if flip else (d.tx, d.ty)
                     dot = (hx - tx) * vx + (hy - ty) * vy

@@ -154,3 +154,41 @@ def test_empty_arena_mask_does_not_crash():
     assert tr.roi == (0, 0, 10, 10)
     dets, _ = tr.process(np.zeros((10, 10), np.uint8))
     assert not dets[0].detected
+
+
+def _segments(start, parts):
+    """Positions and headings (degrees) for (heading, px per frame, frames) segments; speed 0 = still."""
+    pos, ang = [np.asarray(start, float)], [parts[0][0]]
+    for heading, speed, n in parts:
+        u = np.array([np.cos(np.radians(heading)), np.sin(np.radians(heading))])
+        for _ in range(n):
+            pos.append(pos[-1] + speed * u)
+            ang.append(heading)
+    return np.array(pos), np.array(ang, float)
+
+
+def _head_error(tmp_path, pos, ang):
+    p = tmp_path / "v.avi"
+    noses = syn.make_video(p, pos, size=(640, 480), angles=ang, seed=7)
+    app = templates.build("open_field", 20, 20, 600, 440)
+    [[tr]] = track_video(str(p), [ArenaJob(app, DetectionSettings())])
+    return np.hypot(tr.hx - noses[:, 0], tr.hy - noses[:, 1])
+
+
+def test_head_after_slow_approach_and_stop(tmp_path):
+    # H-P01: a quick about-turn, then a slow approach (2 px per frame) and a stop.  The movement-direction vote
+    # used to need ¼ body length in 5 frames, so it never corrected the inversion caught at the about-turn and the
+    # head stayed on the tail for the whole stop.  (It walks away at the end: an animal still for most of the video
+    # would fade into the median background.)
+    pos, ang = _segments((60, 240), [(0, 4, 40), (180, 4, 8), (0, 2, 30), (0, 0, 60), (90, 4, 50)])
+    herr = _head_error(tmp_path, pos, ang)
+    assert np.mean(herr < 12) > 0.8  # each about-turn costs a few frames
+    assert np.mean(herr[79:139] < 12) > 0.95  # the stop
+
+
+def test_head_after_turning_in_place(tmp_path):
+    # stopping and then turning round in place is not an inversion: the older movement must not flip the head back
+    parts = [(0, 4, 40), (0, 0, 5)] + [(15 * (k + 1), 0, 1) for k in range(12)] + [(180, 0, 50), (180, 4, 40)]
+    pos, ang = _segments((100, 240), parts)
+    herr = _head_error(tmp_path, pos, ang)
+    assert np.mean(herr[58:108] < 12) > 0.95  # still after the turn
