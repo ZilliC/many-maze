@@ -425,10 +425,17 @@ class ArenaTracker:
         self._areas: list[float] = []
         self._usual_area = math.nan
         self._area_frames = 0
+        # one animal: the contrast of the recent detections (_excess) and their median, the usual contrast
+        self._excesses: list[float] = []
+        self._usual_excess = math.nan
+        self._excess_frames = 0
         self.contrast_votes = [0, 0]  # frames in which the animal was lighter / darker than the background
         self.lighting_gain = 1.0  # last frame's grey-level scale (Ignore lighting changes)
         self._bg_median_key = None
         self._bg_median = math.nan
+        # how strongly each blob stands out (_choose_single): (image, reference, threshold) of the last frame's
+        # processed region, a pixel's contrast being |image - reference| - threshold; None for colour tracking
+        self._contrast: tuple[np.ndarray, float, float] | None = None
         if settings.method == "colour":
             hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
         for c in settings.identity_colour_list():
@@ -545,6 +552,7 @@ class ArenaTracker:
     def _foreground(self, gray: np.ndarray, frame: np.ndarray | None, box) -> tuple[np.ndarray, np.ndarray | None]:
         """(foreground mask, blurred / erased image) of the processed region (gray and frame already cropped)."""
         s = self.s
+        self._contrast = None
         if s.method == "colour":
             if frame is None or frame.ndim != 3:
                 return np.zeros(gray.shape[:2], np.uint8), None  # no colour in a greyscale frame
@@ -569,6 +577,7 @@ class ArenaTracker:
                 fg = (g > thr).astype(np.uint8) * 255
             else:
                 fg = (g < thr).astype(np.uint8) * 255
+            self._contrast = (g, thr, 0.0)  # how far past the threshold: |grey level - threshold|
             return self._clean(fg), g
         bg = self._processed_background(box)
         if s.lighting_compensation:
@@ -583,6 +592,7 @@ class ArenaTracker:
             diff = cv2.absdiff(g, bg)
         thr = s.threshold if s.threshold > 0 else self._otsu(diff)
         fg = self._clean((diff > thr).astype(np.uint8) * 255)
+        self._contrast = (diff, 0.0, thr)
         if s.contrast not in ("dark", "light"):
             self._vote_contrast(g, bg, fg)
         return fg, g
@@ -694,7 +704,7 @@ class ArenaTracker:
             blobs = self._absorb_ghosts(blobs, gray, g, fg, box)
         blobs.sort(key=lambda b: -b[0])
         if n == 1:
-            blobs = blobs[:1]
+            blobs = self._choose_single(blobs, off) if blobs else blobs
         else:
             self._learn_single_area(blobs, n)
             blobs = self._split_merged(blobs, n)
@@ -788,6 +798,65 @@ class ArenaTracker:
         if absorbed:
             self._bg_version += 1
         return keep
+
+    # one animal among several blobs: a blob farther than the gate (_gate_px) from the animal's last-known position
+    # counts this share of its contrast, and one larger than SINGLE_SIZE_LIMIT times the animal's usual area is
+    # scaled down by the square of the excess
+    SINGLE_FAR_WEIGHT = 0.5
+    SINGLE_SIZE_LIMIT = 2.0
+
+    def _excess(self, c, off) -> float:
+        """How far the blob (contour c, frame coordinates) stands out: its mean difference from the background (or
+        grey level, thresholding) beyond the threshold; nan for colour tracking."""
+        if self._contrast is None:
+            return math.nan
+        img, ref, thr = self._contrast
+        x, y, w, h = cv2.boundingRect(c)
+        x0, y0 = x - off[0], y - off[1]
+        inside = np.zeros((h, w), np.uint8)
+        cv2.drawContours(inside, [c - [x, y]], -1, 255, -1)
+        mean = cv2.mean(img[y0:y0 + h, x0:x0 + w], mask=inside)[0]
+        return max(abs(mean - ref) - thr, 1.0)
+
+    def _choose_single(self, blobs, off):
+        """The animal when one animal is tracked (blobs: (area, contour) in frame coordinates; off: the processed
+        region's origin): a list of the one blob chosen.
+
+        Not simply the largest blob: on water the moving reflection of a lamp breaks into pieces as large as the
+        animal, faint (just past the threshold) where the animal stands out sharply; the experimenter's arm is far
+        larger than the animal, and under red light the hand stands out more than the animal. Each blob scores its
+        area times its contrast (_excess) counted at most up to the animal's usual contrast — scaled down when much
+        larger than the animal's usual area (SINGLE_SIZE_LIMIT) and when out of reach of the last-known position
+        (SINGLE_FAR_WEIGHT), so continuity breaks near ties without holding on to a wrong blob. The contrast of the
+        blob chosen is learnt like the usual area."""
+        if len(blobs) == 1:
+            best, best_excess = blobs[0], self._excess(blobs[0][1], off)
+        else:
+            usual, usual_excess = self._usual_area, self._usual_excess
+            mem = self._mem_pos[0]
+            gate = self._gate_px(0) if mem is not None else math.inf
+            best, best_excess, best_score = blobs[0], math.nan, -1.0
+            for a, c in blobs:
+                excess = self._excess(c, off)
+                score = float(a)
+                if math.isfinite(excess):
+                    score *= min(excess, usual_excess) if usual_excess > 0 else excess
+                if usual > 0 and a > self.SINGLE_SIZE_LIMIT * usual:
+                    score *= (self.SINGLE_SIZE_LIMIT * usual / a) ** 2
+                if mem is not None:
+                    m = cv2.moments(c)
+                    if m["m00"] > 0 and math.hypot(m["m10"] / m["m00"] - mem[0],
+                                                   m["m01"] / m["m00"] - mem[1]) > gate:
+                        score *= self.SINGLE_FAR_WEIGHT
+                if score > best_score:
+                    best, best_excess, best_score = (a, c), excess, score
+        if math.isfinite(best_excess):
+            self._excesses.append(best_excess)
+            del self._excesses[:-self.USUAL_AREA_FRAMES]
+            self._excess_frames += 1
+            if self._excess_frames < 25 or self._excess_frames % 25 == 0:
+                self._usual_excess = float(np.median(self._excesses))
+        return [best]
 
     def _learn_single_area(self, blobs, n: int):
         """With several animals: the area of one animal, learnt from the frames in which every animal is a blob of

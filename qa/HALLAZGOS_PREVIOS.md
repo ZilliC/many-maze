@@ -65,7 +65,7 @@ Antes de abrir un hallazgo nuevo, mira si es uno de estos. Si lo es, **no lo dup
     la marcha (cara o cruz) y 0,0 % sostenida solo porque el movimiento no avanza ≥ 1 s seguido. En el FST la medida
     pertinente es la inmovilidad, no la cabeza. A ojo, en 5 cuadros al azar por video, la cabeza unas veces apunta
     hacia arriba, otras de lado, y otras no se ve (la rata de espaldas a la cámara).
-  - **Hallazgo aparte (agua, no H-P01), por abrir si se quiere:** con los ajustes por defecto el rastreo sobre la
+  - **Hallazgo aparte (agua, no H-P01; abierto y corregido como H-P13):** con los ajustes por defecto el rastreo sobre la
     piscina del MWM salta a reflejos del agua en 24–35 % de los cuadros (la rata, pequeña, pierde frente a las
     manchas brillantes). Con `threshold=40` y área 500–2 500 px baja a 4–17 %.
 - **Por qué el oráculo sintético no lo veía:** los animales sintéticos (incluida una «rata» de 110 px que avanza 2,5
@@ -297,3 +297,65 @@ Antes de abrir un hallazgo nuevo, mira si es uno de estos. Si lo es, **no lo dup
   - **H-005 (Obs):** una lista `.m3u` con un archivo que no existe, o un video vacío, se aceptaban sin aviso: el
     diálogo *Add tests from videos* lo avisa ahora (se pueden añadir igual). La etapa vacía sigue aceptándose:
     es válida (pruebas sin etapa).
+
+## H-P13 — En el MWM con luz blanca, el rastreo tomaba el reflejo de la lámpara en vez de la rata
+
+- **Severidad:** S1 para las medidas del MWM por el centro (latencia, recorrido, tiempo por cuadrante, cruces de la
+  plataforma), las más usadas: con los ajustes por defecto, en ~1 de cada 3 cuadros el «animal» era un trozo del
+  reflejo, a cientos de px de la rata.
+- **Estado:** CORREGIDO (2026-10-12, rama de esta sesión sobre `validacion-qa`). Comprobado en video real; prueba
+  automática `tests/test_water_reflections.py` (incluye cuadros reales, `tests/data/mwm_reflections.npz`);
+  herramienta `qa/herramientas/rastreo_agua.py`.
+- **Dónde:** MWM `MWM_T1-T8_LM-A_F0_HEMBRAS_29.04.2025`, los tres primeros videos (`2025-04-29 20-00-56`,
+  `20-01-42`, `20-11-06`; luz blanca, piscina recortada a (350, 0, 620, 610)); plantilla `water_maze`, ajustes por
+  defecto.
+- **Causa:** con un solo animal el rastreador se quedaba con la mancha **más grande**. En gris la rata (≈ 175) y el
+  reflejo de la lámpara del techo (≈ 169) brillan igual; al nadar, la rata ondula el agua y el reflejo (que está en
+  el fondo, la mediana) se rompe en trozos de 1 100–2 700 px, tan grandes o más que la rata (1 000–1 500 px). No era
+  el umbral ni el área ni la polaridad por sí solos: esos trozos superan apenas el umbral (diferencia media con el
+  fondo +22 a +39 con umbral 25), mientras la rata lo supera con holgura (+44 a +63). Al final, el brazo del
+  experimentador (hasta 7 600 px) también ganaba por tamaño; con luz roja, la mano brilla más que la rata.
+- **Arreglo** (`ArenaTracker._choose_single`, solo con un animal): cada mancha puntúa su área por cuánto supera el
+  umbral su contraste medio, contado como mucho hasta el contraste habitual del animal (mediana de las detecciones,
+  como el área habitual); una mancha de más del doble del área habitual cuenta menos (cuadrado del exceso) y una
+  fuera del alcance de la última posición (la puerta de identidad, 4 cuerpos + 1 por cuadro sin ver) cuenta la mitad.
+  Con una sola mancha nada cambia. Varios animales: sin cambios. No hizo falta cambiar los ajustes por defecto de la
+  plantilla ni añadir máscaras de reflejos.
+- **Medición** (`qa/herramientas/rastreo_agua.py`). Referencia independiente: el color; con luz blanca la rata es
+  cálida (R − B ≈ +75) y el reflejo neutro (≈ 0), y el rastreador trabaja en gris. Revisada a ojo: la referencia cae
+  sobre la rata en 12 de 12 cuadros al azar. Clases: «rata» (la rata sola en el agua: 3 825 cuadros), «mano» (además el
+  brazo del experimentador al soltarla o sacarla: 600), «ausente» (la rata fuera: 356). Acierto = centro a < 30 px
+  (≈ 7 cm). «Crudo» = sin quitar saltos ni rellenar; «final» = la pista guardada (quitar saltos > 300 cm/s y rellenar).
+
+  | Video | antes: crudo / final (rata) | después: crudo / final (rata) | antes → después, final (mano) |
+  |---|---|---|---|
+  | `2025-04-29 20-00-56` | 69,2 % / 97,0 % | 99,4 % / 99,6 % | 1,1 % → 90,9 % |
+  | `2025-04-29 20-01-42` | 75,7 % / **92,3 %** | 100,0 % / 100,0 % | 18,8 % → 87,7 % |
+  | `2025-04-29 20-11-06` | 61,3 % / 99,2 % | 97,9 % / 99,8 % | 41,1 % → 13,2 % |
+  | **Los tres** | **68,6 % / 96,1 %** | **99,1 % / 99,8 %** | 18,3 % → 64,7 % |
+
+  Es decir: los cuadros con reflejo o mano pasan de 31 % a 0,9 % en crudo. La eliminación de saltos inverosímiles (> 300 cm/s, ya en
+  `validacion-qa`) tapaba buena parte en la pista final, pero rellenando a ciegas (y no en 20-01-42: 92 %).
+- **Generalización** (sin ajustar nada a estos videos; 60 s de cada uno, la duración de la plantilla):
+  - Luz blanca, referencia de color, cuadros «rata», crudo / final: adecuación hembras `2025-04-28 20-41-40`
+    72,0 / 89,6 % → 100 / 100 %; `2025-04-28 21-39-46` 74,9 / 95,8 % → 100 / 100 %; adecuación machos
+    `2025-05-06 20-31-49` 87,1 / 89,2 % → 99,7 / 99,9 %; cuarto video del 29.04 (`20-16-02`, no usado para ajustar)
+    73,6 / 92,9 % → 99,5 / 100 %.
+  - Luz roja (agua oscura, casi sin reflejos), contra las trayectorias independientes de
+    `~/Downloads/Ratas/analisis_conductual/MWM_trayectorias` (10 Hz, < 40 px), crudo: `2025-04-29 20-59-45` 89,7 →
+    90,9 %; `2025-05-07 19-58-13` 99,7 → 99,7 %; `2025-04-30 20-25-19` y `2025-05-08 20-03-55` 100 → 100 %. Lo que
+    queda en 20-59-45 son las manos al soltar y sacar la rata.
+- **EPM y OFT (H-P01), `qa/herramientas/cabeza_real.py`, 150 s:** la cabeza invertida sostenida sigue en **0,0 %** en
+  las 8 arenas (2 EPM, 6 OFT), igual que antes del cambio; «contra la marcha» casi igual (EPM 7,3 → 7,3 % y 4,7 →
+  4,4 %; OFT 20-32-43 izquierda 4,8 → 6,4 %, derecha 24,1 → 18,8 %; el resto idéntico).
+- **Queda abierto:**
+  - Cuadros «mano» (1–4 s al soltar y al sacar la rata): 65 % bien. En la mayoría del resto la mano ya tiene a la rata
+    y forman una sola mancha: ninguna elección de mancha lo resuelve. Conviene que la ventana del ensayo los excluya (inicio
+    *experimenter_leaves*, fin al llegar a la plataforma).
+  - Con la rata fuera del agua siempre se «detecta» algo (un reflejo): ni antes ni ahora hay un criterio de
+    «no hay animal».
+  - Con *Downscale* 4 la rata se funde a veces con su estela oscura (en 1 de 12 cuadros reales de prueba); con 1 o 2,
+    bien.
+- **Casos que lo verifican:** `tests/test_water_reflections.py`; `qa/herramientas/rastreo_agua.py` sobre los tres
+  videos (≥ 95 % en «rata», final, = OK).
+

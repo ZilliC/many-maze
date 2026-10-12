@@ -420,7 +420,12 @@ when no range is set. *Undo* reverts the swap.
    cameras with changing light.
 2. Each frame is compared with the background, thresholded, cleaned (blur, remove specks, fill holes) and
    restricted to the arena.
-3. The largest blob is the animal (*n* largest for several animals, with merged animals split by k-means and
+3. With one animal, the blob that stands out most is the animal: its area times how far its difference from the
+   background exceeds the threshold, so the faint, rippling pieces of a lamp's reflection on water lose to the
+   sharply contrasted animal even when they are larger. Contrast beyond the animal's usual contrast does not count
+   (under red light the experimenter's hand stands out more than the animal), a blob much larger than the
+   animal's usual size (the experimenter's arm) counts less, and so does one beyond reach of the animal's last
+   position. With several animals the *n* largest blobs are the animals (merged animals split by k-means,
    identities kept by optimal assignment between frames).
 4. The **centre** is the blob centroid. **Head and tail**: the tail is stripped morphologically, the body axis
    is found by PCA, and the end that the animal moves towards is the head (with frame-to-frame consistency).
