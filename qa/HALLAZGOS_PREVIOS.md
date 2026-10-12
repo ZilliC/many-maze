@@ -174,6 +174,28 @@ Antes de abrir un hallazgo nuevo, mira si es uno de estos. Si lo es, **no lo dup
 
 - **Severidad:** S2 para pruebas largas con muchas sesiones (la app anuncia hasta 40 pruebas simultáneas y pruebas
   de 24 h); sin consecuencias para pruebas cortas.
+- **Estado:** CORREGIDO durante la prueba (2026-10-12, commit 405a9f1 sobre `validacion-qa`; `core/trackstore.py`).
+  Cada sesión guarda en memoria solo el último minuto (1500 filas); el resto de la trayectoria y del contorno se
+  añade por trozos a `<archivo de rescate>.track` (un archivo temporal sin archivo de rescate) y se lee al guardar
+  la prueba. El archivo de rescate JSON lleva solo las filas en memoria y cuántas hay en el `.track`: una prueba
+  recuperada tras un cierre tiene toda la trayectoria hasta el último guardado (un trozo a medio escribir se
+  descarta). Los gráficos del monitor ya no copian la trayectoria entera. `prueba_larga.py --horas 1 --sesiones 4`:
+
+  | | antes | después |
+  |---|---|---|
+  | memoria por sesión y hora de prueba | **62 MB** (0,70 KB por cuadro) | **1 MB** (0,01 KB por cuadro) |
+  | ídem con archivos de rescate (`--autosave`, como *Run tests*) | **62 MB**; pico del proceso 811 MB | **3 MB**; pico 604 MB (al guardar) |
+  | 40 pruebas de 24 h (estimado) | **57,8 GB** (no caben en 24 GB) | **0,8 GB** (2,4 GB con `--autosave`) |
+  | archivo de rescate a 1 h, por sesión | 20,5 MB de JSON reescrito entero (1,15 s la última vez) | JSON pequeño (0,01 s) + 11,4 MB en el `.track` (solo se añade) |
+  | coste por cuadro y sesión | 0,97 ms | 0,97 ms |
+
+  Mismas distancias al centímetro y todas las posiciones guardadas (90 000 de 90 000 por sesión). Una sesión de
+  8 h con `--autosave`: 121 MB a los 10 min, 126 MB al final (0,4 MB/h); 720 000 de 720 000 posiciones. En disco, el
+  `.track` ocupa ~11 MB por hora y sesión (40 × 24 h ≈ 11 GB en `recordings/` mientras corren; se borra al guardar).
+- **Queda (otra causa, fuera de la prueba en vivo):** leer una trayectoria larga guardada (`Track.from_csv`: resultados
+  al terminar, *Review*) usa ~2,4 GB de pico para 8 h con contorno (≈ 6–7 GB para 24 h): lee todo el CSV como texto
+  y listas de cadenas. Reconstruir la trayectoria al guardar usa ~0,4 GB para 8 h (≈ 1,3 GB para 24 h), una prueba
+  cada vez.
 - **Dónde:** `qa/herramientas/prueba_larga.py` (2026-10-12), con el código de *Run tests* sin interfaz.
 - **Observado:** 0,6–0,7 KB por cuadro y sesión (54–64 MB por hora de prueba y sesión), casi todo por el contorno del
   cuerpo que se guarda en memoria cuadro a cuadro (*Record the animal's whole-body outline*, activado por defecto):
