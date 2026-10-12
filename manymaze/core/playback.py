@@ -107,16 +107,23 @@ class TrackAnimation:
         full = getattr(self._path, "_manymaze_full", None)
         if full is None:
             if hasattr(self._path, "get_segments"):  # coloured by time / speed / a parameter
+                # the positions frame by frame, NaN gaps included: track_plot keeps them on the collection, as
+                # matplotlib hands back segments with a NaN end shortened or empty (no use for either)
+                xy = getattr(self._path, "_manymaze_xy", None)
+                if xy is None:  # a collection drawn elsewhere: rebuilt from the segments, short ones as gaps
+                    segs = self._path.get_segments()
+                    xy = [s[0] if len(s) == 2 else (np.nan, np.nan) for s in segs]
+                    xy += [segs[-1][1] if len(segs[-1]) == 2 else (np.nan, np.nan)] if segs else []
+                xy = np.asarray(xy, float).reshape(-1, 2)
                 arr = self._path.get_array()
-                full = (self._path.get_segments(), None if arr is None else np.asarray(arr))
+                full = (np.stack([xy[:-1], xy[1:]], axis=1), None if arr is None else np.asarray(arr))
             else:
                 full = (np.asarray(self._path.get_xdata(), float), np.asarray(self._path.get_ydata(), float))
             self._path._manymaze_full = full
         self._full = full
         if hasattr(self._path, "get_segments"):
             segs = full[0]
-            pts = [s[0] for s in segs] + ([segs[-1][1]] if segs else [])
-            self._xy = np.asarray(pts, float).reshape(-1, 2)
+            self._xy = np.concatenate([segs[:, 0], segs[-1:, 1]]) if len(segs) else np.zeros((0, 2))
         else:
             self._xy = np.column_stack([full[0], full[1]])
         n = min(len(self._xy), len(self.t))

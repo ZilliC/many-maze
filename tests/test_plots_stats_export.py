@@ -168,6 +168,29 @@ def test_track_animation_and_playback_video(app, tmp_path):
     assert render_track_video(fig, tr, tmp_path / "stop.mp4", speed=8.0, fps=10.0, should_stop=lambda: True) is None
 
 
+def test_track_animation_with_undetected_frames(app):
+    """Frames where the animal was not found (NaN) used to break the playback of a track coloured by time:
+    matplotlib hands back empty or one-point segments there, and rebuilding the positions from them failed
+    ("index 0 is out of bounds") or shifted them off the frames they belong to."""
+    from manymaze.core.playback import TrackAnimation
+
+    tr = _circle_track(n=250, head=False)
+    x, y = tr.x.copy(), tr.y.copy()
+    x[[0, 1]] = y[[0, 1]] = np.nan  # undetected at the start
+    x[100:110] = y[100:110] = np.nan  # a run of lost frames (empty segments)
+    x[180] = y[180] = np.nan  # a single lost frame (one-point segments)
+    tr = Track(t=tr.t, x=x, y=y, area=tr.area, motion=tr.motion, fps=tr.fps)
+    fig = plots.track_plot(tr, app, color_by="time")
+    anim = TrackAnimation(fig, tr)
+    assert anim.ok and len(anim._xy) == len(tr)
+    np.testing.assert_array_equal(anim._xy[:, 0], x)
+    np.testing.assert_array_equal(anim._xy[:, 1], y)
+    anim.show(105 / tr.fps)  # inside the gap: the dot stays on the last position found
+    assert anim._now.get_visible() and anim._now.get_xdata()[0] == x[99]
+    anim.show(anim.end)
+    assert not anim._now.get_visible()
+
+
 def test_group_graphs():
     rng = np.random.default_rng(0)
     rows = [{"Group": g, "Stage": s, "Sex": x, "v": float(rng.normal(i))} for i, g in enumerate("AB") for s in

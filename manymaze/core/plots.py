@@ -223,6 +223,9 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
             norm = Normalize(float(fin.min()) if len(fin) else 0, float(fin.max()) if len(fin) else 1)
         lc = LineCollection(segs, cmap=cmap, norm=norm, lw=lw, gid=TRACK_PATH_GID)
         lc.set_array(vals)
+        # the per-frame positions, NaN gaps included: matplotlib drops the NaN vertices from the segments it
+        # hands back, so the animated playback could not rebuild them frame by frame from get_segments()
+        lc._manymaze_xy = np.column_stack([x, y]).astype(float)
         ax.add_collection(lc)
         mappable = lc
     else:

@@ -80,6 +80,22 @@ def test_results_and_plots(view):
     assert view.results_table.rowCount() > 20
     assert float(res["Test duration (s)"]) == pytest.approx(8, abs=0.1)
     assert "Total distance (cm)" in res
+    # a long text value (visit durations, visited zones) is elided with a tooltip instead of widening the Value
+    # column until the numbers end up off-screen
+    from manymaze.gui.pages.testview.page import RESULT_VALUE_MAX_WIDTH
+
+    long = "Quadrant NE: visit durations (s): " + ", ".join(["1.267", "4.383"] * 20)
+    analyse = view.project.analyse_test
+    view.project.analyse_test = lambda t: [dict(r, **{"Visit durations (s)": long}) for r in analyse(t)]
+    try:
+        view.refresh_results()
+    finally:
+        del view.project.analyse_test
+    tbl = view.results_table
+    row = [r for r in range(tbl.rowCount()) if tbl.item(r, 0).text() == "Visit durations (s)"][0]
+    assert tbl.columnWidth(1) <= RESULT_VALUE_MAX_WIDTH
+    assert tbl.item(row, 1).text() == tbl.item(row, 1).toolTip() == long
+    assert tbl.columnWidth(0) + tbl.columnWidth(1) <= tbl.viewport().width()  # no horizontal scrolling
     view.tabs.setCurrentIndex(1)
     assert view.track_canvas.figure is not None and view.heat_canvas.figure is not None
     assert view.speed_canvas.figure is not None

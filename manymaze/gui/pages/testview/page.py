@@ -32,6 +32,7 @@ from .track_edit import TrackEditMixin
 
 INFO_KEYS = set(INFO_COLUMNS)
 SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+RESULT_VALUE_MAX_WIDTH = 180  # px: the Value column of the Results tab, so a long text value is elided, not scrolled
 STATUS_COLORS = {"tracked": "#16a34a", "scored": "#0891b2", "pending": "#d97706", "skipped": "#9333ea",
                  "superseded": "#94a3b8", "excluded": "#94a3b8"}
 
@@ -754,14 +755,22 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                                if len(rows) > 1 else ["Value"])
         tbl.setColumnCount(len(heads))
         tbl.setHorizontalHeaderLabels(heads)
-        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for c in range(1, len(heads)):
-            tbl.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         tbl.setRowCount(len(measures))
         for i, m in enumerate(measures):
             tbl.setItem(i, 0, _ro_item(m))
             for j, r in enumerate(rows):
-                tbl.setItem(i, j + 1, _num_item(r.get(m)))
+                it = _num_item(r.get(m))
+                if isinstance(r.get(m), str) and r.get(m):  # lists of visits or zones: elided, whole on hover
+                    it.setToolTip(it.text())
+                tbl.setItem(i, j + 1, it)
+        # values sized to their contents, but a long text value (visit durations, visited zones) must not push the
+        # numbers of the other rows out of sight: capped, the user can still widen the column
+        for c in range(1, len(heads)):
+            hdr.setSectionResizeMode(c, QHeaderView.Interactive)
+            tbl.resizeColumnToContents(c)
+            hdr.resizeSection(c, min(hdr.sectionSize(c), RESULT_VALUE_MAX_WIDTH))
         self._filter_results()
         src = f"{len(self.tracks)} track{'s' if len(self.tracks) > 1 else ''}" if self.tracks else \
             "the I/O log" if has_io_log(t) else "manual scoring"
