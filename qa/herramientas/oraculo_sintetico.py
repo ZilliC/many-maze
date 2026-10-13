@@ -4,6 +4,12 @@ programado, y los resultados ESPERADOS calculados a partir de ese recorrido, sin
     .venv/bin/python qa/herramientas/oraculo_sintetico.py generar DEST          # crea DEST/<plantilla>.mmaze
     .venv/bin/python qa/herramientas/oraculo_sintetico.py verificar EXPORTADO.csv DEST/<plantilla>.mmaze/esperado.csv
     .venv/bin/python qa/herramientas/oraculo_sintetico.py autoverificar DEST     # rastrea con el motor y compara todo
+    .venv/bin/python qa/herramientas/oraculo_sintetico.py calibrar DEST          # regenera DEST/*/calibracion_capa_A.csv
+
+Cuándo volver a correr `calibrar`: los `calibracion_capa_A.csv` guardan los efectos de rastreo ya conocidos (capa A). Quedan
+viejos cuando cambia el rastreo o el cálculo de la app: tras reconstruir `dist` o arreglar un hallazgo de rastreo, y tras
+regenerar el oráculo con `generar`. Si no, salen diferencias CONOCIDAS como nuevas (o al revés, se ocultan las ya arregladas).
+Se corre sobre la carpeta del oráculo sin rastrear (rastrea una copia temporal); revisar el diff antes de aceptarlo.
 
 Qué es independiente y qué no:
   * El recorrido (posición y orientación del animal en cada cuadro) lo decide este script: es la verdad.
@@ -1083,7 +1089,7 @@ def features_expected(name, truth, app, extras, unit, layer_b=False):
     elif name == "open_field_intervalos":
         dur = truth.duration
         defs = [(f"{a:g}-{min(a + 5, dur):g} s", a, min(a + 5, dur)) for a in np.arange(0, dur, 5.0)]
-        defs = [(f"{int(a)}-{int(round(b))} s", a, b) for _, a, b in defs]
+        # Convención de la app (measures.time_periods): la etiqueta lleva el final REAL del último periodo (35-37.4 s), no redondeado.
         of.periods(truth, rows, "O1", app.name, defs, unit, Expect, lambda: {n: memb[n] for n in names})
     return e.rows + rows
 
