@@ -5,7 +5,8 @@
 - [x] Arreglo: `tests/gui/test_shell_audit.py` tiene 2 tests en rojo en `validacion-qa`
       (`test_ribbon_commands_keep_the_text_being_typed`, `test_delete_time_period_uses_the_table_worked_in_and_invalid_periods_are_reported`)
       → no se reproduce con `QT_QPA_PLATFORM=offscreen` (21/21 en el archivo, 299/299 en `tests/gui`)
-- [ ] Arreglo: `ruff check .` limpio (instalar ruff 0.11.13 en `.venv` si falta, la misma versión que el CI)
+- [x] Arreglo: `ruff check .` limpio (instalar ruff 0.11.13 en `.venv` si falta, la misma versión que el CI)
+      → ya estaba limpio; ruff 0.11.13 instalado en `.venv` con `uv pip`
 - [ ] Revisar `~/mANY-MAZE-QA/2026-10-11_2224/bitacora/HALLAZGOS.md`: cada hallazgo abierto que no esté en
       `qa/HALLAZGOS_PREVIOS.md` como corregido → una tarea Arreglo en esta cola
 - [ ] QA pasada 1: terminar B00, B06 y B17 (el piloto dejó casos sin ejecutar, ver su `COBERTURA.md`)
