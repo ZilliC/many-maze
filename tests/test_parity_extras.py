@@ -550,3 +550,13 @@ def test_test_date_time_and_notes_info_columns(demo):
         ("2026-10-05", "Monday", "14:30:00", "lights flickered")
     t.recorded_at = ""
     assert demo.test_info(t)["Test date"] == ""
+
+
+def test_playlist_with_missing_video_says_which(tmp_path):
+    from manymaze.core.video import VideoSource
+    (tmp_path / "list.m3u").write_text("#EXTM3U\nno_existe.mp4\n")
+    with pytest.raises(IOError) as e:
+        VideoSource(str(tmp_path / "list.m3u"))
+    msg = str(e.value)
+    assert "“list.m3u”" in msg and "“no_existe.mp4”" in msg and "was not found" in msg
+    assert "Errno" not in msg and not isinstance(e.value, FileNotFoundError)
