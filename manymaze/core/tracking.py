@@ -699,8 +699,9 @@ class ArenaTracker:
             if self.s.max_area_px and a > self.s.max_area_px:
                 continue
             blobs.append((a, c))
-        if blobs and g is not None and self.s.method == "background" and \
-                (self.s.background == "adaptive" or self._bootstrapped):
+        # ghosts of the animal in the model: from a live-image background, and also from a median one in which the
+        # animal sat for most of the video (novel tank): a ghost that outscores the animal would hold the track (H-006)
+        if blobs and g is not None and self.s.method == "background":
             blobs = self._absorb_ghosts(blobs, gray, g, fg, box)
         blobs.sort(key=lambda b: -b[0])
         if n == 1:

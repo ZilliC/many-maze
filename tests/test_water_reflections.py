@@ -117,3 +117,27 @@ def test_real_water_maze_frames():
         tr.set_background(z["backgrounds"][int(k)])
         d = tr.process(img)[0][0]
         assert d.detected and np.hypot(d.x - x, d.y - y) < 8, (int(k), int(fr), d.x, d.y, x, y)
+
+
+def test_ghost_of_the_animal_in_a_median_background_does_not_hold_the_track():
+    """Novel tank (H-006): the animal sat in one place for most of the video, so the median background contains it.
+    Where it sat the empty tank now differs from the model: a ghost the size of the animal that never fades. The
+    animal swimming away elsewhere (somewhat larger, so not near-tied) must not be dropped for being far from the
+    ghost the track had been following: the ghost is absorbed into the model."""
+    ghost_at = (200, 330)
+    bg = np.full((H, W), WATER, np.uint8)
+    cv2.ellipse(bg, ghost_at, (16, 7), 0, 0, 360, 200, -1)
+    tr = ArenaTracker(DetectionSettings(head_tail=False, record_outline=False))
+    tr.set_background(bg)
+    # the animal darts away from its old spot and swims on up the tank, a little bigger
+    for i in range(30):
+        f = np.full((H, W), WATER, np.uint8)
+        tr.process(f)  # empty tank: only the ghost is seen, and must not stay a detection
+    last = None
+    for i in range(30):
+        y = 200 - 4 * i  # appears far above the ghost (a quick dart), then swims on
+        f = np.full((H, W), WATER, np.uint8)
+        cv2.ellipse(f, (200, y), (22, 9), 0, 0, 360, 200, -1)
+        dets, _ = tr.process(f)
+        last = dets[0]
+    assert last.detected and np.hypot(last.x - 200, last.y - 84) < 4, (last.x, last.y)
