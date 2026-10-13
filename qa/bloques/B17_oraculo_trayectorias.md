@@ -16,7 +16,7 @@ La verificación tiene **dos capas**:
 
 | Capa | Compara la app con… | Una diferencia significa… |
 |---|---|---|
-| **A** (verdad programada) | lo que pasó de verdad en el video | rastreo + cálculo. Muchas diferencias son efectos del rastreo ya conocidos (H-P05, H-P07), guardados al calibrar en `calibracion_capa_A.csv` |
+| **A** (verdad programada) | lo que pasó de verdad en el video | rastreo + cálculo. Muchas diferencias son efectos del rastreo ya conocidos (H-P05, H-P07), guardados al calibrar en `calibracion_capa_A.csv` (regenerar con `oraculo_sintetico.py calibrar DEST` tras reconstruir `dist`, arreglar rastreo o regenerar el oráculo) |
 | **B** (cálculo) | las mismas fórmulas aplicadas a la trayectoria **que rastreó la app** | **un error de cálculo**: con la misma trayectoria, la app y la definición no dan lo mismo |
 
 Estados que da el verificador:
