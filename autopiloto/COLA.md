@@ -21,6 +21,18 @@
       → `_PlaylistCapture` ahora da IOError claro con lista y video (a0efbdd)
 - [ ] Arreglo: H-007 (herramienta) el oráculo etiqueta el último periodo `35-37 s` y la app `35-37.4 s` (26 SIN FILA
       en `open_field_intervalos`); regenerar `calibracion_capa_A.csv` tras reconstruir `dist`
+- [x] QA motor/CLI (sin GUI): B11 estadística contra `oraculo_estadistica.py`
+      → 7 OK, 3 RARO; valores = oráculo; H-P02 ya no ocurre; H-008, H-009 (S3), H-010 (Obs), H-011 (herramienta)
+- [ ] QA motor/CLI (sin GUI): B16 línea de comandos
+- [ ] QA motor/CLI (sin GUI): B13 videos reales (OFT, EPM, MWM, FST; `cabeza_real.py`, `comparar_anotaciones.py`)
+- [ ] QA motor/CLI (sin GUI): B12 importar desde ANY-maze
+- [ ] QA motor/CLI (sin GUI): B10 exportaciones contra la referencia
 - [ ] QA pasada 1 (necesita computer use, ver PARA_TI): B01, B02, B03, B04, B05 (una tarea por bloque)
 - [ ] QA pasada 1: B07, B08, B09, B10, B11 (una tarea por bloque)
 - [ ] QA pasada 1: B12, B13, B14, B15, B16 (una tarea por bloque)
+- [ ] Arreglo: H-008 (S3) Statistics ▸ Two factors: la 1.ª variable solo admite Stage/Trial/Period, no Group × Sex
+      (el motor sí lo calcula bien)
+- [ ] Arreglo: H-009 (S3) Statistics: Paired t-test/Wilcoxon con 3 etapas se cambian a RM-ANOVA/Friedman y el filtro
+      solo admite «=» (no «≠ Día 3»), así que no se pueden pedir
+- [ ] Arreglo: H-011 (herramienta) `qa/herramientas/oraculo_estadistica.py` no registra «Genotipo» en `animal_fields`
+- [ ] Decidir H-010 (Obs) Assumption checks solo da p, no el estadístico; D'Agostino por grupo, no global

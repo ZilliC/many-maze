@@ -8,3 +8,4 @@
 2026-10-13 · QA pasada 1 B00/B17/B06 (resto) · sin computer use: solo motor; H-006 S2 regresión novel_tank (c9b4880), H-007 Obs oráculo; GUI BLOQUEADO · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · Arreglo H-006 novel_tank · arreglado: absorber fantasmas en todo fondo sustraído; capa A 88→289/328; 1316 tests verdes · ca3c0d7
 2026-10-13 · Arreglo H-P03 .m3u con video que falta · arreglado: mensaje claro con lista y video; 1317 tests verdes · a0efbdd
+2026-10-13 · QA B11 por motor (offscreen) · 7 OK 3 RARO, valores = oráculo; H-008/H-009 S3, H-010 Obs, H-011 herramienta · ~/mANY-MAZE-QA/2026-10-11_2224
