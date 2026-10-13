@@ -7,3 +7,5 @@ Cosas que necesitan hardware real, videos, dinero o una decisión tuya. El agent
 - 2026-10-13: los subagentes de esta sesión **no tienen computer use**, así que los casos de QA que necesitan la
   interfaz quedan BLOQUEADO. Para avanzar B01–B16 hace falta lanzar sesiones con computer use activado (§«Cómo lanzar
   cada sesión» de `qa/PLAN_PRUEBA_INTEGRAL.md`); mientras tanto el autopiloto hace lo que se puede por motor/CLI.
+- 2026-10-13: B13-50/51 (precisión del rastreo frente a fotogramas anotados a mano) necesitan que una persona anote
+  fotogramas con `qa/herramientas/anotar.py`; no hay anotaciones previas.

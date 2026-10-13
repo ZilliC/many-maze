@@ -26,7 +26,9 @@
       → 7 OK, 3 RARO; valores = oráculo; H-P02 ya no ocurre; H-008, H-009 (S3), H-010 (Obs), H-011 (herramienta)
 - [x] QA motor/CLI (sin GUI): B16 línea de comandos
       → 4 OK, 3 RARO, 2 FALLA; H-012/H-013 (S2), H-014/H-015 (S3), H-016 (Obs), H-017 (herramienta)
-- [ ] QA motor/CLI (sin GUI): B13 videos reales (OFT, EPM, MWM, FST; `cabeza_real.py`, `comparar_anotaciones.py`)
+- [x] QA motor/CLI (sin GUI): B13 videos reales (OFT, EPM, MWM, FST; `cabeza_real.py`, `comparar_anotaciones.py`)
+      → P1: 3 OK, 1 RARO (MWM), 1 FALLA (OFT), 2 BLOQUEADO (sin anotaciones); H-P01 ya no ocurre;
+        H-025 (S2), H-026/H-027 (S3), H-028 (Obs), H-029 (herramienta)
 - [x] QA motor/CLI (sin GUI): B12 importar desde ANY-maze
       → offscreen: 2 OK, 3 RARO; H-018/H-019/H-020 (S3)
 - [x] QA motor/CLI (sin GUI): B10 exportaciones contra la referencia
@@ -57,3 +59,9 @@
 - [ ] Arreglo: H-021…H-024 (S4) informe HTML `statistic=nan` en medidas constantes; correo con servidor apagado
       dice «file could not be read or written»; errores al guardar nombran un `.tmp`; «Colour by» ofrece
       «Defecation: count» y falla en silencio. Más: `inspeccionar.py` se cae con la línea `# …` de raw data
+- [ ] Arreglo: H-025 (S2) OFT real: el rastreo se pega al borde de la caja (93 % de cuadros) sin aviso, en 3 de 6
+      arenas; con la caja 15–20 px adentro rastrea bien (`~/mANY-MAZE-QA/2026-10-11_2224/salidas/B13/`)
+- [ ] Arreglo: H-026 (S3) arena vacía: el rastreo da 98,8 % de detección en un cruce de la rejilla (300 s)
+- [ ] Arreglo: H-027 (S3) MWM: distancia ×1,4–1,9 la referencia por los cuadros de la mano al soltar/recoger
+- [ ] Arreglo: H-029 (herramienta) umbral de `cabeza_real.py` pensado para menos fps
+- [ ] Decidir H-028 (Obs) OFT: entradas al centro 2–5× la referencia; calidad 54,8 % en mHFD11

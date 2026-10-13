@@ -13,3 +13,4 @@
 2026-10-13 · QA B16 línea de comandos · 4 OK 3 RARO 2 FALLA; H-012/H-013 S2, H-014/H-015 S3, H-016 Obs, H-017 herramienta · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · QA B12 importar ANY-maze (offscreen) · 2 OK 3 RARO; H-018/H-019/H-020 S3 · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · QA B10 resultados/exportaciones (offscreen) · 14 OK 2 RARO, exportaciones GUI = CLI; H-021…H-024 S4 · ~/mANY-MAZE-QA/2026-10-11_2224
+2026-10-13 · QA B13 videos reales (motor) · P1 3 OK 1 RARO 1 FALLA 2 BLOQ; H-025 S2 OFT pegado al borde, H-026/H-027 S3, H-028 Obs, H-029 herramienta · ~/mANY-MAZE-QA/2026-10-11_2224
