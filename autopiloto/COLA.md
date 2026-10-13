@@ -24,7 +24,8 @@
       → la app tenía razón; oráculo sin redondeo, 26→0 SIN FILA; cuándo correr `calibrar` documentado (be9e3a1)
 - [x] QA motor/CLI (sin GUI): B11 estadística contra `oraculo_estadistica.py`
       → 7 OK, 3 RARO; valores = oráculo; H-P02 ya no ocurre; H-008, H-009 (S3), H-010 (Obs), H-011 (herramienta)
-- [ ] QA motor/CLI (sin GUI): B16 línea de comandos
+- [x] QA motor/CLI (sin GUI): B16 línea de comandos
+      → 4 OK, 3 RARO, 2 FALLA; H-012/H-013 (S2), H-014/H-015 (S3), H-016 (Obs), H-017 (herramienta)
 - [ ] QA motor/CLI (sin GUI): B13 videos reales (OFT, EPM, MWM, FST; `cabeza_real.py`, `comparar_anotaciones.py`)
 - [ ] QA motor/CLI (sin GUI): B12 importar desde ANY-maze
 - [ ] QA motor/CLI (sin GUI): B10 exportaciones contra la referencia
@@ -37,3 +38,13 @@
       solo admite «=» (no «≠ Día 3»), así que no se pueden pedir
 - [ ] Arreglo: H-011 (herramienta) `qa/herramientas/oraculo_estadistica.py` no registra «Genotipo» en `animal_fields`
 - [ ] Decidir H-010 (Obs) Assumption checks solo da p, no el estadístico; D'Agostino por grupo, no global
+- [ ] Arreglo: H-012 (S2) `manymaze demo RUTA_RELATIVA` → FileNotFoundError con la ruta duplicada
+- [ ] Arreglo: H-013 (S2) `manymaze relink --folder RUTA_RELATIVA` dice «Relinked 6» pero guarda rutas relativas
+      al directorio actual; `info` sigue con 6 faltantes
+- [ ] Arreglo: H-014 (S3) CLI muestra Traceback con video inexistente/corrupto/vacío, plantilla inexistente
+      (`KeyError`), `demo` en carpeta de solo lectura, `results -o` a directorio inexistente
+- [ ] Arreglo: H-015 (S3) CLI `-o` con extensión no soportada escribe CSV en silencio; `report -o x.csv` escribe HTML
+- [ ] Arreglo: H-017 (herramienta) `comparar_con_referencia.py` falla con `.slk` y `.xlsx --bins`; `inspeccionar.py`
+      se cae si el archivo no existe; `referencia/` es anterior a H-P01 (regenerar)
+- [ ] Decidir H-016 (Obs) `--bbox` fuera de imagen da ceros, `--size-cm` negativo se ignora, `demo` sobre carpeta
+      existente la regenera (la app la abre)
