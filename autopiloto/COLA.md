@@ -2,8 +2,9 @@
 
 `[ ]` pendiente · `[x]` hecha · `[!]` atascada (ver `PARA_TI.md`). El agente toma siempre la primera `[ ]`.
 
-- [ ] Arreglo: `tests/gui/test_shell_audit.py` tiene 2 tests en rojo en `validacion-qa`
+- [x] Arreglo: `tests/gui/test_shell_audit.py` tiene 2 tests en rojo en `validacion-qa`
       (`test_ribbon_commands_keep_the_text_being_typed`, `test_delete_time_period_uses_the_table_worked_in_and_invalid_periods_are_reported`)
+      → no se reproduce con `QT_QPA_PLATFORM=offscreen` (21/21 en el archivo, 299/299 en `tests/gui`)
 - [ ] Arreglo: `ruff check .` limpio (instalar ruff 0.11.13 en `.venv` si falta, la misma versión que el CI)
 - [ ] Revisar `~/mANY-MAZE-QA/2026-10-11_2224/bitacora/HALLAZGOS.md`: cada hallazgo abierto que no esté en
       `qa/HALLAZGOS_PREVIOS.md` como corregido → una tarea Arreglo en esta cola
