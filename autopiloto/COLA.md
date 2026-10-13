@@ -27,7 +27,8 @@
 - [x] QA motor/CLI (sin GUI): B16 línea de comandos
       → 4 OK, 3 RARO, 2 FALLA; H-012/H-013 (S2), H-014/H-015 (S3), H-016 (Obs), H-017 (herramienta)
 - [ ] QA motor/CLI (sin GUI): B13 videos reales (OFT, EPM, MWM, FST; `cabeza_real.py`, `comparar_anotaciones.py`)
-- [ ] QA motor/CLI (sin GUI): B12 importar desde ANY-maze
+- [x] QA motor/CLI (sin GUI): B12 importar desde ANY-maze
+      → offscreen: 2 OK, 3 RARO; H-018/H-019/H-020 (S3)
 - [ ] QA motor/CLI (sin GUI): B10 exportaciones contra la referencia
 - [ ] QA pasada 1 (necesita computer use, ver PARA_TI): B01, B02, B03, B04, B05 (una tarea por bloque)
 - [ ] QA pasada 1: B07, B08, B09, B10, B11 (una tarea por bloque)
@@ -48,3 +49,7 @@
       se cae si el archivo no existe; `referencia/` es anterior a H-P01 (regenerar)
 - [ ] Decidir H-016 (Obs) `--bbox` fuera de imagen da ceros, `--size-cm` negativo se ignora, `demo` sobre carpeta
       existente la regenera (la app la abre)
+- [ ] Arreglo: H-018 (S3) importar XML de ANY-maze roto da «Something went wrong unexpectedly…» + Traceback ParseError
+- [ ] Arreglo: H-019 (S3) importar dos veces el mismo XML duplica pruebas y animales sin avisar
+- [ ] Arreglo: H-020 (S3) mapa de zonas 80×60 en un aparato de 640×360 no se reescala ni avisa (y rendija de 1 px
+      entre Left y Right)

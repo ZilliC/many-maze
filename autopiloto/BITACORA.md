@@ -11,3 +11,4 @@
 2026-10-13 · QA B11 por motor (offscreen) · 7 OK 3 RARO, valores = oráculo; H-008/H-009 S3, H-010 Obs, H-011 herramienta · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · Arreglo H-007 etiqueta último periodo del oráculo · arreglado en la herramienta (la app tenía razón); 26→0 SIN FILA; 1317 tests · be9e3a1
 2026-10-13 · QA B16 línea de comandos · 4 OK 3 RARO 2 FALLA; H-012/H-013 S2, H-014/H-015 S3, H-016 Obs, H-017 herramienta · ~/mANY-MAZE-QA/2026-10-11_2224
+2026-10-13 · QA B12 importar ANY-maze (offscreen) · 2 OK 3 RARO; H-018/H-019/H-020 S3 · ~/mANY-MAZE-QA/2026-10-11_2224
