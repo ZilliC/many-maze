@@ -19,8 +19,9 @@
       → fantasma del animal en el fondo mediano; `_absorb_ghosts` para todo fondo sustraído. novel_tank 88→289/328 (ca3c0d7)
 - [x] Arreglo: H-P03 (sigue) `lista_con_archivo_que_falta.m3u` da `FileNotFoundError` crudo al añadir prueba
       → `_PlaylistCapture` ahora da IOError claro con lista y video (a0efbdd)
-- [ ] Arreglo: H-007 (herramienta) el oráculo etiqueta el último periodo `35-37 s` y la app `35-37.4 s` (26 SIN FILA
+- [x] Arreglo: H-007 (herramienta) el oráculo etiqueta el último periodo `35-37 s` y la app `35-37.4 s` (26 SIN FILA
       en `open_field_intervalos`); regenerar `calibracion_capa_A.csv` tras reconstruir `dist`
+      → la app tenía razón; oráculo sin redondeo, 26→0 SIN FILA; cuándo correr `calibrar` documentado (be9e3a1)
 - [x] QA motor/CLI (sin GUI): B11 estadística contra `oraculo_estadistica.py`
       → 7 OK, 3 RARO; valores = oráculo; H-P02 ya no ocurre; H-008, H-009 (S3), H-010 (Obs), H-011 (herramienta)
 - [ ] QA motor/CLI (sin GUI): B16 línea de comandos
