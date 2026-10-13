@@ -67,16 +67,18 @@ class _PlaylistCapture:
     """The parts of a playlist behind the cv2.VideoCapture interface VideoSource uses: frames are numbered
     continuously across the files (frame rate and size are those of the first file)."""
 
-    def __init__(self, parts: list[str]):
+    def __init__(self, parts: list[str], name: str = "the playlist"):
         self.caps, self.offsets = [], [0]
         for part in parts:
             if not Path(part).exists():
                 self.release()
-                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(part))
+                raise IOError(f"The playlist “{name}” lists the video “{Path(part).name}”, which was not found. "
+                              "It may have been moved, renamed or deleted, or its drive may not be connected.")
             cap = cv2.VideoCapture(str(part))
             if not cap.isOpened():
                 self.release()
-                raise IOError(f"Cannot open video {part!r}")
+                raise IOError(f"The playlist “{name}” lists the video “{Path(part).name}”, which cannot be opened: "
+                              "it is damaged, empty or in a format mANY-MAZE cannot read")
             self.caps.append(cap)
             self.offsets.append(self.offsets[-1] + max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT))))
         self.cur = 0
@@ -174,7 +176,7 @@ class VideoSource:
         else:
             if not Path(source).exists():
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(source))
-            self.cap = _PlaylistCapture(playlist_parts(source)) if is_playlist(source) else \
+            self.cap = _PlaylistCapture(playlist_parts(source), Path(source).name) if is_playlist(source) else \
                 cv2.VideoCapture(str(source))
         if not self.cap.isOpened():
             if self.is_camera:
