@@ -29,7 +29,8 @@
 - [ ] QA motor/CLI (sin GUI): B13 videos reales (OFT, EPM, MWM, FST; `cabeza_real.py`, `comparar_anotaciones.py`)
 - [x] QA motor/CLI (sin GUI): B12 importar desde ANY-maze
       → offscreen: 2 OK, 3 RARO; H-018/H-019/H-020 (S3)
-- [ ] QA motor/CLI (sin GUI): B10 exportaciones contra la referencia
+- [x] QA motor/CLI (sin GUI): B10 exportaciones contra la referencia
+      → offscreen: 14 OK, 2 RARO; exportaciones = CLI (0 celdas distintas); H-021…H-024 (S4)
 - [ ] QA pasada 1 (necesita computer use, ver PARA_TI): B01, B02, B03, B04, B05 (una tarea por bloque)
 - [ ] QA pasada 1: B07, B08, B09, B10, B11 (una tarea por bloque)
 - [ ] QA pasada 1: B12, B13, B14, B15, B16 (una tarea por bloque)
@@ -53,3 +54,6 @@
 - [ ] Arreglo: H-019 (S3) importar dos veces el mismo XML duplica pruebas y animales sin avisar
 - [ ] Arreglo: H-020 (S3) mapa de zonas 80×60 en un aparato de 640×360 no se reescala ni avisa (y rendija de 1 px
       entre Left y Right)
+- [ ] Arreglo: H-021…H-024 (S4) informe HTML `statistic=nan` en medidas constantes; correo con servidor apagado
+      dice «file could not be read or written»; errores al guardar nombran un `.tmp`; «Colour by» ofrece
+      «Defecation: count» y falla en silencio. Más: `inspeccionar.py` se cae con la línea `# …` de raw data
