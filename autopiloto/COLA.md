@@ -14,8 +14,9 @@
 - [x] QA pasada 1: terminar B00, B06 y B17 (el piloto dejó casos sin ejecutar, ver su `COBERTURA.md`)
       → sin computer use en subagentes: solo motor. B17 autoverificar 34 exp. (H-006, H-007); B06-02 14/15 por motor;
         lo de GUI queda BLOQUEADO
-- [ ] Arreglo: H-006 (S2) `novel_tank` regresó con c9b4880 (H-P13): distancia 4.74 cm vs 30.69 esperado, 232 DIFIERE
+- [x] Arreglo: H-006 (S2) `novel_tank` regresó con c9b4880 (H-P13): distancia 4.74 cm vs 30.69 esperado, 232 DIFIERE
       en capa A; `qa/herramientas/oraculo_sintetico.py autoverificar` lo reproduce
+      → fantasma del animal en el fondo mediano; `_absorb_ghosts` para todo fondo sustraído. novel_tank 88→289/328 (ca3c0d7)
 - [ ] Arreglo: H-P03 (sigue) `lista_con_archivo_que_falta.m3u` da `FileNotFoundError` crudo al añadir prueba
 - [ ] Arreglo: H-007 (herramienta) el oráculo etiqueta el último periodo `35-37 s` y la app `35-37.4 s` (26 SIN FILA
       en `open_field_intervalos`); regenerar `calibracion_capa_A.csv` tras reconstruir `dist`
