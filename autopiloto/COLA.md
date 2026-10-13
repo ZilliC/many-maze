@@ -17,7 +17,8 @@
 - [x] Arreglo: H-006 (S2) `novel_tank` regresó con c9b4880 (H-P13): distancia 4.74 cm vs 30.69 esperado, 232 DIFIERE
       en capa A; `qa/herramientas/oraculo_sintetico.py autoverificar` lo reproduce
       → fantasma del animal en el fondo mediano; `_absorb_ghosts` para todo fondo sustraído. novel_tank 88→289/328 (ca3c0d7)
-- [ ] Arreglo: H-P03 (sigue) `lista_con_archivo_que_falta.m3u` da `FileNotFoundError` crudo al añadir prueba
+- [x] Arreglo: H-P03 (sigue) `lista_con_archivo_que_falta.m3u` da `FileNotFoundError` crudo al añadir prueba
+      → `_PlaylistCapture` ahora da IOError claro con lista y video (a0efbdd)
 - [ ] Arreglo: H-007 (herramienta) el oráculo etiqueta el último periodo `35-37 s` y la app `35-37.4 s` (26 SIN FILA
       en `open_field_intervalos`); regenerar `calibracion_capa_A.csv` tras reconstruir `dist`
 - [ ] QA pasada 1 (necesita computer use, ver PARA_TI): B01, B02, B03, B04, B05 (una tarea por bloque)

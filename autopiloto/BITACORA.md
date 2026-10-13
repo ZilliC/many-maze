@@ -7,3 +7,4 @@
 2026-10-13 · Revisar hallazgos del piloto 2026-10-11 · H-001…H-004 arreglados (a07a9ad), H-005 Obs se queda así; 0 tareas nuevas · —
 2026-10-13 · QA pasada 1 B00/B17/B06 (resto) · sin computer use: solo motor; H-006 S2 regresión novel_tank (c9b4880), H-007 Obs oráculo; GUI BLOQUEADO · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · Arreglo H-006 novel_tank · arreglado: absorber fantasmas en todo fondo sustraído; capa A 88→289/328; 1316 tests verdes · ca3c0d7
+2026-10-13 · Arreglo H-P03 .m3u con video que falta · arreglado: mensaje claro con lista y video; 1317 tests verdes · a0efbdd
