@@ -932,16 +932,17 @@ class Project:
             settings.duration_s = 0.0
             raw = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback,
                               lens=lens)[0]
-            t0 = None
+            start = None
             if self.start_mode == "experimenter_leaves" and raw:
-                from .autostart import experimenter_leaves_start
+                from .autostart import find_start
 
-                t0 = experimenter_leaves_start(raw[0], area_px=settings.max_area_px or 0)
-            tracks = _trim_all_on_detection(raw, dur, t0)
-            if self.start_mode == "experimenter_leaves":
+                start = find_start(raw[0], area_px=settings.max_area_px or 0)
+            tracks = _trim_all_on_detection(raw, dur, start.t if start is not None else None)
+            if start is not None:
                 for tr in tracks:
-                    tr.meta["start"] = ("experimenter left" if t0 is not None else
-                                        "first detection (no experimenter seen)")
+                    tr.meta["start"] = start.note
+                    if start.warning:  # also in the Warnings column of the results
+                        tr.meta["start_warning"] = start.warning
         else:
             tracks = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback,
                                  lens=lens)[0]
@@ -1217,6 +1218,7 @@ class Project:
                     k += 1
                     row["Segment of test"] = k
                 row.update(res)
+                add_warning(row, str(tr.meta.get("start_warning") or ""))  # an automatic start late in the video
                 rows.append(row)
         return rows
 

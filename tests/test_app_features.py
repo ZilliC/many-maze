@@ -17,7 +17,7 @@ from manymaze.core import stats as st
 from manymaze.core import synthetic as syn
 from manymaze.core.analyses import categorical
 from manymaze.core.apparatus import POSITION_KEY, Apparatus, PointOfInterest, Sequence, Zone
-from manymaze.core.autostart import experimenter_leaves_start, hand_frames
+from manymaze.core.autostart import experimenter_leaves_start, find_start, hand_frames
 from manymaze.core.camera import SourceReader, SourceSpec
 from manymaze.core.charts import is_cumulative, parameters
 from manymaze.core.geometry import Polygon
@@ -232,6 +232,65 @@ def test_experimenter_leaves_start_in_videos():
     assert experimenter_leaves_start(tr, area_px=5000) is None  # an explicit size no object reaches
 
 
+def _swim(n, fps=25.0, area=250.0):
+    """A track of an animal swimming alone in circles (positions in px), `n` frames."""
+    t = np.arange(n) / fps
+    a = np.full(n, area) * (1 + 0.15 * np.sin(t * 1.3))  # its area changes as it moves
+    return Track(t, 100 + 40 * np.cos(t * 0.8), 100 + 40 * np.sin(t * 0.8), area=a, detected=np.ones(n, bool),
+                 fps=fps)
+
+
+def test_experimenter_leaves_ignores_the_hand_taking_the_animal_out():
+    # the video starts with the animal already swimming alone; the only hand lifts it out at the end (28-29 s of a
+    # 30 s video): it is not the release, the test starts at the first detection (it used to start at 29 s)
+    tr = _swim(750)
+    tr.area[700:725] = 1500.0
+    tr.detected[725:] = False
+    s = find_start(tr)
+    assert s.t is None and s.release is None and 28.0 <= s.ignored < 29.0
+    assert "taking it out" in s.note and not s.warning
+    trimmed, = _trim_all_on_detection([tr], 0.0, s.t)
+    assert trimmed.meta["video_start_s"] == 0.0 and trimmed.duration == pytest.approx(30.0, abs=0.1)
+
+
+def test_experimenter_leaves_release_and_removal():
+    # the hand puts the animal in (0-1 s, coming back once at 1.4 s while it lets go), the animal swims alone, and
+    # the hand takes it out at the end (25 s): the test starts after the release, the removal is ignored
+    tr = _swim(700)
+    tr.area[:25] = 2000.0
+    tr.area[35:37] = 1800.0
+    tr.area[625:650] = 2500.0
+    s = find_start(tr)
+    assert s.release == (0.0, pytest.approx(36 / 25)) and s.ignored == pytest.approx(25.0, abs=1.0)
+    assert s.t == pytest.approx(37 / 25) and s.note == "experimenter left"
+    assert hand_frames(tr).sum() == 25 + 2 + 25  # (hand_frames lists every hand, the release and the removal)
+
+
+def test_experimenter_leaves_waits_for_the_arm_to_leave():
+    # the release hand is only 1.8 x the animal (a rat; part of the arm outside the arena), and after it the
+    # departing arm is still tracked at about the animal's size until the tracked object jumps to the animal
+    tr = _swim(500, fps=60.0, area=1300.0)
+    hand = slice(0, 30)
+    tr.area[hand] = 1300 * 1.8
+    tr.x[0:40], tr.y[0:40] = 260 - np.arange(40) * 0.5, 300 + np.arange(40) * 4.0  # the arm leaving at the bottom
+    tr.area[30:40] = 1400.0
+    s = find_start(tr)
+    assert s.release == (0.0, pytest.approx(29 / 60))
+    assert s.t == pytest.approx(40 / 60)  # the jump to the animal, not the first frame after the hand (30)
+    # without a jump (the tracker stays on the animal as the hand lets go) the start is back at the animal's size
+    tr.x[0:40], tr.y[0:40] = tr.x[40], tr.y[40]
+    tr.area[30:35] = 1300 * 1.4
+    assert find_start(tr).t == pytest.approx(35 / 60)
+
+
+def test_experimenter_leaves_warns_when_the_start_leaves_little_video():
+    tr = _swim(500)  # 20 s; the animal is seen for 1 s, the hand is in until 3 s, the animal is lost until 12 s
+    tr.area[25:75] = 2000.0
+    tr.detected[75:300] = False
+    s = find_start(tr)
+    assert s.t == pytest.approx(12.0) and "check the start" in s.warning
+
+
 def test_experimenter_leaves_start_when_tracking_a_video(tmp_path):
     path = tmp_path / "hand.avi"
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 25.0, (200, 200))
@@ -253,6 +312,13 @@ def test_experimenter_leaves_start_when_tracking_a_video(tmp_path):
     assert tr.meta["start"] == "experimenter left" and tr.t[0] == 0
     assert 29 / 25 <= tr.meta["video_start_s"] <= 33 / 25  # not at the first detection (the hand, frame 5)
     assert tr.duration == pytest.approx(2.0, abs=0.05)
+    assert "start_warning" not in tr.meta
+    assert "check the start" not in proj.analyse_test(t)[0].get("Warnings", "")
+    # a start late in the video is listed in the Warnings column of the results
+    tr.meta["start_warning"] = "Automatic start at 3.00 s (experimenter's hand left) leaves 1.0 s of 4.0 s of " \
+                               "video: check the start"
+    proj.save_tracks(t, [tr])
+    assert "check the start" in proj.analyse_test(t)[0]["Warnings"]
 
 
 # ====================================================================== capture recovery
