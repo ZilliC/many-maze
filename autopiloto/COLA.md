@@ -195,8 +195,10 @@
       → MID oscuro #8a919b (≥4,5:1); Detection en una columna (merge b71e773)
 - [x] QA offscreen B01 experimentos (pasada 1: 01, 02, 03, 10, 11, 13, 14, 20, 32, 33, 40)
       → 7 OK, 4 RARO; 23 plantillas y persistencia OK; H-077 (S3), H-078/H-079 (S4)
-- [ ] Arreglo: H-077 (S3) zip con un miembro dañado deja el experimento a medio desempaquetar; reintentar da «already
+- [x] Arreglo: H-077 (S3) zip con un miembro dañado deja el experimento a medio desempaquetar; reintentar da «already
       exists» y esa carpeta abre con videos truncados. H-078 (S4) «Archive» sin permiso nombra `x.zip.part` (como H-023).
       H-079 (S4) `project.json` válido pero mal estructurado da «Something went wrong unexpectedly…»
+      → zip se desempaqueta en carpeta oculta y se mueve solo si todo pasa el CRC; errores nombran el zip;
+        project.json mal formado = «damaged» (merge d6f9615)
 - [ ] QA offscreen B15 barrido de cobertura: IDs del inventario sin probar (lo visual BLOQUEADO)
 - [ ] Revisión final de QA (§6 del plan, Opus): informe final, duplicados, severidades, cobertura

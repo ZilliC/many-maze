@@ -40,3 +40,4 @@
 2026-10-14 · Revisar OFT mHFD12/mHFD11 a ojo · rastreo correcto; referencias con artefactos (mHFD12 objeto del borde tras 95 s; escala p1–p99) · /tmp/oft_review
 2026-10-14 · Arreglo H-035/H-036/H-061/H-067/H-068/H-070 y resto de H-074 · arreglados; 1392 tests · 48d0cb9
 2026-10-14 · QA B01 experimentos (offscreen) · 7 OK 4 RARO; H-077 S3, H-078/H-079 S4 · ~/mANY-MAZE-QA/2026-10-11_2224
+2026-10-14 · Arreglo H-077/H-078/H-079 archivo y carga · arreglados; 1399 tests · d6f9615
