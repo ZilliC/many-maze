@@ -146,9 +146,18 @@ class KeysMixin:
 
     def _validate_behaviours(self) -> list[str]:
         errs = wf.validate_behaviours(self.project.behaviours) if self.project is not None else []
+        n_unnamed = sum(1 for r in range(self.beh.rowCount()) if self._row_behaviour(r) is None)
+        if n_unnamed:  # such a row is not part of the experiment until it has a name
+            errs.insert(0, "A key has no name: it is left out of the experiment until you give it one."
+                        if n_unnamed == 1 else f"{n_unnamed} keys have no name: they are left out of the "
+                        "experiment until you give them one.")
         self.beh_lbl.setText("<br>".join(errs))
         self.beh_lbl.setVisible(bool(errs))
         return errs
+
+    def save_problems(self) -> list[str]:
+        """Problems of the keys that the user should know about before the experiment is saved."""
+        return self._validate_behaviours() if self.project is not None else []
 
     def _show_key(self):
         """Show the selected key on the "Key" property page."""

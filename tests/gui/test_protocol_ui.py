@@ -303,3 +303,24 @@ def test_h044_key_stroke_text_is_not_cut_silently(win):
         assert len(p.behaviours[r].key) != 1 or p.behaviours[r].key == " "
     ex.beh.item(r, 1).setText("q")
     assert p.behaviours[r].key == "q"
+
+
+def test_h045_keys_with_errors_are_reported_and_not_saved_silently(win, monkeypatch):
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "keys")
+    p = win.project
+    n = ex.beh.rowCount()
+    ex.beh.item(n - 1, 0).setText("")
+    assert not ex.beh_lbl.isHidden() and "has no name" in ex.beh_lbl.text()
+    ex.beh.item(n - 1, 0).setText("Again")
+    ex.beh.item(n - 1, 1).setText(ex.beh.item(0, 1).text())
+    assert "used by both" in ex.beh_lbl.text()
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    assert win.save() is False and asked and "used by both" in asked[0]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    assert win.save() is True
+    ex.beh.item(n - 1, 1).setText("q")
+    asked.clear()
+    assert win.save() is True and not asked
+    assert len(p.behaviours) == n

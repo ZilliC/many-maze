@@ -1202,6 +1202,11 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return False
         self._flush_edits()
+        problems = [m for pg in self.pages for m in (page_hook(pg, "save_problems") or [])]
+        if problems and QMessageBox.question(
+                self, "Save", "These problems were found in the experiment:\n\n• " + "\n• ".join(problems) +
+                "\n\nSave it anyway?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return False
         try:
             self.project.save()
         except Exception as e:
