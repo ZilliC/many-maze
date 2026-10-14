@@ -92,8 +92,8 @@
 - [x] QA offscreen B04 → 1 OK, 7 RARO; persistencia OK en los 8; H-047/H-048/H-049 (S3), H-050/H-051 (Obs)
 - [x] QA offscreen B05 → 3 OK, 3 RARO, 1 FALLA; persistencia OK; dosis y aleatorización OK; H-052/H-053/H-054 (S3), H-055 (Obs)
 - [x] QA offscreen B02 → 2 OK, 2 RARO, 1 FALLA; persistencia y cifrado OK; H-056/H-057 (S2), H-058/H-059 (S3), H-060 (Obs)
-- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden:
-      B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
+- [x] QA offscreen B09 → 3 OK, 5 RARO; 73/90 eventos en vivo, 85 acciones; H-062/H-063/H-064/H-069 (S3), H-061/H-067/H-068 (S4), H-065/H-066/H-070 (Obs)
+- [ ] QA offscreen B14 robustez (clases reales de la app, sin computer use; lo visual BLOQUEADO)
 - [x] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
       → aviso en rojo en Results si la ventana ya no coincide con el track (sin recálculo; ver PARA_TI)
 - [x] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
@@ -142,3 +142,12 @@
       → unidad y teclas/interruptor de Run tests bajo el bloqueo (merge 8ee5e8e)
 - [ ] Decidir H-060 (Obs) contraseñas de 1 carácter o espacios; sin límite de intentos; archivo cifrado manipulado
       dice «password is wrong»; «Wrong password» antes de escribir en «Restore a backup»
+- [ ] Arreglo: H-062/H-063 (S3) procedimientos: no se puede accionar una entrada simulada en vivo desde la GUI;
+      canales con el mismo nombre en un dispositivo
+- [ ] Arreglo: H-064 (S3) «End the test» en el mismo cuadro que la última recompensa deja el pellet en 0 ms y los
+      resultados lo cuentan de menos
+- [ ] Arreglo: H-069 (S3) pausa por procedimiento no se reanuda con una espera; con video simulado la prueba termina pronto
+- [ ] Arreglo: H-061/H-067/H-068 (S4) mensajes de «Test» < 50 ms; alertas e-mail sin validar destino/puerto; editor
+      sin confirmar ni deshacer al borrar bloque, claves JSON desconocidas ignoradas
+- [ ] Arreglo: H-065/H-066/H-070 (Obs) Log repite cada acción 3–4×; `immobile_time_reaches` no se dispara;
+      `smtp_local.py` sobrescribe correos anteriores
