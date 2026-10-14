@@ -1041,7 +1041,9 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
             return
         t = TEMPLATES[key]
         if p.tests and QMessageBox.question(
-                self, "Apply template", f"Make this a {t.title} protocol with tests of {t.default_duration_s:g} s? "
+                self, "Apply template",
+                f"Make this {'an' if t.title[:1].lower() in 'aeiou' else 'a'} {t.title} protocol with tests of "
+                f"{t.default_duration_s:g} s? "
                 "Existing results are recalculated with the new protocol type.") != QMessageBox.Yes:
             return
         p.set_protocol(key)
