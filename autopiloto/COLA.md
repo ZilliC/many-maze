@@ -86,7 +86,8 @@
       (53 % estático, 84 % detección); quizá aviso «track pegado/estático» (`salidas/B13/`)
 - [x] QA offscreen B07 → 7 OK, 3 RARO; H-030/H-032 (S3), H-031/H-033/H-034 (Obs)
 - [x] QA offscreen B08 → 7 OK, 3 RARO; H-P08 ya no ocurre (8 sesiones 20 min); H-035/H-036 (S3), H-037…H-040 (Obs)
-- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B03, B04, B05, B02,
+- [x] QA offscreen B03 → 7 OK, 4 RARO, 1 FALLA; H-042 (S2), H-041/H-043/H-044/H-045 (S3), H-046 (Obs)
+- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B04, B05, B02,
       B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
 - [ ] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
 - [ ] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
@@ -97,3 +98,10 @@
 - [ ] Arreglo: H-039 (Obs, persistencia) en vivo: duración, modo de inicio y «record» no persisten al reabrir
 - [ ] Decidir H-037/H-038/H-040 (Obs) pruebas en espera descartadas al acabar el video demo; «nuevo archivo cada»
       solo en minutos; «Several tests» acepta el mismo animal en dos paneles
+- [ ] Arreglo: H-042 (S2) Keys: el color elegido en la muestra de la tabla no se guarda (sí desde la página «Key»)
+- [ ] Arreglo: H-041 (S3) «Colour of the animal» / marcas de color aceptan cualquier texto; la vista previa lanza
+      ValueError en cada cuadro
+- [ ] Arreglo: H-043 (S3) cancelar el desbloqueo de ciego deja el botón «Blind testing» desmarcado con ciego activo
+- [ ] Arreglo: H-044/H-045 (S3) Keys: tecla de varias letras se corta sin aviso (`Left`→`l`), espacio deja sin tecla;
+      se pueden guardar teclas con errores (duplicadas nunca puntúan, nombre vacío se pierde)
+- [ ] Decidir H-046 (Obs) etapas duplicadas aceptadas; pruebas conservan una etapa que ya no existe
