@@ -308,3 +308,16 @@ def test_missing_video_says_so_instead_of_offering_observation(view):  # H-072
         assert not view.clock_box.isVisible()
     finally:
         (path.parent / (path.name + ".bak")).rename(path)
+
+
+def test_h076_detection_fields_fit_the_side_panel(view):
+    """The combos and fields of Review > Detection are fully shown (no cut-off text, no horizontal scroll bar)."""
+    view.tabs.setCurrentIndex(3)
+    QTest.qWait(100)
+    sc = view.det_form.parent().parent()
+    viewport_w = sc.viewport().width()
+    assert sc.horizontalScrollBar().maximum() == 0
+    for name, ed in view.det_form.editors.items():
+        if ed.isVisible():
+            right = ed.mapTo(view.det_form, ed.rect().topRight()).x()
+            assert right <= viewport_w, (name, right, viewport_w)

@@ -141,9 +141,11 @@ def y_maze(x, y, w, h, arm_length_cm=35.0, arm_width_cm=8.0) -> Apparatus:
     cx = x + w / 2
     r_c_cm = max(arm_width_cm / (2 * math.tan(math.pi / 3)), arm_width_cm / 2)
     total_h_units = 1.5 * (arm_length_cm + r_c_cm) + arm_width_cm / 2 * math.cos(math.radians(30))
-    s = h / total_h_units
+    # and 2·((arm_len + r_c)·cos 30° + half width·sin 30°) wide: the scale fits both sides of the rectangle
+    total_w_units = 2 * ((arm_length_cm + r_c_cm) * math.cos(math.radians(30)) + arm_width_cm / 2 * 0.5)
+    s = min(h / total_h_units, w / total_w_units)
     arm_len, arm_w = arm_length_cm * s, arm_width_cm * s
-    cy = y + (arm_length_cm + r_c_cm) * s
+    cy = y + (h - total_h_units * s) / 2 + (arm_length_cm + r_c_cm) * s
     app = _arms_maze("Y maze", "y_maze", cx, cy, arm_len, arm_w, [-90, 30, 150], ["Arm A", "Arm B", "Arm C"])
     app.px_per_cm = s
     return app
@@ -647,6 +649,8 @@ def build(key: str, x, y, w, h, **params) -> Apparatus:
     kw.update({k: v for k, v in params.items() if k in info.params})
     if not (w > 0 and h > 0):
         raise ValueError("The template needs a width and a height: drag it in both directions.")
+    if key == "barnes_maze" and not 1 <= kw["escape_hole"] <= kw["n_holes"]:
+        raise ValueError(f"The escape hole must be one of the holes: a number from 1 to {kw['n_holes']}.")
     for k, default in info.params.items():
         if k.endswith("_cm") and isinstance(default, (int, float)) and default > 0 and not kw[k] > 0:
             raise ValueError(f"“{k}” must be greater than 0.")

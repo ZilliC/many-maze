@@ -381,7 +381,8 @@ class SettingsForm(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        compact = not sections  # e.g. a narrow side panel: long rows wrap (input under its label)
+        compact = not sections  # e.g. a narrow side panel: the input goes under its label
+        self._compact = compact
         if field_width is None:
             field_width = 140 if compact else FIELD_WIDTH
         by_attr = {s[0]: s for s in spec}
@@ -402,7 +403,7 @@ class SettingsForm(QWidget):
                 lay.addWidget(section_title(title))
             form = property_form()
             if compact:
-                form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+                form.setRowWrapPolicy(QFormLayout.WrapAllRows)
                 form.setHorizontalSpacing(16)
             lay.addLayout(form)
             self.forms[title] = form
@@ -464,6 +465,14 @@ class SettingsForm(QWidget):
             pl.hide()
             self.problem_labels[attr] = pl
             form.addRow(pl)
+
+    def minimumSizeHint(self):
+        """A compact form (side panel) may be as narrow as its fields: long rows wrap and long labels wrap instead
+        of widening it (the panel would otherwise scroll sideways and cut the combos off)."""
+        hint = super().minimumSizeHint()
+        if self._compact:
+            hint.setWidth(min(hint.width(), 190))
+        return hint
 
     def show_problems(self):
         """Show (or hide) the problem of every checked field."""

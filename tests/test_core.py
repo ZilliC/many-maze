@@ -544,3 +544,18 @@ def test_distance_unit_live():
     assert v[-1] == pytest.approx(st.distance * 10)  # shown in mm
     keys = {k: u for k, _label, u in chart_parameters(app)}
     assert keys["speed"] == "mm/s" and keys["distance"] == "mm" and keys["chart:X position"] == "mm"
+
+
+@pytest.mark.parametrize("box", [(40, 40, 320, 320), (0, 0, 600, 300), (10, 20, 200, 500)])
+def test_h051_y_maze_stays_inside_the_dragged_rectangle(box):
+    x, y, w, h = box
+    app = templates.build("y_maze", *box)
+    for z in app.zones:
+        x0, y0, x1, y1 = z.shape.bounds()
+        assert x0 >= x - 1e-6 and y0 >= y - 1e-6 and x1 <= x + w + 1e-6 and y1 <= y + h + 1e-6, (z.name, box)
+
+
+def test_h051_barnes_escape_hole_must_be_one_of_the_holes():
+    with pytest.raises(ValueError, match="escape hole"):
+        templates.build("barnes_maze", 0, 0, 400, 400, n_holes=20, escape_hole=50)
+    assert templates.build("barnes_maze", 0, 0, 400, 400, n_holes=20, escape_hole=20).points

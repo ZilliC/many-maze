@@ -8,7 +8,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFormLayout, QGraphicsScene, QGraphicsView, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QRadioButton, QSpinBox, QVBoxLayout)
+                               QListWidget, QListWidgetItem, QMessageBox, QRadioButton, QSpinBox, QVBoxLayout)
 
 from ....core import templates
 from ....core.apparatus import DISTANCE_UNITS, GRID_KINDS, Apparatus, unique_name
@@ -189,6 +189,15 @@ class TemplateDialog(QDialog):
             self.name_edit.setText(self.current_name)
         else:
             self.name_edit.setText(unique_name(TEMPLATES[self.key()].title, self.taken))
+
+    def accept(self):
+        """Only with settings the template can be built from: otherwise say what is wrong and keep the dialog."""
+        try:
+            templates.build(self.key(), 0, 0, 200, 200, **self.params())
+        except ValueError as e:
+            QMessageBox.warning(self, "Create apparatus from template", str(e))
+            return
+        super().accept()
 
     def _update_preview(self, *_):
         sc = self.preview.scene()

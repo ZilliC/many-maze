@@ -916,6 +916,9 @@ def zone_map_figure(app: Apparatus, background=None, labels: bool = True, fill: 
     return fig
 
 
+ZONE_MAP_FORMATS = (".png", ".svg", ".pdf", ".jpg", ".jpeg")
+
+
 def save_zone_map(app: Apparatus, path, background=None, labels: bool = True, fill: bool = True,
                   dpi: int = 200) -> str:
     """Save the zone map (:func:`zone_map_figure`) as an image; the format follows the extension (.png, .svg,
@@ -925,6 +928,9 @@ def save_zone_map(app: Apparatus, path, background=None, labels: bool = True, fi
     p = Path(path)
     if not p.suffix:
         p = p.with_suffix(".png")
+    if p.suffix.lower() not in ZONE_MAP_FORMATS:
+        raise ValueError(f"“{p.suffix}” is not a supported image type. Save the map as "
+                         + ", ".join(f.upper().lstrip(".") for f in ZONE_MAP_FORMATS if f != ".jpeg") + ".")
     fig = zone_map_figure(app, background, labels, fill)
     fig.savefig(str(p), dpi=dpi, format=p.suffix[1:].lower().replace("jpg", "jpeg"),
                 facecolor="white", transparent=False)

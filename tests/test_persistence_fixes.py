@@ -654,3 +654,14 @@ def test_save_errors_name_the_users_file_not_the_temporary_one(tmp_path):
     with pytest.raises(OSError) as e:
         write_text_atomic(tmp_path / ("l" * 300 + ".csv"), "a")
     assert ".tmp" not in user_message(e.value) and "lll" in user_message(e.value)
+
+
+def test_h051_a_test_without_apparatus_says_so_in_results(tmp_path):
+    p = _project(tmp_path)
+    for t in p.tests:
+        t.apparatus = ""
+    p.apparatus.clear()
+    rows = p.results()
+    assert len(rows) == 2
+    for r in rows:
+        assert "no apparatus" in r[ERROR_COLUMN] and "NoneType" not in r[ERROR_COLUMN]
