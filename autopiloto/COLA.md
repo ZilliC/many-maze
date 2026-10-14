@@ -87,7 +87,8 @@
 - [x] QA offscreen B07 → 7 OK, 3 RARO; H-030/H-032 (S3), H-031/H-033/H-034 (Obs)
 - [x] QA offscreen B08 → 7 OK, 3 RARO; H-P08 ya no ocurre (8 sesiones 20 min); H-035/H-036 (S3), H-037…H-040 (Obs)
 - [x] QA offscreen B03 → 7 OK, 4 RARO, 1 FALLA; H-042 (S2), H-041/H-043/H-044/H-045 (S3), H-046 (Obs)
-- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B04, B05, B02,
+- [x] QA offscreen B04 → 1 OK, 7 RARO; persistencia OK en los 8; H-047/H-048/H-049 (S3), H-050/H-051 (Obs)
+- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B05, B02,
       B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
 - [ ] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
 - [ ] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
@@ -105,3 +106,10 @@
 - [ ] Arreglo: H-044/H-045 (S3) Keys: tecla de varias letras se corta sin aviso (`Left`→`l`), espacio deja sin tecla;
       se pueden guardar teclas con errores (duplicadas nunca puntúan, nombre vacío se pierde)
 - [ ] Decidir H-046 (Obs) etapas duplicadas aceptadas; pruebas conservan una etapa que ya no existe
+- [ ] Arreglo: H-047 (S3) «Zone grid» de celdas cuadradas en arena no convexa (EPM, T) crea 0 celdas sin aviso
+- [ ] Arreglo: H-048 (S3) se aceptan formas de área cero (plantilla de ancho 0 → 0 px/cm, polígonos colineales o
+      cruzados, `centre_fraction` 1.0)
+- [ ] Arreglo: H-049 (S3) `{` o `}` en el nombre de una zona rompe las fórmulas de cálculo
+- [ ] Arreglo: H-050/H-051 (Obs) «Duplicate» de zona no copia reglas/opciones; varias entradas inválidas sin aviso
+      (Y fuera del rectángulo, agujero Barnes fuera de rango, renombrar vacío, archivo de aparato vacío, borrar el
+      último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
