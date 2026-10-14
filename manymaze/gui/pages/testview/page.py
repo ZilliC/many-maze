@@ -774,8 +774,30 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._filter_results()
         src = f"{len(self.tracks)} track{'s' if len(self.tracks) > 1 else ''}" if self.tracks else \
             "the I/O log" if has_io_log(t) else "manual scoring"
-        self.results_lbl.setText(f"<b>{len(measures)}</b> measures from {src} · unit: "
-                                 f"{self._app().report_unit if self._app() else 'px'}")
+        msg = (f"<b>{len(measures)}</b> measures from {src} · unit: "
+               f"{self._app().report_unit if self._app() else 'px'}")
+        if self._track_window_outdated():
+            msg += (f"<br><span style='color:{theme.ERROR}'>The test period was changed after this track was made: "
+                    "the results still cover the old period. Click <b>Track this test</b> again to apply the "
+                    "new one.</span>")
+        self.results_lbl.setText(msg)
+
+    def _track_window_outdated(self) -> bool:
+        """True when Test start / Duration no longer match the period the saved track was made for."""
+        t, p = self.test, self.project
+        if t is None or p is None or not self.tracks:
+            return False
+        tr = self.tracks[0]
+        if len(tr) == 0 or tr.meta.get("video_start_s") in (None, ""):
+            return False
+        try:
+            if abs(float(tr.meta["video_start_s"]) - t.start_s) > 0.005:
+                return True
+        except (TypeError, ValueError):
+            return False
+        dur = t.duration_s or p.test_duration_s
+        tol = 2.0 / (float(tr.fps) or 25.0)
+        return bool(dur) and dur < float(tr.t[-1]) - tol
 
     def _filter_results(self, *_):
         words = self.results_filter.text().lower().split()
