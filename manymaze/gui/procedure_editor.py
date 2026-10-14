@@ -408,6 +408,21 @@ class ProcedureEditor(QWidget):
         return new
 
     def remove_statement(self):
+        """Remove the selected statement; a block with statements inside is removed only after the user confirms
+        (there is no undo)."""
+        path = self._cur_path()
+        st = self._statement(path) if path else None
+        inside = 0
+        if isinstance(st, dict):
+            inside = sum(1 for _ in pr.iter_statements([st])) - (0 if pr.is_branch(path) else 1)
+            if pr.is_branch(path):
+                inside = sum(1 for _ in pr.iter_statements(st.get("body")))
+        elif isinstance(st, list):
+            inside = sum(1 for _ in pr.iter_statements(st))
+        if inside and not self._read_only and QMessageBox.question(
+                self, "Remove", f"Remove this block and the {inside} statement{'s' if inside != 1 else ''} inside "
+                "it? This cannot be undone.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
         self._apply(pe.remove)
 
     def duplicate_statement(self):
@@ -996,6 +1011,12 @@ class ProcedureEditor(QWidget):
             q, err = parse_procedure_json(ed.toPlainText())
             if q is None:
                 QMessageBox.warning(dlg, "Invalid JSON", err)
+                return
+            unused = [m for _i, _p, m in pr.validate([q]) if "will be ignored" in m]
+            if unused and QMessageBox.question(
+                    dlg, "Unknown settings", "Some settings in this JSON are not used and would be ignored:\n\n"
+                    + "\n".join(f"• {m}" for m in unused[:10]) + "\n\nKeep the procedure as it is?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                 return
             dlg.accept()
             self.set_procedure_json(self._cur_proc_index(), q)

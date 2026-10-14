@@ -510,3 +510,33 @@ def test_io_dialog_refuses_bad_alert_settings(monkeypatch):
     from manymaze.core.mail import send_email
     with pytest.raises(RuntimeError, match="not a number"):
         send_email({"smtp_host": "h", "smtp_port": "abc"}, "a@b.org", "s", "t")
+
+
+def test_remove_block_asks_and_unknown_keys_are_reported(monkeypatch):
+    """H-068: deleting a block with statements inside asks first; settings an action does not have are reported."""
+    p = make_project()
+    ed = ProcedureEditor(p)
+    ed.add_procedure()
+    ed.add_statement("when")
+    ed.add_statement("comment", inside=True)
+    ed.add_statement("comment")
+    ed.tree.setCurrentItem(ed.tree.topLevelItem(0))
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    n = len(ed._cur_proc()["statements"])
+    ed.remove_statement()
+    assert asked and "2 statements" in asked[0] and len(ed._cur_proc()["statements"]) == n
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    ed.remove_statement()
+    assert len(ed._cur_proc()["statements"]) == n - 1
+    # no question for a statement with nothing inside
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: pytest.fail("asked"))
+    ed.tree.setCurrentItem(ed.tree.topLevelItem(0))
+    ed.remove_statement()
+    # unknown keys
+    proc = {"name": "x", "statements": [{"type": "do", "action": "light_ramp", "seconds": 1, "from_level": 0,
+                                         "duration": 1}]}
+    msgs = [m for _i, _p, m in pr.validate([proc])]
+    assert any("seconds" in m and "from_level" in m and pr.is_warning(m) for m in msgs)
+    ok = {"name": "x", "statements": [{"type": "do", "action": "light_ramp", "duration": 1}]}
+    assert not any("ignored" in m for _i, _p, m in pr.validate([ok]))

@@ -140,6 +140,10 @@ class ValidationWarning(str):
     or a loop with nothing in it). It is a str (the message); :func:`is_warning` tells them apart."""
 
 
+# keys any statement may carry besides the parameters of its action
+_STATEMENT_KEYS = frozenset({"type", "action", "enabled", "comment", "note", "label"})
+
+
 def is_warning(message) -> bool:
     return isinstance(message, ValidationWarning)
 
@@ -430,6 +434,11 @@ def validate(procedures, context=None, warnings: bool = True) -> list[tuple[int,
                     if ctx["io_only"] and spec["group"] in CAMERA_ACTION_GROUPS:
                         err2("there is no camera to record in Input/output only mode (Protocol ▸ Mode)")
                     check(statement_fields(st), err2)
+                    unknown = sorted(set(st) - _STATEMENT_KEYS - {q["name"] for q in spec["params"]})
+                    if unknown and warnings:
+                        issues.append((pi, p, ValidationWarning(
+                            f"{lab2}: warning: {', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not "
+                            "used by this action and will be ignored")))
                     if a in ("enable_procedure", "disable_procedure") and st.get("procedure") \
                             and st["procedure"] not in proc_names:
                         err2(f"unknown procedure '{st['procedure']}'")
