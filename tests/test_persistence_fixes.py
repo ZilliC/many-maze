@@ -568,3 +568,66 @@ def test_cli_relink(tmp_path, capsys):
     cli.main(["project", str(p.path), "relink", "--folder", str(tmp_path / "new")])
     assert "Relinked 1" in capsys.readouterr().out
     assert Project.load(p.path).missing_videos() == []
+
+
+def test_cli_demo_with_a_relative_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["demo", "d.mmaze"])
+    p = Project.load(tmp_path / "d.mmaze")
+    assert p.tests and p.missing_videos() == [] and all(p.has_track(t) for t in p.tests)
+
+
+def test_cli_relink_with_a_relative_folder(tmp_path, monkeypatch):
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    t = p.add_test("", "A1")
+    t.video = "../old/v.mp4"
+    p.save()
+    (tmp_path / "new").mkdir()
+    (tmp_path / "new" / "v.mp4").write_bytes(b"x")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["project", "e.mmaze", "relink", "--folder", "new"])
+    assert Project.load(p.path).missing_videos() == []
+
+def test_cli_errors_are_one_line_messages(tmp_path, capsys):
+    empty = tmp_path / "empty.mp4"
+    empty.write_bytes(b"")
+    for argv in (["track", str(tmp_path / "nope.mp4")], ["track", str(empty)],
+                 ["track", str(empty), "--template", "nope"]):
+        with pytest.raises(SystemExit) as e:
+            cli.main(argv)
+        assert isinstance(e.value.code, str) and "Traceback" not in e.value.code and "\n" not in e.value.code
+    with pytest.raises(SystemExit) as e:
+        cli.main(["track", str(empty), "--template", "nope"])
+    assert "open_field" in e.value.code  # lists the valid templates
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        if not os.access(ro, os.W_OK):
+            with pytest.raises(SystemExit) as e:
+                cli.main(["demo", str(ro / "x.mmaze")])
+            assert isinstance(e.value.code, str)
+    finally:
+        ro.chmod(0o700)
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["project", str(p.path), "results", "-o", str(tmp_path / "missing" / "x.csv")])
+    assert isinstance(e.value.code, str) and ".tmp" not in e.value.code and "missing" in e.value.code
+
+def test_cli_rejects_unsupported_output_extensions(tmp_path):
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    for sub, name in (("results", "r.pdf"), ("results", "noext"), ("events", "r.pdf"), ("report", "r.csv"),
+                      ("protocol", "r.csv")):
+        with pytest.raises(SystemExit) as e:
+            cli.main(["project", str(p.path), sub, "-o", str(tmp_path / name)])
+        assert isinstance(e.value.code, str) and "extension" in e.value.code
+        assert not (tmp_path / name).exists()
+    with pytest.raises(SystemExit) as e:
+        cli.main(["track", "x.mp4", "-o", str(tmp_path / "t.pdf")])
+    assert ".xlsx" in e.value.code
+    with pytest.raises(SystemExit) as e:
+        cli.main(["project", str(p.path), "report", "-o", str(tmp_path / "r.csv")])
+    assert ".html" in e.value.code
