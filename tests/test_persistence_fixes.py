@@ -665,3 +665,18 @@ def test_h051_a_test_without_apparatus_says_so_in_results(tmp_path):
     assert len(rows) == 2
     for r in rows:
         assert "no apparatus" in r[ERROR_COLUMN] and "NoneType" not in r[ERROR_COLUMN]
+
+
+def test_h079_malformed_but_valid_json_experiment_file_is_reported_as_damaged(tmp_path):
+    import json
+
+    from manymaze.core.errors import user_message
+    from manymaze.core.project import DamagedExperiment
+
+    for n, content in enumerate(("[1,2,3]", json.dumps({"name": "x", "tests": "roto"}), '"text"', "5")):
+        d = tmp_path / f"m{n}.mmaze"
+        d.mkdir()
+        (d / "project.json").write_text(content, encoding="utf-8")
+        with pytest.raises(DamagedExperiment) as e:
+            Project.load(d)
+        assert "damaged" in user_message(e.value) and "backups" in user_message(e.value)
