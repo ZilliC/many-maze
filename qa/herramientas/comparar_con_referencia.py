@@ -26,14 +26,25 @@ def num(v):
         return None
 
 
-def load(p: Path):
-    rows = [r for r in (table_rows(p) or []) if any(str(c).strip() for c in r)]
+def load(p: Path, sheet: str | None = None):
+    rows = [r for r in (table_rows(p, sheet) or []) if any(str(c).strip() for c in r)]
     head = [str(h).strip() for h in rows[0]]
     return head, [dict(zip(head, r)) for r in rows[1:]]
 
 
+def _key_text(v) -> str:
+    """Key cell as text; 1, 1.0 and "1" are the same (SYLK and XLSX store numbers as floats)."""
+    n = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    if n is None:
+        try:
+            n = float(str(v).strip())
+        except ValueError:
+            return str(v).strip()
+    return str(int(n)) if float(n).is_integer() else str(n)
+
+
 def key_of(r: dict, keys):
-    return tuple(str(r.get(k, "")).strip() for k in keys)
+    return tuple(_key_text(r.get(k, "")) for k in keys)
 
 
 def main():
@@ -41,11 +52,17 @@ def main():
     ap.add_argument("exportado", type=Path)
     ap.add_argument("referencia", type=Path)
     ap.add_argument("--tol", type=float, default=1e-6, help="tolerancia relativa")
+    ap.add_argument("--hoja", help="hoja del .xlsx exportado (por defecto «Results»; con una referencia por intervalos "
+                    "—«Segment of test» rellena— se añaden las filas de «Time periods»)")
     ap.add_argument("--ignorar", nargs="*", default=["Source video file", "Recorded video file"],
                     help="columnas que no se comparan (por defecto, las rutas de los videos: cambian con las copias)")
     a = ap.parse_args()
-    hx, rx = load(a.exportado)
     hr, rr = load(a.referencia)
+    sheet = a.hoja
+    hx, rx = load(a.exportado, sheet)
+    if sheet is None and a.exportado.suffix.lower() == ".xlsx" and any(
+            str(r.get("Segment of test", "")).strip() for r in rr):
+        rx = rx + load(a.exportado, "Time periods")[1]  # the xlsx keeps the time-period rows in their own sheet
     only_x = [h for h in hx if h not in hr]
     only_r = [h for h in hr if h not in hx]
     print(f"exportado: {len(rx)} filas × {len(hx)} columnas   referencia: {len(rr)} filas × {len(hr)} columnas")
