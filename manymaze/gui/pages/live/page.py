@@ -601,8 +601,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.serial.clear()
             self.serial.addItem("")
             if ports is None:
-                self.serial_note.setText("pyserial is not installed: serial / TTL actions are only written to "
-                                         "the log (pip install pyserial).")
+                self.serial_note.setText("Serial devices are not available in this installation: serial / TTL actions are only written to "
+                                         "the log.")
             else:
                 self.serial.addItems(ports)
                 self.serial_note.setText("Optional. Used by “serial” and “ttl” procedure actions.")
@@ -727,7 +727,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         errors = check_before_test(p.procedures, project_context(p))
         if errors:
             shown = errors[:12] + ([f"… and {len(errors) - 12} more"] if len(errors) > 12 else [])
-            msg = ("The test was not armed: the experiment's procedures have problems (Experiment › Procedures):"
+            msg = ("The test was not armed: the experiment's procedures have problems (Protocol › Procedures):"
                    "\n\n" + "\n".join(f"• {e}" for e in shown))
             for e in errors:
                 self._log(f"Procedures: {e}")

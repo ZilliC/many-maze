@@ -71,6 +71,16 @@ class KeysMixin:
             app.removeEventFilter(self)
             self._key_filter = False
 
+    def _start_key_clash(self, name: str) -> bool:
+        """`name` is a start key that is also a scoring key and a test is waiting to start: the start key wins
+        (once the test runs, the key scores)."""
+        if name.lower() not in {qt_key(k).lower() for k in parse_keys(self.start_keys.text())}:
+            return False
+        if self.mode == "multi":
+            return any(e.state == "waiting" for e in self.group.entries)
+        s = self.obs if self.mode == "observe" else self.session
+        return s is not None and s.state == "waiting"
+
     def start_key(self) -> bool:
         """Start key (keyboard / USB presenter): start the waiting test(s) or resume paused ones."""
         if self.mode == "observe" and self.obs is not None:
@@ -296,6 +306,10 @@ class KeysMixin:
             if not e.isAutoRepeat() and name:
                 self.forward_key(name, t == QEvent.KeyPress)
             if b is not None:
+                if self._start_key_clash(name):  # before the test starts, a start key starts it (nothing to score)
+                    if t == QEvent.KeyPress and not e.isAutoRepeat():
+                        self.start_key()
+                    return True
                 if not e.isAutoRepeat():
                     self._score(b, t == QEvent.KeyPress)
                 return True

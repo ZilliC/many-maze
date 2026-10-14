@@ -64,7 +64,11 @@ def build_message(cfg: dict, to, subject: str, text: str, attachments=()) -> Ema
 def send_email(cfg: dict, to, subject: str, text: str, attachments=(), timeout: float = TIMEOUT_S) -> list[str]:
     """Send a message through the device's SMTP server; returns the recipients. Raises RuntimeError (no server,
     no recipient, attachments too large, no STARTTLS) or the smtplib / socket errors."""
-    host, port = str(cfg.get("smtp_host", "")).strip(), int(cfg.get("smtp_port", 587) or 587)
+    host = str(cfg.get("smtp_host", "")).strip()
+    try:
+        port = int(cfg.get("smtp_port", 587) or 587)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"the SMTP port “{cfg.get('smtp_port')}” is not a number") from None
     if not host:
         raise RuntimeError("no SMTP server configured")
     rcpt = addresses(to) if not isinstance(to, (list, tuple)) else [a for a in to if a]

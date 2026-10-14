@@ -28,6 +28,12 @@ class FixedPort(FakeSMTP):
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
 
 
+def next_number(out: Path) -> int:
+    """Último número NNN.eml que ya existe en la carpeta (0 si no hay): se sigue desde ahí, sin pisar nada."""
+    nums = [int(f.stem) for f in out.glob("*.eml") if f.stem.isdigit()]
+    return max(nums, default=0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("carpeta", type=Path)
@@ -38,15 +44,17 @@ def main():
     with FixedPort(a.puerto) as srv:
         print(f"SMTP falso escuchando en 127.0.0.1:{a.puerto}; correos en {out}", flush=True)
         seen = 0
+        base = next_number(out)  # correos de arranques anteriores: la numeración continúa
         while True:
             time.sleep(0.5)
             while seen < len(srv.messages):
                 m = srv.messages[seen]
                 seen += 1
                 msg = m["message"]
-                (out / f"{seen:03d}.eml").write_bytes(msg.as_bytes())
+                n = base + seen
+                (out / f"{n:03d}.eml").write_bytes(msg.as_bytes())
                 att = [(p.get_filename(), len(p.get_payload(decode=True) or b"")) for p in msg.iter_attachments()]
-                print(f"[{seen:03d}] de {m['from']} a {m['to']} — «{msg['subject']}» — adjuntos: {att}", flush=True)
+                print(f"[{n:03d}] de {m['from']} a {m['to']} — «{msg['subject']}» — adjuntos: {att}", flush=True)
 
 
 if __name__ == "__main__":

@@ -460,7 +460,7 @@ def device_plan(configs, choice: str, others) -> tuple[str | None, str]:
         return None, ("Several tests are running at once: choose an I/O Device for each test panel (in the panel "
                       "settings) so that the tests do not share levers, outputs or shocks.")
     if choice not in boxes:
-        return None, f"The I/O device '{choice}' is not configured (Experiment › I/O devices)."
+        return None, f"The I/O device '{choice}' is not configured (Protocol › I/O devices)."
     if choice in others:
         return None, f"The I/O device '{choice}' is already used by another running test."
     return choice, ""
