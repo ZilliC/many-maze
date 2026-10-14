@@ -3,6 +3,7 @@
 import json
 import os
 
+import pytest
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 
 from manymaze.core import procedures as pr
@@ -469,3 +470,22 @@ def test_procedure_json_errors_are_plain():
     assert q is None and "JSON object" in err
     q, err = parse_procedure_json('{"name": "a", "statements": []}')
     assert q is not None and not err
+
+
+def test_io_dialog_test_message_stays_visible(monkeypatch):
+    """H-061: the message of Test is not overwritten by the status refresh (50 ms timer)."""
+    p = make_project()
+    dlg = IODevicesDialog(p)
+    dlg.connect_devices()
+    dlg.status.selectRow(next(r for r in range(dlg.status.rowCount()) if dlg.status.item(r, 2).text() != "Input"
+                              and dlg.status.item(r, 1).text() == "lever"))
+    dlg.test_selected()
+    msg = dlg.conn_lbl.text()
+    assert "is an input" in msg
+    for _ in range(5):
+        dlg._poll()
+    assert dlg.conn_lbl.text() == msg
+    dlg._note_until = 0.0
+    dlg._poll()
+    assert dlg.conn_lbl.text().startswith("Connected")
+    dlg.disconnect_devices()

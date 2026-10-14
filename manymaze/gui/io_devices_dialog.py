@@ -4,6 +4,7 @@ the I/O with manual output toggles and a test button."""
 from __future__ import annotations
 
 import copy
+import time
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -84,6 +85,8 @@ def _options_text(ch: dict) -> str:
 class IODevicesDialog(QDialog):
     """Configure project.io_devices, with live I/O status, manual outputs and a test button."""
 
+    NOTE_S = 5.0  # seconds a message of Test stays in the status line
+
     changed = Signal()
 
     def __init__(self, project, parent=None):
@@ -96,6 +99,7 @@ class IODevicesDialog(QDialog):
         self._output_errors: list[str] = []  # outputs that could not be set while connected
         self._loading = False
         self._status_keys: list = []
+        self._note_until = 0.0
         self._build()
         self._refresh_list(0)
         self.timer = QTimer(self)
@@ -585,6 +589,7 @@ class IODevicesDialog(QDialog):
         self._output_errors = []
         self.connect_btn.setText("Connect")
         self.status.setRowCount(0)
+        self._note_until = 0.0
         self.conn_lbl.setText("Not connected")
 
     def _poll(self):
@@ -621,8 +626,16 @@ class IODevicesDialog(QDialog):
                 it.setText(text)
                 it.setForeground(QBrush(QColor(theme.OK if v else theme.MUTED)))
         errs = m.errors + self._output_errors
+        if time.monotonic() < self._note_until:  # the message of Test stays readable for a few seconds
+            return
         self.conn_lbl.setText("; ".join(errs[-3:]) if errs else f"Connected: {len(m.devices)} device(s)")
         self.conn_lbl.setStyleSheet(f"color:{theme.ERROR if errs else theme.OK}")
+
+    def _note(self, text: str):
+        """A message of Test in the status line, kept for NOTE_S seconds (the status refresh would overwrite it)."""
+        self.conn_lbl.setText(text)
+        self.conn_lbl.setStyleSheet("")
+        self._note_until = time.monotonic() + self.NOTE_S
 
     def _set_output(self, m, device, channel, value) -> bool:
         """Set an output of the connected manager `m`, unless it was disconnected meanwhile; failures are shown."""
@@ -657,18 +670,18 @@ class IODevicesDialog(QDialog):
         c = self._cur()
         if c is not None and c.get("type") == "audio" and m.has(c.get("name")):
             m.audio(c["name"], "tone", frequency=1000, duration=0.5, volume=0.5)
-            self.conn_lbl.setText(f"Played a 1 kHz tone on {c['name']}")
+            self._note(f"Played a 1 kHz tone on {c['name']}")
             return
         if 0 <= r < len(self._status_keys):
             d, ch, k = self._status_keys[r]
         else:
             outs = [key for key in self._status_keys if key[2] in ioconfig.OUTPUT_KINDS]
             if not outs:
-                self.conn_lbl.setText("Select an output to test")
+                self._note("Select an output to test")
                 return
             d, ch, k = outs[0]
         if k not in ioconfig.OUTPUT_KINDS:
-            self.conn_lbl.setText(f"{ch} is an input: press the lever / break the beam to see it change")
+            self._note(f"{ch} is an input: press the lever / break the beam to see it change")
             return
         if self._set_output(m, d, ch, 1):
             # switched off by the same manager only: it may have been disconnected (closed) within the 500 ms
