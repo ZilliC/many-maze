@@ -52,6 +52,8 @@ def build(dest: Path) -> Project:
     p.apparatus.append(app)
     p.groups = [Group(g, c) for g, c, _ in GROUPS]
     p.stages = list(STAGES)
+    if "Genotipo" not in p.animal_fields:  # so the app offers it (Categorical, factors)
+        p.animal_fields.append("Genotipo")
     n = int(SECONDS * FPS)
     k = 0
     for gi, (g, _, speed) in enumerate(GROUPS):
