@@ -79,6 +79,7 @@ class LiveState:
 
     def _reset_extra(self):
         self.end_reason = ""
+        self.end_waited_for_pellets = False  # the test ended a moment after "End the test" to finish a pellet
         self.end_at: float | None = None  # when "End the test" fired (the data after it is dropped if it ends)
         self.awaiting_continuation = False  # "waiting for test end" (End the test allowing continuation)
         self._continue_until = 0.0

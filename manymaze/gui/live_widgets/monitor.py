@@ -6,11 +6,13 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-                               QListWidget, QSizePolicy, QTableWidget, QVBoxLayout, QWidget)
+                               QListWidget, QPushButton, QSizePolicy, QTableWidget, QVBoxLayout, QWidget)
 
+from ...core.iobase import VirtualDevice
+from ...core.ioconfig import INPUT_KINDS
 from ...core.livemonitor import CHART_PREFIX, FAST_PARAMS, LiveCharts, chart_parameters, input_rows, sequence_rows
 from .. import theme
 from ..widgets import fmt_time
@@ -231,6 +233,26 @@ class MonitorPanel(QWidget):
         self.io.hide()
         iv.addWidget(self.io_note)
         iv.addWidget(self.io)
+        # simulated devices have no lever to press: their inputs are triggered from here, during the test
+        self.sim_row = QWidget()
+        sr = QHBoxLayout(self.sim_row)
+        sr.setContentsMargins(0, 0, 0, 0)
+        sr.addWidget(QLabel("Simulate input"))
+        self.sim_input = QComboBox()
+        self.sim_input.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.sim_input.setMinimumContentsLength(8)
+        self.sim_press = QPushButton("Press")
+        self.sim_press.setToolTip("Switch the selected simulated input on for a moment (as a lever press)")
+        self.sim_toggle = QPushButton("Switch")
+        self.sim_toggle.setToolTip("Switch the selected simulated input on if it is off, off if it is on")
+        self.sim_press.clicked.connect(self.simulate_press)
+        self.sim_toggle.clicked.connect(self.simulate_toggle)
+        sr.addWidget(self.sim_input, 1)
+        sr.addWidget(self.sim_press)
+        sr.addWidget(self.sim_toggle)
+        self.sim_row.hide()
+        self._sim_devices = None
+        iv.addWidget(self.sim_row)
         v.addWidget(io)
 
         wb = QGroupBox("Warnings")
@@ -271,6 +293,8 @@ class MonitorPanel(QWidget):
         for box in (self.points_box, self.seq_box, self.inputs_box):
             box.hide()
         self.chart.set_data([], [])
+        self._sim_devices = None
+        self.sim_row.hide()
 
     def refresh(self, session, title: str = "", devices=None, warnings: list[str] | None = None):
         if session is None:
@@ -345,6 +369,46 @@ class MonitorPanel(QWidget):
                                  for n, val, k, on, lat in ins])
         self.inputs_box.setVisible(bool(ins))
 
+    def _refresh_simulated(self, devices, status):
+        """The inputs of simulated (virtual) devices in the "Simulate input" list; hidden when there are none."""
+        self._sim_devices = devices
+        keys = []
+        for dev, ch, kind, _v in (list(r)[:4] for r in status):
+            try:
+                virtual = isinstance(devices.device(dev, create=False), VirtualDevice)
+            except Exception:
+                virtual = False
+            if virtual and kind in INPUT_KINDS:
+                keys.append((dev, ch))
+        if keys != [self.sim_input.itemData(i) for i in range(self.sim_input.count())]:
+            cur = self.sim_input.currentData()
+            self.sim_input.clear()
+            for k in keys:
+                self.sim_input.addItem(f"{k[0]} / {k[1]}", k)
+            i = self.sim_input.findData(cur)
+            self.sim_input.setCurrentIndex(max(0, i))
+        self.sim_row.setVisible(bool(keys))
+
+    def simulate_press(self, *_):
+        """Switch the selected simulated input on, and off again a moment later."""
+        key = self.sim_input.currentData()
+        devices = self._sim_devices
+        if key is None or devices is None:
+            return False
+        devices.set_input(key[0], key[1], 1)
+        QTimer.singleShot(150, lambda: devices.set_input(key[0], key[1], 0))
+        return True
+
+    def simulate_toggle(self, *_):
+        """Switch the selected simulated input to the opposite of its present value."""
+        key = self.sim_input.currentData()
+        devices = self._sim_devices
+        if key is None or devices is None:
+            return False
+        now = next((v for d, c, _k, v in (list(r)[:4] for r in devices.status()) if (d, c) == key), 0)
+        devices.set_input(key[0], key[1], 0 if now else 1)
+        return True
+
     def _refresh_io(self, devices):
         status = None
         if devices is not None:
@@ -358,9 +422,11 @@ class MonitorPanel(QWidget):
                 self.io_note.setText("No I/O devices")
             self.io_note.show()
             self.io.hide()
+            self.sim_row.hide()
             return
         self.io_note.hide()
         self.io.show()
+        self._refresh_simulated(devices, status)
         self.io.setRowCount(len(status))
         for r, row in enumerate(status):
             for c, val in enumerate(list(row)[:4]):

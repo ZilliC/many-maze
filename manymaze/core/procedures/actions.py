@@ -11,9 +11,11 @@ from pathlib import Path
 from .. import ioconfig
 from ..operant import Schedule
 from .catalog import ACTION_SPECS, CONTINUATION_S, EPS, SHOCK_MAX_S, STALL_S
+from .detect import TimeWait
 from .expr import MAX_SEQ, ExprError
 from .model import _params_text
 
+PELLET_GRACE_S = 2.0  # "End the test" waits at most this long for the pellets being dispensed
 
 class _Stop(Exception):
     pass
@@ -343,6 +345,16 @@ class Actions:
                 self._set_out(dev, ch, 0, off_t, tr.typ, hw=tr.hw)
                 tr.on = False
                 tr.k += 1
+
+    def end_deferred(self) -> bool:
+        """Whether "End the test" waits for the pellets being dispensed (at most PELLET_GRACE_S): the test must
+        not end in the middle of a pellet pulse."""
+        if not any(tr.typ == "pellet" for tr in self._trains.values()):
+            return False
+        if self.t - (self.end_at if self.end_at is not None else self.t) >= PELLET_GRACE_S:
+            return False
+        self.end_waited_for_pellets = not self.awaiting_continuation  # the data is kept up to the real end
+        return True
 
     def _stop_train(self, key, t):
         self._ramps.pop(key, None)
@@ -990,7 +1002,12 @@ class Actions:
         if not self.paused:
             return
         self.paused = False
+        for th in self.threads:  # a wait begun during the pause has run part of it in real time
+            if th.alive and isinstance(th.wait, TimeWait) and th.wait.wall and self._pause_t is not None:
+                th.wait.due = t + max(0.0, th.wait.due - self._pause_t - self._pause_wall_s)
+                th.wait.wall = False
         self._pause_t = None
+        self._pause_wall_s = 0.0
         if self.pauses and self.pauses[-1][1] is None:
             self.pauses[-1][1] = t
         self._emit("test_resumed", {}, t)
