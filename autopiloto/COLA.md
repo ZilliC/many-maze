@@ -64,8 +64,9 @@
       → mensaje «damaged or incomplete…», sin traceback (merge 220df68)
 - [x] Arreglo: H-019 (S3) importar dos veces el mismo XML duplica pruebas y animales sin avisar
       → avisa y pregunta antes de reimportar, «No» por defecto (merge 220df68)
-- [ ] Arreglo: H-020 (S3) mapa de zonas 80×60 en un aparato de 640×360 no se reescala ni avisa (y rendija de 1 px
+- [x] Arreglo: H-020 (S3) mapa de zonas 80×60 en un aparato de 640×360 no se reescala ni avisa (y rendija de 1 px
       entre Left y Right)
+      → mapa estirado a la imagen del aparato con aviso; contornos por el borde exterior del píxel (merge 8f6467e)
 - [x] Arreglo: H-021…H-024 (S4) informe HTML `statistic=nan` en medidas constantes; correo con servidor apagado
       dice «file could not be read or written»; errores al guardar nombran un `.tmp`; «Colour by» ofrece
       «Defecation: count» y falla en silencio. Más: `inspeccionar.py` se cae con la línea `# …` de raw data
@@ -99,8 +100,9 @@
       → aviso en rojo en Results si la ventana ya no coincide con el track (sin recálculo; ver PARA_TI)
 - [x] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
       → se niega si no hay posiciones detectadas de las que interpolar (merge 6170031)
-- [ ] Arreglo: H-031/H-033/H-034 (Obs) reproducción 4×/8× va a ~5×/10×; «Mark position» acepta clic fuera del
+- [x] Arreglo: H-031/H-033/H-034 (Obs) reproducción 4×/8× va a ~5×/10×; «Mark position» acepta clic fuera del
       cuadro; «Copy table» copia filas ocultas por el filtro
+      → velocidad real por reloj; clic fuera del cuadro rechazado; copia solo filas visibles (merge 8f6467e)
 - [ ] Arreglo: H-035 (S3) en vivo: una tecla de inicio que también es de puntuación (p. ej. `r`) nunca inicia la prueba
 - [ ] Arreglo: H-036 (S3) en vivo: «On a start switch» con entrada vacía o inexistente espera para siempre sin aviso
 - [x] Arreglo: H-039 (Obs, persistencia) en vivo: duración, modo de inicio y «record» no persisten al reabrir
