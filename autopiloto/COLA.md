@@ -129,12 +129,16 @@
       modo ciego escribe `=SUM(...)`/`+cmd|...` sin protección contra fórmulas
 - [ ] Decidir H-055 (Obs) dosis con concentración 0 → 0,0001 sin aviso; pesos 1e9 → 100000; tope de 1000 animales;
       tratamientos que solo difieren en mayúsculas y colores duplicados permitidos
-- [ ] Arreglo: H-056 (S2) protocolo bloqueado: la tecla Supr en el mapa borra zonas que el admin dejó seleccionadas
+- [x] Arreglo: H-056 (S2) protocolo bloqueado: la tecla Supr en el mapa borra zonas que el admin dejó seleccionadas
       (6→0, sin deshacer)
-- [ ] Arreglo: H-057 (S2) cualquier no-admin puede «Restore a backup» y borrar usuarios, roles y bloqueo sin que se
+      → borrar/pegar comprueban el bloqueo; cambiar de usuario limpia la selección (merge 8ee5e8e)
+- [x] Arreglo: H-057 (S2) cualquier no-admin puede «Restore a backup» y borrar usuarios, roles y bloqueo sin que se
       pida administrador
-- [ ] Arreglo: H-058 (S3) el único administrador puede quitarse a sí mismo del experimento y apaga toda la seguridad
-- [ ] Arreglo: H-059 (S3) con protocolo bloqueado se puede cambiar la unidad de distancia y las teclas/interruptor de
+      → restaurar copia exige administrador si hay seguridad (merge 8ee5e8e)
+- [x] Arreglo: H-058 (S3) el único administrador puede quitarse a sí mismo del experimento y apaga toda la seguridad
+      → no se puede quitar al único administrador (merge 8ee5e8e)
+- [x] Arreglo: H-059 (S3) con protocolo bloqueado se puede cambiar la unidad de distancia y las teclas/interruptor de
       Run tests
+      → unidad y teclas/interruptor de Run tests bajo el bloqueo (merge 8ee5e8e)
 - [ ] Decidir H-060 (Obs) contraseñas de 1 carácter o espacios; sin límite de intentos; archivo cifrado manipulado
       dice «password is wrong»; «Wrong password» antes de escribir en «Restore a backup»

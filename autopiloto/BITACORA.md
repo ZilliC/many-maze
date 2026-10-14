@@ -27,3 +27,4 @@
 2026-10-13 · QA B05 animales (offscreen) · 3 OK 3 RARO 1 FALLA, persistencia OK; H-052/H-053/H-054 S3, H-055 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · QA B02 usuarios y seguridad (offscreen) · 2 OK 2 RARO 1 FALLA; H-056/H-057 S2, H-058/H-059 S3, H-060 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · Arreglo H-042/H-030/H-032 · H-042 y H-032 arreglados, H-030 solo aviso (decisión en PARA_TI); 1340 tests · 6170031
+2026-10-13 · Arreglo H-056…H-059 seguridad · arreglados; 1344 tests · 8ee5e8e
