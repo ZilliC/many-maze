@@ -63,3 +63,17 @@ def test_cabeza_real_threshold_follows_the_frame_rate():
         assert moving > 100 and against == 0, (fps, moving)
         slow = SimpleNamespace(x=x / 10, y=np.zeros(n), hx=x / 10 + 5, hy=np.zeros(n))  # 9 px/s: standing
         assert mod.medir(slow, fps)[0] == 0
+
+
+def test_smtp_local_continues_numbering(tmp_path):
+    """H-070: restarting the fake mail server does not overwrite the mails already saved."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("smtp_local", Path(__file__).resolve().parents[1] / "qa" / "herramientas"
+                                                  / "smtp_local.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.next_number(tmp_path) == 0
+    for n in (1, 2, 3, 5):
+        (tmp_path / f"{n:03d}.eml").write_text("x")
+    (tmp_path / "notas.txt").write_text("x")
+    assert mod.next_number(tmp_path) == 5
