@@ -327,7 +327,7 @@ def _change_project(p, a):
 def cmd_demo(a):
     from .core.demo import create_demo_project
 
-    p = create_demo_project(a.dir, progress=_progress("creating demo"))
+    p = create_demo_project(Path(a.dir).resolve(), progress=_progress("creating demo"))
     print(f"Demo project created at {p.path}")
 
 

@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -568,3 +569,10 @@ def test_cli_relink(tmp_path, capsys):
     cli.main(["project", str(p.path), "relink", "--folder", str(tmp_path / "new")])
     assert "Relinked 1" in capsys.readouterr().out
     assert Project.load(p.path).missing_videos() == []
+
+
+def test_cli_demo_with_a_relative_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["demo", "d.mmaze"])
+    p = Project.load(tmp_path / "d.mmaze")
+    assert p.tests and p.missing_videos() == [] and all(p.has_track(t) for t in p.tests)
