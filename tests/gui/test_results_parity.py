@@ -195,3 +195,17 @@ def test_video_export(page, tmp_path, monkeypatch):
     wait_workers(page)
     with VideoSource(str(out)) as v:
         assert v.width == 200 and 70 <= v.frame_count <= 80
+
+
+def test_colour_by_offers_only_what_can_colour_the_track(page):
+    """H-024: "Defecation: count" was offered but failed silently (no colour bar)."""
+    page.table.selectRow(0)
+    page.render_all()
+    items = [page.color_combo.itemData(i) for i in range(page.color_combo.count())]
+    assert not any(isinstance(d, str) and d.endswith(": count") and d.split(":")[0] == "Defecation" for d in items)
+    for d in items:
+        if d in (None, "none"):
+            continue
+        page.set_plot_options(color_by=d)
+        page.render_all()
+        assert len(page.track_canvas.figure.axes) == 2, f"colouring by {d!r} gave no colour bar"

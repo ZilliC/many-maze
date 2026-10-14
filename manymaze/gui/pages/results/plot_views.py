@@ -385,7 +385,7 @@ class PlotViewsMixin:
         beh = self.project.behaviours
         params = charts.parameters(app, tr, beh)
         for combo, items, keep in (
-                (self.color_combo, [p for p in params if p.kind != charts.STATE and p.group not in ("Zones",)],
+                (self.color_combo, [p for p in params if p.kind != charts.STATE and p.group not in ("Zones", "Behaviours")],
                  [("Time", "time"), ("Speed", "speed"), ("Single colour", "none")]),
                 (self.heat_of, [p for p in params if p.kind == charts.STATE and p.group not in ("Position",)],
                  [(POSITION, None)])):
