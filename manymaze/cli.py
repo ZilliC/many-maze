@@ -311,7 +311,7 @@ def _change_project(p, a):
             sys.exit("relink needs --folder: the folder (searched with its subfolders) holding the moved videos")
         if not Path(a.folder).is_dir():
             sys.exit(f"Folder not found: {a.folder}")
-        res = relink_videos(p, a.folder)
+        res = relink_videos(p, Path(a.folder).resolve())
         if res["relinked"]:
             try:
                 p.save()

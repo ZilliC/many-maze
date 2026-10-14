@@ -576,3 +576,16 @@ def test_cli_demo_with_a_relative_path(tmp_path, monkeypatch):
     cli.main(["demo", "d.mmaze"])
     p = Project.load(tmp_path / "d.mmaze")
     assert p.tests and p.missing_videos() == [] and all(p.has_track(t) for t in p.tests)
+
+
+def test_cli_relink_with_a_relative_folder(tmp_path, monkeypatch):
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    t = p.add_test("", "A1")
+    t.video = "../old/v.mp4"
+    p.save()
+    (tmp_path / "new").mkdir()
+    (tmp_path / "new" / "v.mp4").write_bytes(b"x")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["project", "e.mmaze", "relink", "--folder", "new"])
+    assert Project.load(p.path).missing_videos() == []
