@@ -46,6 +46,23 @@ def _load_project(path):
                  f"{e} (the environment variable {PASSWORD_ENV}).")
 
 
+def _check_output_folder(out):
+    """Exit with a message if the folder of the output file does not exist (instead of a failed temporary file)."""
+    folder = Path(out).resolve().parent
+    if not folder.is_dir():
+        sys.exit(f"Cannot write {out}: the folder {folder} does not exist")
+
+
+def _os_error_message(e: OSError) -> str:
+    """One plain line for a file problem (missing file, no permission, a video that cannot be opened)."""
+    name = e.filename
+    if isinstance(e, FileNotFoundError):
+        return f"File or folder not found: {name}" if name else str(e)
+    if isinstance(e, PermissionError):
+        return f"No permission to access {name}" if name else str(e)
+    return str(e)
+
+
 def _progress(prefix):
     def cb(f):
         sys.stderr.write(f"\r{prefix} {f * 100:5.1f}%")
@@ -62,6 +79,11 @@ def cmd_track(a):
     from .core.tracking import ArenaJob, DetectionSettings, track_video
     from .core.video import VideoSource
 
+    if a.output:
+        _check_output_folder(a.output)
+    if not a.apparatus and a.template not in templates.TEMPLATES:
+        sys.exit(f"Unknown template “{a.template}”. Available: {', '.join(templates.TEMPLATES)} "
+                 f"(see: manymaze templates)")
     with VideoSource(a.video) as v:
         W, H = v.width, v.height
     if a.apparatus:
@@ -129,6 +151,8 @@ def cmd_project(a):
     from .core import explock
 
     p = _load_project(a.dir)
+    if a.output:
+        _check_output_folder(a.output)
     if a.action in ("track", "relink", "plugins"):
         _lock_for_writing(p)
         try:
@@ -385,7 +409,10 @@ def main(argv=None):
         return gui_main(getattr(a, "project", None), argv_project=a.cmd is None)
     if a.cmd == "project" and not Path(a.dir).exists():
         sys.exit(f"Experiment folder not found: {a.dir}")
-    return {"track": cmd_track, "project": cmd_project, "demo": cmd_demo, "templates": cmd_templates}[a.cmd](a)
+    try:
+        return {"track": cmd_track, "project": cmd_project, "demo": cmd_demo, "templates": cmd_templates}[a.cmd](a)
+    except OSError as e:  # a missing or unreadable file, a folder that cannot be written …: a message, not a traceback
+        sys.exit(_os_error_message(e))
 
 
 if __name__ == "__main__":

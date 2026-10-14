@@ -589,3 +589,30 @@ def test_cli_relink_with_a_relative_folder(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cli.main(["project", "e.mmaze", "relink", "--folder", "new"])
     assert Project.load(p.path).missing_videos() == []
+
+def test_cli_errors_are_one_line_messages(tmp_path, capsys):
+    empty = tmp_path / "empty.mp4"
+    empty.write_bytes(b"")
+    for argv in (["track", str(tmp_path / "nope.mp4")], ["track", str(empty)],
+                 ["track", str(empty), "--template", "nope"]):
+        with pytest.raises(SystemExit) as e:
+            cli.main(argv)
+        assert isinstance(e.value.code, str) and "Traceback" not in e.value.code and "\n" not in e.value.code
+    with pytest.raises(SystemExit) as e:
+        cli.main(["track", str(empty), "--template", "nope"])
+    assert "open_field" in e.value.code  # lists the valid templates
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        if not os.access(ro, os.W_OK):
+            with pytest.raises(SystemExit) as e:
+                cli.main(["demo", str(ro / "x.mmaze")])
+            assert isinstance(e.value.code, str)
+    finally:
+        ro.chmod(0o700)
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["project", str(p.path), "results", "-o", str(tmp_path / "missing" / "x.csv")])
+    assert isinstance(e.value.code, str) and ".tmp" not in e.value.code and "missing" in e.value.code
