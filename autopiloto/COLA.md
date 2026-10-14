@@ -84,3 +84,5 @@
 - [ ] Decidir H-028 (Obs) OFT: entradas al centro 2–5× la referencia; calidad 54,8 % en mHFD11
 - [ ] Arreglo: H-025 (resto) OFT arena fC1: el track se queda en una mancha clara del suelo ~50 % de cuadros
       (53 % estático, 84 % detección); quizá aviso «track pegado/estático» (`salidas/B13/`)
+- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B07, B08, B03, B04, B05, B02,
+      B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
