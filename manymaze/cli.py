@@ -53,6 +53,18 @@ def _check_output_folder(out):
         sys.exit(f"Cannot write {out}: the folder {folder} does not exist")
 
 
+TABLE_EXTENSIONS = (".csv", ".tsv", ".txt", ".tab", ".xlsx", ".slk", ".dbf")
+REPORT_EXTENSIONS = (".html", ".htm")
+
+
+def _check_output(out, extensions, what="a table"):
+    """Exit with a message if the output file's extension is not one of `extensions` (the format follows it)."""
+    _check_output_folder(out)
+    if Path(out).suffix.lower() not in extensions:
+        sys.exit(f"Cannot write {out}: the extension decides the format and “{Path(out).suffix or 'no extension'}” "
+                 f"is not supported for {what}. Use one of: {', '.join(extensions)}")
+
+
 def _os_error_message(e: OSError) -> str:
     """One plain line for a file problem (missing file, no permission, a video that cannot be opened)."""
     name = e.filename
@@ -80,7 +92,7 @@ def cmd_track(a):
     from .core.video import VideoSource
 
     if a.output:
-        _check_output_folder(a.output)
+        _check_output(a.output, TABLE_EXTENSIONS)
     if not a.apparatus and a.template not in templates.TEMPLATES:
         sys.exit(f"Unknown template “{a.template}”. Available: {', '.join(templates.TEMPLATES)} "
                  f"(see: manymaze templates)")
@@ -153,6 +165,10 @@ def cmd_project(a):
     p = _load_project(a.dir)
     if a.output:
         _check_output_folder(a.output)
+        if a.action in ("report", "protocol"):
+            _check_output(a.output, REPORT_EXTENSIONS, "an HTML report")
+        elif a.action in ("events", "results"):
+            _check_output(a.output, (*TABLE_EXTENSIONS, ".xml"))  # .xml: explained where it does not fit
     if a.action in ("track", "relink", "plugins"):
         _lock_for_writing(p)
         try:
