@@ -139,6 +139,32 @@ def hex_to_hsv(colour: str) -> tuple[int, int, int]:
     return int(h), int(s_), int(v)
 
 
+def target_colour_problem(settings: DetectionSettings) -> str:
+    """Why the colour of the animal cannot be used ("" if it can, or if the animal is not detected by colour)."""
+    if settings.method != "colour":
+        return ""
+    try:
+        hex_to_hsv(settings.target_colour)
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+def identity_colours_problem(settings: DetectionSettings) -> str:
+    """Why the colour marks that identify the animals cannot be used ("" if they can)."""
+    for c in settings.identity_colour_list():
+        try:
+            hex_to_hsv(c)
+        except ValueError as e:
+            return str(e)
+    return ""
+
+
+def colour_problem(settings: DetectionSettings) -> str:
+    """The first problem with the colours of the detection settings, in plain words ("" = none)."""
+    return target_colour_problem(settings) or identity_colours_problem(settings)
+
+
 def colour_mask(frame_bgr: np.ndarray, colour: str, tolerance_deg: float = 20, min_saturation: int = 60,
                 min_value: int = 40) -> np.ndarray:
     """uint8 mask (255) of the pixels whose hue is within tolerance_deg of ``colour`` and that are saturated and

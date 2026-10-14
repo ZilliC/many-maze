@@ -64,7 +64,8 @@ def validate_behaviours(behaviours: list) -> list[str]:
         if not k:
             continue
         if len(k) != 1 or k not in SCORING_KEYS:
-            errs.append(f"“{b.name}”: “{b.key}” cannot be used as a scoring key.")
+            hint = " A key stroke is a single letter, digit or punctuation key." if len(k) > 1 else ""
+            errs.append(f"“{b.name}”: “{b.key}” cannot be used as a scoring key.{hint}")
         if k in keys:
             errs.append(f"Key “{k.upper()}” is used by both “{keys[k]}” and “{b.name}”.")
         else:

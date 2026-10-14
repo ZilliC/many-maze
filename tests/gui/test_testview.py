@@ -281,3 +281,14 @@ def test_screenshot(view):
     view.tabs.setCurrentIndex(0)
     QTest.qWait(150)
     view.main.grab().save(shot_path("shot_testview.png"))
+
+
+def test_h041_preview_with_a_bad_colour_says_so_instead_of_a_traceback(view, capsys):
+    view.project.detection.method = "colour"
+    view.project.detection.target_colour = "red"
+    view.player.seek_time(2.0)
+    view.chk_preview.setChecked(True)
+    for _ in range(3):
+        view._refresh_frame()
+    assert "Invalid colour" in view.preview_info
+    assert "Traceback" not in capsys.readouterr().err

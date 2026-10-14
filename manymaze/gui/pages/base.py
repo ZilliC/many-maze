@@ -10,7 +10,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
 
 from ...core.freezing import IMMOBILITY_MODES
 from ...core.template_measures import BARNES_METHODS
-from ...core.tracking import ANIMAL_PRESETS, apply_animal_preset
+from ...core.tracking import (ANIMAL_PRESETS, apply_animal_preset, identity_colours_problem,
+                              target_colour_problem)
+from .. import theme
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -289,6 +291,10 @@ ANALYSIS_SPEC = [
 
 # sections of the protocol's property pages: (heading, [attribute, ...]). Attributes of a spec that are not listed
 # here are shown in the last section, so new spec entries always appear.
+# fields of the detection settings checked as they are entered: attribute -> function(settings) -> problem or ""
+DETECTION_CHECKS = {"target_colour": target_colour_problem, "identity_colours": identity_colours_problem,
+                    "method": target_colour_problem}  # (the colour only matters for the colour method)
+
 DETECTION_SECTIONS = [
     ("Detection", ["method", "contrast", "threshold", "background", "background_frame", "background_samples",
                    "lighting_compensation", "min_area_px", "max_area_px"]),
@@ -361,9 +367,13 @@ class SettingsForm(QWidget):
 
     changed = Signal()
 
-    def __init__(self, spec, obj=None, parent=None, sections=None, field_width: int | None = None):
+    def __init__(self, spec, obj=None, parent=None, sections=None, field_width: int | None = None, checks=None):
         super().__init__(parent)
         self.spec = spec
+        # ``checks`` {attr: function(obj) -> problem text or ""}: the problem is shown in red under the field `attr`
+        # (for "method", under the colour field it concerns: see ``_problem_rows``)
+        self.checks = checks or {}
+        self.problem_labels: dict[str, QLabel] = {}
         self.obj = obj
         self.editors: dict[str, QWidget] = {}
         self.labels: dict[str, QLabel] = {}
@@ -447,6 +457,28 @@ class SettingsForm(QWidget):
         lbl.setBuddy(w)
         self.labels[attr] = lbl
         form.addRow(lbl, w)
+        if attr in self.checks and attr != "method":
+            pl = QLabel()
+            pl.setWordWrap(True)
+            theme.style(pl, lambda: f"color:{theme.ERROR};")
+            pl.hide()
+            self.problem_labels[attr] = pl
+            form.addRow(pl)
+
+    def show_problems(self):
+        """Show (or hide) the problem of every checked field."""
+        if self.obj is None:
+            return
+        for attr, fn in self.checks.items():
+            lbl = self.problem_labels.get(attr)
+            if lbl is None and attr == "method":
+                lbl = self.problem_labels.get("target_colour")
+                fn = self.checks["target_colour"]
+            if lbl is None:
+                continue
+            text = fn(self.obj)
+            lbl.setText(text)
+            lbl.setVisible(bool(text))
 
     def add_to_section(self, title: str, widget: QWidget):
         """Append a full-width widget to the rows of a section (the last section if `title` is unknown)."""
@@ -480,11 +512,13 @@ class SettingsForm(QWidget):
                     w.setCurrentIndex(max(0, w.findData(v)))
                 else:
                     w.setText(str(v))
+        self.show_problems()
 
     def _emit(self, *_):
         if self._loading or self.obj is None:
             return
         self.store(self.obj)
+        self.show_problems()
         self.changed.emit()
 
     def store(self, obj):

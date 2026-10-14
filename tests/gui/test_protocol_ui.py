@@ -281,3 +281,72 @@ def test_screenshots(win):
         click_element(win, ex, key)
         pump(3)
         assert win.grab().save(shot_path(f"shot_protocol_{key}.png"))
+
+
+def test_h043_ribbon_blind_button_follows_the_real_state(win, monkeypatch):
+    ex = win.goto("ExperimentPage")
+    ex.blind.setChecked(True)
+    assert win.project.blind and ex.blind_act.isChecked()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    ex.blind_act.trigger()  # the ribbon button unticks, the user answers No
+    assert win.project.blind and ex.blind.isChecked() and ex.blind_act.isChecked()
+
+
+def test_h044_key_stroke_text_is_not_cut_silently(win):
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "keys")
+    p = win.project
+    r = ex.beh.rowCount() - 1
+    for text in ("Left", "ab", " "):
+        ex.beh.item(r, 1).setText(text)
+        assert not ex.beh_lbl.isHidden() and "cannot be used as a scoring key" in ex.beh_lbl.text(), text
+        assert len(p.behaviours[r].key) != 1 or p.behaviours[r].key == " "
+    ex.beh.item(r, 1).setText("q")
+    assert p.behaviours[r].key == "q"
+
+
+def test_h045_keys_with_errors_are_reported_and_not_saved_silently(win, monkeypatch):
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "keys")
+    p = win.project
+    n = ex.beh.rowCount()
+    ex.beh.item(n - 1, 0).setText("")
+    assert not ex.beh_lbl.isHidden() and "has no name" in ex.beh_lbl.text()
+    ex.beh.item(n - 1, 0).setText("Again")
+    ex.beh.item(n - 1, 1).setText(ex.beh.item(0, 1).text())
+    assert "used by both" in ex.beh_lbl.text()
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    assert win.save() is False and asked and "used by both" in asked[0]
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    assert win.save() is True
+    ex.beh.item(n - 1, 1).setText("q")
+    asked.clear()
+    assert win.save() is True and not asked
+    assert len(p.behaviours) == n
+
+
+def test_h041_colour_text_is_checked_on_entry(win):
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "tracking")
+    ed = ex.det_form.editors
+    ed["method"].setCurrentIndex(ed["method"].findData("colour"))
+    ed["target_colour"].setText("red")
+    ed["target_colour"].editingFinished.emit()
+    lbl = ex.det_form.problem_labels["target_colour"]
+    assert not lbl.isHidden() and "Invalid colour" in lbl.text() and "#rrggbb" in lbl.text()
+    ed["target_colour"].setText("#00ff00")
+    ed["target_colour"].editingFinished.emit()
+    assert lbl.isHidden()
+    ed["identity_colours"].setText("#ff0000, blue")
+    ed["identity_colours"].editingFinished.emit()
+    assert "Invalid colour" in ex.det_form.problem_labels["identity_colours"].text()
+    ed["identity_colours"].setText("#ff0000, #0000ff")
+    ed["identity_colours"].editingFinished.emit()
+    assert ex.det_form.problem_labels["identity_colours"].isHidden()
+    # the target colour only matters when the animal is detected by its colour
+    ed["target_colour"].setText("red")
+    ed["target_colour"].editingFinished.emit()
+    assert not lbl.isHidden()
+    ed["method"].setCurrentIndex(ed["method"].findData("background"))
+    assert lbl.isHidden()
