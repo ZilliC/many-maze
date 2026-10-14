@@ -667,3 +667,17 @@ def test_import_broken_anymaze_xml_says_so(tmp_path):
     with pytest.raises(ValueError, match="damaged or incomplete"):
         import_anymaze_xml(p, src)
     assert not p.tests and not p.animals
+
+
+def test_count_already_imported_anymaze_xml(tmp_path):
+    from manymaze.core.anymaze import count_already_imported
+
+    src = tmp_path / "exp.xml"
+    src.write_text(AM_XML, encoding="utf-8")
+    p = Project(name="imp")
+    p.save(tmp_path / "imp.mmaze")
+    assert count_already_imported(p, src) == (0, 2)
+    import_anymaze_xml(p, src)
+    assert count_already_imported(p, src) == (2, 2)
+    import_anymaze_xml(p, src)  # "Animal 2 (2)" still counts as the same animal
+    assert count_already_imported(p, src) == (2, 2) and len(p.tests) == 4

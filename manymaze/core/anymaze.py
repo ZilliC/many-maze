@@ -412,6 +412,26 @@ def track_from_columns(cols: dict, origin: str = "auto", centre: tuple[float, fl
     return tr
 
 
+def count_already_imported(project, path) -> tuple[int, int]:
+    """(tests of the XML export that are already in the experiment, tests in the export): an earlier import of the
+    same file left a test of the same animal (a nameless animal may carry a " (2)" suffix), apparatus and date, with
+    the note "ANY-maze test N". Used to warn before the same file is imported twice."""
+    data = read_anymaze_xml(path)
+    have = [(t.animal_id, t.apparatus, t.recorded_at, set(str(t.notes or "").splitlines())) for t in project.tests]
+    found = total = 0
+    for a in data["animals"]:
+        base = a["id"] or (f"Animal {a['number']}" if a["number"] else "")
+        ids = re.compile(re.escape(base) + r"( \(\d+\))?") if base else re.compile(r"Animal \d+( \(\d+\))?")
+        for t in a["tests"]:
+            total += 1
+            name = t["apparatus"] or "ANY-maze apparatus"
+            note = f"ANY-maze test {t['number']}" if t["number"] else None
+            if any(ids.fullmatch(aid) and app == name and rec == t["recorded_at"] and (note is None or note in notes)
+                   for aid, app, rec, notes in have):
+                found += 1
+    return found, total
+
+
 def import_anymaze_xml(project, path, origin: str = "auto", progress=None) -> dict:
     """Add the animals, tests (with their tracks, zone positions and calibration) of an ANY-maze experiment XML
     export to a saved project. Apparatus missing from the project are created from the exported zone bounding boxes
