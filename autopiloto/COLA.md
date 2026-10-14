@@ -84,5 +84,10 @@
 - [ ] Decidir H-028 (Obs) OFT: entradas al centro 2–5× la referencia; calidad 54,8 % en mHFD11
 - [ ] Arreglo: H-025 (resto) OFT arena fC1: el track se queda en una mancha clara del suelo ~50 % de cuadros
       (53 % estático, 84 % detección); quizá aviso «track pegado/estático» (`salidas/B13/`)
-- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B07, B08, B03, B04, B05, B02,
+- [x] QA offscreen B07 → 7 OK, 3 RARO; H-030/H-032 (S3), H-031/H-033/H-034 (Obs)
+- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B08, B03, B04, B05, B02,
       B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
+- [ ] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
+- [ ] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
+- [ ] Arreglo: H-031/H-033/H-034 (Obs) reproducción 4×/8× va a ~5×/10×; «Mark position» acepta clic fuera del
+      cuadro; «Copy table» copia filas ocultas por el filtro
