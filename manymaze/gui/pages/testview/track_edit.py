@@ -315,6 +315,9 @@ class TrackEditMixin:
         idx = self._range_indices(tr)
         if idx is None:
             return False
+        if not np.isfinite(tr.x[np.setdiff1d(np.arange(len(tr)), idx)]).any():
+            self.edit_lbl.setText("Nothing to interpolate from: the range covers all the detected positions.")
+            return False
         self._push_undo(ai)
         for c in ("x", "y", "hx", "hy", "tx", "ty"):
             v = getattr(tr, c)
