@@ -121,6 +121,22 @@ def test_period_and_criterion_tables(win):
     assert ex.crit.cellWidget(0, 6).value() == 4 and ex.crit.item(0, 3).text() == "2.5"
 
 
+def test_key_colour_from_table_swatch_persists(win, monkeypatch):
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    from manymaze.core.project import Project
+    p = win.project
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "keys")
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor("#ff0000")))
+    ex.beh.setCurrentCell(0, 0)
+    ex.beh.cellWidget(0, 4).button.click()
+    assert p.behaviours[0].color == "#ff0000"
+    win.save()
+    assert Project.load(p.path).behaviours[0].color == "#ff0000"
+
+
 def test_keys_property_page_modes(win):
     p = win.project
     ex = win.goto("ExperimentPage")

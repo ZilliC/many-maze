@@ -45,15 +45,18 @@ class KeysMixin:
         col = ColorButton(b.color or BEH_COLORS[r % len(BEH_COLORS)], "Key colour")
         col.setFixedSize(52, 22)
         col.setToolTip("Colour of the on-screen scoring button")
-        col.color_changed.connect(lambda _c: self._store_behaviours())
         holder = QWidget()
         hl = QHBoxLayout(holder)
         hl.setContentsMargins(6, 0, 6, 0)
         hl.addWidget(col)
         holder.setProperty("color", col.color())
         holder.button = col
-        col.color_changed.connect(lambda c, h=holder: h.setProperty("color", c))
+        col.color_changed.connect(lambda c, h=holder: self._color_picked(h, c))
         self.beh.setCellWidget(r, 4, holder)
+
+    def _color_picked(self, holder, color):
+        holder.setProperty("color", color)  # first: the row is read from this property when storing
+        self._store_behaviours()
 
     @staticmethod
     def _kind_index(kind: str, group: str) -> int:
