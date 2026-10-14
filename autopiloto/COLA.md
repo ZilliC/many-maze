@@ -36,11 +36,14 @@
 - [ ] QA pasada 1 (necesita computer use, ver PARA_TI): B01, B02, B03, B04, B05 (una tarea por bloque)
 - [ ] QA pasada 1: B07, B08, B09, B10, B11 (una tarea por bloque)
 - [ ] QA pasada 1: B12, B13, B14, B15, B16 (una tarea por bloque)
-- [ ] Arreglo: H-008 (S3) Statistics ▸ Two factors: la 1.ª variable solo admite Stage/Trial/Period, no Group × Sex
+- [x] Arreglo: H-008 (S3) Statistics ▸ Two factors: la 1.ª variable solo admite Stage/Trial/Period, no Group × Sex
       (el motor sí lo calcula bien)
-- [ ] Arreglo: H-009 (S3) Statistics: Paired t-test/Wilcoxon con 3 etapas se cambian a RM-ANOVA/Friedman y el filtro
+      → 1.er factor ofrece todos los factores (b353f1b, merge 2bc39bc)
+- [x] Arreglo: H-009 (S3) Statistics: Paired t-test/Wilcoxon con 3 etapas se cambian a RM-ANOVA/Friedman y el filtro
       solo admite «=» (no «≠ Día 3»), así que no se pueden pedir
-- [ ] Arreglo: H-011 (herramienta) `qa/herramientas/oraculo_estadistica.py` no registra «Genotipo» en `animal_fields`
+      → filtro con «=»/«≠»; pareadas con 2 etapas (b353f1b, merge 2bc39bc)
+- [x] Arreglo: H-011 (herramienta) `qa/herramientas/oraculo_estadistica.py` no registra «Genotipo» en `animal_fields`
+      → «Genotipo» registrado (cc42fd4, merge 2bc39bc)
 - [ ] Decidir H-010 (Obs) Assumption checks solo da p, no el estadístico; D'Agostino por grupo, no global
 - [ ] Arreglo: H-012 (S2) `manymaze demo RUTA_RELATIVA` → FileNotFoundError con la ruta duplicada
 - [ ] Arreglo: H-013 (S2) `manymaze relink --folder RUTA_RELATIVA` dice «Relinked 6» pero guarda rutas relativas
