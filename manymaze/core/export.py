@@ -52,6 +52,11 @@ def display_text(v) -> str:
     return str(v)
 
 
+def looks_like_formula(s: str) -> bool:
+    """Text a spreadsheet would evaluate as a formula (see :func:`_csv_text`)."""
+    return bool(s) and (s[0] in ("=", "@") or (s[0] in "+-" and bool(re.search(r"[(!:\\|]", s))))
+
+
 def _csv_text(v) -> str:
     """value_text, with text that looks like a formula prefixed by ' so a spreadsheet keeps it as text (no formula
     injection; as the xlsx writer). Numbers, negative ones included, and plain labels such as "+/+" or "-ctrl" are
@@ -59,9 +64,7 @@ def _csv_text(v) -> str:
     s = value_text(v)
     if not isinstance(v, str) or not s:
         return s
-    if s[0] in ("=", "@") or (s[0] in "+-" and re.search(r"[(!:\\|]", s)):
-        return "'" + s
-    return s
+    return "'" + s if looks_like_formula(s) else s
 
 
 def write_csv(rows: list[dict], path, columns: list[str] | None = None, delimiter=","):
@@ -455,14 +458,25 @@ def zone_visit_rows(project: Project, tests=None) -> list[dict]:
     return rows
 
 
+def animal_table(project: Project, group_header: str = "Treatment", group=None) -> list[list[str]]:
+    """The animal list as a table of text: ID, treatment (``group(animal)`` if given), sex, the custom fields, the
+    notes, the status ("Active" / "Retired") and, when any animal is retired with a reason, that reason. Text that
+    looks like a formula is protected (prefixed by '), as in the results exports."""
+    fields = list(project.animal_fields)
+    reasons = any(a.retired_reason for a in project.animals)
+    head = ["ID", group_header, "Sex"] + fields + ["Notes", "Status"] + (["Retired reason"] if reasons else [])
+    rows = [[_csv_text(c) for c in head]]
+    for a in project.animals:
+        row = [a.id, group(a) if group else a.group, a.sex] + [a.fields.get(f, "") for f in fields]
+        row += [a.notes, "Retired" if a.retired else "Active"] + ([a.retired_reason] if reasons else [])
+        rows.append([_csv_text(v) for v in row])
+    return rows
+
+
 def export_animals(project: Project, path):
-    """The animal list as CSV: ID, treatment, sex, the custom fields and the notes."""
+    """The animal list as CSV (see :func:`animal_table`)."""
     with atomic_write(path, newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow([_csv_text(c) for c in ["ID", "Treatment", "Sex"] + list(project.animal_fields) + ["Notes"]])
-        for a in project.animals:  # text that looks like a formula stays text, as in the results exports
-            w.writerow([_csv_text(v) for v in [a.id, a.group, a.sex] + [a.fields.get(f, "") for f in
-                                                                        project.animal_fields] + [a.notes]])
+        csv.writer(fh).writerows(animal_table(project))
 
 
 def event_log_rows(project: Project, test) -> list[dict]:

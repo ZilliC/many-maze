@@ -162,9 +162,22 @@ def test_csv_roundtrip(page, tmp_path):
     out = tmp_path / "out.csv"
     export_animals(p, out)
     rows = list(csv.reader(out.open()))
-    assert rows[0] == ["ID", "Treatment", "Sex", "Genotype", "Weight", "Notes"]
-    assert ["K7", "KO", "Female", "KO", "25", ""] in rows
+    assert rows[0] == ["ID", "Treatment", "Sex", "Genotype", "Weight", "Notes", "Status"]
+    assert ["K7", "KO", "Female", "KO", "25", "", "Active"] in rows
     assert len(rows) == 6
+
+
+def test_blind_export_protects_formulas_and_keeps_status(page, tmp_path):
+    p = page.project
+    a = p.animals[0]
+    a.notes, a.retired, a.retired_reason = "=SUM(1,2)", True, "died"
+    p.animals[1].notes = "+cmd|' /C calc'!A0"
+    p.blind = True
+    out = tmp_path / "blind.csv"
+    page.export_csv(str(out))
+    rows = list(csv.reader(out.open()))
+    assert rows[0][:3] == ["ID", "Treatment code", "Sex"] and rows[0][-2:] == ["Status", "Retired reason"]
+    assert rows[1][-3:] == ["'=SUM(1,2)", "Retired", "died"] and rows[2][-3].startswith("'+cmd")
 
 
 def test_rename_treatment_keeps_blind_code(page):

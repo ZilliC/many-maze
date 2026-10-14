@@ -9,7 +9,7 @@ import string
 from dataclasses import asdict, dataclass
 
 from .calculations import calculations_from
-from .project import INACTIVE_STATUSES, Animal, Behaviour, Group, Project, Test, without_secrets
+from .project import INACTIVE_STATUSES, INFO_COLUMNS, Animal, Behaviour, Group, Project, Test, without_secrets
 
 MAX_STAGES = 50
 MAX_TRIALS = 99
@@ -23,7 +23,27 @@ WEIGHT_FIELD = "Weight (g)"
 DOSE_FIELD = "Dose (mg/kg)"
 VOLUME_FIELD = "Volume (mL)"
 BLIND_COLOR = "#64748b"
-RESERVED_FIELDS = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment", "notes")
+RESERVED_FIELDS = ("id", "group", "sex", "tests", "animal", "animal id", "status", "treatment", "notes",
+                   "retired reason")
+
+
+def reserved_field(name: str) -> bool:
+    """Whether an animal field of this name would clash with an Animals sheet column or a Results information
+    column (Stage, Apparatus, Test, …)."""
+    n = name.strip().lower()
+    return n in RESERVED_FIELDS or n in {c.lower() for c in INFO_COLUMNS}
+
+
+def field_problem(project: Project, name: str, old: str | None = None) -> str | None:
+    """Why ``name`` cannot be an animal field (add or rename from ``old``), in plain words; None if it can."""
+    name = name.strip()
+    if not name:
+        return "A field needs a name."
+    if reserved_field(name):
+        return f"“{name}” is the name of a column the program already uses (Animals sheet or Results); choose another."
+    if name in project.animal_fields and name != old:
+        return f"“{name}” is already a column."
+    return None
 STAGE_ENDED = "stage ended"  # note of the tests skipped by end_stage (removed again by reopen_stage)
 
 
@@ -601,7 +621,7 @@ def delete_group(project: Project, name: str):
 def add_field(project: Project, name: str) -> bool:
     """Add a custom animal field (column); False if the name is empty, taken or reserved."""
     name = name.strip()
-    if not name or name in project.animal_fields or name.lower() in RESERVED_FIELDS:
+    if not name or name in project.animal_fields or reserved_field(name):
         return False
     project.animal_fields.append(name)
     return True
@@ -610,7 +630,7 @@ def add_field(project: Project, name: str) -> bool:
 def rename_field(project: Project, old: str, new: str) -> bool:
     new = new.strip()
     f = project.animal_fields
-    if old not in f or not new or new in f or new.lower() in RESERVED_FIELDS:
+    if old not in f or not new or new in f or reserved_field(new):
         return False
     f[f.index(old)] = new
     for a in project.animals:
