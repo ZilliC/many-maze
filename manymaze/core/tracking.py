@@ -368,6 +368,10 @@ def apply_animal_preset(settings: DetectionSettings, key: str, px_per_cm: float 
 REPEAT_CHANGE_RATIO = 0.3
 
 
+# structures of the background thinner than this (px) are lines (grid, bars, a wall's edge): see _edge_tolerant
+THIN_LINE_PX = 9
+
+
 class ArenaTracker:
     """Tracks the animal(s) within one arena mask of a frame.
 
@@ -406,6 +410,8 @@ class ArenaTracker:
         self._bg_version = 0
         self._bgp_key = None  # cache of the blurred / erased background of the processed region
         self._bgp: np.ndarray | None = None
+        self._bge_key = None  # cache of the edge-tolerant background (see _edge_tolerant)
+        self._bge: tuple[np.ndarray, np.ndarray] | None = None
         self._bootstrapped = False  # the background is the first frame seen (no empty-arena image was given)
         self.prev_gray: np.ndarray | None = None  # previous frame of the processed region (motion)
         self._prev_box = None
@@ -522,6 +528,27 @@ class ArenaTracker:
             self._bgp_key = key
         return self._bgp
 
+    def _edge_tolerant(self, box, bg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The (darkest, lightest) the background can look at each pixel for a frame that is it shifted by a pixel.
+        Along a sharp edge (grid lines, cage bars, a glass wall: a local range above the threshold) the image
+        shifts by a pixel with the camera's or the wall's vibration and the edge then differs from the model by more
+        than the threshold all along the structure: its lines join the animal into one huge blob, or stand alone as a
+        thin blob that outscores the animal.  There the background is taken as the darkest / lightest value of its
+        3 x 3 neighbourhood, so only a change beyond a pixel's shift counts; elsewhere it is the background itself
+        (cached until the background or the threshold changes)."""
+        thr = self.s.threshold if self.s.threshold > 0 else 25
+        key = (box, self._bg_version, self.s.blur, self.s.erase_thin_px, thr)
+        if self._bge_key != key:
+            k = np.ones((3, 3), np.uint8)
+            hi, lo = cv2.dilate(bg, k), cv2.erode(bg, k)
+            wide = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (THIN_LINE_PX, THIN_LINE_PX))
+            thin = np.maximum(cv2.subtract(bg, cv2.morphologyEx(bg, cv2.MORPH_OPEN, wide)),
+                              cv2.subtract(cv2.morphologyEx(bg, cv2.MORPH_CLOSE, wide), bg)) > thr
+            sharp = cv2.dilate(thin.astype(np.uint8), k).astype(bool) & (cv2.subtract(hi, lo) > thr)
+            self._bge = (np.where(sharp, lo, bg), np.where(sharp, hi, bg))
+            self._bge_key = key
+        return self._bge
+
     def _own_background(self):
         """Copy a background shared with the caller before writing into it."""
         if not self._bg_owned:
@@ -582,14 +609,13 @@ class ArenaTracker:
         bg = self._processed_background(box)
         if s.lighting_compensation:
             g = self._match_lighting(g, bg, box)
-        g16 = g.astype(np.int16)
-        b16 = bg.astype(np.int16)
         if s.contrast == "dark":
-            diff = np.clip(b16 - g16, 0, 255).astype(np.uint8)
+            diff = cv2.subtract(self._edge_tolerant(box, bg)[0], g)
         elif s.contrast == "light":
-            diff = np.clip(g16 - b16, 0, 255).astype(np.uint8)
+            diff = cv2.subtract(g, self._edge_tolerant(box, bg)[1])
         else:
-            diff = cv2.absdiff(g, bg)
+            lo, hi = self._edge_tolerant(box, bg)
+            diff = cv2.max(cv2.subtract(lo, g), cv2.subtract(g, hi))
         thr = s.threshold if s.threshold > 0 else self._otsu(diff)
         fg = self._clean((diff > thr).astype(np.uint8) * 255)
         self._contrast = (diff, 0.0, thr)
