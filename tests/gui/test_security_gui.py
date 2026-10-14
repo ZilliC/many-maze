@@ -228,3 +228,20 @@ def test_only_an_administrator_restores_a_backup_with_security(win, monkeypatch)
     win.answers = ["bob-pw"]
     win.sign_in("Bob")
     assert win.restore_backup("whatever") is None and not called and shown == ["Restore a backup"]
+
+
+def test_the_only_administrator_cannot_remove_themselves(win, monkeypatch):
+    """H-058: as with demoting the last administrator, it would switch all security off."""
+    from PySide6.QtWidgets import QInputDialog
+
+    p = win.project
+    win.answers = ["ann-pw"]
+    win.sign_in("Ann")
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[1]))
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **k: ("Ann", True))
+    win._remove_user_dialog()
+    assert sec.admins(p) == ["Ann"] and "Ann" in p.experimenters and shown == ["Remove user"]
+    sec.set_role(p, "Bob", "admin")  # with another administrator it is allowed
+    win._remove_user_dialog()
+    assert sec.admins(p) == ["Bob"] and "Ann" not in p.experimenters

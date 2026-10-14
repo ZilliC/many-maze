@@ -802,6 +802,11 @@ class MainWindow(QMainWindow):
                                         "their experimenter):", list(p.experimenters), 0, False)
         if not ok:
             return
+        if security.admins(p) == [name]:
+            QMessageBox.information(self, "Remove user", f"{name} is the only administrator: without one nobody "
+                                    "could change the security settings any more. Make another user an "
+                                    "administrator first (File ▸ Users and security).")
+            return
         if security.has_password(p, name) and name != self.current_user() and not security.can(p, "manage"):
             QMessageBox.information(self, "Remove user", f"{name} has a password: only an administrator (or {name}) "
                                     "can remove this user.")
