@@ -153,15 +153,19 @@
       → unidad y teclas/interruptor de Run tests bajo el bloqueo (merge 8ee5e8e)
 - [ ] Decidir H-060 (Obs) contraseñas de 1 carácter o espacios; sin límite de intentos; archivo cifrado manipulado
       dice «password is wrong»; «Wrong password» antes de escribir en «Restore a backup»
-- [ ] Arreglo: H-062/H-063 (S3) procedimientos: no se puede accionar una entrada simulada en vivo desde la GUI;
+- [x] Arreglo: H-062/H-063 (S3) procedimientos: no se puede accionar una entrada simulada en vivo desde la GUI;
       canales con el mismo nombre en un dispositivo
-- [ ] Arreglo: H-064 (S3) «End the test» en el mismo cuadro que la última recompensa deja el pellet en 0 ms y los
+      → «Simulate input» en Monitor; canales duplicados rechazados (merge 5e24b1a)
+- [x] Arreglo: H-064 (S3) «End the test» en el mismo cuadro que la última recompensa deja el pellet en 0 ms y los
       resultados lo cuentan de menos
-- [ ] Arreglo: H-069 (S3) pausa por procedimiento no se reanuda con una espera; con video simulado la prueba termina pronto
+      → «End the test» espera el pellet en curso (merge 5e24b1a)
+- [x] Arreglo: H-069 (S3) pausa por procedimiento no se reanuda con una espera; con video simulado la prueba termina pronto
+      → esperas durante la pausa en tiempo real (merge 5e24b1a); fin temprano no reproducido
 - [ ] Arreglo: H-061/H-067/H-068 (S4) mensajes de «Test» < 50 ms; alertas e-mail sin validar destino/puerto; editor
       sin confirmar ni deshacer al borrar bloque, claves JSON desconocidas ignoradas
 - [ ] Arreglo: H-065/H-066/H-070 (Obs) Log repite cada acción 3–4×; `immobile_time_reaches` no se dispara;
       `smtp_local.py` sobrescribe correos anteriores
+      → H-065 y H-066 arreglados (5e24b1a); falta H-070
 - [x] Arreglo: H-072 (S3) Review con el video renombrado dice «No video — scoring by direct observation» en vez de
       «Video not found»
       → «Video not found:» con la ruta (merge 4d8c000)
