@@ -20,22 +20,28 @@ sys.path.insert(0, str(ROOT))
 SUSPECT = re.compile(r"Traceback|Exception|\bnan\b|\binf\b|None\b|#VALUE|#DIV", re.I)
 
 
-def table_rows(p: Path):
+def table_rows(p: Path, sheet: str | None = None):
     suf = p.suffix.lower()
     if suf in (".csv", ".tsv", ".txt"):
-        text = p.read_text(encoding="utf-8-sig", errors="replace")
-        dialect = csv.Sniffer().sniff(text[:5000], delimiters=",\t;") if text.strip() else csv.excel
-        return list(csv.reader(text.splitlines(), dialect))
+        lines = p.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        while lines and lines[0].startswith("#"):  # raw-data files start with a "# Test 1, animal …" comment line
+            lines.pop(0)
+        text = "\n".join(lines)
+        try:
+            dialect = csv.Sniffer().sniff(text[:5000], delimiters=",\t;") if text.strip() else csv.excel
+        except csv.Error:  # e.g. a single column: no delimiter to find
+            dialect = csv.excel_tab if suf == ".tsv" else csv.excel
+        return list(csv.reader(lines, dialect))
     if suf == ".xlsx":
         import openpyxl
 
         wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
         print(f"  hojas: {wb.sheetnames}")
-        return [["" if v is None else v for v in r] for r in wb[wb.sheetnames[0]].iter_rows(values_only=True)]
+        return [["" if v is None else v for v in r] for r in wb[sheet or wb.sheetnames[0]].iter_rows(values_only=True)]
     if suf == ".slk":
         from manymaze.core.export import read_sylk
 
-        return read_sylk(p)
+        return [["" if v is None else v for v in r] for r in read_sylk(p)]
     if suf == ".dbf":
         from manymaze.core.export import read_dbf
 
@@ -45,6 +51,9 @@ def table_rows(p: Path):
 
 
 def check(p: Path) -> bool:
+    if not p.is_file():
+        print(f"\n== {p}\n  ✗ el archivo no existe")
+        return False
     print(f"\n== {p}  ({p.stat().st_size:,} bytes)")
     if p.stat().st_size == 0:
         print("  ✗ archivo vacío")

@@ -432,3 +432,32 @@ def test_48_cameras_40_simultaneous_tests(win, monkeypatch):
         x0 = 10 if t.apparatus == "Left box" else 210
         assert np.all((tr.x[tr.detected] > x0 - 5) & (tr.x[tr.detected] < x0 + 185))
     assert not [w for w in page.group.warnings if "Cannot open" in w[1]]
+
+
+def test_import_anymaze_xml_broken_and_twice(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    p = win.project
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda parent, title, text, *a: shown.append(text))
+    asked = []
+    answer = [QMessageBox.No]
+    monkeypatch.setattr(QMessageBox, "question", lambda parent, title, text, *a: asked.append(text) or answer[0])
+    cut = tmp_path / "cut.xml"
+    cut.write_text(AM_XML[:len(AM_XML) // 2])
+    n = len(p.tests)
+    assert win.import_anymaze_xml(str(cut)) is not None
+    assert pump(lambda: shown, 30)
+    assert "damaged or incomplete" in shown[0] and "unexpectedly" not in shown[0] and len(p.tests) == n
+    xml = tmp_path / "exp.xml"
+    xml.write_text(AM_XML)
+    win.last_import = None
+    win.import_anymaze_xml(str(xml))
+    assert pump(lambda: win.last_import is not None, 30) and len(p.tests) == n + 1 and not asked
+    win.last_import = None
+    win.import_anymaze_xml(str(xml))  # the same file again: asks, and "No" leaves the experiment as it was
+    assert pump(lambda: asked, 30)
+    assert "already" in asked[0] and len(p.tests) == n + 1 and win.last_import is None
+    answer[0] = QMessageBox.Yes
+    win.import_anymaze_xml(str(xml))
+    assert pump(lambda: win.last_import is not None, 30) and len(p.tests) == n + 2

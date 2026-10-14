@@ -1281,10 +1281,10 @@ class MainWindow(QMainWindow):
                                              "apparatus (File ▸ Users and security).")
         return True
 
-    def import_anymaze_xml(self, path: str | None = None, origin: str = "auto"):
+    def import_anymaze_xml(self, path: str | None = None, origin: str = "auto", again: bool = False):
         """ANY-maze ▸ File ▸ Export ▸ Export experiment as XML: its animals, tests and tracks (see core.anymaze;
         ANY-maze's own .szd experiment files are in an undocumented binary format and cannot be read)."""
-        from ..core.anymaze import import_anymaze_xml, is_anymaze_xml
+        from ..core.anymaze import count_already_imported, import_anymaze_xml, is_anymaze_xml
 
         p = self.project
         if p is None or self.protocol_locked("Import from ANY-maze"):
@@ -1312,9 +1312,28 @@ class MainWindow(QMainWindow):
                     raise InterruptedError("import stopped")
                 progress(f)
 
-            return import_anymaze_xml(scratch, path, origin, step)
+            try:
+                if not again:  # the same file imported twice would repeat its animals' tests: ask first
+                    found, total = count_already_imported(scratch, path)
+                    if found:
+                        return {"already": (found, total)}
+                return import_anymaze_xml(scratch, path, origin, step)
+            except ValueError as e:  # a damaged file: said in plain words, without a traceback in the console
+                return {"error": str(e)}
 
         def done(res):
+            if "error" in res:
+                return error_box(self, "Import from ANY-maze", res["error"])
+            if "already" in res:
+                found, total = res["already"]
+                if QMessageBox.question(
+                        self, "Import from ANY-maze",
+                        f"{found} of the {total} tests in this file seem to be in the experiment already (same animal, "
+                        f"apparatus, date and ANY-maze test number): it may have been imported before.\n\nImport it "
+                        f"again anyway? The tests and animals would be added a second time.",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                    self.import_anymaze_xml(path, origin, again=True)
+                return
             _merge_imported(p, scratch)
             self.mark_dirty()
             self.save()
