@@ -162,3 +162,13 @@ def test_appearance_menu_screenshots_and_figures(win, tmp_path):
     win.set_appearance("light")
     assert theme.WORK_BG == "#f9f9f9" and app.palette().color(QPalette.Base) == QColor("#ffffff")
     assert lum(QColor(figures.to_hex(fig.patch.get_facecolor()))) > 0.9
+
+
+def test_h076_secondary_text_is_readable_in_the_dark_scheme(win):
+    """Secondary text (hints, ``palette(mid)`` captions) has WCAG AA contrast in the dark scheme."""
+    assert theme.contrast(theme.DARK["MID"], theme.DARK["WORK_BG"]) >= 4.5
+    assert theme.contrast(theme.DARK["MID"], theme.DARK["BASE"]) >= 4.5
+    win.set_appearance("dark")
+    for w in app.allWidgets():  # nothing is coloured with palette(mid) except through the readable MID
+        if "palette(mid)" in w.styleSheet():
+            assert theme.contrast(theme.MID, theme.WORK_BG) >= 4.5

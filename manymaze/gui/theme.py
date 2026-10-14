@@ -56,7 +56,7 @@ DARK = {
     "ACCENT_BG": "#2f6fbf", "ACCENT_BG_HOVER": "#3b7dd0", "ON_ACCENT": "#ffffff",
     "INPUT_BORDER": "#555555", "BUTTON": "#323232", "BUTTON_BORDER": "#565656", "BUTTON_DISABLED": "#2a2a2a",
     "BUTTON_HOVER_BORDER": "#4f73a6",
-    "MID": "#5c5c5c",
+    "MID": "#8a919b",  # also text drawn with palette(mid): AA on the work area
     "ERROR": "#f87171", "ERROR_BG": "#4a1f1f", "OK": "#4ade80", "WARNING": "#fbbf24", "LINK": "#7fb0f0",
     "NOTE": "#c4b5fd",
     "NOTE_BG": "#3a3220", "NOTE_BORDER": "#6b5a2a",
