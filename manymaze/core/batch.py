@@ -10,6 +10,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue
+import threading
 import time
 import traceback
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -117,7 +118,24 @@ def _track_batch(project, batch, progress, should_stop) -> list[str]:
 _W: dict = {}
 
 
-def _init_worker(progress_q, stop_event, threads: int):
+def _exit_with_parent(parent_pid: int, poll_s: float = 1.0):
+    """Make this worker process end when the program that started it dies (a crash or ``kill -9``): otherwise the
+    workers go on, finish the tracks of an experiment nobody has open any more and wait for ever."""
+    def watch():
+        while True:
+            time.sleep(poll_s)
+            if os.getppid() != parent_pid:  # (the parent is gone: this process was adopted by init / launchd)
+                os._exit(1)
+    threading.Thread(target=watch, daemon=True, name="parent-watch").start()
+
+
+def _probe_pid() -> int:
+    return os.getpid()
+
+
+def _init_worker(progress_q, stop_event, threads: int, parent_pid: int | None = None):
+    if parent_pid:
+        _exit_with_parent(parent_pid)
     os.environ["MANYMAZE_THREADS"] = str(threads)
     import cv2
     cv2.setNumThreads(threads)
@@ -199,7 +217,7 @@ def _track_parallel(project, batches, progress, should_stop, out, n_workers):
     state = project.to_dict()
     frac = [0.0] * len(batches)
     with ProcessPoolExecutor(n_workers, mp_context=ctx, initializer=_init_worker,
-                             initargs=(q, stop, threads)) as pool:
+                             initargs=(q, stop, threads, os.getpid())) as pool:
         futs = {pool.submit(_run_batch, state, str(project.path), [t.id for t in b], bi): bi
                 for bi, b in enumerate(batches)}
         pending = set(futs)
