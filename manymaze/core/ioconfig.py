@@ -184,7 +184,7 @@ def level_for(value: float, points, max_level: float = 1.0) -> float:
 
 # ---------------------------------------------------------------- operant chamber presets
 # The named inputs and outputs of typical operant chambers, to set up the I/O device of each chamber at once
-# (Protocol ▸ Mode Input/output only, Experiment › I/O devices). A preset describes the user's own wiring of the
+# (Protocol ▸ Mode Input/output only, Protocol › I/O devices). A preset describes the user's own wiring of the
 # chamber's levers, nose pokes, lights, dispenser and shocker to one of the drivers above (the mANY-MAZE Arduino
 # firmware, Firmata, NI-DAQmx or LabJack, or a simulated device): the vendors' own interface cards and software
 # (Med Associates MED-PC, Coulbourn Habitest, Lafayette ABET) are not driven. Channels are (name, kind, role); the
@@ -220,7 +220,7 @@ OPERANT_PRESETS: dict[str, dict] = {
                      ("pellet", "output", ""), ("tone", "output", "speaker")]},
     "custom": {
         "label": "Custom chamber",
-        "description": "No channels: add the chamber's inputs and outputs yourself (Experiment › I/O devices).",
+        "description": "No channels: add the chamber's inputs and outputs yourself (Protocol › I/O devices).",
         "channels": []},
 }
 # the drivers a preset can be wired to (the simulated device lets the protocol be tried without hardware)

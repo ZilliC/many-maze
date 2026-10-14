@@ -68,6 +68,21 @@ def _wrapped(text: str) -> QLabel:
     return lbl
 
 
+def parse_procedure_json(text: str) -> tuple[dict | None, str]:
+    """A procedure from edited JSON text: (procedure, "") or (None, a plain-language reason)."""
+    try:
+        q = json.loads(text)
+    except json.JSONDecodeError as e:
+        return None, (f"This is not valid JSON: there is a mistake near line {e.lineno}, column {e.colno}. "
+                      "Check the commas, quotes and brackets.")
+    if not isinstance(q, dict):
+        return None, "The procedure must be a JSON object (between { and })."
+    try:
+        return pr.normalize_procedures([q])[0], ""
+    except Exception as e:
+        return None, str(e)
+
+
 class ProcedureEditor(QWidget):
     changed = Signal()
 
@@ -978,13 +993,9 @@ class ProcedureEditor(QWidget):
         bb.rejected.connect(dlg.reject)
 
         def ok():
-            try:
-                q = json.loads(ed.toPlainText())
-                if not isinstance(q, dict):
-                    raise ValueError("the procedure must be a JSON object")
-                q = pr.normalize_procedures([q])[0]
-            except Exception as e:
-                QMessageBox.warning(dlg, "Invalid JSON", str(e))
+            q, err = parse_procedure_json(ed.toPlainText())
+            if q is None:
+                QMessageBox.warning(dlg, "Invalid JSON", err)
                 return
             dlg.accept()
             self.set_procedure_json(self._cur_proc_index(), q)

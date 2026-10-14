@@ -459,3 +459,13 @@ def test_io_devices_dialog_new_device_types_and_calibration(monkeypatch):
     assert cal.table_text().startswith("0:0|0.25:0.9")
     dlg.accept()
     assert [d["type"] for d in p.io_devices][-2:] == ["notify", "scale"]
+
+
+def test_procedure_json_errors_are_plain():
+    from manymaze.gui.procedure_editor import parse_procedure_json
+    q, err = parse_procedure_json('{"name": "a",')
+    assert q is None and "not valid JSON" in err and "line 1" in err and "Expecting" not in err
+    q, err = parse_procedure_json("[1]")
+    assert q is None and "JSON object" in err
+    q, err = parse_procedure_json('{"name": "a", "statements": []}')
+    assert q is not None and not err

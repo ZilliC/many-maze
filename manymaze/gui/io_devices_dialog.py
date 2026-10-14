@@ -287,7 +287,7 @@ class IODevicesDialog(QDialog):
         with loading(self):
             self.f_port.clear()
             if ports is None:
-                self.f_port.setToolTip("pyserial is not installed (pip install pyserial)")
+                self.f_port.setToolTip("Serial devices are not available in this installation of ManyMaze")
             else:
                 self.f_port.addItems(ports)
             self.f_port.setCurrentText(cur)
@@ -778,7 +778,7 @@ class OperantPresetDialog(QDialog):
         v.addWidget(self.table, 1)
         note = QLabel("A preset names the inputs and outputs of your own wiring of the chamber to the interface "
                       "chosen above (pins numbered in order: check them, and Invert or the options, against your "
-                      "wiring in Experiment › I/O devices). It does not drive the chamber makers' own interface "
+                      "wiring in Protocol › I/O devices). It does not drive the chamber makers' own interface "
                       "cards or software.")
         note.setWordWrap(True)
         note.setObjectName("Hint")
