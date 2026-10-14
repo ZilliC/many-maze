@@ -1041,8 +1041,4 @@ class AnimalsPage(Page):
 
         p = self.project
         with atomic_write(path, newline="") as fh:
-            w = csv.writer(fh)
-            w.writerow(["ID", "Treatment code", "Sex"] + list(p.animal_fields) + ["Notes"])
-            for a in p.animals:
-                w.writerow([a.id, treatment_text(p, a.group), a.sex] + [a.fields.get(f, "") for f in p.animal_fields]
-                           + [a.notes])
+            csv.writer(fh).writerows(export.animal_table(p, "Treatment code", lambda a: treatment_text(p, a.group)))
