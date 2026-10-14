@@ -245,3 +245,27 @@ def test_the_only_administrator_cannot_remove_themselves(win, monkeypatch):
     sec.set_role(p, "Bob", "admin")  # with another administrator it is allowed
     win._remove_user_dialog()
     assert sec.admins(p) == ["Bob"] and "Ann" not in p.experimenters
+
+
+def test_locked_protocol_locks_the_distance_unit_and_the_start_stop_settings(win):
+    """H-059: the unit changes every apparatus; the start / stop keys and the control switch are protocol settings."""
+    p = win.project
+    sec.set_security(p, lock_protocol=True)
+    win.answers = ["bob-pw"]
+    win.sign_in("Bob")
+    appar = win.goto("ApparatusPage")
+    assert not appar.unit_combo.isEnabled()
+    before = p.distance_unit
+    appar.set_distance_unit("m" if before != "m" else "cm")
+    assert p.distance_unit == before
+    live = win.goto("LivePage")
+    for w in (live.start_keys, live.stop_keys, live.control_input, live.start_input):
+        assert not w.isEnabled()
+    keys = list(p.settings_extra.get("live", {}).get("start_keys", []))
+    live.start_keys.setText("zzq")
+    live._save_live_settings()
+    assert p.settings_extra.get("live", {}).get("start_keys", []) == keys
+    win.answers = ["ann-pw"]
+    win.sign_in("Ann")
+    assert live.start_keys.isEnabled() and live.stop_keys.isEnabled() and live.control_input.isEnabled()
+
