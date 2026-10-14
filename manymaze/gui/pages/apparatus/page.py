@@ -451,6 +451,9 @@ class ApparatusPage(Page):
             return []
         if apps is None:
             return []
+        if not apps:
+            QMessageBox.warning(self, "Import apparatus", f"{src.name} has no apparatus to import.")
+            return []
         if names is None and len(apps) > 1:
             choices = ["All"] + [a.name for a in apps]
             item, ok = QInputDialog.getItem(self, "Import apparatus", "Apparatus to import:", choices, 0, False)
@@ -571,7 +574,11 @@ class ApparatusPage(Page):
 
     def _rename_apparatus(self, app: Apparatus, new_name: str) -> bool:
         new_name = new_name.strip()
-        if not new_name or new_name == app.name:
+        if not new_name:
+            QMessageBox.warning(self, "Rename apparatus", "The name cannot be empty. The apparatus keeps its name "
+                                f"“{app.name}”.")
+            return False
+        if new_name == app.name:
             return False
         if new_name in self._names(exclude=app):
             QMessageBox.warning(self, "Rename apparatus", f"An apparatus called “{new_name}” already exists.")
@@ -1221,7 +1228,11 @@ class ApparatusPage(Page):
             if spec["square"]:
                 s = min(w, h)
                 x, y, w, h = (w - s) / 2, (h - s) / 2, s, s
-            return self.apply_template(spec["key"], x, y, w, h, spec["params"], spec["name"], spec["replace"])
+            try:
+                return self.apply_template(spec["key"], x, y, w, h, spec["params"], spec["name"], spec["replace"])
+            except ValueError as e:
+                QMessageBox.warning(self, "Template", str(e))
+                return None
         self.start_template_placement(spec)
 
     def start_template_placement(self, spec: dict):

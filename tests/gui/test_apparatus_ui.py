@@ -6,13 +6,13 @@ import shutil
 import pytest
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QFontInfo
-from PySide6.QtWidgets import QApplication, QMessageBox, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QToolBar
 
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import Project
 from manymaze.gui import theme
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.pages.apparatus import RulerItem
+from manymaze.gui.pages.apparatus import RulerItem, TemplateDialog
 from shots import shot_path
 from test_apparatus import approx, drag, mouse
 
@@ -257,3 +257,43 @@ def test_duplicate_zone_keeps_its_properties(page):
               "whishaw_width_cm", "body_fraction", "color"):
         assert getattr(c, k) == getattr(z, k)
     assert c.shape is not z.shape
+
+
+def test_h051_blank_rename_is_refused_with_a_message(page, monkeypatch):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    old = page.app.name
+    assert not page.rename_apparatus("   ")
+    assert page.app.name == old and msgs and "empty" in msgs[0]
+
+
+def test_h051_importing_a_file_without_apparatus_says_so(page, monkeypatch, tmp_path):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    f = tmp_path / "empty.json"
+    f.write_text('{"apparatus": []}', encoding="utf-8")
+    n = len(page.project.apparatus)
+    assert page.import_apparatus(str(f)) == []
+    assert len(page.project.apparatus) == n and msgs and "no apparatus" in msgs[0]
+
+
+def test_h051_export_map_with_an_unknown_extension_lists_the_supported_ones(page, monkeypatch, tmp_path):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    assert page.export_map_image(str(tmp_path / "map.xyz")) is None
+    assert msgs and "xyz" in msgs[0] and "PNG" in msgs[0] and "SVG" in msgs[0] and "PDF" in msgs[0]
+    assert "matplotlib" not in msgs[0] and not (tmp_path / "map.xyz").exists()
+    assert page.export_map_image(str(tmp_path / "map.png"))
+
+
+def test_h051_template_dialog_refuses_an_escape_hole_that_does_not_exist(page, monkeypatch):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    dlg = TemplateDialog(page, "barnes_maze", None, [], False)
+    dlg.form.editors["n_holes"].setValue(20)
+    dlg.form.editors["escape_hole"].setValue(50)
+    dlg.accept()
+    assert dlg.result() != QDialog.Accepted and msgs and "escape hole" in msgs[0]
+    dlg.form.editors["escape_hole"].setValue(5)
+    dlg.accept()
+    assert dlg.result() == QDialog.Accepted

@@ -1193,6 +1193,9 @@ class Project:
     def _analyse_test(self, test: Test, segmented: bool, steps=None) -> list[dict]:
         tracks = self.load_tracks(test)
         app = self.get_apparatus(test.apparatus)
+        if app is None and tracks:
+            raise ValueError(f"Test {test.id} has no apparatus: add one on the Apparatus page and choose it for "
+                             "the test.")
         s = self.analysis_for(test)
         rows = []
         behaviours = self.behaviours
@@ -1331,7 +1334,7 @@ class Project:
             row = self.test_info(test)
         except Exception:
             row = {"Test": test.id, "Animal": test.animal_id}
-        row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: f"{type(error).__name__}: {error}"})
+        row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: str(error) if type(error) is ValueError else f"{type(error).__name__}: {error}"})
         return row
 
 
