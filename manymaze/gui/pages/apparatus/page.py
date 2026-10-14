@@ -10,6 +10,7 @@ import copy
 import math
 import traceback
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
@@ -960,7 +961,10 @@ class ApparatusPage(Page):
 
     def duplicate_zone(self, index: int) -> Zone | None:
         z = self._obj("zone", index)
-        return self.add_zone(z.shape.translated(10.0, 10.0), f"{z.name} copy", z.color) if z else None
+        if z is None:
+            return None
+        return self._add("zone", lambda n, k: replace(z, name=n, shape=z.shape.translated(10.0, 10.0)),
+                         f"{z.name} copy")
 
     def zone_to_arena(self, index: int):
         z = self._obj("zone", index)

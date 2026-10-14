@@ -245,3 +245,15 @@ def test_zone_names_cannot_hold_braces(page):
     assert "cannot contain" in page.main.statusBar().currentMessage()
     z = page.add_zone(page.app.zones[i].shape, "Q{")
     assert z.name == "Q("
+
+
+def test_duplicate_zone_keeps_its_properties(page):
+    z = page.app.zones[0]
+    page.set_property("zone", 0, entry_rule="body 50 %", hidden=True, moveable=True,
+                      investigation_distance_cm=2.5, entry_orientation_deg=45.0, whishaw_width_cm=3.5)
+    c = page.duplicate_zone(0)
+    assert c.name == f"{z.name} copy"
+    for k in ("entry_rule", "hidden", "moveable", "investigation_distance_cm", "entry_orientation_deg",
+              "whishaw_width_cm", "body_fraction", "color"):
+        assert getattr(c, k) == getattr(z, k)
+    assert c.shape is not z.shape
