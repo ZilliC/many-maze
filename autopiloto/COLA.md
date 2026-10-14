@@ -108,11 +108,14 @@
       solo en minutos; «Several tests» acepta el mismo animal en dos paneles
 - [x] Arreglo: H-042 (S2) Keys: el color elegido en la muestra de la tabla no se guarda (sí desde la página «Key»)
       → color guardado al elegirlo en la tabla (merge 6170031)
-- [ ] Arreglo: H-041 (S3) «Colour of the animal» / marcas de color aceptan cualquier texto; la vista previa lanza
+- [x] Arreglo: H-041 (S3) «Colour of the animal» / marcas de color aceptan cualquier texto; la vista previa lanza
       ValueError en cada cuadro
-- [ ] Arreglo: H-043 (S3) cancelar el desbloqueo de ciego deja el botón «Blind testing» desmarcado con ciego activo
-- [ ] Arreglo: H-044/H-045 (S3) Keys: tecla de varias letras se corta sin aviso (`Left`→`l`), espacio deja sin tecla;
+      → mensaje rojo «Invalid colour…» y vista previa sin traceback (merge 4b93b0f)
+- [x] Arreglo: H-043 (S3) cancelar el desbloqueo de ciego deja el botón «Blind testing» desmarcado con ciego activo
+      → el botón sigue el estado real de ciego (merge 4b93b0f)
+- [x] Arreglo: H-044/H-045 (S3) Keys: tecla de varias letras se corta sin aviso (`Left`→`l`), espacio deja sin tecla;
       se pueden guardar teclas con errores (duplicadas nunca puntúan, nombre vacío se pierde)
+      → tecla de un solo carácter con mensaje; nombre vacío avisado; guardar con errores pregunta, «No» por defecto (merge 4b93b0f)
 - [ ] Decidir H-046 (Obs) etapas duplicadas aceptadas; pruebas conservan una etapa que ya no existe
 - [ ] Arreglo: H-047 (S3) «Zone grid» de celdas cuadradas en arena no convexa (EPM, T) crea 0 celdas sin aviso
 - [ ] Arreglo: H-048 (S3) se aceptan formas de área cero (plantilla de ancho 0 → 0 px/cm, polígonos colineales o
