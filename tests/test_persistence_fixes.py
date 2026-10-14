@@ -680,3 +680,48 @@ def test_h079_malformed_but_valid_json_experiment_file_is_reported_as_damaged(tm
         with pytest.raises(DamagedExperiment) as e:
             Project.load(d)
         assert "damaged" in user_message(e.value) and "backups" in user_message(e.value)
+
+
+def test_h078_archive_errors_name_the_users_zip_not_the_part_file(tmp_path):
+    from manymaze.core.archive import archive_project
+    from manymaze.core.errors import user_message
+
+    if sys.platform == "win32":
+        pytest.skip("a read-only folder (chmod) does not stop writing on Windows")
+    p = _project(tmp_path)
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError) as e:
+            archive_project(p, ro / "x.zip")
+        assert "“x.zip”" in user_message(e.value) and ".part" not in user_message(e.value)
+    finally:
+        ro.chmod(0o755)
+
+
+def test_h077_damaged_member_leaves_nothing_unpacked_and_retry_works(tmp_path):
+    import zipfile
+
+    from manymaze.core.archive import archive_project, extract_archive
+    from manymaze.core.errors import user_message
+
+    p = _project(tmp_path)
+    (p.path / "videos").mkdir(exist_ok=True)
+    (p.path / "videos" / "a.bin").write_bytes(b"A" * 5000)
+    (p.path / "videos" / "z.bin").write_bytes(bytes(range(256)) * 40)
+    good = archive_project(p, tmp_path / "good.zip")
+    raw = bytearray(good.read_bytes())
+    with zipfile.ZipFile(good) as z:
+        info = z.getinfo(next(n for n in z.namelist() if n.endswith("z.bin")))
+    raw[info.header_offset + 30 + len(info.filename) + 100] ^= 0xFF  # damage inside a late member's data
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(bytes(raw))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(ValueError) as e:
+        extract_archive(bad, dest)
+    assert "damaged" in user_message(e.value) and "nothing was unpacked" in user_message(e.value)
+    assert list(dest.iterdir()) == []
+    out = extract_archive(good, dest)  # the retry with a good archive works
+    assert (out / "project.json").is_file() and [x.name for x in dest.iterdir()] == [out.name]
