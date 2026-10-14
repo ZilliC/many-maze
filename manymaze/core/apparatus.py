@@ -105,10 +105,17 @@ def from_known(cls, d: dict):
     return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+def clean_name(name: str) -> str:
+    """`name` stripped, with { } turned into ( ): braces delimit measure names in calculation formulas, so a zone
+    called "A {b}" would leave its measures unusable there."""
+    return name.strip().replace("{", "(").replace("}", ")")
+
+
 def unique_name(name: str, taken) -> str:
-    """`name` (stripped; "Unnamed" if blank), or "name 2", "name 3"… if it is already taken."""
+    """`name` (stripped, braces turned into parentheses; "Unnamed" if blank), or "name 2", "name 3"… if it is
+    already taken."""
     taken = set(taken)
-    name = name.strip() or "Unnamed"
+    name = clean_name(name) or "Unnamed"
     if name not in taken:
         return name
     i = 2
@@ -355,7 +362,7 @@ class Apparatus:
         that refer to it. Zones and groups share one namespace. Returns the name given (made unique), or the old
         name if `new_name` is blank or unchanged."""
         items = getattr(self, kind + "s")
-        old, name = items[index].name, new_name.strip()
+        old, name = items[index].name, clean_name(new_name)
         if not name or name == old:
             return old
         taken = [x.name for i, x in enumerate(items) if i != index]
@@ -638,6 +645,7 @@ def make_grid(app: Apparatus, kind: str = "square", region: Shape | None = None,
     if region is None:
         region = app.arena_or_bounds()
     taken = set(app.names()) | {g.name for g in app.grids}
+    name = clean_name(name) or "Grid"
     base, i = name, 2
     while name in taken or any(n.startswith(name + " ") for n in taken if n in {z.name for z in app.zones}):
         name = f"{base} {i}"

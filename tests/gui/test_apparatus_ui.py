@@ -235,3 +235,13 @@ def test_degenerate_shapes_are_refused(page, monkeypatch):
     page.set_tool("rect")
     page.finish_drag(100, 50, 200, 150)
     assert len(page.app.zones) == n_zones + 1 and len(warned) == 6
+
+
+def test_zone_names_cannot_hold_braces(page):
+    """Braces delimit measures in calculation formulas: a zone named with them is renamed with parentheses."""
+    i = 0
+    assert page.rename("zone", i, "A {b}")
+    assert page.app.zones[i].name == "A (b)"
+    assert "cannot contain" in page.main.statusBar().currentMessage()
+    z = page.add_zone(page.app.zones[i].shape, "Q{")
+    assert z.name == "Q("

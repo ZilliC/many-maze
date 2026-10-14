@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, 
 
 from ....core import plots, security, templates
 from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
-                                load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
+                                clean_name, load_apparatus_file, make_grid, remove_grid, save_apparatus_file,
+                                unique_name)
 from ....core.geometry import Ellipse, Polygon, Shape, polygon_problem, shape_from_dict
 from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
@@ -971,12 +972,16 @@ class ApparatusPage(Page):
         """Rename a zone / point / line / group / sequence; groups, sequences, grids and the per-test positions
         of moveable zones follow. Names are made unique."""
         m, name = self._obj(kind, index), name.strip()
-        if m is None or not name or name == m.name:
+        if m is None or not name or clean_name(name) == m.name:
             return False
         with self._edit(select=(kind, index) if kind in MAP_KINDS else None):
             new = self.project.rename_in_apparatus(self.app, kind, index, name)
         if new != name:
-            self.main.status(f"“{name}” is already used; renamed to “{new}”")
+            if "{" in name or "}" in name:
+                self.main.status(f"Names cannot contain {{ or }} (they delimit measures in calculations); "
+                                 f"renamed to “{new}”")
+            else:
+                self.main.status(f"“{name}” is already used; renamed to “{new}”")
         return True
 
     def set_item_color(self, kind: str, index: int, color: str):

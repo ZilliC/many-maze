@@ -795,3 +795,14 @@ def test_make_grid_never_adds_an_empty_grid():
     with pytest.raises(ValueError, match="No grid cell"):
         make_grid(app, "square", Polygon([(0, 0), (50, 50), (100, 100)]), nx=2, ny=2)
     assert len(app.grids) == n and not app.groups
+
+
+def test_braces_in_names_become_parentheses():
+    from manymaze.core.apparatus import unique_name
+
+    assert unique_name("A {b}", []) == "A (b)"
+    app = box_app()
+    app.zones.append(Zone("Z", rect(0, 0, 10, 10), "#fff"))
+    assert app.rename("zone", len(app.zones) - 1, "Z}x{") == "Z)x("
+    assert app.zones[-1].name == "Z)x("
+    assert make_grid(app, "square", nx=1, ny=1, name="G{1}").name == "G(1)"
