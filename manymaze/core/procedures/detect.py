@@ -342,6 +342,7 @@ def _timed_out(th, due, t) -> bool:
 @dataclass
 class TimeWait:
     due: float
+    wall: bool = False  # started while the test was paused: runs out in real time (Engine.paused_tick)
 
     def ready(self, eng, th, t) -> bool:
         return t + EPS >= self.due

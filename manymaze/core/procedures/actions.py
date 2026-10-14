@@ -11,6 +11,7 @@ from pathlib import Path
 from .. import ioconfig
 from ..operant import Schedule
 from .catalog import ACTION_SPECS, CONTINUATION_S, EPS, SHOCK_MAX_S, STALL_S
+from .detect import TimeWait
 from .expr import MAX_SEQ, ExprError
 from .model import _params_text
 
@@ -990,7 +991,12 @@ class Actions:
         if not self.paused:
             return
         self.paused = False
+        for th in self.threads:  # a wait begun during the pause has run part of it in real time
+            if th.alive and isinstance(th.wait, TimeWait) and th.wait.wall and self._pause_t is not None:
+                th.wait.due = t + max(0.0, th.wait.due - self._pause_t - self._pause_wall_s)
+                th.wait.wall = False
         self._pause_t = None
+        self._pause_wall_s = 0.0
         if self.pauses and self.pauses[-1][1] is None:
             self.pauses[-1][1] = t
         self._emit("test_resumed", {}, t)
