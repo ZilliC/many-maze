@@ -15,3 +15,6 @@ Cosas que necesitan hardware real, videos, dinero o una decisión tuya. El agent
   final (cortaría datos sin avisar, o con aviso)?
 - Pendientes de decidir (observaciones): H-010 Assumption checks solo da p; H-016 `--bbox` fuera de imagen /
   `--size-cm` negativo / `demo` sobre carpeta existente; H-028 entradas al centro OFT 2–5× la referencia.
+- 2026-10-13 · **H-030 (decisión)**: al cambiar Test start/Duration, Results ahora avisa en rojo que hay que volver a
+  rastrear. Un recálculo real sin re-rastrear exige recortar/desplazar el track en el análisis (toca el núcleo).
+  ¿Lo hacemos o basta el aviso?

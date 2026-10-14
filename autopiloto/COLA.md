@@ -94,8 +94,10 @@
 - [x] QA offscreen B02 → 2 OK, 2 RARO, 1 FALLA; persistencia y cifrado OK; H-056/H-057 (S2), H-058/H-059 (S3), H-060 (Obs)
 - [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden:
       B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
-- [ ] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
-- [ ] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
+- [x] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
+      → aviso en rojo en Results si la ventana ya no coincide con el track (sin recálculo; ver PARA_TI)
+- [x] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
+      → se niega si no hay posiciones detectadas de las que interpolar (merge 6170031)
 - [ ] Arreglo: H-031/H-033/H-034 (Obs) reproducción 4×/8× va a ~5×/10×; «Mark position» acepta clic fuera del
       cuadro; «Copy table» copia filas ocultas por el filtro
 - [ ] Arreglo: H-035 (S3) en vivo: una tecla de inicio que también es de puntuación (p. ej. `r`) nunca inicia la prueba
@@ -103,7 +105,8 @@
 - [ ] Arreglo: H-039 (Obs, persistencia) en vivo: duración, modo de inicio y «record» no persisten al reabrir
 - [ ] Decidir H-037/H-038/H-040 (Obs) pruebas en espera descartadas al acabar el video demo; «nuevo archivo cada»
       solo en minutos; «Several tests» acepta el mismo animal en dos paneles
-- [ ] Arreglo: H-042 (S2) Keys: el color elegido en la muestra de la tabla no se guarda (sí desde la página «Key»)
+- [x] Arreglo: H-042 (S2) Keys: el color elegido en la muestra de la tabla no se guarda (sí desde la página «Key»)
+      → color guardado al elegirlo en la tabla (merge 6170031)
 - [ ] Arreglo: H-041 (S3) «Colour of the animal» / marcas de color aceptan cualquier texto; la vista previa lanza
       ValueError en cada cuadro
 - [ ] Arreglo: H-043 (S3) cancelar el desbloqueo de ciego deja el botón «Blind testing» desmarcado con ciego activo
