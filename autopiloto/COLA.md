@@ -45,12 +45,16 @@
 - [x] Arreglo: H-011 (herramienta) `qa/herramientas/oraculo_estadistica.py` no registra «Genotipo» en `animal_fields`
       → «Genotipo» registrado (cc42fd4, merge 2bc39bc)
 - [ ] Decidir H-010 (Obs) Assumption checks solo da p, no el estadístico; D'Agostino por grupo, no global
-- [ ] Arreglo: H-012 (S2) `manymaze demo RUTA_RELATIVA` → FileNotFoundError con la ruta duplicada
-- [ ] Arreglo: H-013 (S2) `manymaze relink --folder RUTA_RELATIVA` dice «Relinked 6» pero guarda rutas relativas
+- [x] Arreglo: H-012 (S2) `manymaze demo RUTA_RELATIVA` → FileNotFoundError con la ruta duplicada
+      → ruta resuelta antes de escribir (merge dea53d0)
+- [x] Arreglo: H-013 (S2) `manymaze relink --folder RUTA_RELATIVA` dice «Relinked 6» pero guarda rutas relativas
       al directorio actual; `info` sigue con 6 faltantes
-- [ ] Arreglo: H-014 (S3) CLI muestra Traceback con video inexistente/corrupto/vacío, plantilla inexistente
+      → carpeta resuelta a absoluta (merge dea53d0)
+- [x] Arreglo: H-014 (S3) CLI muestra Traceback con video inexistente/corrupto/vacío, plantilla inexistente
       (`KeyError`), `demo` en carpeta de solo lectura, `results -o` a directorio inexistente
-- [ ] Arreglo: H-015 (S3) CLI `-o` con extensión no soportada escribe CSV en silencio; `report -o x.csv` escribe HTML
+      → mensajes de una línea y código 1 (merge dea53d0)
+- [x] Arreglo: H-015 (S3) CLI `-o` con extensión no soportada escribe CSV en silencio; `report -o x.csv` escribe HTML
+      → `-o` validado: tablas y `.html/.htm` para report/protocol (merge dea53d0)
 - [ ] Arreglo: H-017 (herramienta) `comparar_con_referencia.py` falla con `.slk` y `.xlsx --bins`; `inspeccionar.py`
       se cae si el archivo no existe; `referencia/` es anterior a H-P01 (regenerar)
 - [ ] Decidir H-016 (Obs) `--bbox` fuera de imagen da ceros, `--size-cm` negativo se ignora, `demo` sobre carpeta

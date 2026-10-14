@@ -15,3 +15,4 @@
 2026-10-13 · QA B10 resultados/exportaciones (offscreen) · 14 OK 2 RARO, exportaciones GUI = CLI; H-021…H-024 S4 · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · QA B13 videos reales (motor) · P1 3 OK 1 RARO 1 FALLA 2 BLOQ; H-025 S2 OFT pegado al borde, H-026/H-027 S3, H-028 Obs, H-029 herramienta · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · Arreglo H-008/H-009/H-011 estadística · arreglados; oráculo B11 coincide; 1319 tests · 2bc39bc
+2026-10-13 · Arreglo H-012…H-015 línea de comandos · arreglados; 1321 tests · dea53d0
