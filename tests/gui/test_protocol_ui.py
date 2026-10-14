@@ -281,3 +281,12 @@ def test_screenshots(win):
         click_element(win, ex, key)
         pump(3)
         assert win.grab().save(shot_path(f"shot_protocol_{key}.png"))
+
+
+def test_h043_ribbon_blind_button_follows_the_real_state(win, monkeypatch):
+    ex = win.goto("ExperimentPage")
+    ex.blind.setChecked(True)
+    assert win.project.blind and ex.blind_act.isChecked()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    ex.blind_act.trigger()  # the ribbon button unticks, the user answers No
+    assert win.project.blind and ex.blind.isChecked() and ex.blind_act.isChecked()

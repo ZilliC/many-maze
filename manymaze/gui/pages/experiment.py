@@ -572,7 +572,8 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
         self.blind_act = A("Blind testing", "eye_off", lambda: self.blind.setChecked(self.blind_act.isChecked()),
                            "Hide the treatments (shown as codes) while testing and scoring")
         self.blind_act.setCheckable(True)
-        self.blind.toggled.connect(lambda on: self.blind_act.setChecked(on))
+        # the real state, not the signal's: a cancelled unblind re-ticks the box before this slot runs
+        self.blind.toggled.connect(lambda _on: self.blind_act.setChecked(self.blind.isChecked()))
         self.element_acts = {
             "protocol": [self.blind_act],
             "tracking": [A("Install pose model", "brain", lambda: self.pose_box.install(),
