@@ -91,7 +91,8 @@
 - [x] QA offscreen B03 → 7 OK, 4 RARO, 1 FALLA; H-042 (S2), H-041/H-043/H-044/H-045 (S3), H-046 (Obs)
 - [x] QA offscreen B04 → 1 OK, 7 RARO; persistencia OK en los 8; H-047/H-048/H-049 (S3), H-050/H-051 (Obs)
 - [x] QA offscreen B05 → 3 OK, 3 RARO, 1 FALLA; persistencia OK; dosis y aleatorización OK; H-052/H-053/H-054 (S3), H-055 (Obs)
-- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B02,
+- [x] QA offscreen B02 → 2 OK, 2 RARO, 1 FALLA; persistencia y cifrado OK; H-056/H-057 (S2), H-058/H-059 (S3), H-060 (Obs)
+- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden:
       B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
 - [ ] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
 - [ ] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
@@ -125,3 +126,12 @@
       modo ciego escribe `=SUM(...)`/`+cmd|...` sin protección contra fórmulas
 - [ ] Decidir H-055 (Obs) dosis con concentración 0 → 0,0001 sin aviso; pesos 1e9 → 100000; tope de 1000 animales;
       tratamientos que solo difieren en mayúsculas y colores duplicados permitidos
+- [ ] Arreglo: H-056 (S2) protocolo bloqueado: la tecla Supr en el mapa borra zonas que el admin dejó seleccionadas
+      (6→0, sin deshacer)
+- [ ] Arreglo: H-057 (S2) cualquier no-admin puede «Restore a backup» y borrar usuarios, roles y bloqueo sin que se
+      pida administrador
+- [ ] Arreglo: H-058 (S3) el único administrador puede quitarse a sí mismo del experimento y apaga toda la seguridad
+- [ ] Arreglo: H-059 (S3) con protocolo bloqueado se puede cambiar la unidad de distancia y las teclas/interruptor de
+      Run tests
+- [ ] Decidir H-060 (Obs) contraseñas de 1 carácter o espacios; sin límite de intentos; archivo cifrado manipulado
+      dice «password is wrong»; «Wrong password» antes de escribir en «Restore a backup»
