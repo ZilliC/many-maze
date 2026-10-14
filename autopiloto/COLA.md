@@ -122,11 +122,14 @@
       último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
 - [ ] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
       (distancia 1511 vs 2135) mirando cuadros con el track superpuesto; ¿arreglo o es la referencia?
-- [ ] Arreglo: H-052 (S3) un campo de animal llamado `Stage`/`Apparatus`/`Test` sobrescribe esa columna en Results
-- [ ] Arreglo: H-053 (S3) «Import animals» sin avisos: ID duplicado sobrescribe, filas sin ID se pierden, pesos malos
+- [x] Arreglo: H-052 (S3) un campo de animal llamado `Stage`/`Apparatus`/`Test` sobrescribe esa columna en Results
+      → nombres reservados rechazados; experimentos viejos cargan (merge a893721)
+- [x] Arreglo: H-053 (S3) «Import animals» sin avisos: ID duplicado sobrescribe, filas sin ID se pierden, pesos malos
       se guardan, dice «Imported 7» con 6; columna *Status* de ANY-maze ignorada
-- [ ] Arreglo: H-054 (S3) exportar animales pierde estado/motivo de retirado, notas con `=` vuelven con apóstrofo; en
+      → resumen de avisos, recuento real, columna Status mapeada (merge a893721)
+- [x] Arreglo: H-054 (S3) exportar animales pierde estado/motivo de retirado, notas con `=` vuelven con apóstrofo; en
       modo ciego escribe `=SUM(...)`/`+cmd|...` sin protección contra fórmulas
+      → columnas Status/Retired reason, protección de fórmulas también en ciego (merge a893721)
 - [ ] Decidir H-055 (Obs) dosis con concentración 0 → 0,0001 sin aviso; pesos 1e9 → 100000; tope de 1000 animales;
       tratamientos que solo difieren en mayúsculas y colores duplicados permitidos
 - [x] Arreglo: H-056 (S2) protocolo bloqueado: la tecla Supr en el mapa borra zonas que el admin dejó seleccionadas
