@@ -1041,7 +1041,9 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
             return
         t = TEMPLATES[key]
         if p.tests and QMessageBox.question(
-                self, "Apply template", f"Make this a {t.title} protocol with tests of {t.default_duration_s:g} s? "
+                self, "Apply template",
+                f"Make this {'an' if t.title[:1].lower() in 'aeiou' else 'a'} {t.title} protocol with tests of "
+                f"{t.default_duration_s:g} s? "
                 "Existing results are recalculated with the new protocol type.") != QMessageBox.Yes:
             return
         p.set_protocol(key)
@@ -1126,6 +1128,11 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
             self.an_form.load(p.analysis)
             self.fst_form.load(p.analysis)
             self._update_fst()
+        if p.test_duration_s != self.duration.value() or p.start_mode != self.start_mode.currentData():
+            live = p.settings_extra.get("live")  # the protocol's new defaults replace the last run's
+            if isinstance(live, dict):
+                live.pop("duration_s", None)
+                live.pop("start_mode", None)
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
         self._follow_stage_renames(p)

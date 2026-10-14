@@ -71,3 +71,23 @@ def test_tests_model_rejects_bad_numbers(monkeypatch):
         assert getattr(t, attr) == before
     w.dirty = False
     w.close()
+
+
+def test_save_cleans_stale_temp_files_of_interrupted_saves(tmp_path):  # H-073
+    import time
+
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    old = p.path / "project.json.4242-3-0a1b2c3d.tmp"
+    recent = p.path / "project.json.4243-0-0a1b2c3e.tmp"
+    other = p.path / "notes.tmp"
+    for f in (old, recent, other):
+        f.write_text("partial")
+    t = time.time() - 3600
+    os.utime(old, (t, t))
+    os.utime(other, (t, t))
+    p.save()
+    assert not old.exists()
+    assert recent.exists(), "a recent temp file may belong to a save in progress"
+    assert other.exists(), "only the program's own temp pattern is removed"
+    assert (p.path / "project.json").exists()

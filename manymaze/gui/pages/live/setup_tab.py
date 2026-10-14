@@ -309,6 +309,9 @@ class SetupMixin:
         self.record_overlay.setToolTip("Write the test time, the clock time and the latest event labels on the "
                                        "recorded video (otherwise the recording is clean).")
         self.record_overlay.toggled.connect(self._save_live_settings)
+        self.record.toggled.connect(self._save_live_settings)
+        self.duration.valueChanged.connect(self._save_live_settings)
+        self.start_mode.currentIndexChanged.connect(self._save_live_settings)
         self.split_min = QDoubleSpinBox()
         self.split_min.setRange(0, 24 * 60)
         self.split_min.setDecimals(0)

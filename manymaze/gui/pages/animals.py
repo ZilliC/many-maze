@@ -642,9 +642,9 @@ class AnimalsPage(Page):
         n_tests = sum(len(counts.get(a.id, [])) for a in sel)
         msg = f"Delete {len(sel)} animal{'s' if len(sel) > 1 else ''}?"
         if n_tests:
-            msg += (f"\n\n{n_tests} test{'s' if n_tests > 1 else ''} refer to "
-                    f"{'these animals' if len(sel) > 1 else 'this animal'}; they are kept but will have no "
-                    "treatment or animal details.")
+            msg += (f"\n\n{n_tests} test{'s refer' if n_tests > 1 else ' refers'} to "
+                    f"{'these animals' if len(sel) > 1 else 'this animal'}; "
+                    f"{'they are' if n_tests > 1 else 'it is'} kept but will have no treatment or animal details.")
         if QMessageBox.question(self, "Delete animals", msg) == QMessageBox.Yes:
             self.delete_animals(sel)
 
@@ -955,7 +955,7 @@ class AnimalsPage(Page):
         n = sum(1 for a in self.project.animals if a.group == name)
         msg = f"Delete the treatment “{name}”?"
         if n:
-            msg += f"\n\n{n} animals will be left without a treatment."
+            msg += f"\n\n{n} animal{'s' if n > 1 else ''} will be left without a treatment."
         if QMessageBox.question(self, "Delete treatment", msg) == QMessageBox.Yes:
             self.delete_group(name)
 

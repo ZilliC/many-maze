@@ -214,6 +214,7 @@ class PlotViewsMixin:
         for c in (self.markers_check, self.split_check):
             c.toggled.connect(self._options_changed)
         self.heat_max.valueChanged.connect(self._options_changed)
+        self.heat_max.valueChanged.connect(self._store_heat_max)
         self.align_combo.currentIndexChanged.connect(self._align_changed)
 
     def export_video(self, path: str | None = None, options=None):
@@ -420,6 +421,23 @@ class PlotViewsMixin:
             w.setEnabled(i in (1, 3))
         self.heat_max.setEnabled(i in (1, 3) and self.heat_norm.currentData() == "fixed")
         self._render_current()
+
+    def _store_heat_max(self, value: float):
+        p = self.project
+        if p is not None and not getattr(self, "_loading_view", False):
+            view = p.settings_extra.setdefault("results_view", {})
+            if view.get("heat_max") != value:
+                view["heat_max"] = value
+                self.main.mark_dirty()
+
+    def load_view_settings(self):
+        """The experiment's saved view options (the fixed heat-map maximum)."""
+        view = (self.project.settings_extra.get("results_view") or {}) if self.project is not None else {}
+        self._loading_view = True
+        try:
+            self.heat_max.setValue(float(view.get("heat_max", 1.0)))
+        finally:
+            self._loading_view = False
 
     def _options_changed(self, *_):
         self.heat_max.setEnabled(self.tabs.currentIndex() in (1, 3) and self.heat_norm.currentData() == "fixed")

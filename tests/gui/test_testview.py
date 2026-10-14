@@ -3,6 +3,7 @@
 import math
 import shutil
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -292,3 +293,18 @@ def test_h041_preview_with_a_bad_colour_says_so_instead_of_a_traceback(view, cap
         view._refresh_frame()
     assert "Invalid colour" in view.preview_info
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_missing_video_says_so_instead_of_offering_observation(view):  # H-072
+    p, t = view.project, view.test
+    assert t.video
+    path = Path(p.abs_path(t.video))
+    path.rename(str(path) + ".bak")
+    try:
+        view.load_test(t.id)
+        QTest.qWait(50)
+        html = view.hud.toPlainText()
+        assert "Video not found" in html and "scoring by direct observation" not in html
+        assert not view.clock_box.isVisible()
+    finally:
+        (path.parent / (path.name + ".bak")).rename(path)

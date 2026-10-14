@@ -61,6 +61,9 @@ class OverlayMixin:
     def _overlay(self, index: int, frame: np.ndarray) -> np.ndarray:
         if self.test is None or self.project is None:
             return frame
+        if self._video_missing:  # (the grey placeholder: nothing to draw on)
+            self._set_hud([("Video not found:", "#e2e8f0"), (self._video_missing, "#e2e8f0")])
+            return frame
         app = self._app()
         h, w = frame.shape[:2]
         sc = max(1.0, w / 640)

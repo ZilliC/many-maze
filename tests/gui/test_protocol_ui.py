@@ -350,3 +350,29 @@ def test_h041_colour_text_is_checked_on_entry(win):
     assert not lbl.isHidden()
     ed["method"].setCurrentIndex(ed["method"].findData("background"))
     assert lbl.isHidden()
+
+
+def test_confirmation_messages_use_the_right_grammar(win, monkeypatch):  # H-074
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    ex = win.goto("ExperimentPage")
+    ex.apply_template("open_field")
+    assert "Make this an Open field protocol" in asked[-1]
+    ex.apply_template("epm")
+    assert "Make this an Elevated plus maze protocol" in asked[-1]
+    ex.apply_template("water_maze")
+    assert "Make this a " in asked[-1]
+    an = win.goto("AnimalsPage")
+    p = win.project
+    p.animals.clear()
+    p.tests.clear()
+    a = an.add_animal("Z1", group="Solo")
+    an.table.selectRow(an._row_of(a))
+    an.group_list.setCurrentRow(0) if hasattr(an, "group_list") else None
+    an._current_group = lambda: "Solo"
+    an._delete_group_dialog()
+    assert "1 animal will be left" in asked[-1]
+    p.add_test("", "Z1")
+    an.table.selectRow(an._row_of(a))
+    an.delete_selected_interactive()
+    assert "1 test refers to this animal; it is kept" in asked[-1]
