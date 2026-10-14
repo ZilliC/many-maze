@@ -190,3 +190,16 @@ def test_html_report_statistics_use_the_saved_level(tmp_path):
     out = tmp_path / "r.html"
     html_report(p, out, include_plots=False, stats_measures=["Total distance (cm)"])
     assert "significance level 0.0001" in out.read_text(encoding="utf-8")
+
+
+def test_summary_text_says_plainly_when_a_test_cannot_be_computed():
+    """H-021: constant measures printed "statistic=nan, df=1.00, n/a"."""
+    same = st.compare_groups({"a": np.array([5.0, 5, 5]), "b": np.array([5.0, 5, 5])})
+    text = st.summary_text(same, "Test duration (s)")
+    assert "nan" not in text and "inf" not in text and "n/a" not in text
+    assert "not computed: all values are equal" in text
+    apart = st.compare_groups({"a": np.array([5.0, 5, 5]), "b": np.array([6.0, 6, 6])})
+    text = st.summary_text(apart, "m")
+    assert "inf" not in text and "not computed" in text
+    few = st.summary_text(st.compare_groups({"a": np.array([1.0]), "b": np.array([2.0, 3])}), "m")
+    assert "statistic=nan" not in few and "Not enough data" in few

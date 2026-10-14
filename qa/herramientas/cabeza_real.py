@@ -3,9 +3,9 @@
     .venv/bin/python qa/herramientas/cabeza_real.py VIDEO [--segundos 150] [--inicio 0] [--recorte X Y ANCHO ALTO]...
                                                           [--codigo DIR_DEL_REPOSITORIO]
 
-Rastrea el video (o cada arena, con un --recorte por arena) y, en los cuadros en que el animal avanza más de 2 px por
-cuadro (dirección de marcha medida sobre 5 cuadros), mira si la cabeza rastreada apunta contra la marcha. Un roedor
-camina con la cabeza por delante. Da dos cifras:
+Rastrea el video (o cada arena, con un --recorte por arena) y, en los cuadros en que el animal avanza más de 60 px/s
+(2 px por cuadro a 30 fps, 1 a 60 fps; dirección de marcha medida sobre 5 cuadros), mira si la cabeza rastreada
+apunta contra la marcha. Un roedor camina con la cabeza por delante. Da dos cifras:
 
   * contra la marcha (%): todos los cuadros en movimiento con la cabeza hacia atrás. Incluye los ratos en que la
     rata retrocede de verdad (al bajar de un rearing o apartarse de la pared), que no son errores;
@@ -45,6 +45,7 @@ ARENAS = {
     "2025-06-05 09-31-36": {"cilindro": (400, 30, 530, 610)},
 }
 SOSTENIDA_S = 1.0
+MARCHA_PX_S = 60.0  # "avanza": más de 60 px/s (= 2 px por cuadro a 30 fps, 1 px a 60 fps)
 UMBRAL_PCT = 5.0
 
 
@@ -59,7 +60,7 @@ def medir(tr, fps):
     vx = np.r_[np.full(5, np.nan), tr.x[5:] - tr.x[:-5]]
     vy = np.r_[np.full(5, np.nan), tr.y[5:] - tr.y[:-5]]
     step = np.r_[np.nan, np.hypot(np.diff(tr.x), np.diff(tr.y))]
-    moving = (np.hypot(vx, vy) / 5 > 2) & np.isfinite(tr.hx)
+    moving = (np.hypot(vx, vy) / 5 * fps > MARCHA_PX_S) & np.isfinite(tr.hx)
     typical = np.nanmedian(step[moving]) if moving.any() else np.nan
     jump = np.zeros(len(step), bool)
     if np.isfinite(typical) and typical > 0:

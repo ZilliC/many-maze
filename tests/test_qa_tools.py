@@ -41,3 +41,24 @@ def test_inspect_missing_file_and_raw_data_comment_line(tmp_path):
     one = tmp_path / "one.csv"  # a single column: no delimiter to sniff
     one.write_text("a\n1\n2\n")
     assert run("inspeccionar.py", one).returncode == 0
+
+
+def test_cabeza_real_threshold_follows_the_frame_rate():
+    """H-029: "advances" was fixed at 2 px per frame (60 px/s at 30 fps), so at 60 fps a rat walking at that
+    speed (1 px per frame) counted as standing still."""
+    import importlib.util
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    spec = importlib.util.spec_from_file_location("cabeza_real", TOOLS / "cabeza_real.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for fps in (30.0, 60.0):
+        n = 120
+        x = np.arange(n) * (90.0 / fps)  # 90 px/s, head in front
+        tr = SimpleNamespace(x=x, y=np.zeros(n), hx=x + 5, hy=np.zeros(n))
+        moving, against, _, _ = mod.medir(tr, fps)
+        assert moving > 100 and against == 0, (fps, moving)
+        slow = SimpleNamespace(x=x / 10, y=np.zeros(n), hx=x / 10 + 5, hy=np.zeros(n))  # 9 px/s: standing
+        assert mod.medir(slow, fps)[0] == 0

@@ -1134,6 +1134,19 @@ def summary_text(res: dict, measure: str, alpha: float = ALPHA) -> str:
         lines.append(f"  {g}: n={d['n']}, mean={d['mean']:.3f} ± {d['sem']:.3f} SEM (SD {d['sd']:.3f}), "
                      f"median={d['median']:.3f}")
     stat = res.get("statistic", math.nan)
+    if not isinstance(stat, (int, float)) or not math.isfinite(stat):
+        test = str(res.get("test"))
+        if test.startswith("Not enough"):
+            lines.append(f"  {test}")
+        else:
+            sds = [d.get("sd", math.nan) for d in res.get("descriptive", {}).values()]
+            means = {d.get("mean") for d in res.get("descriptive", {}).values()}
+            if sds and all(sd == 0 for sd in sds):
+                why = "all values are equal" if len(means) == 1 else "the values do not vary within the groups"
+            else:
+                why = "the test gave no result for these values"
+            lines.append(f"  {test}: not computed: {why}")
+        return "\n".join(lines)
     df = res.get("df")
     if isinstance(df, tuple):
         df = ", ".join(f"{v:.4g}" for v in df)
