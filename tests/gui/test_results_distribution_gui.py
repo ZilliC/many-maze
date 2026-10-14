@@ -427,7 +427,8 @@ def test_48_cameras_40_simultaneous_tests(win, monkeypatch):
     for t in new:
         trs = p.load_tracks(t)
         tr = trs[0]
-        assert len(tr) >= 5 and tr.detected.mean() > 0.8, (t.id, t.apparatus, t.animal_id, t.extra_animals, len(trs),
+        # 48 cameras on a hosted runner can drop to ~2 frames per second per test: a 1 s test keeps 3 or more
+        assert len(tr) >= 3 and tr.detected.mean() > 0.8, (t.id, t.apparatus, t.animal_id, t.extra_animals, len(trs),
                                                            [x.detected.mean() for x in trs], tr.meta, t.detection)
         x0 = 10 if t.apparatus == "Left box" else 210
         assert np.all((tr.x[tr.detected] > x0 - 5) & (tr.x[tr.detected] < x0 + 185))
