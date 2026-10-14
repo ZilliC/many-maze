@@ -370,6 +370,9 @@ REPEAT_CHANGE_RATIO = 0.3
 
 # structures of the background thinner than this (px) are lines (grid, bars, a wall's edge): see _edge_tolerant
 THIN_LINE_PX = 9
+
+# a ghost of the animal in the model must have been there this long (s) to be absorbed (see _absorb_ghosts)
+GHOST_PERSIST_S = 1.0
 # a detected region larger than this share of the arena is a change of the whole scene, never the animal
 MAX_ARENA_SHARE = 0.5
 
@@ -412,6 +415,8 @@ class ArenaTracker:
         self._bg_version = 0
         self._bgp_key = None  # cache of the blurred / erased background of the processed region
         self._bgp: np.ndarray | None = None
+        self.frame_rate = 30.0  # of the frames processed (set by track_video)
+        self._ghost_age: np.ndarray | None = None  # frames each pixel has been taken for a ghost (_absorb_ghosts)
         self._bge_key = None  # cache of the edge-tolerant background (see _edge_tolerant)
         self._bge: tuple[np.ndarray, np.ndarray] | None = None
         self._bootstrapped = False  # the background is the first frame seen (no empty-arena image was given)
@@ -791,6 +796,14 @@ class ArenaTracker:
         bg = self._processed_background(box)
         ox, oy = (0, 0) if box is None else (box[0], box[1])
         H, W = gray.shape[:2]
+        # a ghost stays: how long each pixel has been taken for one.  What disappears within a second (the
+        # experimenter's head or hand over the floor at the start) is not: the model, a median of the whole video,
+        # has the floor right
+        if self._ghost_age is None or self._ghost_age.shape != (H, W):
+            self._ghost_age = np.zeros((H, W), np.uint16)
+        age = self._ghost_age
+        cand = np.zeros((H, W), bool)
+        need = max(1, round(GHOST_PERSIST_S * self.frame_rate))
         keep = []
         absorbed = False
         for a, c in blobs:
@@ -812,12 +825,18 @@ class ArenaTracker:
             ghost = e_bg > 8.0 and e_img < 0.5 * e_bg
             inside = np.zeros_like(band)
             cv2.drawContours(inside, [local], -1, 255, -1)
+            if ghost:  # and it is the model that has the step: the blob's inside differs from the floor around it there
+                ghost = self._model_has_step(g[py0:py1, px0:px1], bg[py0:py1, px0:px1], inside, fg[py0:py1, px0:px1])
             if ghost and self.prev_gray is not None and self._prev_box == box:  # and nothing moves in it
                 moved = cv2.absdiff(gray[py0:py1, px0:px1], self.prev_gray[py0:py1, px0:px1]) > self.s.motion_threshold
                 ghost = np.count_nonzero(moved & (inside > 0)) <= 0.02 * max(1, np.count_nonzero(inside))
             if not ghost:
                 keep.append((a, c))
                 continue
+            ins = inside > 0
+            cand[py0:py1, px0:px1] |= ins
+            if np.count_nonzero(age[py0:py1, px0:px1][ins] + 1 >= need) < 0.9 * np.count_nonzero(ins):
+                continue  # not the animal, but not yet certain enough to change the model
             # copy the image into the model over the blob and the margin the adaptive update leaves out
             self._own_background()
             region = cv2.dilate(inside, np.ones((15, 15), np.uint8)) > 0
@@ -827,9 +846,28 @@ class ArenaTracker:
             self._bg_float[sl][region] = src[region]
             cv2.drawContours(fg[py0:py1, px0:px1], [local], -1, 0, -1)
             absorbed = True
+        self._ghost_age = np.where(cand, age + 1, 0).astype(np.uint16)
         if absorbed:
             self._bg_version += 1
         return keep
+
+    GHOST_STEP_RATIO = 0.4  # a ghost's image differs from the floor around it by at most this share of the model's step
+
+    @staticmethod
+    def _model_has_step(g, bg, inside, fg) -> bool:
+        """Is the change a ghost, i.e. it is in the model and not in the image?  Compared with the floor in a ring
+        around the blob, the model's mean level inside it has a step (the animal it contains) and the image has
+        none (or a much smaller one).  A grid seen through an experimenter's head or hand at the start of the video
+        has sharp edges in the model, which the edge test takes for a ghost, yet it is the image that has the step:
+        absorbing it would spoil the model for the rest of the test."""
+        ins = inside > 0
+        ring = (cv2.dilate(inside, np.ones((15, 15), np.uint8)) > 0) & (cv2.dilate(inside, np.ones((5, 5), np.uint8)) == 0) \
+            & (fg == 0)
+        if np.count_nonzero(ring) < 20:
+            return True
+        step_bg = float(bg[ins].mean()) - float(bg[ring].mean())
+        step_img = float(g[ins].mean()) - float(g[ring].mean())
+        return abs(step_img) <= ArenaTracker.GHOST_STEP_RATIO * abs(step_bg) and step_bg * (float(bg[ins].mean()) - float(g[ins].mean())) > 0
 
     # one animal among several blobs: a blob farther than the gate (_gate_px) from the animal's last-known position
     # counts this share of its contrast, and one larger than SINGLE_SIZE_LIMIT times the animal's usual area is
@@ -1393,6 +1431,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     tr.set_background(bg_cache[key])
             trackers.append(tr)
         fps = v.fps
+        for tr in trackers:
+            getattr(tr, "tracker", tr).frame_rate = fps / max(1, int(s0.frame_step))
         start, end = _frame_window(s0, fps, v.frame_count)
         if end <= 0:  # neither a frame count nor a duration: read to the end of the video
             end = 10**12
