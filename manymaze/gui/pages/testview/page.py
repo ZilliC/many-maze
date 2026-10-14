@@ -43,6 +43,8 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
     Results / Plots / Scoring / Detection / Track editing tabs on the right.  A test without a video that ran with
     the I/O devices (Input/output only mode) shows its I/O log and events instead of the video."""
 
+    _video_missing = ""  # the path of the test's video when the file is gone (else "")
+
     title = "Test view"
 
     def __init__(self, main):
@@ -533,9 +535,11 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._update_range_lbl()
         self._enable(True)
         path = p.abs_path(t.video) if t.video else ""
+        self._video_missing = ""
         if path and Path(path).exists() and self.player.open(path, p.lens_for(t)):
             self.player.seek_time(t.start_s)
         else:
+            self._video_missing = str(path)  # the test had a video but it is gone (not a test scored by observation)
             self.player.close_video()
             self.player.current_frame = None
             self.pos_lbl.setText("")
@@ -587,6 +591,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.pad.set_behaviours([])
         self._load_notes()
         self.clock_box.hide()
+        self._video_missing = ""
         self._show_io_review()
         self._placeholder("No test selected")
 
