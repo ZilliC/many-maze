@@ -21,7 +21,7 @@ Lo que necesita hardware real, videos de ANY-maze, dinero o una decisión de pro
 1. Lee `COLA.md` y las últimas ~30 líneas de `BITACORA.md`. Nada más de contexto salvo lo que pida la tarea.
 2. Toma la **primera** tarea sin hacer de `COLA.md`. Si la cola está vacía, genera las siguientes tareas a partir
    de la meta (hallazgos abiertos → bloques de QA pendientes → revisión final) y escríbelas en la cola.
-3. Delega la tarea a **un subagente** (tipo `general-purpose`, modelo `sonnet`), con un prompt autocontenido: qué
+3. Delega la tarea (reglas comunes en `autopiloto/QA_COMUN.md` y `autopiloto/ARREGLO_COMUN.md`) a **un subagente** (tipo `general-purpose`, modelo `sonnet`), con un prompt autocontenido: qué
    hacer, qué archivos mirar, cómo verificar y qué devolver (un resumen de ≤ 10 líneas). Tú solo coordinas: así tu
    contexto no crece y cada tarea empieza limpia. Usa `model: "opus"` solo para un fallo que Sonnet ya intentó dos
    veces sin resolver, o para la revisión final.
