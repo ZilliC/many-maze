@@ -15,6 +15,7 @@ from .detect import TimeWait
 from .expr import MAX_SEQ, ExprError
 from .model import _params_text
 
+PELLET_GRACE_S = 2.0  # "End the test" waits at most this long for the pellets being dispensed
 
 class _Stop(Exception):
     pass
@@ -344,6 +345,16 @@ class Actions:
                 self._set_out(dev, ch, 0, off_t, tr.typ, hw=tr.hw)
                 tr.on = False
                 tr.k += 1
+
+    def end_deferred(self) -> bool:
+        """Whether "End the test" waits for the pellets being dispensed (at most PELLET_GRACE_S): the test must
+        not end in the middle of a pellet pulse."""
+        if not any(tr.typ == "pellet" for tr in self._trains.values()):
+            return False
+        if self.t - (self.end_at if self.end_at is not None else self.t) >= PELLET_GRACE_S:
+            return False
+        self.end_waited_for_pellets = not self.awaiting_continuation  # the data is kept up to the real end
+        return True
 
     def _stop_train(self, key, t):
         self._ramps.pop(key, None)

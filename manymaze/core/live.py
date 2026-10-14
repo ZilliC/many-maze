@@ -471,6 +471,8 @@ class LiveSession(_Scoring):
 
     def _end_if_requested(self):
         if self._end_requested and self.state != "finished" and not self._finishing and not self.engine._busy:
+            if self.engine.end_deferred():  # pellets already ordered are dispensed first
+                return
             self._end_requested = False
             self.finish(self.engine.end_reason or END_PROCEDURE)
 
@@ -1146,7 +1148,8 @@ class LiveSession(_Scoring):
                     self._call_engine(eng.stop, self.elapsed if self.state != "waiting" else eng.t)
                 finally:
                     self._finishing = False
-            if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9:
+            if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9 \
+                    and not (eng.end_waited_for_pellets and not waiting):
                 self._cut_data(end_at)
             self._close_states()
             for m in self.engine.state_events:  # "mark start / end" actions

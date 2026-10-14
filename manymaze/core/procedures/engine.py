@@ -1295,7 +1295,7 @@ class ProcedureEngine(Actions, LiveState):
         if self._pending_stop is not None:
             t, self._pending_stop = self._pending_stop, None
             self.stop(t)
-        elif self.ended and not self.stopped:
+        elif self.ended and not self.stopped and not self.end_deferred():
             self.stop(self.t)
 
     # ------------------------------------------------------------------ statements

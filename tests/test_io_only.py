@@ -234,3 +234,17 @@ def test_crash_recovery(tmp_path):
     s.flush_autosave()
     assert recover_autosaves(Project.load(p.path)) == [] and not side.exists()
     s.finish()
+
+
+def test_end_the_test_lets_the_last_pellet_finish():
+    """H-064: "End the test" in the same frame as a pellet dispense used to cut the pulse to 0 ms (the last
+    pellet short, the lever press not counted); the dispense is completed first."""
+    last = proc(WHEN("input_on", [DO("pellet", device="box", channel="pellet", count=1, pulse_width=50),
+                                  DO("end_test")], device="box", channel="lever"))
+    dm = box()
+    s = run(IOSession(duration_s=5.0, start_mode="immediate", procedures=[last], devices=dm), presses=(1.0,))
+    assert s.state == "finished" and s.end_reason == END_PROCEDURE
+    pellets = [(e["t"], e["value"]) for e in s.io_events if e["channel"] == "pellet"]
+    assert pellets == [(1.0, 1), (1.05, 0)]
+    assert s.elapsed == pytest.approx(1.05, abs=0.02)
+    dm.close()
