@@ -241,5 +241,5 @@ def test_user_messages_name_the_real_menus_and_never_pip():
     root = Path(io.__file__).resolve().parents[1]
     for rel in ("core/iodrivers.py", "core/iodevices.py", "gui/pages/live/page.py", "gui/io_devices_dialog.py",
                 "gui/pages/live/multi.py", "core/livegroup.py", "core/ioconfig.py"):
-        text = (root / rel).read_text()
+        text = (root / rel).read_text(encoding="utf-8")
         assert not re.search(r"pip install|Experiment › (Procedures|I/O devices)", text), rel

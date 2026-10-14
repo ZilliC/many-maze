@@ -298,8 +298,9 @@ def test_h041_preview_with_a_bad_colour_says_so_instead_of_a_traceback(view, cap
 def test_missing_video_says_so_instead_of_offering_observation(view):  # H-072
     p, t = view.project, view.test
     assert t.video
-    path = Path(p.abs_path(t.video))
-    path.rename(str(path) + ".bak")
+    video = t.video
+    t.video = str(Path(video).with_name("missing_" + Path(video).name))  # (the open video cannot be renamed on Windows)
+    assert not Path(p.abs_path(t.video)).exists()
     try:
         view.load_test(t.id)
         QTest.qWait(50)
@@ -307,7 +308,7 @@ def test_missing_video_says_so_instead_of_offering_observation(view):  # H-072
         assert "Video not found" in html and "scoring by direct observation" not in html
         assert not view.clock_box.isVisible()
     finally:
-        (path.parent / (path.name + ".bak")).rename(path)
+        t.video = video
 
 
 def test_h076_detection_fields_fit_the_side_panel(view):
