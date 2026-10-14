@@ -103,7 +103,7 @@
       cuadro; «Copy table» copia filas ocultas por el filtro
 - [ ] Arreglo: H-035 (S3) en vivo: una tecla de inicio que también es de puntuación (p. ej. `r`) nunca inicia la prueba
 - [ ] Arreglo: H-036 (S3) en vivo: «On a start switch» con entrada vacía o inexistente espera para siempre sin aviso
-- [ ] Arreglo: H-039 (Obs, persistencia) en vivo: duración, modo de inicio y «record» no persisten al reabrir
+- [x] Arreglo: H-039 (Obs, persistencia) en vivo: duración, modo de inicio y «record» no persisten al reabrir
 - [ ] Decidir H-037/H-038/H-040 (Obs) pruebas en espera descartadas al acabar el video demo; «nuevo archivo cada»
       solo en minutos; «Several tests» acepta el mismo animal en dos paneles
 - [x] Arreglo: H-042 (S2) Keys: el color elegido en la muestra de la tabla no se guarda (sí desde la página «Key»)
@@ -162,12 +162,18 @@
       sin confirmar ni deshacer al borrar bloque, claves JSON desconocidas ignoradas
 - [ ] Arreglo: H-065/H-066/H-070 (Obs) Log repite cada acción 3–4×; `immobile_time_reaches` no se dispara;
       `smtp_local.py` sobrescribe correos anteriores
-- [ ] Arreglo: H-072 (S3) Review con el video renombrado dice «No video — scoring by direct observation» en vez de
+- [x] Arreglo: H-072 (S3) Review con el video renombrado dice «No video — scoring by direct observation» en vez de
       «Video not found»
-- [ ] Arreglo: H-071/H-073 tras `kill -9` en «Track all untracked» los procesos hijos siguen y las pruebas quedan
+      → «Video not found:» con la ruta (merge 4d8c000)
+- [x] Arreglo: H-071/H-073 tras `kill -9` en «Track all untracked» los procesos hijos siguen y las pruebas quedan
       `pending` con track completo («No tests to track»); `project.json.*.tmp` huérfanos nunca se limpian
+      → procesos hijos salen al morir el padre; `.tmp` viejos se limpian al guardar (merge 4d8c000).
+        Sin hacer: reconciliar «pending con track completo» al abrir (decisión)
 - [ ] Arreglo: H-074 (S4) textos de mensajes: rutas de menú equivocadas (Experiment › Procedures/I/O devices),
       singular/plural, «a Open field», texto crudo de Python, «MANY-MAZE»
-- [ ] Arreglo: H-075 + H-039 persistencia: máximo del mapa de calor y duración/modo de inicio/record de Run tests no
+      → en parte (4d8c000); faltan: «Experiment › Procedures/I/O devices» en live/page.py, live/multi.py,
+        livegroup.py, ioconfig.py, io_devices_dialog.py; «pip install pyserial»; JSON crudo en procedure_editor.py:987
+- [x] Arreglo: H-075 + H-039 persistencia: máximo del mapa de calor y duración/modo de inicio/record de Run tests no
       persisten
+      → guardados en el experimento (merge 4d8c000)
 - [ ] Arreglo: H-076 (S4) modo oscuro: textos secundarios con contraste 1,7–2,5:1; combos de Review ▸ Detection cortados

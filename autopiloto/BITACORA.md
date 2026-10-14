@@ -33,3 +33,4 @@
 2026-10-14 · QA B14 robustez (offscreen) · 2 OK 4 RARO 1 N/A; H-071…H-076 (1 S3) · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-14 · Arreglo H-041/H-043/H-044/H-045 protocolo · arreglados; 1354 tests · 4b93b0f
 2026-10-14 · Arreglo H-047…H-050 aparatos · arreglados; 1355 tests · f40f1aa
+2026-10-14 · Arreglo H-039/H-075/H-072/H-073/H-071, H-074 en parte · arreglados; 1366 tests · 4d8c000
