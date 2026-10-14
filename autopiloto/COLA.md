@@ -103,8 +103,10 @@
 - [x] Arreglo: H-031/H-033/H-034 (Obs) reproducción 4×/8× va a ~5×/10×; «Mark position» acepta clic fuera del
       cuadro; «Copy table» copia filas ocultas por el filtro
       → velocidad real por reloj; clic fuera del cuadro rechazado; copia solo filas visibles (merge 8f6467e)
-- [ ] Arreglo: H-035 (S3) en vivo: una tecla de inicio que también es de puntuación (p. ej. `r`) nunca inicia la prueba
-- [ ] Arreglo: H-036 (S3) en vivo: «On a start switch» con entrada vacía o inexistente espera para siempre sin aviso
+- [x] Arreglo: H-035 (S3) en vivo: una tecla de inicio que también es de puntuación (p. ej. `r`) nunca inicia la prueba
+      → antes de empezar, la tecla de inicio inicia (merge 48d0cb9)
+- [x] Arreglo: H-036 (S3) en vivo: «On a start switch» con entrada vacía o inexistente espera para siempre sin aviso
+      → interruptor vacío o inexistente rechazado con mensaje (merge 48d0cb9)
 - [x] Arreglo: H-039 (Obs, persistencia) en vivo: duración, modo de inicio y «record» no persisten al reabrir
 - [ ] Decidir H-037/H-038/H-040 (Obs) pruebas en espera descartadas al acabar el video demo; «nuevo archivo cada»
       solo en minutos; «Several tests» acepta el mismo animal en dos paneles
@@ -166,11 +168,13 @@
       → «End the test» espera el pellet en curso (merge 5e24b1a)
 - [x] Arreglo: H-069 (S3) pausa por procedimiento no se reanuda con una espera; con video simulado la prueba termina pronto
       → esperas durante la pausa en tiempo real (merge 5e24b1a); fin temprano no reproducido
-- [ ] Arreglo: H-061/H-067/H-068 (S4) mensajes de «Test» < 50 ms; alertas e-mail sin validar destino/puerto; editor
+- [x] Arreglo: H-061/H-067/H-068 (S4) mensajes de «Test» < 50 ms; alertas e-mail sin validar destino/puerto; editor
       sin confirmar ni deshacer al borrar bloque, claves JSON desconocidas ignoradas
-- [ ] Arreglo: H-065/H-066/H-070 (Obs) Log repite cada acción 3–4×; `immobile_time_reaches` no se dispara;
+      → mensaje 5 s; SMTP validado; confirmar al borrar bloque y avisar claves sobrantes (merge 48d0cb9)
+- [x] Arreglo: H-065/H-066/H-070 (Obs) Log repite cada acción 3–4×; `immobile_time_reaches` no se dispara;
       `smtp_local.py` sobrescribe correos anteriores
       → H-065 y H-066 arreglados (5e24b1a); falta H-070
+      → H-070 arreglado (48d0cb9)
 - [x] Arreglo: H-072 (S3) Review con el video renombrado dice «No video — scoring by direct observation» en vez de
       «Video not found»
       → «Video not found:» con la ruta (merge 4d8c000)
@@ -178,10 +182,11 @@
       `pending` con track completo («No tests to track»); `project.json.*.tmp` huérfanos nunca se limpian
       → procesos hijos salen al morir el padre; `.tmp` viejos se limpian al guardar (merge 4d8c000).
         Sin hacer: reconciliar «pending con track completo» al abrir (decisión)
-- [ ] Arreglo: H-074 (S4) textos de mensajes: rutas de menú equivocadas (Experiment › Procedures/I/O devices),
+- [x] Arreglo: H-074 (S4) textos de mensajes: rutas de menú equivocadas (Experiment › Procedures/I/O devices),
       singular/plural, «a Open field», texto crudo de Python, «MANY-MAZE»
       → en parte (4d8c000); faltan: «Experiment › Procedures/I/O devices» en live/page.py, live/multi.py,
         livegroup.py, ioconfig.py, io_devices_dialog.py; «pip install pyserial»; JSON crudo en procedure_editor.py:987
+      → resto arreglado: rutas Protocol ›, textos de pip, JSON con línea y columna (merge 48d0cb9)
 - [x] Arreglo: H-075 + H-039 persistencia: máximo del mapa de calor y duración/modo de inicio/record de Run tests no
       persisten
       → guardados en el experimento (merge 4d8c000)
