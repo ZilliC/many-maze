@@ -210,3 +210,50 @@ def test_test_video_menu_and_labels_declutter(page):
     assert page.view.item("zone", k).label.isVisible()
     assert 0 < sum(lb.isVisible() for lb in labels) < len(labels)
     page.main.grab().save(shot_path("shot_apparatus_ui.png"))
+
+
+def test_degenerate_shapes_are_refused(page, monkeypatch):
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]) or QMessageBox.Ok)
+    n_zones, n_apps = len(page.app.zones), len(page.project.apparatus)
+    # a rectangle / ellipse dragged straight down has no width
+    for tool in ("rect", "ellipse"):
+        page.set_tool(tool)
+        page.finish_drag(100, 50, 100, 250)
+    # collinear and self-crossing polygons
+    page.set_tool("zone_poly" if "zone_poly" in page.tool_actions else "polygon")
+    page.finish_polygon([(10, 10), (50, 50), (100, 100)])
+    page.finish_polygon([(10, 10), (100, 100), (100, 10), (10, 100)])
+    assert len(page.app.zones) == n_zones and len(warned) == 4
+    # a template dragged with no width, or whose settings leave a zone empty
+    for params in ({}, {"centre_fraction": 1.0}):
+        page.set_tool("template")
+        page.view.template = {"key": "open_field", "params": params, "name": "X", "replace": False, "square": False}
+        page.finish_drag(100, 50, 100 if not params else 300, 250 if not params else 250)
+    assert len(page.project.apparatus) == n_apps and len(warned) == 6
+    # valid shapes still work
+    page.set_tool("rect")
+    page.finish_drag(100, 50, 200, 150)
+    assert len(page.app.zones) == n_zones + 1 and len(warned) == 6
+
+
+def test_zone_names_cannot_hold_braces(page):
+    """Braces delimit measures in calculation formulas: a zone named with them is renamed with parentheses."""
+    i = 0
+    assert page.rename("zone", i, "A {b}")
+    assert page.app.zones[i].name == "A (b)"
+    assert "cannot contain" in page.main.statusBar().currentMessage()
+    z = page.add_zone(page.app.zones[i].shape, "Q{")
+    assert z.name == "Q("
+
+
+def test_duplicate_zone_keeps_its_properties(page):
+    z = page.app.zones[0]
+    page.set_property("zone", 0, entry_rule="body 50 %", hidden=True, moveable=True,
+                      investigation_distance_cm=2.5, entry_orientation_deg=45.0, whishaw_width_cm=3.5)
+    c = page.duplicate_zone(0)
+    assert c.name == f"{z.name} copy"
+    for k in ("entry_rule", "hidden", "moveable", "investigation_distance_cm", "entry_orientation_deg",
+              "whishaw_width_cm", "body_fraction", "color"):
+        assert getattr(c, k) == getattr(z, k)
+    assert c.shape is not z.shape

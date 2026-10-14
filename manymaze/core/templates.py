@@ -640,10 +640,22 @@ TEMPLATES: dict[str, TemplateInfo] = {t.key: t for t in [
 
 
 def build(key: str, x, y, w, h, **params) -> Apparatus:
+    """The template built into the box (x, y, w, h). ValueError (in plain words) when the box or the settings would
+    give a shape with no area or an apparatus that cannot be calibrated."""
     info = TEMPLATES[key]
     kw = dict(info.params)
     kw.update({k: v for k, v in params.items() if k in info.params})
-    return info.builder(x, y, w, h, **kw)
+    if not (w > 0 and h > 0):
+        raise ValueError("The template needs a width and a height: drag it in both directions.")
+    for k, default in info.params.items():
+        if k.endswith("_cm") and isinstance(default, (int, float)) and default > 0 and not kw[k] > 0:
+            raise ValueError(f"“{k}” must be greater than 0.")
+    app = info.builder(x, y, w, h, **kw)
+    for z in app.zones:
+        if z.shape.area() <= 1e-6:
+            raise ValueError(f"With these settings the zone “{z.name}” would have no area. Change the settings "
+                             "(a fraction of exactly 0 or 1 leaves a zone empty).")
+    return app
 
 
 def build_many(key: str, x, y, w, h, **params) -> list[Apparatus]:

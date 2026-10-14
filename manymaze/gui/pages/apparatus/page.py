@@ -10,6 +10,7 @@ import copy
 import math
 import traceback
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
@@ -20,8 +21,9 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, 
 
 from ....core import plots, security, templates
 from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
-                                load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
-from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
+                                clean_name, load_apparatus_file, make_grid, remove_grid, save_apparatus_file,
+                                unique_name)
+from ....core.geometry import Ellipse, Polygon, Shape, polygon_problem, shape_from_dict
 from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
 from ....core.terminology import term
@@ -778,8 +780,11 @@ class ApparatusPage(Page):
                 if square or spec.get("square"):
                     p1 = EditorView.constrain(QPointF(x0, y0), QPointF(x1, y1), True)
                     x1, y1 = p1.x(), p1.y()
-                self.apply_template(spec["key"], min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0),
-                                    spec["params"], spec["name"], spec["replace"])
+                try:
+                    self.apply_template(spec["key"], min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0),
+                                        spec["params"], spec["name"], spec["replace"])
+                except ValueError as e:
+                    QMessageBox.warning(self, "Template", str(e))
             return
         if tool == "line":
             self.add_line(x0, y0, x1, y1)
@@ -793,6 +798,10 @@ class ApparatusPage(Page):
             x1, y1 = p1.x(), p1.y()
         xa, xb = sorted((x0, x1))
         ya, yb = sorted((y0, y1))
+        if xb - xa < 1 or yb - ya < 1:
+            QMessageBox.warning(self, "Shape", "The shape has no width or no height, so nothing was added. Drag "
+                                "in both directions.")
+            return
         if self.view.drag_kind() == "ellipse":
             shape = Ellipse((xa + xb) / 2, (ya + yb) / 2, (xb - xa) / 2, (yb - ya) / 2)
         else:
@@ -803,6 +812,10 @@ class ApparatusPage(Page):
             self.add_zone(shape)
 
     def finish_polygon(self, points):
+        problem = polygon_problem(points)
+        if problem:
+            QMessageBox.warning(self, "Polygon", problem)
+            return
         shape = Polygon([(float(x), float(y)) for x, y in points])
         if self.view.tool == "arena":
             self.set_arena(shape)
@@ -948,7 +961,10 @@ class ApparatusPage(Page):
 
     def duplicate_zone(self, index: int) -> Zone | None:
         z = self._obj("zone", index)
-        return self.add_zone(z.shape.translated(10.0, 10.0), f"{z.name} copy", z.color) if z else None
+        if z is None:
+            return None
+        return self._add("zone", lambda n, k: replace(z, name=n, shape=z.shape.translated(10.0, 10.0)),
+                         f"{z.name} copy")
 
     def zone_to_arena(self, index: int):
         z = self._obj("zone", index)
@@ -960,12 +976,16 @@ class ApparatusPage(Page):
         """Rename a zone / point / line / group / sequence; groups, sequences, grids and the per-test positions
         of moveable zones follow. Names are made unique."""
         m, name = self._obj(kind, index), name.strip()
-        if m is None or not name or name == m.name:
+        if m is None or not name or clean_name(name) == m.name:
             return False
         with self._edit(select=(kind, index) if kind in MAP_KINDS else None):
             new = self.project.rename_in_apparatus(self.app, kind, index, name)
         if new != name:
-            self.main.status(f"“{name}” is already used; renamed to “{new}”")
+            if "{" in name or "}" in name:
+                self.main.status(f"Names cannot contain {{ or }} (they delimit measures in calculations); "
+                                 f"renamed to “{new}”")
+            else:
+                self.main.status(f"“{name}” is already used; renamed to “{new}”")
         return True
 
     def set_item_color(self, kind: str, index: int, color: str):

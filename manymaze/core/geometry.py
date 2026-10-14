@@ -308,6 +308,55 @@ def clip_convex(shape: Shape, clip: Shape) -> Polygon | None:
     return Polygon([(float(x), float(y)) for x, y in inter.reshape(-1, 2)])
 
 
+def polygon_problem(points) -> str | None:
+    """Why a polygon drawn through `points` is not a usable zone (no area, or an outline that crosses itself), in
+    plain words; None when it is fine."""
+    pts = [(float(x), float(y)) for x, y in points]
+    n = len(pts)
+    area = abs(sum(pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1] for i in range(n))) / 2
+    if n < 3 or area < 1.0:
+        return "The shape has no area (its points lie on a line). Place the points so they enclose a region."
+
+    def orient(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return (v > 1e-9) - (v < -1e-9)
+
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        for j in range(i + 2, n):
+            if i == 0 and j == n - 1:
+                continue  # adjacent through the closing edge
+            c, d = pts[j], pts[(j + 1) % n]
+            if orient(a, b, c) * orient(a, b, d) < 0 and orient(c, d, a) * orient(c, d, b) < 0:
+                return "The outline crosses itself. Place the points in order around the shape."
+    return None
+
+
+def clip_to_box(shape: Shape, x0: float, y0: float, x1: float, y1: float) -> Polygon | None:
+    """Part of any shape (convex or not) inside an axis-aligned box (Sutherland-Hodgman; None if nothing is
+    inside). Where the shape enters the box in several pieces they are joined by zero-width seams, which the
+    even-odd point-in-polygon test ignores."""
+    pts = [(float(x), float(y)) for x, y in shape.polygon(96)]
+    edges = [(0, x0, True), (0, x1, False), (1, y0, True), (1, y1, False)]  # axis, limit, keep >= limit
+    for axis, lim, keep_ge in edges:
+        if not pts:
+            break
+        inside = (lambda p: p[axis] >= lim) if keep_ge else (lambda p: p[axis] <= lim)
+        out = []
+        for i, cur in enumerate(pts):
+            prev = pts[i - 1]
+            if inside(cur) != inside(prev):
+                t = (lim - prev[axis]) / (cur[axis] - prev[axis])
+                out.append((prev[0] + t * (cur[0] - prev[0]), prev[1] + t * (cur[1] - prev[1])))
+            if inside(cur):
+                out.append(cur)
+        pts = out
+    if len(pts) < 3:
+        return None
+    poly = Polygon(pts)
+    return poly if poly.area() > 1e-6 else None
+
+
 def square_grid(x: float, y: float, w: float, h: float, nx: int, ny: int) -> list[list[Polygon]]:
     """nx × ny rectangular cells covering the box; returned as rows (top to bottom) of cells (left to right)."""
     nx, ny = max(1, int(nx)), max(1, int(ny))
