@@ -216,3 +216,15 @@ def test_locked_protocol_keeps_zones_selected_before_the_user_changed(win):
     assert not appar.delete_selected() and len(appar.app.zones) == n
     assert not appar.delete_item("zone", 0) and len(appar.app.zones) == n
     assert appar.paste() == 0
+
+
+def test_only_an_administrator_restores_a_backup_with_security(win, monkeypatch):
+    """H-057: restoring an old copy would wipe the users, roles and the protocol lock."""
+    p = win.project
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[1]))
+    called = []
+    monkeypatch.setattr(type(p), "restore_backup", lambda self, *a, **k: called.append(a) or self)
+    win.answers = ["bob-pw"]
+    win.sign_in("Bob")
+    assert win.restore_backup("whatever") is None and not called and shown == ["Restore a backup"]
