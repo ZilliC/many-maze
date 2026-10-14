@@ -235,7 +235,12 @@ def read_anymaze_xml(path) -> dict:
     "track": {t, x, y, hx, hy, tx, ty}, "zone_events": [(t, zone, entered)]}]}]}."""
     import xml.etree.ElementTree as ET
 
-    root = ET.parse(str(path)).getroot()
+    try:
+        root = ET.parse(str(path)).getroot()
+    except ET.ParseError as e:  # cut short, or not well-formed XML
+        line = e.position[0] if getattr(e, "position", None) else None
+        raise ValueError(f"{Path(path).name} is damaged or incomplete (the XML cannot be read"
+                         f"{f' past line {line}' if line else ''}). Export the experiment from ANY-maze again.") from e
     if _norm(root.tag) != "experiment":
         exp = next((e for e in root.iter() if _norm(e.tag) == "experiment"), None)
         if exp is None:

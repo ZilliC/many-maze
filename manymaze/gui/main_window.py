@@ -1312,9 +1312,14 @@ class MainWindow(QMainWindow):
                     raise InterruptedError("import stopped")
                 progress(f)
 
-            return import_anymaze_xml(scratch, path, origin, step)
+            try:
+                return import_anymaze_xml(scratch, path, origin, step)
+            except ValueError as e:  # a damaged file: said in plain words, without a traceback in the console
+                return {"error": str(e)}
 
         def done(res):
+            if "error" in res:
+                return error_box(self, "Import from ANY-maze", res["error"])
             _merge_imported(p, scratch)
             self.mark_dirty()
             self.save()
