@@ -73,3 +73,21 @@ def test_wait_in_test_paused_handler_runs_in_real_time_and_resumes():
     eng.paused_tick(1.01)
     assert not eng.paused and len(resumed) == 1 and resumed[0] == pytest.approx(1.0, abs=0.05) and not eng.errors
     assert eng.pauses[0][1] == pytest.approx(eng.pauses[0][0], abs=1e-6)  # test time did not move
+
+
+def test_immobile_time_counts_the_whole_episode_once_confirmed():
+    """H-066: live, the immobility is confirmed only after its minimum length, but the results count it from when
+    the animal stopped: "total immobile time reaches" must agree with them."""
+    from manymaze.core.procedures import ProcedureEngine
+
+    pr = {"name": "P", "statements": [{"type": "when", "event": "immobile_time_reaches", "seconds": 2,
+                                       "body": [{"type": "do", "action": "log", "text": "2 s still"}]}]}
+    eng = ProcedureEngine([pr])
+    eng.start(0)
+    for i in range(0, 76):  # still from 1 s; confirmed after 1 s of stillness (at 2 s)
+        t = i / 25
+        confirmed = t >= 2.0
+        eng.update_state(t, {"immobile": confirmed, "immobile_since": 1.0 if confirmed else None})
+    fired = [x for x in eng.log_lines if x[1] == "2 s still"]
+    assert len(fired) == 1 and fired[0][0] == pytest.approx(3.0, abs=0.05)  # still since 1 s
+    assert eng.immobile_time == pytest.approx(2.0, abs=0.05)

@@ -487,7 +487,8 @@ class ProcedureEngine(Actions, LiveState):
     @_locked
     def update_state(self, t: float, state: dict | None = None):
         """Call once per frame. state: {"zones": {name: bool}, "head_zones": {...}, "detected", "freezing",
-        "immobile", "x", "y", "speed", "distance"} (all optional)."""
+        "immobile", "immobile_since" (when the immobility being confirmed began), "x", "y", "speed",
+        "distance"} (all optional)."""
         if not self.started:
             self.start(t)
         if self.stopped:
@@ -914,6 +915,9 @@ class ProcedureEngine(Actions, LiveState):
                 v = bool(st[key])
                 if v != getattr(self, attr):
                     self._emit(f"{key}_{'start' if v else 'end'}", {}, t)
+                    since = st.get("immobile_since")
+                    if key == "immobile" and v and since is not None:  # the results count the whole episode
+                        self.immobile_time += max(0.0, t - float(since))
                 setattr(self, attr, v)
         if "detected" in st:
             v = bool(st["detected"])

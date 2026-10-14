@@ -358,6 +358,11 @@ class LiveStats:
             self.history.append((t, self.speed, self.distance, self.motion_pct, float(self.detected),
                                  float(self.freezing)))
 
+    @property
+    def immobile_since(self) -> float | None:
+        """When the animal last became still (it counts as immobile from then, once min_immobile_s has passed)."""
+        return self._slow_since if self.immobile else None
+
     def current_zones(self) -> list[str]:
         return [n for n in self.names if self.inside[n]]
 

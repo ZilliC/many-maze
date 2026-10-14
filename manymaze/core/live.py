@@ -1078,6 +1078,7 @@ class LiveSession(_Scoring):
         try:
             eng.update_state(t, {"zones": zones, "head_zones": head_zones, "detected": bool(d.detected),
                                  "freezing": freezing, "immobile": self.stats.immobile,
+                                 "immobile_since": self.stats.immobile_since,
                                  "x": float(d.x), "y": float(d.y), "speed": self.stats.speed,
                                  "distance": self.stats.distance, "hx": float(d.hx), "hy": float(d.hy),
                                  "tx": float(d.tx), "ty": float(d.ty), "rearing": bool(rearing),
