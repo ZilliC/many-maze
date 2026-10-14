@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .atomicfile import write_text_atomic
-from .geometry import (Ellipse, Polygon, Shape, clip_convex, concentric_rings, radial_sectors, shape_from_dict,
+from .geometry import (Ellipse, Polygon, Shape, clip_to_box, concentric_rings, radial_sectors, shape_from_dict,
                        similarity_points, square_grid)
 
 # Test.zone_overrides key holding the position of the whole apparatus map in that test (the camera or the
@@ -584,7 +584,7 @@ def grid_shapes(kind: str, region: Shape, nx: int = 4, ny: int = 4, cell_cm: flo
     square: nx × ny cells named A1, A2 … (rows top to bottom, columns left to right); with cell_cm > 0 and a
     calibration the cell count follows from the real cell size. rings: concentric rings 1 (centre) … n.
     sectors: pie sectors 1 … n clockwise from start_deg (-90 = top). polar: rings × sectors ("R1 S1" …).
-    Square cells are clipped to the region when it is convex (e.g. a circular arena).
+    Square cells are clipped to the region (a circular or a cross-shaped arena); cells outside it are dropped.
     """
     x0, y0, x1, y1 = region.bounds()
     w, h = x1 - x0, y1 - y0
@@ -601,7 +601,8 @@ def grid_shapes(kind: str, region: Shape, nx: int = 4, ny: int = 4, cell_cm: flo
             for i, cell in enumerate(row):
                 shp = cell
                 if clip and not rect_region:
-                    shp = clip_convex(cell, region)
+                    cx0, cy0, cx1, cy1 = cell.bounds()
+                    shp = clip_to_box(region, cx0, cy0, cx1, cy1)
                     if shp is None or shp.area() < 0.02 * cell.area():
                         continue
                 out.append((f"{_row_label(j)}{i + 1}", shp))
@@ -643,6 +644,8 @@ def make_grid(app: Apparatus, kind: str = "square", region: Shape | None = None,
         i += 1
     colors = colors or ["#64748b", "#94a3b8"]
     cells = grid_shapes(kind, region, px_per_cm=params.pop("px_per_cm", app.px_per_cm), **params)
+    if not cells:
+        raise ValueError("No grid cell fits inside that region, so no grid was added. Try fewer or larger cells.")
     names = []
     for k, (label, shp) in enumerate(cells):
         zn = f"{name} {label}"

@@ -9,7 +9,7 @@ import pytest
 from manymaze.core import templates
 from manymaze.core.apparatus import (Apparatus, PointOfInterest, Sequence, Zone, grid_shapes, make_grid,
                                      remove_grid)
-from manymaze.core.geometry import annular_sector, body_fraction_inside, circle, rect
+from manymaze.core.geometry import Polygon, annular_sector, body_fraction_inside, circle, rect
 from manymaze.core.measures import (AnalysisSettings, all_periods, analyse, analyse_segmented, behaviour_measures,
                                     occupancy)
 from manymaze.core.periods import event_periods
@@ -777,3 +777,21 @@ def test_barnes_strategy_method_setting():
     # holes without numbers: the simple method
     app.zones[1].name = "Hole A"
     assert "Primary strategy" not in analyse(tr, app, AnalysisSettings(barnes_strategy_method="classic"))
+
+
+def test_square_grid_on_a_non_convex_arena_has_cells():
+    app = templates.elevated_plus_maze(0, 0, 400, 400)
+    cells = grid_shapes("square", app.arena_or_bounds(), nx=3, ny=3)
+    assert len(cells) >= 5
+    assert all(s.area() > 0 for _, s in cells)
+    assert sum(s.area() for _, s in cells) == pytest.approx(app.arena_or_bounds().area(), rel=0.02)
+    t = templates.t_maze(0, 0, 400, 400)
+    assert len(make_grid(t, "square", nx=2, ny=2).zones) >= 2
+
+
+def test_make_grid_never_adds_an_empty_grid():
+    app = box_app()
+    n = len(app.grids)
+    with pytest.raises(ValueError, match="No grid cell"):
+        make_grid(app, "square", Polygon([(0, 0), (50, 50), (100, 100)]), nx=2, ny=2)
+    assert len(app.grids) == n and not app.groups

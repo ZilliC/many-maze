@@ -308,6 +308,31 @@ def clip_convex(shape: Shape, clip: Shape) -> Polygon | None:
     return Polygon([(float(x), float(y)) for x, y in inter.reshape(-1, 2)])
 
 
+def clip_to_box(shape: Shape, x0: float, y0: float, x1: float, y1: float) -> Polygon | None:
+    """Part of any shape (convex or not) inside an axis-aligned box (Sutherland-Hodgman; None if nothing is
+    inside). Where the shape enters the box in several pieces they are joined by zero-width seams, which the
+    even-odd point-in-polygon test ignores."""
+    pts = [(float(x), float(y)) for x, y in shape.polygon(96)]
+    edges = [(0, x0, True), (0, x1, False), (1, y0, True), (1, y1, False)]  # axis, limit, keep >= limit
+    for axis, lim, keep_ge in edges:
+        if not pts:
+            break
+        inside = (lambda p: p[axis] >= lim) if keep_ge else (lambda p: p[axis] <= lim)
+        out = []
+        for i, cur in enumerate(pts):
+            prev = pts[i - 1]
+            if inside(cur) != inside(prev):
+                t = (lim - prev[axis]) / (cur[axis] - prev[axis])
+                out.append((prev[0] + t * (cur[0] - prev[0]), prev[1] + t * (cur[1] - prev[1])))
+            if inside(cur):
+                out.append(cur)
+        pts = out
+    if len(pts) < 3:
+        return None
+    poly = Polygon(pts)
+    return poly if poly.area() > 1e-6 else None
+
+
 def square_grid(x: float, y: float, w: float, h: float, nx: int, ny: int) -> list[list[Polygon]]:
     """nx × ny rectangular cells covering the box; returned as rows (top to bottom) of cells (left to right)."""
     nx, ny = max(1, int(nx)), max(1, int(ny))
