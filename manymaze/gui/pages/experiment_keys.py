@@ -107,7 +107,8 @@ class KeysMixin:
         name = self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else ""
         if not name:
             return None
-        key = self.beh.item(r, 1).text().strip()[:1].lower() if self.beh.item(r, 1) else ""
+        key = self.beh.item(r, 1).text() if self.beh.item(r, 1) else ""
+        key = (key.strip() or key).lower()  # as typed (a lone space is kept: it is not a scoring key)
         kind = self.beh.cellWidget(r, 2).currentData() if self.beh.cellWidget(r, 2) else "state"
         group = self.beh.item(r, 3).text().strip() if self.beh.item(r, 3) else ""
         color = self.beh.cellWidget(r, 4).property("color") if self.beh.cellWidget(r, 4) else ""

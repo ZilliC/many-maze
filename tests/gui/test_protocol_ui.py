@@ -290,3 +290,16 @@ def test_h043_ribbon_blind_button_follows_the_real_state(win, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
     ex.blind_act.trigger()  # the ribbon button unticks, the user answers No
     assert win.project.blind and ex.blind.isChecked() and ex.blind_act.isChecked()
+
+
+def test_h044_key_stroke_text_is_not_cut_silently(win):
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "keys")
+    p = win.project
+    r = ex.beh.rowCount() - 1
+    for text in ("Left", "ab", " "):
+        ex.beh.item(r, 1).setText(text)
+        assert not ex.beh_lbl.isHidden() and "cannot be used as a scoring key" in ex.beh_lbl.text(), text
+        assert len(p.behaviours[r].key) != 1 or p.behaviours[r].key == " "
+    ex.beh.item(r, 1).setText("q")
+    assert p.behaviours[r].key == "q"
