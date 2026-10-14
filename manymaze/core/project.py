@@ -29,7 +29,7 @@ from typing import Callable
 import numpy as np
 
 from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_factor, rename_unit
-from .atomicfile import write_text_atomic
+from .atomicfile import clean_stale_temps, write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
 from .lens import LensCorrection, corrected, lens_from
@@ -250,6 +250,7 @@ class Project:
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / "tracks").mkdir(exist_ok=True)
         text = self.file_text()
+        clean_stale_temps(self.path)  # (left by a save that was cut off)
         if self.settings_extra.get("backups", True):
             self.backup(min_interval_s=BACKUP_INTERVAL_S)
         write_text_atomic(self.path / PROJECT_FILE, text)
