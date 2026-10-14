@@ -23,3 +23,4 @@
 2026-10-13 · QA B08 pruebas en vivo (offscreen, cámaras simuladas) · 7 OK 3 RARO; H-035/H-036 S3, H-037…H-040 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · QA B03 protocolo (offscreen) · 7 OK 4 RARO 1 FALLA; H-042 S2, H-041/H-043/H-044/H-045 S3, H-046 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · QA B04 aparatos (offscreen) · 1 OK 7 RARO, persistencia OK; H-047/H-048/H-049 S3, H-050/H-051 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
+2026-10-13 · Arreglo H-025 resto (fC1) · arreglado: fantasma persistente ≥1 s; detección fC1 99,5 %; oráculo sin regresión; 1337 tests · 77c4f3f

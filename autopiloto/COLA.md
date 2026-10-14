@@ -82,8 +82,10 @@
 - [x] Arreglo: H-029 (herramienta) umbral de `cabeza_real.py` pensado para menos fps
       → umbral en px/s (60 px/s) (merge ef948c5)
 - [ ] Decidir H-028 (Obs) OFT: entradas al centro 2–5× la referencia; calidad 54,8 % en mHFD11
-- [ ] Arreglo: H-025 (resto) OFT arena fC1: el track se queda en una mancha clara del suelo ~50 % de cuadros
+- [x] Arreglo: H-025 (resto) OFT arena fC1: el track se queda en una mancha clara del suelo ~50 % de cuadros
       (53 % estático, 84 % detección); quizá aviso «track pegado/estático» (`salidas/B13/`)
+      → fantasma debe durar 1 s antes de entrar al fondo (la cabeza del experimentador al inicio); fC1 detección
+        84→99,5 %; distancia baja en 4 arenas (antes medía la cola) (merge 77c4f3f)
 - [x] QA offscreen B07 → 7 OK, 3 RARO; H-030/H-032 (S3), H-031/H-033/H-034 (Obs)
 - [x] QA offscreen B08 → 7 OK, 3 RARO; H-P08 ya no ocurre (8 sesiones 20 min); H-035/H-036 (S3), H-037…H-040 (Obs)
 - [x] QA offscreen B03 → 7 OK, 4 RARO, 1 FALLA; H-042 (S2), H-041/H-043/H-044/H-045 (S3), H-046 (Obs)
@@ -113,3 +115,5 @@
 - [ ] Arreglo: H-050/H-051 (Obs) «Duplicate» de zona no copia reglas/opciones; varias entradas inválidas sin aviso
       (Y fuera del rectángulo, agujero Barnes fuera de rango, renombrar vacío, archivo de aparato vacío, borrar el
       último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
+- [ ] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
+      (distancia 1511 vs 2135) mirando cuadros con el track superpuesto; ¿arreglo o es la referencia?
