@@ -193,3 +193,6 @@
 - [x] Arreglo: H-076 (S4) modo oscuro: textos secundarios con contraste 1,7–2,5:1; combos de Review ▸ Detection cortados
 
       → MID oscuro #8a919b (≥4,5:1); Detection en una columna (merge b71e773)
+- [ ] QA offscreen B01 experimentos (pasada 1: 01, 02, 03, 10, 11, 13, 14, 20, 32, 33, 40)
+- [ ] QA offscreen B15 barrido de cobertura: IDs del inventario sin probar (lo visual BLOQUEADO)
+- [ ] Revisión final de QA (§6 del plan, Opus): informe final, duplicados, severidades, cobertura
