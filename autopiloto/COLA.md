@@ -124,10 +124,11 @@
       → formas de área cero y plantillas degeneradas rechazadas con aviso (merge f40f1aa)
 - [x] Arreglo: H-049 (S3) `{` o `}` en el nombre de una zona rompe las fórmulas de cálculo
       → `{}` en nombres se cambian a `()` con aviso; nombres viejos intactos hasta editarlos (merge f40f1aa)
-- [ ] Arreglo: H-050/H-051 (Obs) «Duplicate» de zona no copia reglas/opciones; varias entradas inválidas sin aviso
+- [x] Arreglo: H-050/H-051 (Obs) «Duplicate» de zona no copia reglas/opciones; varias entradas inválidas sin aviso
       (Y fuera del rectángulo, agujero Barnes fuera de rango, renombrar vacío, archivo de aparato vacío, borrar el
       último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
       → H-050 arreglado (Duplicate copia todo, f40f1aa); falta H-051
+      → H-051 arreglado: Y maze, Barnes, renombrar vacío, importar vacío, extensión de mapa, Results sin aparato (merge b71e773)
 - [ ] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
       (distancia 1511 vs 2135) mirando cuadros con el track superpuesto; ¿arreglo o es la referencia?
 - [x] Arreglo: H-052 (S3) un campo de animal llamado `Stage`/`Apparatus`/`Test` sobrescribe esa columna en Results
@@ -180,4 +181,6 @@
 - [x] Arreglo: H-075 + H-039 persistencia: máximo del mapa de calor y duración/modo de inicio/record de Run tests no
       persisten
       → guardados en el experimento (merge 4d8c000)
-- [ ] Arreglo: H-076 (S4) modo oscuro: textos secundarios con contraste 1,7–2,5:1; combos de Review ▸ Detection cortados
+- [x] Arreglo: H-076 (S4) modo oscuro: textos secundarios con contraste 1,7–2,5:1; combos de Review ▸ Detection cortados
+
+      → MID oscuro #8a919b (≥4,5:1); Detection en una columna (merge b71e773)

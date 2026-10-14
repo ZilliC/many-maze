@@ -35,3 +35,4 @@
 2026-10-14 · Arreglo H-047…H-050 aparatos · arreglados; 1355 tests · f40f1aa
 2026-10-14 · Arreglo H-039/H-075/H-072/H-073/H-071, H-074 en parte · arreglados; 1366 tests · 4d8c000
 2026-10-14 · Arreglo H-062…H-066, H-069 procedimientos · arreglados; 1360 tests antes del merge · 5e24b1a
+2026-10-14 · Arreglo H-051 aparatos y H-076 modo oscuro · arreglados; 1377 tests · b71e773
