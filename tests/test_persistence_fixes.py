@@ -631,3 +631,25 @@ def test_cli_rejects_unsupported_output_extensions(tmp_path):
     with pytest.raises(SystemExit) as e:
         cli.main(["project", str(p.path), "report", "-o", str(tmp_path / "r.csv")])
     assert ".html" in e.value.code
+
+
+def test_save_errors_name_the_users_file_not_the_temporary_one(tmp_path):
+    """H-023: the error named "x.csv.<pid>-<n>-<random>.tmp", a file the user never chose."""
+    from manymaze.core.atomicfile import write_text_atomic
+    from manymaze.core.errors import user_message
+
+    with pytest.raises(FileNotFoundError) as e:
+        write_text_atomic(tmp_path / "missing folder" / "x.csv", "a")
+    assert "“x.csv” was not found" in user_message(e.value) and ".tmp" not in user_message(e.value)
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError) as e:
+            write_text_atomic(ro / "x.csv", "a")
+        assert "“x.csv”" in user_message(e.value) and ".tmp" not in user_message(e.value)
+    finally:
+        ro.chmod(0o755)
+    with pytest.raises(OSError) as e:
+        write_text_atomic(tmp_path / ("l" * 300 + ".csv"), "a")
+    assert ".tmp" not in user_message(e.value) and "lll" in user_message(e.value)

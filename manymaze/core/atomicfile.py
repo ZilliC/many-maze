@@ -73,11 +73,13 @@ def atomic_write(path, mode: str = "w", encoding: str | None = "utf-8", newline:
             _sync_file(fh.fileno())
         os.replace(tmp, p)
         sync_dir(p.parent)
-    except BaseException:
+    except BaseException as e:
         try:
             tmp.unlink()
         except OSError:
             pass
+        if isinstance(e, OSError) and e.filename is not None and Path(os.fsdecode(e.filename)) == tmp:
+            e.filename = str(p)  # the error names the file the user chose, not our temporary one
         raise
 
 
