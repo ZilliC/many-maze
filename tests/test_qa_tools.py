@@ -4,8 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from manymaze.core.export import write_table, write_xlsx
 
 TOOLS = Path(__file__).resolve().parents[1] / "qa" / "herramientas"
