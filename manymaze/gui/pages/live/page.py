@@ -540,6 +540,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                                     if locked else "")
         self.rec_names_btn.setEnabled(not locked)
         self.start_delay.setEnabled(not locked)
+        for w in (self.start_keys, self.stop_keys, self.control_input, self.start_input):
+            w.setEnabled(not locked)
+        self._start_mode_changed()  # (the start switch input also follows the start mode)
         self.rec_names_btn.setToolTip("The protocol is locked: only an administrator can change the file names"
                                       if locked else self.REC_NAMES_TIP)
 
@@ -839,19 +842,26 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         if self.start_input.text().strip() or "start_input" in self._live_settings():
             new["start_input"] = self.start_input.text().strip()
         d = self._live_settings()
+        if not security.can(self.project, "edit_protocol"):  # start / stop keys and the switches are the protocol's
+            for k in ("start_keys", "stop_keys", "control_input", "start_input"):
+                new.pop(k, None)
+                if k in d:
+                    new[k] = d[k]
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
             new["pause_outputs_off"] = self.pause_off.isChecked()
         if any(d.get(k) != v for k, v in new.items()):
             d.update(new)
             self.main.mark_dirty()
-        self.group.start_keys, self.group.stop_keys = new["start_keys"], new["stop_keys"]
+        self.group.start_keys = new.get("start_keys", d.get("start_keys", list(DEFAULT_START_KEYS)))
+        self.group.stop_keys = new.get("stop_keys", d.get("stop_keys", list(DEFAULT_STOP_KEYS)))
         self._update_keys_label()
 
     def _start_mode_changed(self, *_):
         sched = self.start_mode.currentData() == "scheduled"
         self.sched_time.setEnabled(sched)
         self.sched_daily.setEnabled(sched)
-        self.start_input.setEnabled(self.start_mode.currentData() == "input")
+        editable = self.project is None or security.can(self.project, "edit_protocol")
+        self.start_input.setEnabled(self.start_mode.currentData() == "input" and editable)
 
     def _store_start_delay(self, value: float):
         """The delay after the start switch is part of the protocol (Project.start_switch_delay_s)."""

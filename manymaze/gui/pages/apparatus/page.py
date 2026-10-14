@@ -398,7 +398,9 @@ class ApparatusPage(Page):
         """Another user, or other security settings: the apparatus is editable or read-only."""
         if self.locked:
             self.set_tool("select")
+            self.view.scene().clearSelection()  # what the previous user left selected must not be editable
         self._set_enabled(self.app is not None)
+        self.refresh_info()  # the distance unit is locked with the protocol
 
     def _names(self, exclude: Apparatus | None = None):
         return [a.name for a in self.project.apparatus if a is not exclude]
@@ -662,7 +664,7 @@ class ApparatusPage(Page):
                                        f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
                 self.ppc_spin.setValue(0)
             self.unit_combo.setCurrentIndex(max(0, self.unit_combo.findData(app.distance_unit)))
-            self.unit_combo.setEnabled(bool(app.px_per_cm))
+            self.unit_combo.setEnabled(bool(app.px_per_cm) and not self.locked)
 
     # ================================================================ map
     def _rebuild_map(self, keep_selection: bool = True):
@@ -874,7 +876,7 @@ class ApparatusPage(Page):
 
     def set_distance_unit(self, unit: str):
         """Report distances in `unit` for every apparatus of the experiment."""
-        if self.project is None or unit == self.project.distance_unit and \
+        if self.project is None or self.locked or unit == self.project.distance_unit and \
                 all(a.distance_unit == unit for a in self.project.apparatus):
             return
         check = self.project.set_distance_unit(unit)
@@ -925,7 +927,7 @@ class ApparatusPage(Page):
 
     def delete_selected(self) -> bool:
         keys = self.view.selected_keys()
-        if not keys or self.app is None:
+        if not keys or self.app is None or self.locked:
             return False
         with self._edit():
             for kind, idx in sorted(keys, key=lambda k: -k[1]):
@@ -938,7 +940,7 @@ class ApparatusPage(Page):
             exists = self.app is not None and self.app.arena is not None
         else:
             exists = self._obj(kind, index) is not None
-        if not exists:
+        if not exists or self.locked:
             return False
         with self._edit():
             self.app.remove(kind, index)
@@ -1091,7 +1093,7 @@ class ApparatusPage(Page):
         """Paste copied zones / points / lines (offset when pasted into the apparatus they came from)."""
         app = self.app
         clip = ApparatusPage._clipboard
-        if app is None or not clip:
+        if app is None or not clip or self.locked:
             return 0
         off = 12.0 * (clip.setdefault("pasted", {}).get(id(app), 0) + (1 if clip.get("source") == id(app) else 0))
         new_keys = []

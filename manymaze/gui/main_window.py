@@ -802,6 +802,11 @@ class MainWindow(QMainWindow):
                                         "their experimenter):", list(p.experimenters), 0, False)
         if not ok:
             return
+        if security.admins(p) == [name]:
+            QMessageBox.information(self, "Remove user", f"{name} is the only administrator: without one nobody "
+                                    "could change the security settings any more. Make another user an "
+                                    "administrator first (File ▸ Users and security).")
+            return
         if security.has_password(p, name) and name != self.current_user() and not security.can(p, "manage"):
             QMessageBox.information(self, "Remove user", f"{name} has a password: only an administrator (or {name}) "
                                     "can remove this user.")
@@ -1406,7 +1411,13 @@ class MainWindow(QMainWindow):
     def restore_backup(self, backup: str | None = None):
         """Go back to an automatic backup of the experiment file (made when saving, at most every 10 minutes)."""
         p = self.project
-        if p is None or p.path is None or not self.maybe_save():
+        if p is None or p.path is None:
+            return None
+        if not security.can(p, "manage"):  # an old copy would bring back the users, roles and lock it had then
+            QMessageBox.information(self, "Restore a backup", "Only an administrator can restore a backup of an "
+                                    "experiment with users and security (File ▸ Users and security).")
+            return None
+        if not self.maybe_save():
             return None
         if backup is None:
             backups = p.list_backups()

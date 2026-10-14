@@ -192,3 +192,80 @@ def test_protect_experiment(win, monkeypatch):
     win.answers = ["bob-pw"]
     win.sign_in("Bob")
     assert not win.protect_experiment(ProtectDialog(q, win))
+
+
+def test_locked_protocol_keeps_zones_selected_before_the_user_changed(win):
+    """H-056: Delete / Backspace on the map must not delete what the administrator left selected."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+
+    win.answers = ["ann-pw"]
+    win.sign_in("Ann")
+    sec.set_security(win.project, lock_protocol=True)
+    appar = win.goto("ApparatusPage")
+    appar.select_all_act.trigger()
+    n = len(appar.app.zones)
+    assert n and appar.view.selected_keys()
+    win.answers = ["bob-pw"]
+    win.sign_in("Bob")
+    assert appar.locked and not appar.view.selected_keys()  # the selection does not outlive the user change
+    for key in (Qt.Key_Delete, Qt.Key_Backspace):
+        appar.view.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, key, Qt.NoModifier))
+    assert len(appar.app.zones) == n
+    appar.view.scene().items()[0].setSelected(True) if appar.view.scene().items() else None
+    assert not appar.delete_selected() and len(appar.app.zones) == n
+    assert not appar.delete_item("zone", 0) and len(appar.app.zones) == n
+    assert appar.paste() == 0
+
+
+def test_only_an_administrator_restores_a_backup_with_security(win, monkeypatch):
+    """H-057: restoring an old copy would wipe the users, roles and the protocol lock."""
+    p = win.project
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[1]))
+    called = []
+    monkeypatch.setattr(type(p), "restore_backup", lambda self, *a, **k: called.append(a) or self)
+    win.answers = ["bob-pw"]
+    win.sign_in("Bob")
+    assert win.restore_backup("whatever") is None and not called and shown == ["Restore a backup"]
+
+
+def test_the_only_administrator_cannot_remove_themselves(win, monkeypatch):
+    """H-058: as with demoting the last administrator, it would switch all security off."""
+    from PySide6.QtWidgets import QInputDialog
+
+    p = win.project
+    win.answers = ["ann-pw"]
+    win.sign_in("Ann")
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[1]))
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **k: ("Ann", True))
+    win._remove_user_dialog()
+    assert sec.admins(p) == ["Ann"] and "Ann" in p.experimenters and shown == ["Remove user"]
+    sec.set_role(p, "Bob", "admin")  # with another administrator it is allowed
+    win._remove_user_dialog()
+    assert sec.admins(p) == ["Bob"] and "Ann" not in p.experimenters
+
+
+def test_locked_protocol_locks_the_distance_unit_and_the_start_stop_settings(win):
+    """H-059: the unit changes every apparatus; the start / stop keys and the control switch are protocol settings."""
+    p = win.project
+    sec.set_security(p, lock_protocol=True)
+    win.answers = ["bob-pw"]
+    win.sign_in("Bob")
+    appar = win.goto("ApparatusPage")
+    assert not appar.unit_combo.isEnabled()
+    before = p.distance_unit
+    appar.set_distance_unit("m" if before != "m" else "cm")
+    assert p.distance_unit == before
+    live = win.goto("LivePage")
+    for w in (live.start_keys, live.stop_keys, live.control_input, live.start_input):
+        assert not w.isEnabled()
+    keys = list(p.settings_extra.get("live", {}).get("start_keys", []))
+    live.start_keys.setText("zzq")
+    live._save_live_settings()
+    assert p.settings_extra.get("live", {}).get("start_keys", []) == keys
+    win.answers = ["ann-pw"]
+    win.sign_in("Ann")
+    assert live.start_keys.isEnabled() and live.stop_keys.isEnabled() and live.control_input.isEnabled()
+
