@@ -71,10 +71,16 @@
       «Defecation: count» y falla en silencio. Más: `inspeccionar.py` se cae con la línea `# …` de raw data
       → nota «not computed…», mensaje de servidor de correo, nombre real del archivo, «Colour by» sin
         medidas de puntuación manual (merge ef948c5)
-- [ ] Arreglo: H-025 (S2) OFT real: el rastreo se pega al borde de la caja (93 % de cuadros) sin aviso, en 3 de 6
+- [x] Arreglo: H-025 (S2) OFT real: el rastreo se pega al borde de la caja (93 % de cuadros) sin aviso, en 3 de 6
       arenas; con la caja 15–20 px adentro rastrea bien (`~/mANY-MAZE-QA/2026-10-11_2224/salidas/B13/`)
-- [ ] Arreglo: H-026 (S3) arena vacía: el rastreo da 98,8 % de detección en un cruce de la rejilla (300 s)
-- [ ] Arreglo: H-027 (S3) MWM: distancia ×1,4–1,9 la referencia por los cuadros de la mano al soltar/recoger
+      → en parte: fondo tolerante junto a líneas finas; fC2 801→2322 cm (ref 2457); fC1 sigue en una
+        mancha clara del suelo (merge eb1245c)
+- [x] Arreglo: H-026 (S3) arena vacía: el rastreo da 98,8 % de detección en un cruce de la rejilla (300 s)
+      → región >50 % de la arena no es el animal; 98,8 %→17 % (merge eb1245c)
+- [!] Arreglo: H-027 (S3) MWM: distancia ×1,4–1,9 la referencia por los cuadros de la mano al soltar/recoger
+      → necesita decisión (inicio por defecto del MWM / recortar la mano final), ver PARA_TI
 - [x] Arreglo: H-029 (herramienta) umbral de `cabeza_real.py` pensado para menos fps
       → umbral en px/s (60 px/s) (merge ef948c5)
 - [ ] Decidir H-028 (Obs) OFT: entradas al centro 2–5× la referencia; calidad 54,8 % en mHFD11
+- [ ] Arreglo: H-025 (resto) OFT arena fC1: el track se queda en una mancha clara del suelo ~50 % de cuadros
+      (53 % estático, 84 % detección); quizá aviso «track pegado/estático» (`salidas/B13/`)

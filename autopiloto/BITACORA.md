@@ -18,3 +18,4 @@
 2026-10-13 · Arreglo H-012…H-015 línea de comandos · arreglados; 1321 tests · dea53d0
 2026-10-13 · Arreglo H-017/H-018/H-019 herramientas e importación ANY-maze · arreglados; 1325 tests · 220df68, 0b9c8f0
 2026-10-13 · Arreglo H-021…H-024 (S4) y H-029 herramienta · arreglados; 1334 tests · ef948c5
+2026-10-13 · Arreglo H-025/H-026/H-027 rastreo real · H-025 en parte (fC1 queda), H-026 arreglado, H-027 a decisión; oráculo 14403→14404; 1331 tests · eb1245c
