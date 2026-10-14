@@ -20,3 +20,4 @@
 2026-10-13 · Arreglo H-021…H-024 (S4) y H-029 herramienta · arreglados; 1334 tests · ef948c5
 2026-10-13 · Arreglo H-025/H-026/H-027 rastreo real · H-025 en parte (fC1 queda), H-026 arreglado, H-027 a decisión; oráculo 14403→14404; 1331 tests · eb1245c
 2026-10-13 · QA B07 revisar y puntuar (offscreen) · 7 OK 3 RARO; H-030/H-032 S3, H-031/H-033/H-034 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
+2026-10-13 · QA B08 pruebas en vivo (offscreen, cámaras simuladas) · 7 OK 3 RARO; H-035/H-036 S3, H-037…H-040 Obs · ~/mANY-MAZE-QA/2026-10-11_2224
