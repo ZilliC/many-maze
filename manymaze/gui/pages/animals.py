@@ -974,7 +974,7 @@ class AnimalsPage(Page):
             return
         name, ok = QInputDialog.getText(self, "Add field", "Field (column) name, e.g. Weight (g), Genotype:")
         if ok and name.strip() and not self.add_field(name):
-            QMessageBox.warning(self, "Add field", f"“{name.strip()}” is already a column.")
+            QMessageBox.warning(self, "Add field", wf.field_problem(self.project, name) or "The field was not added.")
 
     def _current_field(self) -> str | None:
         """The field column holding the current cell of the Animals sheet, if any."""
@@ -1001,7 +1001,8 @@ class AnimalsPage(Page):
             return
         new, ok = QInputDialog.getText(self, "Rename field", "New name:", text=old)
         if ok and new.strip() and new.strip() != old and not self.rename_field(old, new):
-            QMessageBox.warning(self, "Rename field", f"“{new.strip()}” is already a column.")
+            QMessageBox.warning(self, "Rename field",
+                                wf.field_problem(self.project, new, old) or "The field was not renamed.")
 
     def _remove_field_dialog(self):
         name = self._pick_field("Remove field")

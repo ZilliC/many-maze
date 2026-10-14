@@ -1026,7 +1026,8 @@ class Project:
             info["Video time at test start (s)"] = 0.0
         if a:
             for f in self.animal_fields:
-                info[f] = a.fields.get(f, "")
+                if f not in INFO_COLUMNS:  # an older experiment's field named like a column: the column wins
+                    info[f] = a.fields.get(f, "")
         return info
 
     def treatment_code(self, group: str) -> str:
