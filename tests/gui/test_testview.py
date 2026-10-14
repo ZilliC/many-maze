@@ -227,6 +227,16 @@ def test_track_editing(view):
     assert np.isfinite(saved.x[m]).all()
 
 
+def test_results_warn_when_the_test_period_changed(view):
+    view.tabs.setCurrentIndex(0)
+    view.refresh_results()
+    assert "again" not in view.results_lbl.text()
+    view.start_spin.setValue(view.start_spin.value() + 1.0)
+    assert "Track this test</b> again" in view.results_lbl.text()
+    view.start_spin.setValue(view.start_spin.value() - 1.0)
+    assert "again" not in view.results_lbl.text()
+
+
 def test_interpolate_never_wipes_the_track(view):
     tr = view.tracks[0]
     before = tr.x.copy()
