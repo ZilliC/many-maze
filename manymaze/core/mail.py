@@ -12,6 +12,7 @@ from __future__ import annotations
 import ipaddress
 import mimetypes
 import smtplib
+import socket
 import ssl
 from email.message import EmailMessage
 from pathlib import Path
@@ -75,10 +76,14 @@ def send_email(cfg: dict, to, subject: str, text: str, attachments=(), timeout: 
                            f"{MAX_ATTACHMENTS_MB:.0f} MB)")
     msg = build_message(cfg, rcpt, subject, text, attachments)
     ctx = ssl.create_default_context()
-    if port == 465:
-        srv = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx)
-    else:
-        srv = smtplib.SMTP(host, port, timeout=timeout)
+    try:
+        if port == 465:
+            srv = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx)
+        else:
+            srv = smtplib.SMTP(host, port, timeout=timeout)
+    except (ConnectionError, TimeoutError, socket.gaierror) as e:
+        raise RuntimeError(f"the mail server {host}:{port} could not be reached ({e.strerror or type(e).__name__}); "
+                           f"nothing was sent. Check its address and port, and that it is running.") from e
     with srv:
         if port != 465:
             srv.ehlo()
