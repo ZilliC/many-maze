@@ -117,13 +117,17 @@
       se pueden guardar teclas con errores (duplicadas nunca puntúan, nombre vacío se pierde)
       → tecla de un solo carácter con mensaje; nombre vacío avisado; guardar con errores pregunta, «No» por defecto (merge 4b93b0f)
 - [ ] Decidir H-046 (Obs) etapas duplicadas aceptadas; pruebas conservan una etapa que ya no existe
-- [ ] Arreglo: H-047 (S3) «Zone grid» de celdas cuadradas en arena no convexa (EPM, T) crea 0 celdas sin aviso
-- [ ] Arreglo: H-048 (S3) se aceptan formas de área cero (plantilla de ancho 0 → 0 px/cm, polígonos colineales o
+- [x] Arreglo: H-047 (S3) «Zone grid» de celdas cuadradas en arena no convexa (EPM, T) crea 0 celdas sin aviso
+      → celdas recortadas al polígono; rejilla vacía rechazada (merge f40f1aa)
+- [x] Arreglo: H-048 (S3) se aceptan formas de área cero (plantilla de ancho 0 → 0 px/cm, polígonos colineales o
       cruzados, `centre_fraction` 1.0)
-- [ ] Arreglo: H-049 (S3) `{` o `}` en el nombre de una zona rompe las fórmulas de cálculo
+      → formas de área cero y plantillas degeneradas rechazadas con aviso (merge f40f1aa)
+- [x] Arreglo: H-049 (S3) `{` o `}` en el nombre de una zona rompe las fórmulas de cálculo
+      → `{}` en nombres se cambian a `()` con aviso; nombres viejos intactos hasta editarlos (merge f40f1aa)
 - [ ] Arreglo: H-050/H-051 (Obs) «Duplicate» de zona no copia reglas/opciones; varias entradas inválidas sin aviso
       (Y fuera del rectángulo, agujero Barnes fuera de rango, renombrar vacío, archivo de aparato vacío, borrar el
       último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
+      → H-050 arreglado (Duplicate copia todo, f40f1aa); falta H-051
 - [ ] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
       (distancia 1511 vs 2135) mirando cuadros con el track superpuesto; ¿arreglo o es la referencia?
 - [x] Arreglo: H-052 (S3) un campo de animal llamado `Stage`/`Apparatus`/`Test` sobrescribe esa columna en Results
