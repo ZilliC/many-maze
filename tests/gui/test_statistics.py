@@ -89,3 +89,25 @@ def test_correlation(page):
     assert page.corr_canvas.figure.axes
     page.set_inputs(corr_method="pearson")
     assert page.corr["method"] == "pearson" and "Pearson" in page.summary()
+
+
+def test_two_factors_first_factor_can_be_a_group(page):
+    """H-008: the 1st factor of Two factors is any factor, not only Stage / Trial / Period."""
+    page.tabs.setCurrentIndex(1)
+    assert page.tc_x.findData("Group") >= 0
+    page.set_inputs(measure="Total distance (cm)", tc_x="Group", tc_by="(none)", filter=None)
+    assert page.analysis() is not None
+    assert page.settings()["tc_x"] == "Group"
+
+
+def test_filter_not_equal_leaves_a_level_out(page):
+    """H-009: the filter has “≠”, e.g. to run a paired test on two of the three periods."""
+    page.tabs.setCurrentIndex(0)
+    page.set_inputs(measure="Total distance (cm)", factor="Period", paired=True, parametric=True,
+                    filter=("Group", "Control", "≠"))
+    assert page.settings()["filter"] == ["Group", "Control", "≠"]
+    assert page.result["descriptive"]["0-4 s"]["n"] == 3  # the other group only
+    page.set_inputs(factor="Group")
+    assert page.result["groups"] == ["Anxious"] or "Control" not in page.result["groups"]
+    page.set_inputs(filter=("Group", "Control"))
+    assert page.settings()["filter"] == ["Group", "Control"]

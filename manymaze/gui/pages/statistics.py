@@ -144,6 +144,11 @@ class StatisticsPage(Page):
                                "“Set segment length” on the Data page)")
         self.filter_field = _wide_combo()
         self.filter_value = _wide_combo()
+        self.filter_op = QComboBox()
+        self.filter_op.addItem("=", "=")
+        self.filter_op.addItem("≠", "≠")
+        self.filter_op.setToolTip("“=” keeps only the tests with this value; “≠” keeps all the others "
+                                  "(e.g. Stage ≠ Day 3 to compare two stages)")
         self.param_radio = QRadioButton("Parametric")
         self.param_radio.setChecked(True)
         self.nonparam_radio = QRadioButton("Non-parametric")
@@ -215,7 +220,7 @@ class StatisticsPage(Page):
         self.cat_rows = _wide_combo()
         self.cat_col = _wide_combo()
         self.cat_col.setToolTip("A categorical result (e.g. search strategy, first choice) or a factor")
-        for w in (self.factor, self.period, self.filter_value, self.plot_kind, self.method, self.posthoc,
+        for w in (self.factor, self.period, self.filter_value, self.filter_op, self.plot_kind, self.method, self.posthoc,
                   self.control, self.error, self.tc_x, self.tc_by, self.design, self.tc_plot, self.corr_method,
                   self.corr_by, self.f1, self.f2, self.f3, self.cat_rows, self.cat_col):
             w.currentIndexChanged.connect(self._changed)
@@ -243,7 +248,7 @@ class StatisticsPage(Page):
         for c in (self.filter_field, self.filter_value):
             c.setMinimumContentsLength(4)
         fl.addWidget(self.filter_field, 1)
-        fl.addWidget(QLabel("="))
+        fl.addWidget(self.filter_op)
         fl.addWidget(self.filter_value, 1)
         radios = QWidget()
         rl = QHBoxLayout(radios)
@@ -618,7 +623,7 @@ class StatisticsPage(Page):
         fields = ["(all rows)"] + [c for c in factors if c != "Period"]
         self._set_items(self.filter_field, fields, self.filter_field.currentData())
         self._fill_filter_values()
-        xs = [c for c in ("Stage", "Trial", "Period") if c in factors]
+        xs = list(factors)
         default_x = "Period" if "Period" in xs and len(self.levels("Period")) > 2 and \
             len(self.levels("Stage")) < 2 else ("Stage" if "Stage" in xs else (xs[0] if xs else None))
         self._set_items(self.tc_x, xs, self.tc_x.currentData() or default_x)
@@ -650,6 +655,7 @@ class StatisticsPage(Page):
     def _fill_filter_values(self):
         field = self.filter_field.currentData()
         enabled = bool(field) and field != "(all rows)"
+        self.filter_op.setEnabled(enabled)
         vals = self.levels(field) if enabled else []
         self._set_items(self.filter_value, vals, self.filter_value.currentData())
         self.filter_value.setEnabled(enabled)
@@ -682,7 +688,9 @@ class StatisticsPage(Page):
             if m is not None:
                 out[k] = m
         field, value = self.filter_field.currentData(), self.filter_value.currentData()
-        out["filter"] = [field, value] if field and field != "(all rows)" and value is not None else None
+        out["filter"] = None
+        if field and field != "(all rows)" and value is not None:
+            out["filter"] = [field, value] + (["≠"] if self.filter_op.currentData() == "≠" else [])
         out.update(control=self.control.currentData(), parametric=self.is_parametric(), paired=self.paired.isChecked(),
                    mu=self.mu.value(), points=self.points.isChecked(), alpha=self.alpha.value())
         return out
@@ -750,7 +758,8 @@ class StatisticsPage(Page):
         elif k == "paired":
             self.paired.setChecked(bool(v))
         elif k == "filter":
-            field, value = v if v else ("(all rows)", None)
+            field, value, *op = v if v else ("(all rows)", None)
+            self.filter_op.setCurrentIndex(1 if op and op[0] in ("≠", "!=") else 0)
             self.filter_field.setCurrentIndex(max(0, self.filter_field.findData(field)))
             self._fill_filter_values()
             if value is not None:
@@ -770,7 +779,8 @@ class StatisticsPage(Page):
         field = self.filter_field.currentData()
         if field and field != "(all rows)" and self.filter_value.currentData() is not None:
             v = self.filter_value.currentData()
-            rows = [r for r in rows if str(r.get(field, "")) == v]
+            keep = self.filter_op.currentData() == "="
+            rows = [r for r in rows if (str(r.get(field, "")) == v) == keep]
         if use_period and self.period.currentData() is not None:
             per = self.period.currentData()
             rows = [r for r in rows if str(r.get("Period", WHOLE)) == per]
@@ -780,7 +790,7 @@ class StatisticsPage(Page):
         """period / filt arguments of the analyses: the tests included, as mentioned in titles and summaries."""
         filt = None
         if self.filter_value.isEnabled() and self.filter_value.currentData() is not None:
-            filt = (self.filter_field.currentData(), self.filter_value.currentData())
+            filt = (self.filter_field.currentData(), self.filter_value.currentData(), self.filter_op.currentData())
         return {"period": self.period.currentData() if self.period.count() > 1 else None, "filt": filt}
 
     # ------------------------------------------------------------------ compute
