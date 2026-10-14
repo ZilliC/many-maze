@@ -139,6 +139,7 @@ def check(p: Path) -> bool:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # ✓/✗ on a Windows console (cp1252)
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     results = [check(Path(a)) for a in sys.argv[1:]]

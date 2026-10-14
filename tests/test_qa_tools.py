@@ -11,7 +11,8 @@ ROWS = [{"Test": i, "Animal": f"A{i}", "Period": "Whole test", "Total distance (
 
 
 def run(tool, *args):
-    return subprocess.run([sys.executable, str(TOOLS / tool), *map(str, args)], capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(TOOLS / tool), *map(str, args)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
 
 def test_compare_slk_and_xlsx_match_csv(tmp_path):

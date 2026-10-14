@@ -641,15 +641,16 @@ def test_save_errors_name_the_users_file_not_the_temporary_one(tmp_path):
     with pytest.raises(FileNotFoundError) as e:
         write_text_atomic(tmp_path / "missing folder" / "x.csv", "a")
     assert "“x.csv” was not found" in user_message(e.value) and ".tmp" not in user_message(e.value)
-    ro = tmp_path / "ro"
-    ro.mkdir()
-    ro.chmod(0o555)
-    try:
-        with pytest.raises(PermissionError) as e:
-            write_text_atomic(ro / "x.csv", "a")
-        assert "“x.csv”" in user_message(e.value) and ".tmp" not in user_message(e.value)
-    finally:
-        ro.chmod(0o755)
+    if sys.platform != "win32":  # a read-only folder (chmod) does not stop writing on Windows
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            with pytest.raises(PermissionError) as e:
+                write_text_atomic(ro / "x.csv", "a")
+            assert "“x.csv”" in user_message(e.value) and ".tmp" not in user_message(e.value)
+        finally:
+            ro.chmod(0o755)
     with pytest.raises(OSError) as e:
         write_text_atomic(tmp_path / ("l" * 300 + ".csv"), "a")
     assert ".tmp" not in user_message(e.value) and "lll" in user_message(e.value)
