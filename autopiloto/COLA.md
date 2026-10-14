@@ -131,8 +131,10 @@
       último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
       → H-050 arreglado (Duplicate copia todo, f40f1aa); falta H-051
       → H-051 arreglado: Y maze, Barnes, renombrar vacío, importar vacío, extensión de mapa, Results sin aparato (merge b71e773)
-- [ ] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
+- [x] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
       (distancia 1511 vs 2135) mirando cuadros con el track superpuesto; ¿arreglo o es la referencia?
+      → rastreo correcto en ambas. mHFD12: la rata sale ~95 s, la referencia sigue un objeto del borde (inválida).
+        mHFD11: la referencia escala con p1–p99 de las posiciones (~1,3× inflado). % centro 24 vs 37 sin explicar
 - [x] Arreglo: H-052 (S3) un campo de animal llamado `Stage`/`Apparatus`/`Test` sobrescribe esa columna en Results
       → nombres reservados rechazados; experimentos viejos cargan (merge a893721)
 - [x] Arreglo: H-053 (S3) «Import animals» sin avisos: ID duplicado sobrescribe, filas sin ID se pierden, pesos malos

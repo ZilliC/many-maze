@@ -37,3 +37,4 @@
 2026-10-14 · Arreglo H-062…H-066, H-069 procedimientos · arreglados; 1360 tests antes del merge · 5e24b1a
 2026-10-14 · Arreglo H-051 aparatos y H-076 modo oscuro · arreglados; 1377 tests · b71e773
 2026-10-14 · Arreglo H-020, H-031/H-033/H-034 · arreglados; 1387 tests · 8f6467e
+2026-10-14 · Revisar OFT mHFD12/mHFD11 a ojo · rastreo correcto; referencias con artefactos (mHFD12 objeto del borde tras 95 s; escala p1–p99) · /tmp/oft_review
