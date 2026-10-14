@@ -51,3 +51,27 @@ def test_a_change_of_the_whole_arena_is_not_an_animal():
     cv2.ellipse(f, (150, 120), (20, 9), 0, 0, 360, 200, -1)
     d = tr.process(f)[0][0]
     assert d.detected and abs(d.x - 150) < 3
+
+
+def test_a_hand_over_the_grid_at_the_start_is_not_a_ghost_in_the_background():
+    """H-025 (fC1): the experimenter's head covers the arena in the first frames and hides the grid, which has sharp
+    edges in the median background: the edge test took it for a ghost of the animal and copied it into the model,
+    spoiling the floor (a brighter patch of the floor became a permanent "animal" that outscored the real one)."""
+    floor = _grid(0)
+    cv2.rectangle(floor, (225, 150), (290, 215), 75, -1)  # a brighter patch of the floor (also in the median model)
+    tr = ArenaTracker(DetectionSettings(head_tail=False, record_outline=False))
+    tr.set_background(floor)
+    for _ in range(8):
+        f = floor.copy()
+        cv2.ellipse(f, (255, 180), (50, 45), 0, 0, 360, 12, -1)  # the head: dark, smooth, over grid lines and patch
+        f = cv2.GaussianBlur(f, (0, 0), 3)
+        tr.process(f)
+    assert abs(int(tr.background[182, 258]) - 75) < 10
+    errors = []
+    for i in range(40):
+        f = floor.copy()
+        x, y = 60 + 3 * i, 100 + 20 * np.sin(i / 8)
+        cv2.ellipse(f, (int(x), int(y)), (16, 8), 0, 0, 360, 130, -1)
+        d = tr.process(f)[0][0]
+        errors.append(np.hypot(d.x - x, d.y - y) if d.detected else np.inf)
+    assert np.percentile(errors, 80) < 12, np.round(errors)  # not the patch, 150 px away
