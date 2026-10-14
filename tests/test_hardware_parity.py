@@ -577,7 +577,7 @@ def test_missing_optional_packages_are_reported():
         dm.open()
     finally:
         builtins.__import__ = real
-    assert any("nidaqmx" in e for e in dm.errors) and any("labjack-ljm" in e for e in dm.errors)
+    assert any("National Instruments" in e for e in dm.errors) and any("LabJack" in e for e in dm.errors)
 
 
 def test_thermostat_class_is_exported():
