@@ -1274,6 +1274,8 @@ class MainWindow(QMainWindow):
         n = len(dlg.result or [])
         self.mark_dirty()
         self.status(f"Imported {n} {'animals' if kind == 'animals' else 'tests'}.")
+        if kind == "animals" and getattr(dlg.result, "warnings", None):
+            QMessageBox.information(self, "Import animals", dlg.result.summary())
         self.show_page(self.page("AnimalsPage" if kind == "animals" else "TestsPage"))
         return dlg.result
 
