@@ -370,6 +370,8 @@ REPEAT_CHANGE_RATIO = 0.3
 
 # structures of the background thinner than this (px) are lines (grid, bars, a wall's edge): see _edge_tolerant
 THIN_LINE_PX = 9
+# a detected region larger than this share of the arena is a change of the whole scene, never the animal
+MAX_ARENA_SHARE = 0.5
 
 
 class ArenaTracker:
@@ -465,6 +467,7 @@ class ArenaTracker:
                 self.mask = cv2.dilate(arena_mask, k)
         else:
             self.roi = None
+        self._mask_area = int(cv2.countNonZero(self.mask)) if self.mask is not None else 0
         self._region_key = None
         self._region_box = None
         self._mask_c = self.mask  # the mask of the processed region (see _region)
@@ -724,6 +727,8 @@ class ArenaTracker:
                 continue
             if self.s.max_area_px and a > self.s.max_area_px:
                 continue
+            if self._mask_area and a > MAX_ARENA_SHARE * self._mask_area:
+                continue  # most of the arena changed at once (lighting, camera exposure): not an animal
             blobs.append((a, c))
         # ghosts of the animal in the model: from a live-image background, and also from a median one in which the
         # animal sat for most of the video (novel tank): a ghost that outscores the animal would hold the track (H-006)

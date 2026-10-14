@@ -35,3 +35,19 @@ def test_a_grid_that_shifts_one_pixel_does_not_hide_the_animal():
         d = tr.process(f)[0][0]
         errors.append(np.hypot(d.x - x, d.y - y) if d.detected else np.inf)
     assert np.percentile(errors, 80) < 6, np.round(errors)
+
+
+def test_a_change_of_the_whole_arena_is_not_an_animal():
+    """H-026: the lighting (or the camera's exposure) changed after the background was taken: the whole empty arena
+    differs from it, and that one huge region was reported as the animal in every frame (98.8 % detected)."""
+    mask = np.zeros((H, W), np.uint8)
+    mask[20:220, 20:300] = 255
+    tr = ArenaTracker(DetectionSettings(head_tail=False, record_outline=False), mask)
+    tr.set_background(np.full((H, W), 60, np.uint8))
+    dets = [tr.process(np.full((H, W), 140, np.uint8))[0][0] for _ in range(10)]
+    assert not any(d.detected for d in dets)
+    # a real animal on the same brighter floor is still found
+    f = np.full((H, W), 60, np.uint8)
+    cv2.ellipse(f, (150, 120), (20, 9), 0, 0, 360, 200, -1)
+    d = tr.process(f)[0][0]
+    assert d.detected and abs(d.x - 150) < 3
