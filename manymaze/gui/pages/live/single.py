@@ -523,10 +523,14 @@ class SingleTestMixin:
             for t, trig, act, payload in fired[self._fired_seen:]:
                 self._log(f"{fmt_time(t)}  rule: {trig} → {act} {payload}".rstrip())
             self._fired_seen = len(fired)
+            new_log = info["proc_log"][self._proc_log_seen:]
+            # a procedure's log / message action is written to both logs: show it once (the test log's line)
+            twice = {f"{t:.2f}s {m}" for t, m in new_log}
             for line in info["outputs"][self._outputs_seen:]:
-                self._log(f"  {line}")
+                if line not in twice:
+                    self._log(f"  {line}")
             self._outputs_seen = len(info["outputs"])
-            for t, m in info["proc_log"][self._proc_log_seen:]:
+            for t, m in new_log:
                 self._log(f"  {fmt_time(t)} {m}")
             self._proc_log_seen = len(info["proc_log"])
             if state == "finished":
@@ -704,7 +708,8 @@ class SingleTestMixin:
     def _show_popup(self, pop: dict, entry=None):
         """A procedure's "show a pop-up message": a non-modal message box (the test keeps running)."""
         prefix = f"{entry.label} · " if entry is not None else ""
-        self._log(f"{prefix}{fmt_time(pop.get('t', 0))}  message: {pop.get('text', '')}", entry)
+        if entry is not None:  # (in a single test the "Message:" line of the test log says it)
+            self._log(f"{prefix}{fmt_time(pop.get('t', 0))}  message: {pop.get('text', '')}", entry)
         box = QMessageBox(QMessageBox.Information, f"{prefix}{pop.get('title') or 'Procedure'}",
                           str(pop.get("text", "")), QMessageBox.Ok, self)
         box.setModal(False)

@@ -247,6 +247,24 @@ def test_procedure_log_lines_are_shown_once(win):
     page.stop_test(save=False)
 
 
+def test_a_procedure_message_is_logged_once_not_three_or_four_times(win):
+    """H-065: a "log" / "pop-up" action used to appear as the rule line, the output line, the procedure-log line
+    and the pop-up line; now as the rule line and one line with the text."""
+    page, video = _arm_single(win, duration=0)
+    src = VideoSource(video)
+    ok, f = src.read()
+    src.release()
+    page.session.outputs.log.append("1.00s Message: hello")  # what the engine writes to both logs
+    page.session.log.append((1.0, "Message: hello"))
+    page.session.outputs.log.append("1.00s watch this")
+    page.session.log.append((1.0, "watch this"))
+    page.feed_frame(f, 0.0)
+    page._show_popup({"t": 1.0, "text": "hello", "title": "Procedure"})
+    lines = [page.log.item(i).text() for i in range(page.log.count())]
+    assert sum("hello" in x for x in lines) == 1 and sum("watch this" in x for x in lines) == 1
+    page.stop_test(save=False)
+
+
 def test_scoring_when_the_test_ends_meanwhile(win):
     p = win.project
     p.behaviours = [Behaviour("Grooming", "g", "state", group="g1"), Behaviour("Rearing", "r", "state", group="g1")]
