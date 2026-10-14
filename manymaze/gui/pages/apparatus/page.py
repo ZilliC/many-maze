@@ -398,6 +398,7 @@ class ApparatusPage(Page):
         """Another user, or other security settings: the apparatus is editable or read-only."""
         if self.locked:
             self.set_tool("select")
+            self.view.scene().clearSelection()  # what the previous user left selected must not be editable
         self._set_enabled(self.app is not None)
 
     def _names(self, exclude: Apparatus | None = None):
@@ -925,7 +926,7 @@ class ApparatusPage(Page):
 
     def delete_selected(self) -> bool:
         keys = self.view.selected_keys()
-        if not keys or self.app is None:
+        if not keys or self.app is None or self.locked:
             return False
         with self._edit():
             for kind, idx in sorted(keys, key=lambda k: -k[1]):
@@ -938,7 +939,7 @@ class ApparatusPage(Page):
             exists = self.app is not None and self.app.arena is not None
         else:
             exists = self._obj(kind, index) is not None
-        if not exists:
+        if not exists or self.locked:
             return False
         with self._edit():
             self.app.remove(kind, index)
@@ -1091,7 +1092,7 @@ class ApparatusPage(Page):
         """Paste copied zones / points / lines (offset when pasted into the apparatus they came from)."""
         app = self.app
         clip = ApparatusPage._clipboard
-        if app is None or not clip:
+        if app is None or not clip or self.locked:
             return 0
         off = 12.0 * (clip.setdefault("pasted", {}).get(id(app), 0) + (1 if clip.get("source") == id(app) else 0))
         new_keys = []

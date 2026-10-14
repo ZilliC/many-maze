@@ -192,3 +192,27 @@ def test_protect_experiment(win, monkeypatch):
     win.answers = ["bob-pw"]
     win.sign_in("Bob")
     assert not win.protect_experiment(ProtectDialog(q, win))
+
+
+def test_locked_protocol_keeps_zones_selected_before_the_user_changed(win):
+    """H-056: Delete / Backspace on the map must not delete what the administrator left selected."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+
+    win.answers = ["ann-pw"]
+    win.sign_in("Ann")
+    sec.set_security(win.project, lock_protocol=True)
+    appar = win.goto("ApparatusPage")
+    appar.select_all_act.trigger()
+    n = len(appar.app.zones)
+    assert n and appar.view.selected_keys()
+    win.answers = ["bob-pw"]
+    win.sign_in("Bob")
+    assert appar.locked and not appar.view.selected_keys()  # the selection does not outlive the user change
+    for key in (Qt.Key_Delete, Qt.Key_Backspace):
+        appar.view.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, key, Qt.NoModifier))
+    assert len(appar.app.zones) == n
+    appar.view.scene().items()[0].setSelected(True) if appar.view.scene().items() else None
+    assert not appar.delete_selected() and len(appar.app.zones) == n
+    assert not appar.delete_item("zone", 0) and len(appar.app.zones) == n
+    assert appar.paste() == 0
