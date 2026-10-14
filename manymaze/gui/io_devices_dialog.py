@@ -705,6 +705,10 @@ class IODevicesDialog(QDialog):
                 QMessageBox.warning(self, "I/O devices", f"{c.get('name', '?')}: each channel name can be used "
                                                          f"only once in a device: {', '.join(twice)}")
                 return
+        problems = [x for c in self.configs for x in ioconfig.notify_problems(c)]
+        if problems:
+            QMessageBox.warning(self, "I/O devices", "\n".join(problems))
+            return
         if not self.check_bandwidth():
             return
         extra = self.project.settings_extra

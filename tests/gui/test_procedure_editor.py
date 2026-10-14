@@ -489,3 +489,24 @@ def test_io_dialog_test_message_stays_visible(monkeypatch):
     dlg._poll()
     assert dlg.conn_lbl.text().startswith("Connected")
     dlg.disconnect_devices()
+
+
+def test_io_dialog_refuses_bad_alert_settings(monkeypatch):
+    """H-067: e-mail alerts: a valid port and valid addresses are needed to accept the dialog."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a[2]) or QMessageBox.Ok)
+    p = make_project()
+    p.io_devices.append({"name": "mail", "type": "notify", "smtp_host": "localhost", "smtp_port": "abc",
+                         "email_to": "no-es-correo", "from_addr": "", "channels": []})
+    dlg = IODevicesDialog(p)
+    dlg.accept()
+    assert shown and "SMTP port" in shown[-1] and "no-es-correo" in shown[-1]
+    assert dlg.result() == 0
+    from manymaze.core.ioconfig import notify_problems
+    ok = {"name": "m", "type": "notify", "smtp_port": 2525, "email_to": "a@b.org, c.d@lab.edu.mx"}
+    assert notify_problems(ok) == []
+    assert notify_problems({**ok, "smtp_port": 70000}) and notify_problems({**ok, "smtp_port": "0"})
+    assert notify_problems({**ok, "smtp_port": ""}) == []
+    from manymaze.core.mail import send_email
+    with pytest.raises(RuntimeError, match="not a number"):
+        send_email({"smtp_host": "h", "smtp_port": "abc"}, "a@b.org", "s", "t")
