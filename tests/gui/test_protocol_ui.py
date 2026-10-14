@@ -324,3 +324,29 @@ def test_h045_keys_with_errors_are_reported_and_not_saved_silently(win, monkeypa
     asked.clear()
     assert win.save() is True and not asked
     assert len(p.behaviours) == n
+
+
+def test_h041_colour_text_is_checked_on_entry(win):
+    ex = win.goto("ExperimentPage")
+    click_element(win, ex, "tracking")
+    ed = ex.det_form.editors
+    ed["method"].setCurrentIndex(ed["method"].findData("colour"))
+    ed["target_colour"].setText("red")
+    ed["target_colour"].editingFinished.emit()
+    lbl = ex.det_form.problem_labels["target_colour"]
+    assert not lbl.isHidden() and "Invalid colour" in lbl.text() and "#rrggbb" in lbl.text()
+    ed["target_colour"].setText("#00ff00")
+    ed["target_colour"].editingFinished.emit()
+    assert lbl.isHidden()
+    ed["identity_colours"].setText("#ff0000, blue")
+    ed["identity_colours"].editingFinished.emit()
+    assert "Invalid colour" in ex.det_form.problem_labels["identity_colours"].text()
+    ed["identity_colours"].setText("#ff0000, #0000ff")
+    ed["identity_colours"].editingFinished.emit()
+    assert ex.det_form.problem_labels["identity_colours"].isHidden()
+    # the target colour only matters when the animal is detected by its colour
+    ed["target_colour"].setText("red")
+    ed["target_colour"].editingFinished.emit()
+    assert not lbl.isHidden()
+    ed["method"].setCurrentIndex(ed["method"].findData("background"))
+    assert lbl.isHidden()

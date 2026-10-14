@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QGridLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from ....core.tracking import DetectionSettings, arena_tracker, compute_background, draw_overlay
+from ....core.tracking import DetectionSettings, arena_tracker, colour_problem, compute_background, draw_overlay
 from ... import theme
 from ...widgets import Worker
-from ..base import DETECTION_SPEC, PRESET_TIP, AnimalPresetCombo, SettingsForm, apply_preset_to_form
+from ..base import DETECTION_CHECKS, DETECTION_SPEC, PRESET_TIP, AnimalPresetCombo, SettingsForm, apply_preset_to_form
 
 SPEC_ATTRS = [a for a, *_ in DETECTION_SPEC]
 
@@ -21,7 +21,7 @@ class DetectionMixin:
         self.det_lbl = QLabel()
         self.det_lbl.setWordWrap(True)
         lay.addWidget(self.det_lbl)
-        self.det_form = SettingsForm(DETECTION_SPEC)
+        self.det_form = SettingsForm(DETECTION_SPEC, checks=DETECTION_CHECKS)
         self.det_form.changed.connect(self._detection_changed)
         self.preset = AnimalPresetCombo()
         self.preset.setMinimumWidth(140)
@@ -74,6 +74,11 @@ class DetectionMixin:
                 mask = app.arena_or_bounds().mask((h, w))
             except ValueError:
                 mask = None
+        problem = colour_problem(s)
+        if problem:  # say so (once per frame, quietly) instead of failing in the tracker
+            hud.append((problem, "#fbbf24"))
+            self._set_preview_info(f"<span style='color:{theme.ERROR}'>{problem}</span>")
+            return draw_overlay(frame, [], app if draw_zones else None)
         tracker = arena_tracker(s, mask, (h, w))  # downscaled as tracking will be (Downscale before tracking)
         if s.method == "background":
             key = self.bg_key(s)

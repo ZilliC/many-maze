@@ -29,7 +29,7 @@ from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
 from ._results_cache import get_rows, info_columns
-from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
+from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_CHECKS, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
                    FST_SPEC, PRESET_TIP, AnimalPresetCombo, Page, SettingsForm, apply_preset_to_form, property_form)
 from .experiment_calcs import CalculationsMixin, PluginsMixin
 from .experiment_keys import KeysMixin
@@ -254,7 +254,7 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
                     "padding:6px 8px;")
         self.takenote_lbl.hide()
         pg.add(self.takenote_lbl)
-        self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS)
+        self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS, checks=DETECTION_CHECKS)
         self.det_form.changed.connect(self.main.mark_dirty)
         self.det_form.changed.connect(self._update_pose_box)
         self.preset = AnimalPresetCombo()
