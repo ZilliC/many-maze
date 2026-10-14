@@ -55,12 +55,15 @@
       → mensajes de una línea y código 1 (merge dea53d0)
 - [x] Arreglo: H-015 (S3) CLI `-o` con extensión no soportada escribe CSV en silencio; `report -o x.csv` escribe HTML
       → `-o` validado: tablas y `.html/.htm` para report/protocol (merge dea53d0)
-- [ ] Arreglo: H-017 (herramienta) `comparar_con_referencia.py` falla con `.slk` y `.xlsx --bins`; `inspeccionar.py`
+- [x] Arreglo: H-017 (herramienta) `comparar_con_referencia.py` falla con `.slk` y `.xlsx --bins`; `inspeccionar.py`
       se cae si el archivo no existe; `referencia/` es anterior a H-P01 (regenerar)
+      → herramientas arregladas, `--hoja` nuevo (merge 220df68)
 - [ ] Decidir H-016 (Obs) `--bbox` fuera de imagen da ceros, `--size-cm` negativo se ignora, `demo` sobre carpeta
       existente la regenera (la app la abre)
-- [ ] Arreglo: H-018 (S3) importar XML de ANY-maze roto da «Something went wrong unexpectedly…» + Traceback ParseError
-- [ ] Arreglo: H-019 (S3) importar dos veces el mismo XML duplica pruebas y animales sin avisar
+- [x] Arreglo: H-018 (S3) importar XML de ANY-maze roto da «Something went wrong unexpectedly…» + Traceback ParseError
+      → mensaje «damaged or incomplete…», sin traceback (merge 220df68)
+- [x] Arreglo: H-019 (S3) importar dos veces el mismo XML duplica pruebas y animales sin avisar
+      → avisa y pregunta antes de reimportar, «No» por defecto (merge 220df68)
 - [ ] Arreglo: H-020 (S3) mapa de zonas 80×60 en un aparato de 640×360 no se reescala ni avisa (y rendija de 1 px
       entre Left y Right)
 - [ ] Arreglo: H-021…H-024 (S4) informe HTML `statistic=nan` en medidas constantes; correo con servidor apagado
