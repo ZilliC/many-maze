@@ -3,6 +3,7 @@ helpers and record tables."""
 
 from __future__ import annotations
 
+import time
 import traceback
 from contextlib import contextmanager
 from typing import Callable
@@ -235,6 +236,8 @@ class VideoPlayer(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.speed = 1.0
+        self._clock = time.monotonic
+        self._t0, self._i0, self._last = 0.0, 0, 0
         self.range_start = 0  # frames
         self.range_end: int | None = None
 
@@ -337,8 +340,14 @@ class VideoPlayer(QWidget):
     def play(self):
         if self.source is None:
             return
-        self.timer.start(max(1, int(1000 / (self.fps * self.speed))))
+        # up to 1×: one frame per tick; faster: the frame shown follows the clock (frames are skipped), so 4× and 8×
+        # are really 4 and 8 times real time however fast the video can be decoded
+        self.timer.start(max(1, int(1000 / (self.fps * min(self.speed, 1.0)))))
+        self._rebase()
         self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+
+    def _rebase(self):
+        self._t0, self._i0, self._last = self._clock(), self.index, self.index
 
     def pause(self):
         self.timer.stop()
@@ -365,9 +374,13 @@ class VideoPlayer(QWidget):
     def _tick(self):
         if self.source is None:
             return
-        skip = max(1, int(round(self.speed / 2))) if self.speed > 2 else 1
-        if skip > 1:
-            self.seek(self.index + skip)
+        if self.speed > 1:
+            if self.index != self._last:  # the user moved the slider meanwhile
+                self._rebase()
+            target = self._i0 + int((self._clock() - self._t0) * self.fps * self.speed)
+            if target > self.index:
+                self.seek(target)
+            self._last = self.index
         else:
             ok, f = self.source.read()
             if not ok:

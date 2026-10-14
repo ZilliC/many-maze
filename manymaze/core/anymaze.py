@@ -578,13 +578,41 @@ def mask_polygon(mask: np.ndarray, epsilon: float = 0.5) -> list[tuple[float, fl
     if not cs:
         return []
     c = cv2.approxPolyDP(max(cs, key=cv2.contourArea), epsilon, True)
-    return [(float(x), float(y)) for x, y in c.reshape(-1, 2)]
+    pts = c.reshape(-1, 2).astype(float) + 0.5  # pixel centres -> image coordinates (pixel i covers i..i+1)
+    n = len(pts)
+    if n < 3:
+        return [(float(x), float(y)) for x, y in pts]
+    # grow the outline by half a pixel so it follows the outer pixel edges: neighbouring zones then meet exactly
+    area = float(np.sum(pts[:, 0] * np.roll(pts[:, 1], -1) - np.roll(pts[:, 0], -1) * pts[:, 1]))
+    sign = 1.0 if area > 0 else -1.0
+    out = []
+    for k in range(n):
+        a, p, b = pts[k - 1], pts[k], pts[(k + 1) % n]
+        normals = []
+        for d in (p - a, b - p):
+            ln = float(np.hypot(*d))
+            if ln:
+                normals.append(np.array([d[1], -d[0]]) * sign / ln)  # outward normal of that edge
+        if not normals:
+            out.append((float(p[0]), float(p[1])))
+            continue
+        m = sum(normals)
+        mm = float(np.hypot(*m))
+        if mm < 1e-9:
+            q = p + 0.5 * normals[0]
+        else:
+            m = m / mm
+            cosh = max(float(np.dot(m, normals[0])), 0.5)  # miter, limited on very sharp corners
+            q = p + m * (0.5 / cosh)
+        out.append((float(q[0]), float(q[1])))
+    return out
 
 
-def zone_maps_apparatus(paths, project=None) -> list[Apparatus]:
+def zone_maps_apparatus(paths, project=None, rescaled: list | None = None) -> list[Apparatus]:
     """Apparatus built from ANY-maze zone map files (individual and / or combined; several apparatus are told apart
     by the names in the files). With a project, they are added to it, replacing the zones of an apparatus of the
-    same name (its calibration is kept). A moveable zone exported in several positions gets the first one."""
+    same name (its calibration is kept; zones of a map of another size are stretched to the apparatus image and the
+    apparatus names are appended to `rescaled`). A moveable zone exported in several positions gets the first one."""
     by_app: dict[str, Apparatus] = {}
     seen_pos: set[tuple[str, str]] = set()
     for p in paths:
@@ -610,13 +638,22 @@ def zone_maps_apparatus(paths, project=None) -> list[Apparatus]:
     if project is None:
         return apps
     out = []
+    if rescaled is None:
+        rescaled = []
     for app in apps:
         old = next((a for a in project.apparatus if a.name == app.name), None)
         if old is None:
             project.apparatus.append(app)
             out.append(app)
             continue
+        sx = sy = 1.0
+        if old.frame_size and app.frame_size and tuple(old.frame_size) != tuple(app.frame_size):
+            # the map was made at another frame size: stretch its zones onto the apparatus image
+            sx, sy = old.frame_size[0] / app.frame_size[0], old.frame_size[1] / app.frame_size[1]
+            rescaled.append(old.name)
         for z in app.zones:  # an existing apparatus keeps its other zones, points, lines and calibration
+            if (sx, sy) != (1.0, 1.0):
+                z.shape = z.shape.scaled(sx, sy)
             oz = old.zone(z.name)
             if oz is not None:
                 oz.shape = z.shape

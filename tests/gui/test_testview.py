@@ -321,3 +321,45 @@ def test_h076_detection_fields_fit_the_side_panel(view):
         if ed.isVisible():
             right = ed.mapTo(view.det_form, ed.rect().topRight()).x()
             assert right <= viewport_w, (name, right, viewport_w)
+
+
+def test_h031_fast_playback_follows_the_clock(view):
+    pl = view.player
+    now = [100.0]
+    pl._clock = lambda: now[0]
+    pl.seek(0)
+    for speed in (4.0, 8.0):
+        pl.pause()
+        pl.seek(0)
+        view.set_speed(speed)
+        pl.play()
+        now[0] += 0.5  # half a second of real time later
+        pl._tick()
+        assert pl.index == int(0.5 * pl.fps * speed)
+        pl.pause()
+        now[0] += 10
+
+
+def test_h033_mark_position_refuses_clicks_outside_the_frame(view):
+    tr = view.tracks[0]
+    view.player.seek_time(2.0)
+    j = view.sample_at(tr, 2.0)
+    before = (tr.x[j], tr.y[j])
+    view.mark_btn.setChecked(True)
+    view.advance_spin.setValue(0)
+    view.player.view.clicked.emit(-500.0, -500.0)
+    assert (view.tracks[0].x[j], view.tracks[0].y[j]) == before
+    assert "outside" in view.edit_lbl.text()
+    view.mark_btn.setChecked(False)
+
+
+def test_h034_copy_table_copies_only_the_visible_rows(view):
+    from PySide6.QtGui import QGuiApplication
+    view.refresh_results()
+    n = view.results_table.rowCount()
+    view.copy_results()
+    assert len(QGuiApplication.clipboard().text().splitlines()) == n + 1
+    view.results_filter.setText("distance")
+    view.copy_results()
+    lines = QGuiApplication.clipboard().text().splitlines()
+    assert 1 < len(lines) < n + 1 and all("distance" in ln.lower() for ln in lines[1:])

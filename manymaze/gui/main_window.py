@@ -1377,13 +1377,16 @@ class MainWindow(QMainWindow):
             if not paths:
                 return None
         try:
-            apps = zone_maps_apparatus(paths, p)
+            rescaled: list[str] = []
+            apps = zone_maps_apparatus(paths, p, rescaled)
         except Exception as e:
             error_box(self, "Import zone maps", e)
             return None
         self.mark_dirty()
         n = sum(len(a.zones) for a in apps)
-        self.status(f"Imported {n} zones into {', '.join(a.name for a in apps)}. Calibrate the apparatus if needed.")
+        self.status(f"Imported {n} zones into {', '.join(a.name for a in apps)}. Calibrate the apparatus if needed."
+                    + (f" The zone map had another size than the image of {', '.join(rescaled)}: the zones were "
+                       f"stretched to fit it." if rescaled else ""))
         self.show_page(self.page("ApparatusPage"))
         return apps
 
