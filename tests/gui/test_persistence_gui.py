@@ -86,3 +86,40 @@ def test_open_locked_experiment_read_only(tmp_path, monkeypatch):
     assert w.save()
     w.dirty = False
     w.close()
+
+
+def _reopen(w, p):
+    w.save()
+    path = p.path
+    w.dirty = False
+    w.close()
+    w2 = MainWindow()
+    w2.set_project(Project.load(path))
+    return w2
+
+
+def test_run_tests_settings_and_heat_max_persist(tmp_path):  # H-039, H-075
+    p = _saved(tmp_path)
+    w = MainWindow()
+    w.set_project(Project.load(p.path))
+    live = w.page("LivePage")
+    live.duration.setValue(33)
+    live.start_mode.setCurrentIndex(live.start_mode.findData("on_detection"))
+    live.record.setChecked(False)
+    w.page("ResultsPage").heat_max.setValue(9)
+    w2 = _reopen(w, p)
+    live = w2.page("LivePage")
+    assert live.duration.value() == 33
+    assert live.start_mode.currentData() == "on_detection"
+    assert not live.record.isChecked()
+    assert w2.page("ResultsPage").heat_max.value() == 9
+    w2.dirty = False
+    w2.close()
+
+
+def test_opening_does_not_dirty_the_experiment(tmp_path):
+    p = _saved(tmp_path)
+    w = MainWindow()
+    w.set_project(Project.load(p.path))
+    assert not w.dirty
+    w.close()

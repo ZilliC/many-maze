@@ -1126,6 +1126,11 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
             self.an_form.load(p.analysis)
             self.fst_form.load(p.analysis)
             self._update_fst()
+        if p.test_duration_s != self.duration.value() or p.start_mode != self.start_mode.currentData():
+            live = p.settings_extra.get("live")  # the protocol's new defaults replace the last run's
+            if isinstance(live, dict):
+                live.pop("duration_s", None)
+                live.pop("start_mode", None)
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
         self._follow_stage_renames(p)

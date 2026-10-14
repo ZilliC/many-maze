@@ -419,6 +419,7 @@ class ResultsPage(PlotViewsMixin, ExportsMixin, Page):
         self._detail_key = None
         self._names = _names(project)
         self.model.project = project
+        self.load_view_settings()
         # the experiment's default report is shown once its results are delivered (on_show)
         rep = default_report(project.reports) if project is not None else None
         self.report_name, self._report_pending, self._known_cols = (rep["name"] if rep else None), rep, set()

@@ -544,7 +544,11 @@ class SingleTestMixin:
             self.trial.setValue(t.trial)
             if t.apparatus:
                 self.apparatus.setCurrentText(t.apparatus)
-            self.duration.setValue(t.duration_s or self.project.test_duration_s)
+            self._loading = True  # (the duration of the chosen test, not a setting of the experiment)
+            try:
+                self.duration.setValue(t.duration_s or self.project.test_duration_s)
+            finally:
+                self._loading = False
         self._update_single_title()
 
     def _update_single_title(self, elapsed: float | None = None):
