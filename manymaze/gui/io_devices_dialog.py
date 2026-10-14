@@ -685,6 +685,13 @@ class IODevicesDialog(QDialog):
         if dup:
             QMessageBox.warning(self, "I/O devices", f"Device names must be unique: {', '.join(sorted(dup))}")
             return
+        for c in self.configs:
+            chans = [str(ch.get("name") or "").strip() for ch in c.get("channels", [])]
+            twice = sorted({n for n in chans if n and chans.count(n) > 1})
+            if twice:
+                QMessageBox.warning(self, "I/O devices", f"{c.get('name', '?')}: each channel name can be used "
+                                                         f"only once in a device: {', '.join(twice)}")
+                return
         if not self.check_bandwidth():
             return
         extra = self.project.settings_extra
