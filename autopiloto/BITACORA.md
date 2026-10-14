@@ -17,3 +17,4 @@
 2026-10-13 · Arreglo H-008/H-009/H-011 estadística · arreglados; oráculo B11 coincide; 1319 tests · 2bc39bc
 2026-10-13 · Arreglo H-012…H-015 línea de comandos · arreglados; 1321 tests · dea53d0
 2026-10-13 · Arreglo H-017/H-018/H-019 herramientas e importación ANY-maze · arreglados; 1325 tests · 220df68, 0b9c8f0
+2026-10-13 · Arreglo H-021…H-024 (S4) y H-029 herramienta · arreglados; 1334 tests · ef948c5

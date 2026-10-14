@@ -66,12 +66,15 @@
       → avisa y pregunta antes de reimportar, «No» por defecto (merge 220df68)
 - [ ] Arreglo: H-020 (S3) mapa de zonas 80×60 en un aparato de 640×360 no se reescala ni avisa (y rendija de 1 px
       entre Left y Right)
-- [ ] Arreglo: H-021…H-024 (S4) informe HTML `statistic=nan` en medidas constantes; correo con servidor apagado
+- [x] Arreglo: H-021…H-024 (S4) informe HTML `statistic=nan` en medidas constantes; correo con servidor apagado
       dice «file could not be read or written»; errores al guardar nombran un `.tmp`; «Colour by» ofrece
       «Defecation: count» y falla en silencio. Más: `inspeccionar.py` se cae con la línea `# …` de raw data
+      → nota «not computed…», mensaje de servidor de correo, nombre real del archivo, «Colour by» sin
+        medidas de puntuación manual (merge ef948c5)
 - [ ] Arreglo: H-025 (S2) OFT real: el rastreo se pega al borde de la caja (93 % de cuadros) sin aviso, en 3 de 6
       arenas; con la caja 15–20 px adentro rastrea bien (`~/mANY-MAZE-QA/2026-10-11_2224/salidas/B13/`)
 - [ ] Arreglo: H-026 (S3) arena vacía: el rastreo da 98,8 % de detección en un cruce de la rejilla (300 s)
 - [ ] Arreglo: H-027 (S3) MWM: distancia ×1,4–1,9 la referencia por los cuadros de la mano al soltar/recoger
-- [ ] Arreglo: H-029 (herramienta) umbral de `cabeza_real.py` pensado para menos fps
+- [x] Arreglo: H-029 (herramienta) umbral de `cabeza_real.py` pensado para menos fps
+      → umbral en px/s (60 px/s) (merge ef948c5)
 - [ ] Decidir H-028 (Obs) OFT: entradas al centro 2–5× la referencia; calidad 54,8 % en mHFD11
