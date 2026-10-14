@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, 
 from ....core import plots, security, templates
 from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
                                 load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
-from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
+from ....core.geometry import Ellipse, Polygon, Shape, polygon_problem, shape_from_dict
 from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
 from ....core.terminology import term
@@ -778,8 +778,11 @@ class ApparatusPage(Page):
                 if square or spec.get("square"):
                     p1 = EditorView.constrain(QPointF(x0, y0), QPointF(x1, y1), True)
                     x1, y1 = p1.x(), p1.y()
-                self.apply_template(spec["key"], min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0),
-                                    spec["params"], spec["name"], spec["replace"])
+                try:
+                    self.apply_template(spec["key"], min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0),
+                                        spec["params"], spec["name"], spec["replace"])
+                except ValueError as e:
+                    QMessageBox.warning(self, "Template", str(e))
             return
         if tool == "line":
             self.add_line(x0, y0, x1, y1)
@@ -793,6 +796,10 @@ class ApparatusPage(Page):
             x1, y1 = p1.x(), p1.y()
         xa, xb = sorted((x0, x1))
         ya, yb = sorted((y0, y1))
+        if xb - xa < 1 or yb - ya < 1:
+            QMessageBox.warning(self, "Shape", "The shape has no width or no height, so nothing was added. Drag "
+                                "in both directions.")
+            return
         if self.view.drag_kind() == "ellipse":
             shape = Ellipse((xa + xb) / 2, (ya + yb) / 2, (xb - xa) / 2, (yb - ya) / 2)
         else:
@@ -803,6 +810,10 @@ class ApparatusPage(Page):
             self.add_zone(shape)
 
     def finish_polygon(self, points):
+        problem = polygon_problem(points)
+        if problem:
+            QMessageBox.warning(self, "Polygon", problem)
+            return
         shape = Polygon([(float(x), float(y)) for x, y in points])
         if self.view.tool == "arena":
             self.set_arena(shape)
