@@ -314,3 +314,17 @@ def test_start_key_that_is_also_a_scoring_key_starts_the_test(win, monkeypatch):
     QApplication.sendEvent(target, QKeyEvent(QEvent.KeyRelease, Qt.Key_R, Qt.NoModifier, "r"))
     assert any("Rearing" in str(e) for e in page.session.events)
     page.stop_test(save=False)
+
+
+def test_start_switch_needs_a_configured_input(win, monkeypatch):
+    """H-036: 'On a start switch' with an empty input, or a device the project does not have, is not armed."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: shown.append(a[2]) or QMessageBox.Ok)
+    page = _arm_manual(win, monkeypatch, "input")
+    page.start_input.setText("")
+    assert not page.arm() and page.session is None and "start switch" in shown[-1].lower()
+    page.start_input.setText("box/start")
+    assert not page.arm() and page.session is None and "box" in shown[-1]
+    win.project.io_devices = [{"name": "box", "type": "virtual", "channels": [{"name": "start", "kind": "input"}]}]
+    assert page.arm() and page.session.state == "waiting"
+    page.stop_test(save=False)

@@ -600,6 +600,14 @@ class MultiTestMixin:
             else:
                 self._notice("Run tests", f"{e.label}: {msg}")
             return False
+        problem = self.start_switch_problem()
+        if problem:
+            self._log(f"{e.label}: not armed. {problem}", e)
+            if interactive:
+                QMessageBox.warning(self, "Run tests", f"{e.label}: {problem}")
+            else:
+                self._notice("Run tests", f"{e.label}: {problem}")
+            return False
         if not io and e.source_key not in self.group.runners:
             if not self.group.sources:
                 return False
