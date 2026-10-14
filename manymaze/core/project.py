@@ -520,15 +520,21 @@ class Project:
             raise NotAnExperiment(f"“{pdir.name}” is not a mANY-MAZE experiment: it has no experiment file "
                                   f"({PROJECT_FILE}).\n\nChoose the experiment's own folder (its name usually ends "
                                   "in .mmaze), or create one with File ▸ New experiment.")
+        damaged = (f"The experiment file of “{pdir.stem}” ({PROJECT_FILE}) is damaged and cannot be read.\n\n"
+                   f"Earlier saved copies, if any, are in the experiment's “{BACKUP_DIR}” folder "
+                   f"(project-<date>.json): copy the newest one over {PROJECT_FILE} to go back to it.")
         try:
             d, key = read_project_file(pdir / PROJECT_FILE, password)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             log.warning("Unreadable experiment file %s: %s", pdir / PROJECT_FILE, e)
-            raise DamagedExperiment(f"The experiment file of “{pdir.stem}” ({PROJECT_FILE}) is damaged and cannot "
-                                    f"be read.\n\nEarlier saved copies, if any, are in the experiment's “{BACKUP_DIR}” "
-                                    f"folder (project-<date>.json): copy the newest one over {PROJECT_FILE} to "
-                                    "go back to it.") from e
-        p = cls.from_dict(d, pdir)
+            raise DamagedExperiment(damaged) from e
+        try:
+            if not isinstance(d, dict):
+                raise TypeError("the experiment file is not a JSON object")
+            p = cls.from_dict(d, pdir)
+        except (TypeError, AttributeError, KeyError, ValueError) as e:  # valid JSON with the wrong structure
+            log.warning("Malformed experiment file %s: %r", pdir / PROJECT_FILE, e)
+            raise DamagedExperiment(damaged) from e
         if key is not None:
             p._password, p._key = password, key
         return p
