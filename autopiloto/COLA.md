@@ -90,7 +90,8 @@
 - [x] QA offscreen B08 → 7 OK, 3 RARO; H-P08 ya no ocurre (8 sesiones 20 min); H-035/H-036 (S3), H-037…H-040 (Obs)
 - [x] QA offscreen B03 → 7 OK, 4 RARO, 1 FALLA; H-042 (S2), H-041/H-043/H-044/H-045 (S3), H-046 (Obs)
 - [x] QA offscreen B04 → 1 OK, 7 RARO; persistencia OK en los 8; H-047/H-048/H-049 (S3), H-050/H-051 (Obs)
-- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B05, B02,
+- [x] QA offscreen B05 → 3 OK, 3 RARO, 1 FALLA; persistencia OK; dosis y aleatorización OK; H-052/H-053/H-054 (S3), H-055 (Obs)
+- [ ] QA offscreen (clases reales de la app, sin computer use), pasada 1 en orden: B02,
       B09, B14 (una tarea por bloque; lo puramente visual queda BLOQUEADO para una sesión con computer use)
 - [ ] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
 - [ ] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
@@ -117,3 +118,10 @@
       último aparato deja pruebas sin aparato, extensión de mapa desconocida da mensaje crudo)
 - [ ] Revisar OFT mHFD12 (28,9 % detectado, 1061 cm vs 3477 de referencia; la rata sale de la arena) y mHFD11
       (distancia 1511 vs 2135) mirando cuadros con el track superpuesto; ¿arreglo o es la referencia?
+- [ ] Arreglo: H-052 (S3) un campo de animal llamado `Stage`/`Apparatus`/`Test` sobrescribe esa columna en Results
+- [ ] Arreglo: H-053 (S3) «Import animals» sin avisos: ID duplicado sobrescribe, filas sin ID se pierden, pesos malos
+      se guardan, dice «Imported 7» con 6; columna *Status* de ANY-maze ignorada
+- [ ] Arreglo: H-054 (S3) exportar animales pierde estado/motivo de retirado, notas con `=` vuelven con apóstrofo; en
+      modo ciego escribe `=SUM(...)`/`+cmd|...` sin protección contra fórmulas
+- [ ] Decidir H-055 (Obs) dosis con concentración 0 → 0,0001 sin aviso; pesos 1e9 → 100000; tope de 1000 animales;
+      tratamientos que solo difieren en mayúsculas y colores duplicados permitidos
