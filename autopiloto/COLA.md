@@ -93,7 +93,8 @@
 - [x] QA offscreen B05 → 3 OK, 3 RARO, 1 FALLA; persistencia OK; dosis y aleatorización OK; H-052/H-053/H-054 (S3), H-055 (Obs)
 - [x] QA offscreen B02 → 2 OK, 2 RARO, 1 FALLA; persistencia y cifrado OK; H-056/H-057 (S2), H-058/H-059 (S3), H-060 (Obs)
 - [x] QA offscreen B09 → 3 OK, 5 RARO; 73/90 eventos en vivo, 85 acciones; H-062/H-063/H-064/H-069 (S3), H-061/H-067/H-068 (S4), H-065/H-066/H-070 (Obs)
-- [ ] QA offscreen B14 robustez (clases reales de la app, sin computer use; lo visual BLOQUEADO)
+- [x] QA offscreen B14 robustez → 2 OK, 4 RARO, 1 N/A; 94/94 mensajes provocados; 28/30 cambios persisten;
+      H-072 (S3), H-071/H-074/H-076 (S4), H-073/H-075 (Obs)
 - [x] Arreglo: H-030 (S3) cambiar Test start o Duration no recalcula Results ni avisa (hasta «Track this test»)
       → aviso en rojo en Results si la ventana ya no coincide con el track (sin recálculo; ver PARA_TI)
 - [x] Arreglo: H-032 (S3) «Interpolate» sobre todo el video deja el track como «not detected» y dice «Interpolated 750»
@@ -154,3 +155,12 @@
       sin confirmar ni deshacer al borrar bloque, claves JSON desconocidas ignoradas
 - [ ] Arreglo: H-065/H-066/H-070 (Obs) Log repite cada acción 3–4×; `immobile_time_reaches` no se dispara;
       `smtp_local.py` sobrescribe correos anteriores
+- [ ] Arreglo: H-072 (S3) Review con el video renombrado dice «No video — scoring by direct observation» en vez de
+      «Video not found»
+- [ ] Arreglo: H-071/H-073 tras `kill -9` en «Track all untracked» los procesos hijos siguen y las pruebas quedan
+      `pending` con track completo («No tests to track»); `project.json.*.tmp` huérfanos nunca se limpian
+- [ ] Arreglo: H-074 (S4) textos de mensajes: rutas de menú equivocadas (Experiment › Procedures/I/O devices),
+      singular/plural, «a Open field», texto crudo de Python, «MANY-MAZE»
+- [ ] Arreglo: H-075 + H-039 persistencia: máximo del mapa de calor y duración/modo de inicio/record de Run tests no
+      persisten
+- [ ] Arreglo: H-076 (S4) modo oscuro: textos secundarios con contraste 1,7–2,5:1; combos de Review ▸ Detection cortados

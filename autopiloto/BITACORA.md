@@ -30,3 +30,4 @@
 2026-10-13 · Arreglo H-056…H-059 seguridad · arreglados; 1344 tests · 8ee5e8e
 2026-10-13 · QA B09 procedimientos e I/O simulado (offscreen) · 3 OK 5 RARO; H-061…H-070 (4 S3) · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-13 · Arreglo H-052/H-053/H-054 animales · arreglados; CSV de animales gana columna Status; 1349 tests · a893721
+2026-10-14 · QA B14 robustez (offscreen) · 2 OK 4 RARO 1 N/A; H-071…H-076 (1 S3) · ~/mANY-MAZE-QA/2026-10-11_2224
