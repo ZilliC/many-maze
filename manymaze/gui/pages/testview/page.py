@@ -349,6 +349,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.results_table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.results_table.setAlternatingRowColors(False)
         copy = QPushButton("Copy table")
+        copy.setToolTip("Copy the measures shown (those left by Filter measures) to the clipboard")
         copy.clicked.connect(self.copy_results)
         self.results_filter = QLineEdit()
         self.results_filter.setPlaceholderText("Filter measures…")
@@ -820,6 +821,8 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         tbl = self.results_table
         lines = ["\t".join(tbl.horizontalHeaderItem(c).text() for c in range(tbl.columnCount()))]
         for r in range(tbl.rowCount()):
+            if tbl.isRowHidden(r):  # left out by Filter measures
+                continue
             lines.append("\t".join(tbl.item(r, c).text() if tbl.item(r, c) else "" for c in range(tbl.columnCount())))
         QGuiApplication.clipboard().setText("\n".join(lines))
         self.main.status("Results copied to the clipboard.")
