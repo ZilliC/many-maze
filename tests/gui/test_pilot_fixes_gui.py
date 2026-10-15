@@ -75,3 +75,13 @@ def test_tracking_errors_are_in_plain_words(capsys):
                               "its drive may not be connected.")
     assert "FileNotFoundError" in capsys.readouterr().err  # the technical details go to the console
     assert "KeyError" not in _err(batch, KeyError("x")) and "unexpectedly" in _err(batch, KeyError("x"))
+
+
+def test_add_tests_dialog_says_which_animals_are_new(tmp_path, win):
+    (tmp_path / "rat_a.mp4").write_bytes(b"x")
+    known = win.project.animals[0].id
+    dlg = AddVideosDialog(win.project, [str(tmp_path / "rat_a.mp4")], win)
+    assert "1 new animal will be added" in dlg.new_note.text() and "rat_a" in dlg.new_note.text()
+    dlg.table.item(0, 2).setText(known)
+    assert dlg.new_note.text() == ""
+    dlg.close()
