@@ -43,3 +43,4 @@
 2026-10-14 · Arreglo H-077/H-078/H-079 archivo y carga · arreglados; 1399 tests · d6f9615
 2026-10-14 · PAUSA pedida por el usuario · B15 detenido antes de escribir nada en COBERTURA; arranque programado cancelado · —
 2026-10-15 · QA B15 barrido de cobertura (offscreen) · 1363 IDs: 1114 OK, 198 N/A, 40 BLOQ, 11 RARO, 0 FALLA; sin hallazgos nuevos · ~/mANY-MAZE-QA/2026-10-11_2224
+2026-10-15 · Revisión final de QA (Opus) · 77 hallazgos únicos: 66 corregidos, 11 decisión; quedan H-P05/H-P10 S2 previos · INFORME_FINAL.md

@@ -203,4 +203,12 @@
 - [x] QA offscreen B15 barrido de cobertura: IDs del inventario sin probar (lo visual BLOQUEADO)
       → 1363/1363 IDs sin cubrir resueltos: 1114 OK, 198 N/A, 40 BLOQUEADO, 11 RARO (ya registrados), 0 FALLA;
         sin hallazgos nuevos; 21 controles fuera del inventario
-- [ ] Revisión final de QA (§6 del plan, Opus): informe final, duplicados, severidades, cobertura
+- [x] Revisión final de QA (§6 del plan, Opus): informe final, duplicados, severidades, cobertura
+
+      → 77 únicos: 66 corregidos, 11 decisión, 0 abiertos; informe en $QA/bitacora/INFORME_FINAL.md y
+        qa/REVISION_FINAL_2026-10-15.md (sin commit, para revisión del usuario)
+- [ ] Arreglo: H-P05 (S2) medidas de giro/acercamiento infladas ×1,5–1,9 por el temblor del rastreo (capa B = verdad)
+- [ ] Arreglo: H-P10 (S2) rearing automático no detecta rears con cámara cenital (OFT `2025-04-22 20-10-36.mov`,
+      arena izquierda: rears claros ≈116,5; 120,3; 127,0; 152,5 s)
+- [ ] QA: registrar H-080/H-081 (RARO de B06-10 y B06-01 sin H-###) y volver a provocar los 11 RARO de B15 con el
+      código actual; quitar el ID de ejemplo `PROPROANITRA-3B12` de la cobertura

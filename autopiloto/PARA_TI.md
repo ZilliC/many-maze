@@ -18,3 +18,6 @@ Cosas que necesitan hardware real, videos, dinero o una decisión tuya. El agent
 - 2026-10-13 · **H-030 (decisión)**: al cambiar Test start/Duration, Results ahora avisa en rojo que hay que volver a
   rastrear. Un recálculo real sin re-rastrear exige recortar/desplazar el track en el análisis (toca el núcleo).
   ¿Lo hacemos o basta el aviso?
+- 2026-10-15 · **H-071 (decisión)**: tras un cierre forzado durante el rastreo, las pruebas pueden quedar «pending»
+  con el track completo. ¿Recuperarlas al abrir (hay que definir cuándo un track cuenta como completo)?
+- 2026-10-15 · **Revisión final**: `qa/REVISION_FINAL_2026-10-15.md` (sin commit) — léela y dime si la subo.
