@@ -27,3 +27,6 @@ Cosas que necesitan hardware real, videos, dinero o una decisión tuya. El agent
 - 2026-10-15 · **H-P05 (decisión)**: las medidas de giro ignoran ya movimientos < 0,5 cm (ajuste nuevo en Analysis ▸
   Movement). En videos reales los giros bajan ~45 % y siguen bajando con mínimos mayores (el temblor real supera
   0,5 cm). ¿Subir el mínimo por defecto, o validar contra un recuento externo de giros?
+- 2026-10-15 · **H-080/H-081 (decisión)**: el rastreo bloquea la ventana a propósito (para que el experimento no
+  cambie debajo); ¿quieres poder seguir trabajando mientras rastrea? «Add tests from videos» usa el nombre del
+  archivo como Animal ID (ahora avisa de los animales nuevos); ¿preferirías que proponga animales existentes?

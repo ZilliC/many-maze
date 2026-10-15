@@ -220,6 +220,8 @@
 - [x] Regenerar `calibracion_capa_A.csv` del oráculo (`oraculo_sintetico.py calibrar`) tras H-P05 y la nueva app
 
       → recalibrado; capa A 15039/16817, capa B 0 DIFIERE (26 SIN FILA: oráculo viejo de open_field_intervalos)
-- [ ] Arreglo: H-080 (Obs) el rastreo abre un diálogo modal que bloquea la ventana principal; H-081 (Obs) «Add tests
+- [x] Arreglo: H-080 (Obs) el rastreo abre un diálogo modal que bloquea la ventana principal; H-081 (Obs) «Add tests
       from videos» propone el nombre del archivo como Animal ID y crea animales nuevos; H-074 punto 9: «Save as»
       pregunta «Replace…» antes de avisar de que el experimento está abierto en otro proceso
+
+      → H-074.9 arreglado; H-081 con aviso de animales nuevos; H-080 se queda (modal a propósito; decisión) (merge 4bde3d3)
