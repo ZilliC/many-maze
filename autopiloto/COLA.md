@@ -214,6 +214,12 @@
       arena izquierda: rears claros ≈116,5; 120,3; 127,0; 152,5 s)
       → intento 1 (Sonnet): ninguna señal de forma/brillo separa los rears (AUC 0,33–0,58); datos en
         $QA/salidas/HP10/. Siguiente: modelo de pose (necesita permiso de descarga, ver PARA_TI) o posición junto a la pared
-- [ ] QA: registrar H-080/H-081 (RARO de B06-10 y B06-01 sin H-###) y volver a provocar los 11 RARO de B15 con el
+- [x] QA: registrar H-080/H-081 (RARO de B06-10 y B06-01 sin H-###) y volver a provocar los 11 RARO de B15 con el
       código actual; quitar el ID de ejemplo `PROPROANITRA-3B12` de la cobertura
-- [ ] Regenerar `calibracion_capa_A.csv` del oráculo (`oraculo_sintetico.py calibrar`) tras H-P05 y la nueva app
+      → H-080/H-081 registrados (siguen); 10/11 RARO de B15 ya no ocurren, sigue el punto 9 de H-074; ID de ejemplo corregido
+- [x] Regenerar `calibracion_capa_A.csv` del oráculo (`oraculo_sintetico.py calibrar`) tras H-P05 y la nueva app
+
+      → recalibrado; capa A 15039/16817, capa B 0 DIFIERE (26 SIN FILA: oráculo viejo de open_field_intervalos)
+- [ ] Arreglo: H-080 (Obs) el rastreo abre un diálogo modal que bloquea la ventana principal; H-081 (Obs) «Add tests
+      from videos» propone el nombre del archivo como Animal ID y crea animales nuevos; H-074 punto 9: «Save as»
+      pregunta «Replace…» antes de avisar de que el experimento está abierto en otro proceso

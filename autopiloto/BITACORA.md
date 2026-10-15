@@ -46,3 +46,4 @@
 2026-10-15 · Revisión final de QA (Opus) · 77 hallazgos únicos: 66 corregidos, 11 decisión; quedan H-P05/H-P10 S2 previos · INFORME_FINAL.md
 2026-10-15 · Arreglo H-P10 rearing cenital (intento 1) · sin arreglo: 12 señales sin separación; pide modelo de pose (PARA_TI) · —
 2026-10-15 · Arreglo H-P05 temblor en medidas de dirección · en parte; oráculo 14442→15098; suite completa verde tras el merge · f9ed232
+2026-10-15 · Cierre de QA · H-080/H-081 registrados; 10/11 RARO resueltos; oráculo recalibrado (capa B 0 DIFIERE) · INFORME_FINAL.md
