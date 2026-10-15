@@ -200,5 +200,7 @@
       H-079 (S4) `project.json` válido pero mal estructurado da «Something went wrong unexpectedly…»
       → zip se desempaqueta en carpeta oculta y se mueve solo si todo pasa el CRC; errores nombran el zip;
         project.json mal formado = «damaged» (merge d6f9615)
-- [ ] QA offscreen B15 barrido de cobertura: IDs del inventario sin probar (lo visual BLOQUEADO)
+- [x] QA offscreen B15 barrido de cobertura: IDs del inventario sin probar (lo visual BLOQUEADO)
+      → 1363/1363 IDs sin cubrir resueltos: 1114 OK, 198 N/A, 40 BLOQUEADO, 11 RARO (ya registrados), 0 FALLA;
+        sin hallazgos nuevos; 21 controles fuera del inventario
 - [ ] Revisión final de QA (§6 del plan, Opus): informe final, duplicados, severidades, cobertura

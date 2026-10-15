@@ -42,3 +42,4 @@
 2026-10-14 · QA B01 experimentos (offscreen) · 7 OK 4 RARO; H-077 S3, H-078/H-079 S4 · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-14 · Arreglo H-077/H-078/H-079 archivo y carga · arreglados; 1399 tests · d6f9615
 2026-10-14 · PAUSA pedida por el usuario · B15 detenido antes de escribir nada en COBERTURA; arranque programado cancelado · —
+2026-10-15 · QA B15 barrido de cobertura (offscreen) · 1363 IDs: 1114 OK, 198 N/A, 40 BLOQ, 11 RARO, 0 FALLA; sin hallazgos nuevos · ~/mANY-MAZE-QA/2026-10-11_2224
