@@ -30,7 +30,7 @@ from .occupancy import occupancy, occupancy_map
 from .pauses import drop_pauses, shift_events
 from .series import count_rotations  # noqa: F401 (re-exported)
 from .series import (drop_short_runs, ffill, initial_heading_frames, partial_rotation_events, rotation_events,
-                     round_result as _r, runs, seg_moving_average, segments)
+                     round_result as _r, runs, seg_moving_average, segments, simplify_path)
 from .extra_measures import behaviour_measures, grid_measures, social_measures  # (re-exported)
 from .template_measures import TemplateData, template_measures
 from .templates import apply_overrides
@@ -47,6 +47,9 @@ _log = logging.getLogger(__name__)
 class AnalysisSettings:
     speed_smoothing_s: float = 0.2  # positions are smoothed over this window before distance/speed
     mobility_threshold: float = 2.0  # speed (units/s) below which the animal is immobile
+    # the direction of movement (turning, rotations, getting closer / further, moving towards / away) is measured on
+    # a path in which the animal must move this far (units) before a direction exists - see series.simplify_path
+    min_direction_step: float = 0.5
     min_immobile_s: float = 2.0  # immobile episodes shorter than this count as mobile
     immobility_mode: str = "speed"  # "speed" (above) | "motion": forced swim / tail suspension (freezing.py)
     # motion mode: mobile (struggling) while the struggle index (% of body) reaches this; 3.5 % separated floating from
@@ -144,6 +147,8 @@ class Kinematics:
     y: np.ndarray
     ux: np.ndarray  # units, smoothed
     uy: np.ndarray
+    sx: np.ndarray  # units, the path without the jitter (series.simplify_path), for the direction of movement
+    sy: np.ndarray
     step: np.ndarray  # distance travelled into each sample (units)
     speed: np.ndarray  # units/s
     mobile: np.ndarray
@@ -225,17 +230,23 @@ def kinematics(track: Track, app: Apparatus, s: AnalysisSettings, t0: float | No
     if s.immobility_mode == "motion" and np.isfinite(motion_pct).any():
         # forced swim / tail suspension: mobile while the animal struggles, wherever its centre goes
         mobile, struggle = immobility_from_motion(motion_pct, t, dur, track.dt, s, breaks)
+    # direction of movement: on the path without the jitter, so that a centre wobbling while the animal sits still
+    # does not turn at random (H-P05)
+    # (a stroke lasts at most the time to cover min_direction_step at the mobility threshold: slower is not movement)
+    max_frames = max(1, int(math.ceil(s.min_direction_step / max(s.mobility_threshold, 1e-9) / max(track.dt, 1e-6))))
+    sx, sy = simplify_path(ux, uy, s.min_direction_step, max_frames, cuts)
     heading = np.full(len(t), np.nan)
     if len(t) > 1:
-        heading[1:] = np.degrees(np.arctan2(np.diff(uy), np.diff(ux)))
-        heading[step < 1e-6] = np.nan
+        sd = np.hypot(np.diff(sx), np.diff(sy))
+        heading[1:] = np.degrees(np.arctan2(np.diff(sy), np.diff(sx)))
+        heading[1:][~(sd >= 1e-9)] = np.nan
         if cuts is not None:
             heading[cuts] = np.nan
     if t0 is None:
         t0 = float(t[0]) if len(t) else 0.0
     if duration is None:
         duration = float(dur.sum())
-    return Kinematics(t, dur, x, y, ux, uy, step, speed, mobile, freezing, motion_pct, heading, t0, duration,
+    return Kinematics(t, dur, x, y, ux, uy, sx, sy, step, speed, mobile, freezing, motion_pct, heading, t0, duration,
                       scale, unit, breaks, struggle)
 
 
@@ -1294,14 +1305,14 @@ def _zone_heading_arrays(P: _Prepared, z) -> dict:
     clockwise of the zone on screen)."""
     K = P.k
     with np.errstate(invalid="ignore"):
-        px, py = K.ux / K.scale, K.uy / K.scale
+        px, py = K.sx / K.scale, K.sy / K.scale
         d = np.where(z.shape.contains(px, py), 0.0, z.shape.distance_to_edge(px, py) * K.scale)
         dd = np.zeros(len(d))
         if len(d) > 1:
             dd[1:] = np.nan_to_num(np.diff(d))
             dd[P.cuts()] = 0.0
         zx, zy = z.shape.centroid()
-        brg = np.degrees(np.arctan2(zy * K.scale - K.uy, zx * K.scale - K.ux))
+        brg = np.degrees(np.arctan2(zy * K.scale - K.sy, zx * K.scale - K.sx))
         err = (K.heading - brg + 180.0) % 360.0 - 180.0
     return {"dd": dd, "err": err}
 
@@ -1944,7 +1955,7 @@ def _point_arrays(P: _Prepared, p) -> dict:
         else:
             near = dist <= radius
         out["near"] = near
-    ud = np.hypot(K.ux - p.x * K.scale, K.uy - p.y * K.scale)
+    ud = np.hypot(K.sx - p.x * K.scale, K.sy - p.y * K.scale)
     dd = np.zeros(len(K.t))
     if len(dd) > 1:
         dd[1:] = np.nan_to_num(np.diff(ud))
@@ -1955,7 +1966,7 @@ def _point_arrays(P: _Prepared, p) -> dict:
     hd_err = np.full(len(K.t), np.nan)
     if len(K.t) > 1:
         with np.errstate(invalid="ignore"):
-            brg = np.arctan2(p.y * K.scale - K.uy[:-1], p.x * K.scale - K.ux[:-1])
+            brg = np.arctan2(p.y * K.scale - K.sy[:-1], p.x * K.scale - K.sx[:-1])
             hd_err[1:] = _angle_diff(np.radians(K.heading[1:]), brg)
     out["heading_err"] = hd_err
     o = _orientation(P)

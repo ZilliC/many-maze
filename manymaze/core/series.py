@@ -80,6 +80,43 @@ def seg_moving_average(v: np.ndarray, window: int, breaks: np.ndarray | None) ->
     return out
 
 
+def simplify_path(x: np.ndarray, y: np.ndarray, min_step: float, max_frames: int,
+                  breaks: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The path with the tracking jitter taken out, for the measures that depend on the DIRECTION of movement
+    (turning, rotations, getting closer / further, moving towards / away).
+
+    A direction needs a displacement: a centre that wobbles by a fraction of a millimetre while the animal sits still
+    points anywhere, so every frame would be a random turn. The path is therefore cut into strokes: starting from an
+    anchor position, nothing happens until the animal is at least `min_step` away from it; that frame becomes the
+    next anchor. The stroke is the straight line from the old anchor to the new one, but lasts at most `max_frames`
+    frames (a slower stroke is not a movement, and a long stop must not be stretched into the next movement); before
+    it, and while the animal stays within min_step of the anchor, the animal is held at the anchor (no movement, no
+    direction). x, y and
+    min_step share a unit. No stroke crosses a break (a pause or a reappearance); NaN positions stay NaN.
+    min_step <= 0 returns the path unchanged."""
+    sx, sy = np.array(x, float), np.array(y, float)
+    if min_step <= 0:
+        return sx, sy
+    for a, b in segments(len(sx), breaks):
+        ok = np.flatnonzero(np.isfinite(x[a:b]) & np.isfinite(y[a:b])) + a
+        if not len(ok):
+            continue
+        anchor = int(ok[0])
+        for i in ok[1:]:
+            if math.hypot(x[i] - x[anchor], y[i] - y[anchor]) < min_step:
+                continue
+            start = max(anchor, int(i) - max_frames)
+            sx[anchor:start + 1], sy[anchor:start + 1] = x[anchor], y[anchor]  # held until the stroke started
+            f = (np.arange(start, i + 1) - start) / (i - start)
+            sx[start:i + 1] = x[anchor] + f * (x[i] - x[anchor])
+            sy[start:i + 1] = y[anchor] + f * (y[i] - y[anchor])
+            anchor = int(i)
+        sx[anchor:b], sy[anchor:b] = x[anchor], y[anchor]
+    gone = ~(np.isfinite(x) & np.isfinite(y))
+    sx[gone] = sy[gone] = np.nan
+    return sx, sy
+
+
 def round_result(v, nd=3):
     """A result value: ints kept, floats rounded to nd decimals, None / inf -> NaN."""
     if v is None:

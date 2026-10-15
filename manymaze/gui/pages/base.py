@@ -152,6 +152,9 @@ ANALYSIS_SPEC = [
     ("speed_smoothing_s", "Smooth positions for distance and speed over (s)", "float", (0.0, 5.0, 0.05, 2),
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
+    ("min_direction_step", "Smallest movement that has a direction (units)", "float", (0.0, 20.0, 0.1, 2),
+     "Turning, rotations and approaching / moving away follow the path in strokes of at least this length, so that "
+     "the tracking jitter of a still animal is not counted as turns. 0 = every frame."),
     ("min_immobile_s", "Shortest immobility episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
     ("immobility_mode", "Detect immobility", "choice", list(IMMOBILITY_MODES.items()),
      "From the speed: immobile while the animal's centre moves slower than the threshold above. Forced swim / "
@@ -312,7 +315,8 @@ FST_FIELDS = ["immobility_mode", "fst_threshold_pct", "min_fst_immobile_s", "fst
 FST_SPEC = [s for s in ANALYSIS_SPEC if s[0] in FST_FIELDS]
 
 ANALYSIS_SECTIONS = [
-    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s", "partial_rotation_deg"]),
+    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_direction_step", "min_immobile_s",
+                  "partial_rotation_deg"]),
     (FST_SECTION, FST_FIELDS),
     ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
                   "min_freeze_s"]),

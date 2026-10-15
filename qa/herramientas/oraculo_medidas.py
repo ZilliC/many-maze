@@ -33,6 +33,7 @@ MOBILITY = 2.0
 MIN_IMMOBILE = 2.0
 MIN_FREEZE = 1.0
 SMOOTH_S = 0.2
+MIN_DIRECTION_STEP = 0.5  # cm: un rumbo necesita un desplazamiento (H-P05; sin él, el temblor del rastreo gira al azar)
 ORIENT = 30.0
 FACING = 45.0
 VARIANTS = ("doc", "impl")
@@ -125,6 +126,27 @@ def seg_intersect(p, q, a, b):
 
 
 # ------------------------------------------------------------------------------------------------ cinemática
+def strokes_path(pos_cm, min_step, max_frames):
+    """El recorrido sin el temblor, según la regla documentada (guía de usuario, «Dirección del movimiento»): desde un ancla,
+    nada pasa hasta que el animal se aleja de ella al menos min_step; entonces ese cuadro es la nueva ancla y el tramo
+    es la recta del ancla vieja a la nueva, que dura como mucho max_frames cuadros (antes y mientras no se aleje, el
+    animal se queda en el ancla). Escrito aquí por separado de la app a partir de esa regla."""
+    out = np.array(pos_cm, float)
+    anchor = 0
+    anchors = [0]
+    for i in range(1, len(out)):
+        if np.hypot(*(pos_cm[i] - pos_cm[anchor])) >= min_step:
+            anchors.append(i)
+            anchor = i
+    for a, b in zip(anchors[:-1], anchors[1:]):
+        start = max(a, b - max_frames)
+        out[a:start + 1] = pos_cm[a]
+        for j in range(start, b + 1):
+            out[j] = pos_cm[a] + (pos_cm[b] - pos_cm[a]) * (j - start) / (b - start)
+    out[anchors[-1]:] = pos_cm[anchors[-1]]
+    return out
+
+
 class Kin:
     """Cinemática de una trayectoria según una variante (doc / impl)."""
 
@@ -139,9 +161,12 @@ class Kin:
         self.spos = ma(self.pos, w)
         self.step = np.r_[0.0, np.hypot(*np.diff(self.spos, axis=0).T)] / self.ppc
         self.speed = self.step * FPS
-        d = np.diff(self.spos, axis=0, prepend=self.spos[:1])
+        # la dirección del movimiento se mide sobre el recorrido sin temblor (px, como spos)
+        self.dpos = strokes_path(self.spos / self.ppc, MIN_DIRECTION_STEP,
+                                 max(1, int(math.ceil(MIN_DIRECTION_STEP / MOBILITY * FPS)))) * self.ppc
+        d = np.diff(self.dpos, axis=0, prepend=self.dpos[:1])
         self.heading = np.degrees(np.arctan2(d[:, 1], d[:, 0]))
-        self.heading[self.step < 1e-6] = np.nan
+        self.heading[np.hypot(d[:, 0], d[:, 1]) < 1e-9] = np.nan
         self.moving = np.isfinite(self.heading) & (self.speed > MOBILITY)
         sp = self.speed if variant == "doc" else ma(self.speed, int(round(0.5 * FPS)))
         self.mobile = drop_short(sp >= MOBILITY, MIN_IMMOBILE, value=False)
@@ -550,15 +575,15 @@ def zone_geometry(k, e, unit, zobj, ins, hin, ih, cin=None):
     facing = (np.min(np.abs(wrap(to - k.ang[:, None])), axis=1) <= ORIENT) & ~ins
     e.add(f"{z}: time facing (s)", k.mins(facing), round(0.04 * facing.sum() / FPS + 0.3, 2),
           "fuera, orientación (centro→cabeza) a ≤ 30° de la dirección desde la cabeza a algún punto del borde")
-    sin = np.asarray(zobj.shape.contains(k.spos[:, 0], k.spos[:, 1]), bool)
-    ds = np.where(sin, 0.0, polygon_distance(poly, k.spos))
+    sin = np.asarray(zobj.shape.contains(k.dpos[:, 0], k.dpos[:, 1]), bool)
+    ds = np.where(sin, 0.0, polygon_distance(poly, k.dpos))
     dd = np.r_[0.0, np.diff(ds)]
     out = ~ins
     gt = round(0.06 * out.sum() / FPS + 0.8, 2)
     e.add(f"{z}: time getting closer (s)", k.mins(out & (dd < -1e-9)), gt, "")
     e.add(f"{z}: time getting further away (s)", k.mins(out & (dd > 1e-9)), gt, "")
     zx, zy = zobj.shape.centroid()
-    brg = np.degrees(np.arctan2(zy - k.spos[:, 1], zx - k.spos[:, 0]))
+    brg = np.degrees(np.arctan2(zy - k.dpos[:, 1], zx - k.dpos[:, 0]))
     err = np.abs(wrap(k.heading - brg))
     mov = (k.moving if k.variant == "doc" else k.mobile) & out & np.isfinite(err)
     mt = round(0.05 * mov.sum() / FPS + 0.3, 2)
@@ -631,7 +656,7 @@ def per_point(k: Kin, e, app, unit):
         e.add(f"{p.name}: time head moving towards (s)", k.mins(hmov & (herr2 < FACING)), mt,
               "la cabeza se mueve (> umbral) hacia el punto (±45°)")
         e.add(f"{p.name}: time head moving away (s)", k.mins(hmov & (herr2 > 180 - FACING)), mt, "")
-        base = k.spos if k.variant == "doc" else np.vstack([k.spos[:1], k.spos[:-1]])
+        base = k.dpos if k.variant == "doc" else np.vstack([k.dpos[:1], k.dpos[:-1]])
         brg = np.degrees(np.arctan2(py - base[:, 1], px - base[:, 0]))
         err = np.abs(wrap(k.heading - brg))
         mov = (k.moving if k.variant == "doc" else k.mobile) & np.isfinite(err)
@@ -639,7 +664,7 @@ def per_point(k: Kin, e, app, unit):
         tow = mov & (err < FACING)
         e.add(f"{p.name}: time moving towards (s)", k.mins(tow), mt, "")
         e.add(f"{p.name}: time moving away (s)", k.mins(mov & (err > 180 - FACING)), mt, "")
-        ud = np.hypot(k.spos[:, 0] - px, k.spos[:, 1] - py) / k.ppc
+        ud = np.hypot(k.dpos[:, 0] - px, k.dpos[:, 1] - py) / k.ppc
         dd = np.r_[0.0, np.diff(ud)]
         mm = k.mobile if k.variant == "impl" else k.moving
         e.add(f"{p.name}: distance moved towards ({unit})", round(float(-dd[mm & (dd < 0)].sum()), 2),

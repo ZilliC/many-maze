@@ -213,6 +213,8 @@ everything without a camera.
   (it paused when released for less than the immobility time, which counts as mobile), the heading would be the
   tracking jitter's: the position after it has actually moved (faster than the mobility threshold) for N s is used
   instead, and the heading is blank if it is no further away then either.
+* **Analysis ▸ Movement ▸ Smallest movement that has a direction** – the tracking jitter filter of the turn and
+  approach measures (default 0.5 cm, §9; 0 = every frame).
 * **Analysis ▸ Movement ▸ Partial rotation angle** – ANY-maze's partial rotations: turns of at least this angle
   (default 90°) that completed no rotation (§9).
 * **Default analysis values, and where ANY-maze's differ** (compare with care when matching published ANY-maze
@@ -1774,8 +1776,22 @@ maps, group heat maps, results and statistics.
   time bins add up to the whole test's (a rotation counts in the bin in which it is completed). An animal that was
   never detected is neither immobile nor outside the arena. No zone exit, entry or grid crossing is counted across a
   pause. The **absolute turn angle** sums the changes of the direction of travel between the frames in which the
-  animal moves faster than the mobility threshold (ANY-maze sums "all the positions" but without saying how it
-  ignores the jitter of a still animal; our choice); the **angular velocity** is, as ANY-maze defines it, the
+  animal moves faster than the mobility threshold. ANY-maze sums "all the positions" but does not say how it
+  ignores the jitter of a still animal; ours is the **direction of movement** rule, used by every measure that
+  depends on a direction (turn angle, meander, angular velocity, path rotations, *time getting closer / further
+  away*, *time moving towards / away*, distance moved towards / away, mean absolute heading error): a direction needs a
+  displacement, so the path is cut into strokes. From an anchor position nothing happens until the animal is at
+  least *Analysis ▸ Movement ▸ Smallest movement that has a direction* away from it (default 0.5 cm; the
+  uncalibrated unit is pixels); that frame becomes the next anchor and the stroke is the straight line between the
+  two (lasting at most the time it takes to cover that distance at the mobility threshold, so that a long stop is
+  not stretched into the next movement). The animal is held at its anchor while it wobbles within the distance, so
+  a centre that trembles by a fraction of a millimetre while the animal sits still has no direction, no turns and
+  does not get closer or further away. Without this rule, the tracking jitter alone made the turn measures ×1.9 and
+  the approach times +60 % on a synthetic video with a known path (H-P05); with it they are ×1.3 and +15 %, paths
+  that really turn keep their turning (a circle of 8 cm radius gives its 72 deg/s), and the 0.2 s position
+  smoothing still applies first. The turn measures grow as the minimum shrinks (the finer the path, the longer it
+  is): compare values only between experiments analysed with the same setting; 0 turns the rule off. Distance and
+  speed are not affected by it. The **angular velocity** is, as ANY-maze defines it, the
   absolute turn angle / the test duration (or the period's; before this version: / the time mobile).
   **Partial rotations** (clockwise, anticlockwise, total; ANY-maze's calculation is not published, it is "still in
   beta"): the turns of the body (the same orientation and reversal rule as the rotations: a turn ends when the

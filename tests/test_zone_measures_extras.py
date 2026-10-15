@@ -184,8 +184,9 @@ def test_towards_away_and_heading_errors():
     app = box_app(Zone("B", rect(300, 150, 50, 100)))
     pts = np.vstack([line((50, 200), (250, 200), 50), line((250, 200), (50, 200), 50)])
     res = analyse(make_track(pts, head=False), app, S)
-    assert res["B: time getting closer (s)"] == pytest.approx(49 / FPS, abs=0.05)
-    assert res["B: time getting further away (s)"] == pytest.approx(49 / FPS, abs=0.05)
+    # (a stroke of at least 0.5 cm - H-P05 - blurs the reversal by a frame or two)
+    assert res["B: time getting closer (s)"] == pytest.approx(49 / FPS, abs=0.1)
+    assert res["B: time getting further away (s)"] == pytest.approx(49 / FPS, abs=0.1)
     assert res["B: time moving towards (s)"] == pytest.approx(49 / FPS, abs=0.1)
     assert res["B: time moving away (s)"] == pytest.approx(49 / FPS, abs=0.1)
     assert res["B: initial heading error (deg)"] == 0 and res["B: signed initial heading error (deg)"] == 0
