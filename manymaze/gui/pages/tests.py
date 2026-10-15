@@ -9,10 +9,10 @@ from pathlib import Path
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelectionModel, QModelIndex, QRect,
                             QSortFilterProxyModel, Qt)
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QPainter, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMenu, QMessageBox,
-                               QSpinBox, QStyledItemDelegate, QTableView, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMenu,
+                               QMessageBox, QSpinBox, QStyledItemDelegate, QTableView, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
 from ...core.batch import track_tests, tracking_batches
@@ -1194,6 +1194,17 @@ class TestsPage(Page):
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 tbl.setItem(r, col, it)
         tbl.resizeColumnsToContents()
+        # long findings wrap inside their cell instead of being cut, and the dialog opens as wide as its table
+        # (within the screen) and can be resized
+        tbl.setWordWrap(True)
+        last = len(heads) - 1
+        tbl.setColumnWidth(last, min(tbl.columnWidth(last), 520))
+        tbl.resizeRowsToContents()
+        dlg.setSizeGripEnabled(True)
+        screen = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        want = sum(tbl.columnWidth(c) for c in range(len(heads))) + 60
+        dlg.resize(max(900, min(want, screen.width() - 40)), min(max(360, tbl.verticalHeader().length() + 200),
+                                                                 screen.height() - 80))
         v.addWidget(QLabel("Duplicate frames repeat the previous frame (the camera or recorder dropped frames); "
                            "missing frames are gaps in the timestamps longer than 1.5 frame intervals. Tracking "
                            "uses the frames as they are: consider re-recording a test with many glitches."))

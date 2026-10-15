@@ -210,6 +210,62 @@ def _games_howell(names, data):
     return out
 
 
+# Dunnett: grid for the shared (control) normal component; the trapezoid rule is near exact for these smooth,
+# Gaussian-tailed integrands
+_DUNNETT_W = np.linspace(-12.0, 12.0, 481)
+_DUNNETT_PHI = sps.norm.pdf(_DUNNETT_W) * (_DUNNETT_W[1] - _DUNNETT_W[0])
+
+
+def _dunnett_p(c: float, lam: list[float], df: float) -> float:
+    """Two-sided single-step Dunnett p = P(max_j |T_j| >= c), computed by deterministic numerical integration
+    (scipy.stats.dunnett uses randomised quasi-Monte Carlo, so its p changes from call to call).
+
+    T_j = Z_j / s with Z_j = lam_j W + sqrt(1 - lam_j²) E_j (W, E_j independent standard normal; lam_j =
+    sqrt(n_j / (n_j + n_control)), which gives any group sizes the correlation lam_i lam_j) and s² ~ χ²_df / df.
+    Given s and W the |T_j| are independent, so the integrand is 1 - prod_j P(|Z_j| < c s | W), evaluated in a
+    form that keeps relative accuracy for very small p; s is integrated through its χ² quantile in log-probability.
+    """
+    if not math.isfinite(c):
+        return 0.0 if c > 0 else math.nan
+    if not df >= 1:
+        return math.nan
+    lam = np.asarray(lam, float)[:, None]
+    sd = np.sqrt(1.0 - lam ** 2)
+    w = _DUNNETT_W
+
+    def outside(s):
+        tail = sps.norm.sf((c * s - lam * w) / sd) + sps.norm.cdf((-c * s - lam * w) / sd)
+        with np.errstate(divide="ignore"):
+            return float(-np.expm1(np.log1p(-np.minimum(tail, 1.0)).sum(axis=0)) @ _DUNNETT_PHI)
+
+    def integrand(v):
+        u = math.exp(v)
+        return u * outside(math.sqrt(sps.chi2.ppf(u, df) / df)) if u > 0 else 0.0
+
+    from scipy import integrate
+    p = integrate.quad(integrand, -math.inf, 0.0, epsabs=0.0, epsrel=1e-8, limit=500)[0]
+    return float(min(1.0, max(0.0, p)))
+
+
+def _dunnett(names, data, ci):
+    """Dunnett's test of every group against data[ci] (pooled ANOVA error term, df = N - k), exact p values."""
+    n = [len(d) for d in data]
+    df = sum(n) - len(data)
+    mse = sum(float(((d - d.mean()) ** 2).sum()) for d in data) / df if df > 0 else math.nan
+    others = [i for i in range(len(data)) if i != ci]
+    lam = [math.sqrt(n[i] / (n[i] + n[ci])) for i in others]
+    out = []
+    for i in others:
+        diff = float(data[i].mean() - data[ci].mean())
+        se = math.sqrt(mse * (1 / n[i] + 1 / n[ci]))
+        if se == 0:
+            p = 1.0 if diff == 0 else 0.0
+        else:
+            p = _dunnett_p(abs(diff) / se, lam, df)
+        out.append({"a": names[i], "b": names[ci], "diff": diff, "p": p, "test": "Dunnett"})
+    return out
+
+
 def _dunn(names, data, adjust="bonferroni"):
     allv = np.concatenate(data)
     ranks = sps.rankdata(allv)
@@ -374,11 +430,7 @@ def posthoc(groups: "dict[str, np.ndarray]", method: str = "tukey", parametric: 
     if method == "dunn" and not paired:
         return _dunn(names, data, "bonferroni")
     if method == "dunnett" and not paired:
-        ci = names.index(control) if control in names else 0
-        others = [i for i in range(len(data)) if i != ci]
-        r = sps.dunnett(*[data[i] for i in others], control=data[ci])
-        return [{"a": names[i], "b": names[ci], "diff": float(data[i].mean() - data[ci].mean()),
-                 "p": float(p), "test": "Dunnett"} for i, p in zip(others, r.pvalue)]
+        return _dunnett(names, data, names.index(control) if control in names else 0)
     adjust = method if method in ("bonferroni", "holm", "sidak", "fdr", "none") else "bonferroni"
     combos = list(itertools.combinations(range(len(data)), 2))
     if method == "dunnett":  # paired: the conditions against the control only (Bonferroni over k - 1 tests)
@@ -1082,6 +1134,19 @@ def summary_text(res: dict, measure: str, alpha: float = ALPHA) -> str:
         lines.append(f"  {g}: n={d['n']}, mean={d['mean']:.3f} ± {d['sem']:.3f} SEM (SD {d['sd']:.3f}), "
                      f"median={d['median']:.3f}")
     stat = res.get("statistic", math.nan)
+    if not isinstance(stat, (int, float)) or not math.isfinite(stat):
+        test = str(res.get("test"))
+        if test.startswith("Not enough"):
+            lines.append(f"  {test}")
+        else:
+            sds = [d.get("sd", math.nan) for d in res.get("descriptive", {}).values()]
+            means = {d.get("mean") for d in res.get("descriptive", {}).values()}
+            if sds and all(sd == 0 for sd in sds):
+                why = "all values are equal" if len(means) == 1 else "the values do not vary within the groups"
+            else:
+                why = "the test gave no result for these values"
+            lines.append(f"  {test}: not computed: {why}")
+        return "\n".join(lines)
     df = res.get("df")
     if isinstance(df, tuple):
         df = ", ".join(f"{v:.4g}" for v in df)

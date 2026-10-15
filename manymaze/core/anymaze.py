@@ -235,7 +235,12 @@ def read_anymaze_xml(path) -> dict:
     "track": {t, x, y, hx, hy, tx, ty}, "zone_events": [(t, zone, entered)]}]}]}."""
     import xml.etree.ElementTree as ET
 
-    root = ET.parse(str(path)).getroot()
+    try:
+        root = ET.parse(str(path)).getroot()
+    except ET.ParseError as e:  # cut short, or not well-formed XML
+        line = e.position[0] if getattr(e, "position", None) else None
+        raise ValueError(f"{Path(path).name} is damaged or incomplete (the XML cannot be read"
+                         f"{f' past line {line}' if line else ''}). Export the experiment from ANY-maze again.") from e
     if _norm(root.tag) != "experiment":
         exp = next((e for e in root.iter() if _norm(e.tag) == "experiment"), None)
         if exp is None:
@@ -407,6 +412,26 @@ def track_from_columns(cols: dict, origin: str = "auto", centre: tuple[float, fl
     return tr
 
 
+def count_already_imported(project, path) -> tuple[int, int]:
+    """(tests of the XML export that are already in the experiment, tests in the export): an earlier import of the
+    same file left a test of the same animal (a nameless animal may carry a " (2)" suffix), apparatus and date, with
+    the note "ANY-maze test N". Used to warn before the same file is imported twice."""
+    data = read_anymaze_xml(path)
+    have = [(t.animal_id, t.apparatus, t.recorded_at, set(str(t.notes or "").splitlines())) for t in project.tests]
+    found = total = 0
+    for a in data["animals"]:
+        base = a["id"] or (f"Animal {a['number']}" if a["number"] else "")
+        ids = re.compile(re.escape(base) + r"( \(\d+\))?") if base else re.compile(r"Animal \d+( \(\d+\))?")
+        for t in a["tests"]:
+            total += 1
+            name = t["apparatus"] or "ANY-maze apparatus"
+            note = f"ANY-maze test {t['number']}" if t["number"] else None
+            if any(ids.fullmatch(aid) and app == name and rec == t["recorded_at"] and (note is None or note in notes)
+                   for aid, app, rec, notes in have):
+                found += 1
+    return found, total
+
+
 def import_anymaze_xml(project, path, origin: str = "auto", progress=None) -> dict:
     """Add the animals, tests (with their tracks, zone positions and calibration) of an ANY-maze experiment XML
     export to a saved project. Apparatus missing from the project are created from the exported zone bounding boxes
@@ -553,13 +578,41 @@ def mask_polygon(mask: np.ndarray, epsilon: float = 0.5) -> list[tuple[float, fl
     if not cs:
         return []
     c = cv2.approxPolyDP(max(cs, key=cv2.contourArea), epsilon, True)
-    return [(float(x), float(y)) for x, y in c.reshape(-1, 2)]
+    pts = c.reshape(-1, 2).astype(float) + 0.5  # pixel centres -> image coordinates (pixel i covers i..i+1)
+    n = len(pts)
+    if n < 3:
+        return [(float(x), float(y)) for x, y in pts]
+    # grow the outline by half a pixel so it follows the outer pixel edges: neighbouring zones then meet exactly
+    area = float(np.sum(pts[:, 0] * np.roll(pts[:, 1], -1) - np.roll(pts[:, 0], -1) * pts[:, 1]))
+    sign = 1.0 if area > 0 else -1.0
+    out = []
+    for k in range(n):
+        a, p, b = pts[k - 1], pts[k], pts[(k + 1) % n]
+        normals = []
+        for d in (p - a, b - p):
+            ln = float(np.hypot(*d))
+            if ln:
+                normals.append(np.array([d[1], -d[0]]) * sign / ln)  # outward normal of that edge
+        if not normals:
+            out.append((float(p[0]), float(p[1])))
+            continue
+        m = sum(normals)
+        mm = float(np.hypot(*m))
+        if mm < 1e-9:
+            q = p + 0.5 * normals[0]
+        else:
+            m = m / mm
+            cosh = max(float(np.dot(m, normals[0])), 0.5)  # miter, limited on very sharp corners
+            q = p + m * (0.5 / cosh)
+        out.append((float(q[0]), float(q[1])))
+    return out
 
 
-def zone_maps_apparatus(paths, project=None) -> list[Apparatus]:
+def zone_maps_apparatus(paths, project=None, rescaled: list | None = None) -> list[Apparatus]:
     """Apparatus built from ANY-maze zone map files (individual and / or combined; several apparatus are told apart
     by the names in the files). With a project, they are added to it, replacing the zones of an apparatus of the
-    same name (its calibration is kept). A moveable zone exported in several positions gets the first one."""
+    same name (its calibration is kept; zones of a map of another size are stretched to the apparatus image and the
+    apparatus names are appended to `rescaled`). A moveable zone exported in several positions gets the first one."""
     by_app: dict[str, Apparatus] = {}
     seen_pos: set[tuple[str, str]] = set()
     for p in paths:
@@ -585,13 +638,22 @@ def zone_maps_apparatus(paths, project=None) -> list[Apparatus]:
     if project is None:
         return apps
     out = []
+    if rescaled is None:
+        rescaled = []
     for app in apps:
         old = next((a for a in project.apparatus if a.name == app.name), None)
         if old is None:
             project.apparatus.append(app)
             out.append(app)
             continue
+        sx = sy = 1.0
+        if old.frame_size and app.frame_size and tuple(old.frame_size) != tuple(app.frame_size):
+            # the map was made at another frame size: stretch its zones onto the apparatus image
+            sx, sy = old.frame_size[0] / app.frame_size[0], old.frame_size[1] / app.frame_size[1]
+            rescaled.append(old.name)
         for z in app.zones:  # an existing apparatus keeps its other zones, points, lines and calibration
+            if (sx, sy) != (1.0, 1.0):
+                z.shape = z.shape.scaled(sx, sy)
             oz = old.zone(z.name)
             if oz is not None:
                 oz.shape = z.shape

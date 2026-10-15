@@ -338,11 +338,17 @@ def _rebuild_tensor(storage, offset, size, stride, *args):
 
 def load_torch_checkpoint(path) -> object:
     """Read a PyTorch zip checkpoint into nested dicts of NumPy arrays (no torch needed)."""
-    with zipfile.ZipFile(path) as z:
+    not_checkpoint = (f"“{Path(path).name}” is not a PyTorch model checkpoint. Choose the snapshot file (.pt) that "
+                      "DeepLabCut saved when training the model, in the model's train folder.")
+    try:
+        z = zipfile.ZipFile(path)
+    except zipfile.BadZipFile as e:
+        raise ValueError(not_checkpoint) from e
+    with z:
         names = z.namelist()
         pkl = next((n for n in names if n.endswith("data.pkl")), None)
         if pkl is None:
-            raise ValueError(f"{path}: not a PyTorch zip checkpoint")
+            raise ValueError(not_checkpoint)
         root = pkl[: -len("data.pkl")]
         cache = {}
 
@@ -697,7 +703,7 @@ def load_model_info(path) -> dict:
     if meta is None and path.stem in MODELS:
         meta = _meta_from_spec(path.stem)
     if meta is None:
-        raise FileNotFoundError(f"no model metadata found for {path} (expected {side.name})")
+        raise FileNotFoundError(f"“{path.name}” has no description of the model: {side.name} was not found next to it.")
     return validate_meta(meta)
 
 

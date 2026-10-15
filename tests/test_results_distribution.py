@@ -657,3 +657,49 @@ def test_48_cameras_40_apparatus():
         xs = tr.x[tr.detected]
         assert np.all((xs > x0 - 5) & (xs < x1 + 5))  # each test tracks the animal of its own apparatus
     assert not [w for w in g.warnings if "Cannot open" in w[1]]
+
+
+def test_import_broken_anymaze_xml_says_so(tmp_path):
+    src = tmp_path / "cut.xml"
+    src.write_text(AM_XML[:len(AM_XML) // 2], encoding="utf-8")  # cut in the middle: no closing tags
+    p = Project(name="imp")
+    p.save(tmp_path / "imp.mmaze")
+    with pytest.raises(ValueError, match="damaged or incomplete"):
+        import_anymaze_xml(p, src)
+    assert not p.tests and not p.animals
+
+
+def test_count_already_imported_anymaze_xml(tmp_path):
+    from manymaze.core.anymaze import count_already_imported
+
+    src = tmp_path / "exp.xml"
+    src.write_text(AM_XML, encoding="utf-8")
+    p = Project(name="imp")
+    p.save(tmp_path / "imp.mmaze")
+    assert count_already_imported(p, src) == (0, 2)
+    import_anymaze_xml(p, src)
+    assert count_already_imported(p, src) == (2, 2)
+    import_anymaze_xml(p, src)  # "Animal 2 (2)" still counts as the same animal
+    assert count_already_imported(p, src) == (2, 2) and len(p.tests) == 4
+
+
+def test_zone_map_other_size_and_no_gap(tmp_path):
+    h, w = 60, 80
+    combined = np.zeros((h, w), int)
+    combined[:, :40] = 1
+    combined[:, 40:] = 2
+    _write_map(tmp_path / "Combined zone area map for Box A.csv",
+               [["Zone names and codes:"], ["Left", 1], ["Right", 2],
+                ["Zone area map dimensions (w x h)", w, h]], combined)
+    p = Project(name="zm")
+    p.apparatus.append(Apparatus(name="Box A", frame_size=(640, 360)))
+    notes = []
+    zone_maps_apparatus(sorted(tmp_path.glob("*.csv")), p, notes)
+    assert notes == ["Box A"]
+    app = p.get_apparatus("Box A")
+    left, right = app.zone("Left").shape, app.zone("Right").shape
+    assert bool(left.contains(100, 300)) and not bool(left.contains(330, 300))
+    assert bool(right.contains(330, 300)) and bool(right.contains(630, 350))
+    xs = lambda s: [pt[0] for pt in s.points]  # noqa: E731
+    assert max(xs(left)) == min(xs(right)) == 320.0  # no gap between neighbours
+    assert min(xs(left)) == 0.0 and max(xs(right)) == 640.0

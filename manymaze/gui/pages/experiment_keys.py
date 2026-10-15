@@ -45,15 +45,18 @@ class KeysMixin:
         col = ColorButton(b.color or BEH_COLORS[r % len(BEH_COLORS)], "Key colour")
         col.setFixedSize(52, 22)
         col.setToolTip("Colour of the on-screen scoring button")
-        col.color_changed.connect(lambda _c: self._store_behaviours())
         holder = QWidget()
         hl = QHBoxLayout(holder)
         hl.setContentsMargins(6, 0, 6, 0)
         hl.addWidget(col)
         holder.setProperty("color", col.color())
         holder.button = col
-        col.color_changed.connect(lambda c, h=holder: h.setProperty("color", c))
+        col.color_changed.connect(lambda c, h=holder: self._color_picked(h, c))
         self.beh.setCellWidget(r, 4, holder)
+
+    def _color_picked(self, holder, color):
+        holder.setProperty("color", color)  # first: the row is read from this property when storing
+        self._store_behaviours()
 
     @staticmethod
     def _kind_index(kind: str, group: str) -> int:
@@ -104,7 +107,8 @@ class KeysMixin:
         name = self.beh.item(r, 0).text().strip() if self.beh.item(r, 0) else ""
         if not name:
             return None
-        key = self.beh.item(r, 1).text().strip()[:1].lower() if self.beh.item(r, 1) else ""
+        key = self.beh.item(r, 1).text() if self.beh.item(r, 1) else ""
+        key = (key.strip() or key).lower()  # as typed (a lone space is kept: it is not a scoring key)
         kind = self.beh.cellWidget(r, 2).currentData() if self.beh.cellWidget(r, 2) else "state"
         group = self.beh.item(r, 3).text().strip() if self.beh.item(r, 3) else ""
         color = self.beh.cellWidget(r, 4).property("color") if self.beh.cellWidget(r, 4) else ""
@@ -142,9 +146,18 @@ class KeysMixin:
 
     def _validate_behaviours(self) -> list[str]:
         errs = wf.validate_behaviours(self.project.behaviours) if self.project is not None else []
+        n_unnamed = sum(1 for r in range(self.beh.rowCount()) if self._row_behaviour(r) is None)
+        if n_unnamed:  # such a row is not part of the experiment until it has a name
+            errs.insert(0, "A key has no name: it is left out of the experiment until you give it one."
+                        if n_unnamed == 1 else f"{n_unnamed} keys have no name: they are left out of the "
+                        "experiment until you give them one.")
         self.beh_lbl.setText("<br>".join(errs))
         self.beh_lbl.setVisible(bool(errs))
         return errs
+
+    def save_problems(self) -> list[str]:
+        """Problems of the keys that the user should know about before the experiment is saved."""
+        return self._validate_behaviours() if self.project is not None else []
 
     def _show_key(self):
         """Show the selected key on the "Key" property page."""

@@ -642,9 +642,9 @@ class AnimalsPage(Page):
         n_tests = sum(len(counts.get(a.id, [])) for a in sel)
         msg = f"Delete {len(sel)} animal{'s' if len(sel) > 1 else ''}?"
         if n_tests:
-            msg += (f"\n\n{n_tests} test{'s' if n_tests > 1 else ''} refer to "
-                    f"{'these animals' if len(sel) > 1 else 'this animal'}; they are kept but will have no "
-                    "treatment or animal details.")
+            msg += (f"\n\n{n_tests} test{'s refer' if n_tests > 1 else ' refers'} to "
+                    f"{'these animals' if len(sel) > 1 else 'this animal'}; "
+                    f"{'they are' if n_tests > 1 else 'it is'} kept but will have no treatment or animal details.")
         if QMessageBox.question(self, "Delete animals", msg) == QMessageBox.Yes:
             self.delete_animals(sel)
 
@@ -955,7 +955,7 @@ class AnimalsPage(Page):
         n = sum(1 for a in self.project.animals if a.group == name)
         msg = f"Delete the treatment “{name}”?"
         if n:
-            msg += f"\n\n{n} animals will be left without a treatment."
+            msg += f"\n\n{n} animal{'s' if n > 1 else ''} will be left without a treatment."
         if QMessageBox.question(self, "Delete treatment", msg) == QMessageBox.Yes:
             self.delete_group(name)
 
@@ -974,7 +974,7 @@ class AnimalsPage(Page):
             return
         name, ok = QInputDialog.getText(self, "Add field", "Field (column) name, e.g. Weight (g), Genotype:")
         if ok and name.strip() and not self.add_field(name):
-            QMessageBox.warning(self, "Add field", f"“{name.strip()}” is already a column.")
+            QMessageBox.warning(self, "Add field", wf.field_problem(self.project, name) or "The field was not added.")
 
     def _current_field(self) -> str | None:
         """The field column holding the current cell of the Animals sheet, if any."""
@@ -1001,7 +1001,8 @@ class AnimalsPage(Page):
             return
         new, ok = QInputDialog.getText(self, "Rename field", "New name:", text=old)
         if ok and new.strip() and new.strip() != old and not self.rename_field(old, new):
-            QMessageBox.warning(self, "Rename field", f"“{new.strip()}” is already a column.")
+            QMessageBox.warning(self, "Rename field",
+                                wf.field_problem(self.project, new, old) or "The field was not renamed.")
 
     def _remove_field_dialog(self):
         name = self._pick_field("Remove field")
@@ -1040,8 +1041,4 @@ class AnimalsPage(Page):
 
         p = self.project
         with atomic_write(path, newline="") as fh:
-            w = csv.writer(fh)
-            w.writerow(["ID", "Treatment code", "Sex"] + list(p.animal_fields) + ["Notes"])
-            for a in p.animals:
-                w.writerow([a.id, treatment_text(p, a.group), a.sex] + [a.fields.get(f, "") for f in p.animal_fields]
-                           + [a.notes])
+            csv.writer(fh).writerows(export.animal_table(p, "Treatment code", lambda a: treatment_text(p, a.group)))

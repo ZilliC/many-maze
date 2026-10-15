@@ -116,7 +116,7 @@ def context(period: str | None = None, filt: tuple | None = None, factor: str | 
     if factor != "Period" and period is not None:
         ctx.append(str(period))
     if filt is not None:
-        ctx.append(f"{filt[0]} = {filt[1]}")
+        ctx.append(f"{filt[0]} {filt[2] if len(filt) > 2 else '='} {filt[1]}")
     return " · ".join(ctx)
 
 
@@ -281,7 +281,7 @@ def compare(project, rows: list[dict], measure: str, factor: str, method: str = 
     if factor != "Period" and period is not None:
         head += f", period: {period}"
     if filt is not None:
-        head += f", only {filt[0]} = {filt[1]}"
+        head += f", {'only' if len(filt) < 3 or filt[2] == '=' else 'excluding'} {filt[0]} = {filt[1]}"
     if alpha != ALPHA:
         head += f", significance level {alpha:g}"
     if one:

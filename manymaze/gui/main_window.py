@@ -14,9 +14,10 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
-                               QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
+                               QScrollArea, QSizePolicy, QStackedWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..core.export import protocol_report
@@ -149,7 +150,7 @@ class WelcomePage(QWidget):
         self.side_buttons = {}
         for key, text, fn in (("new", "New experiment", main.new_project),
                               ("open", "Open experiment", main.open_project_dialog),
-                              ("demo", "Open demo experiment", main.create_demo),
+                              ("demo", "Create demo experiment", main.create_demo),
                               ("save", "Save", main.save), ("save_as", "Save as", main.save_as),
                               ("close", "Close experiment", main.close_project),
                               ("import", "Import from ANY-maze", main.import_menu),
@@ -295,7 +296,14 @@ class SectionView(QWidget):
         it.setData(0, Qt.UserRole + 2, label)  # the label in mANY-MAZE's terms (see apply_terminology)
         self.explorer.addTopLevelItem(it)
         self.pages.append(page)
-        self.stack.addWidget(page)
+        # each page sits in a scroll area, so a page that needs more room than the screen has (Review, Results,
+        # the apparatus editor on a laptop) scrolls instead of making the window bigger than the screen
+        holder = QScrollArea()
+        holder.setObjectName("PageScroll")
+        holder.setWidgetResizable(True)
+        holder.setFrameShape(QFrame.NoFrame)
+        holder.setWidget(page)
+        self.stack.addWidget(holder)
 
     def item_for(self, page, key=None):
         for i in range(self.explorer.topLevelItemCount()):
@@ -341,13 +349,14 @@ class SectionView(QWidget):
                 self.explorer.setCurrentItem(it)
 
     def current_page(self):
-        return self.stack.currentWidget()
+        holder = self.stack.currentWidget()
+        return holder.widget() if isinstance(holder, QScrollArea) else holder
 
     def _item_changed(self, it, _prev=None):
         if it is None:
             return
         page = self.pages[it.data(0, Qt.UserRole)]
-        self.stack.setCurrentWidget(page)
+        self.stack.setCurrentIndex(it.data(0, Qt.UserRole))
         self.page_changed.emit(page)
         key = it.data(0, Qt.UserRole + 1)
         if key is not None:
@@ -366,7 +375,9 @@ class MainWindow(QMainWindow):
         self.dirty = False
         ini = os.environ.get("MANYMAZE_SETTINGS")  # e.g. tests: keep the user's preferences untouched
         self.settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings("manymaze", "mANY-MAZE")
-        self.resize(1400, 880)
+        # never bigger than the screen (the Dock and the menu bar take part of it)
+        avail = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
+        self.resize(min(1400, avail.width()) if avail else 1400, min(880, avail.height()) if avail else 880)
         app_icon = Path(__file__).resolve().parent.parent / "resources" / "icon.svg"
         if app_icon.exists():
             self.setWindowIcon(QIcon(str(app_icon)))
@@ -392,7 +403,12 @@ class MainWindow(QMainWindow):
         self.workspace = QStackedWidget()
         self.workspace.setObjectName("Workspace")
         self.welcome = WelcomePage(self)
-        self.workspace.addWidget(self.welcome)
+        self._welcome_scroll = QScrollArea()  # (see SectionView.add_page)
+        self._welcome_scroll.setObjectName("PageScroll")
+        self._welcome_scroll.setWidgetResizable(True)
+        self._welcome_scroll.setFrameShape(QFrame.NoFrame)
+        self._welcome_scroll.setWidget(self.welcome)
+        self.workspace.addWidget(self._welcome_scroll)
         for title, entries in SECTIONS:
             sec = SectionView(title)
             panel = self.ribbon.add_tab(title)
@@ -786,6 +802,11 @@ class MainWindow(QMainWindow):
                                         "their experimenter):", list(p.experimenters), 0, False)
         if not ok:
             return
+        if security.admins(p) == [name]:
+            QMessageBox.information(self, "Remove user", f"{name} is the only administrator: without one nobody "
+                                    "could change the security settings any more. Make another user an "
+                                    "administrator first (File ▸ Users and security).")
+            return
         if security.has_password(p, name) and name != self.current_user() and not security.can(p, "manage"):
             QMessageBox.information(self, "Remove user", f"{name} has a password: only an administrator (or {name}) "
                                     "can remove this user.")
@@ -849,7 +870,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ navigation
     def _show_backstage(self):
         self.welcome.refresh()
-        self.workspace.setCurrentWidget(self.welcome)
+        self.workspace.setCurrentWidget(self._welcome_scroll)
         if self.ribbon.tabs.currentIndex() != 0:
             self.ribbon.tabs.blockSignals(True)
             self.ribbon.tabs.setCurrentIndex(0)
@@ -861,7 +882,7 @@ class MainWindow(QMainWindow):
             self._hide_current()
             self._current_page = None
             self.welcome.refresh()
-            self.workspace.setCurrentWidget(self.welcome)
+            self.workspace.setCurrentWidget(self._welcome_scroll)
         elif i == self._help_tab:
             pass  # the Help tab only offers its ribbon commands; the work area stays as it is
         elif self.project is None:
@@ -1181,6 +1202,11 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return False
         self._flush_edits()
+        problems = [m for pg in self.pages for m in (page_hook(pg, "save_problems") or [])]
+        if problems and QMessageBox.question(
+                self, "Save", "These problems were found in the experiment:\n\n• " + "\n• ".join(problems) +
+                "\n\nSave it anyway?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return False
         try:
             self.project.save()
         except Exception as e:
@@ -1205,13 +1231,13 @@ class MainWindow(QMainWindow):
         old = self.project.path
         if old is not None and same_folder(dest, old):  # also another spelling of the same folder
             return self.save()
-        if dest.exists() and QMessageBox.question(
-                self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
-            return False
         other = explock.held_by_other(dest) if dest.exists() else None
-        if other is not None:
+        if other is not None:  # before asking to replace it: it cannot be replaced while it is open
             QMessageBox.warning(self, "Save as", f"{dest} is open in {explock.describe(other)}: close it there "
                                 "or choose another folder.")
+            return False
+        if dest.exists() and QMessageBox.question(
+                self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
             return False
         try:
             self.project.save_as(dest)  # copies the tracks before replacing anything
@@ -1253,6 +1279,8 @@ class MainWindow(QMainWindow):
         n = len(dlg.result or [])
         self.mark_dirty()
         self.status(f"Imported {n} {'animals' if kind == 'animals' else 'tests'}.")
+        if kind == "animals" and getattr(dlg.result, "warnings", None):
+            QMessageBox.information(self, "Import animals", dlg.result.summary())
         self.show_page(self.page("AnimalsPage" if kind == "animals" else "TestsPage"))
         return dlg.result
 
@@ -1265,10 +1293,10 @@ class MainWindow(QMainWindow):
                                              "apparatus (File ▸ Users and security).")
         return True
 
-    def import_anymaze_xml(self, path: str | None = None, origin: str = "auto"):
+    def import_anymaze_xml(self, path: str | None = None, origin: str = "auto", again: bool = False):
         """ANY-maze ▸ File ▸ Export ▸ Export experiment as XML: its animals, tests and tracks (see core.anymaze;
         ANY-maze's own .szd experiment files are in an undocumented binary format and cannot be read)."""
-        from ..core.anymaze import import_anymaze_xml, is_anymaze_xml
+        from ..core.anymaze import count_already_imported, import_anymaze_xml, is_anymaze_xml
 
         p = self.project
         if p is None or self.protocol_locked("Import from ANY-maze"):
@@ -1296,9 +1324,28 @@ class MainWindow(QMainWindow):
                     raise InterruptedError("import stopped")
                 progress(f)
 
-            return import_anymaze_xml(scratch, path, origin, step)
+            try:
+                if not again:  # the same file imported twice would repeat its animals' tests: ask first
+                    found, total = count_already_imported(scratch, path)
+                    if found:
+                        return {"already": (found, total)}
+                return import_anymaze_xml(scratch, path, origin, step)
+            except ValueError as e:  # a damaged file: said in plain words, without a traceback in the console
+                return {"error": str(e)}
 
         def done(res):
+            if "error" in res:
+                return error_box(self, "Import from ANY-maze", res["error"])
+            if "already" in res:
+                found, total = res["already"]
+                if QMessageBox.question(
+                        self, "Import from ANY-maze",
+                        f"{found} of the {total} tests in this file seem to be in the experiment already (same animal, "
+                        f"apparatus, date and ANY-maze test number): it may have been imported before.\n\nImport it "
+                        f"again anyway? The tests and animals would be added a second time.",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                    self.import_anymaze_xml(path, origin, again=True)
+                return
             _merge_imported(p, scratch)
             self.mark_dirty()
             self.save()
@@ -1330,13 +1377,16 @@ class MainWindow(QMainWindow):
             if not paths:
                 return None
         try:
-            apps = zone_maps_apparatus(paths, p)
+            rescaled: list[str] = []
+            apps = zone_maps_apparatus(paths, p, rescaled)
         except Exception as e:
             error_box(self, "Import zone maps", e)
             return None
         self.mark_dirty()
         n = sum(len(a.zones) for a in apps)
-        self.status(f"Imported {n} zones into {', '.join(a.name for a in apps)}. Calibrate the apparatus if needed.")
+        self.status(f"Imported {n} zones into {', '.join(a.name for a in apps)}. Calibrate the apparatus if needed."
+                    + (f" The zone map had another size than the image of {', '.join(rescaled)}: the zones were "
+                       f"stretched to fit it." if rescaled else ""))
         self.show_page(self.page("ApparatusPage"))
         return apps
 
@@ -1371,7 +1421,13 @@ class MainWindow(QMainWindow):
     def restore_backup(self, backup: str | None = None):
         """Go back to an automatic backup of the experiment file (made when saving, at most every 10 minutes)."""
         p = self.project
-        if p is None or p.path is None or not self.maybe_save():
+        if p is None or p.path is None:
+            return None
+        if not security.can(p, "manage"):  # an old copy would bring back the users, roles and lock it had then
+            QMessageBox.information(self, "Restore a backup", "Only an administrator can restore a backup of an "
+                                    "experiment with users and security (File ▸ Users and security).")
+            return None
+        if not self.maybe_save():
             return None
         if backup is None:
             backups = p.list_backups()

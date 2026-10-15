@@ -223,6 +223,9 @@ def track_plot(track: Track, app: Apparatus | None = None, frame=None, title: st
             norm = Normalize(float(fin.min()) if len(fin) else 0, float(fin.max()) if len(fin) else 1)
         lc = LineCollection(segs, cmap=cmap, norm=norm, lw=lw, gid=TRACK_PATH_GID)
         lc.set_array(vals)
+        # the per-frame positions, NaN gaps included: matplotlib drops the NaN vertices from the segments it
+        # hands back, so the animated playback could not rebuild them frame by frame from get_segments()
+        lc._manymaze_xy = np.column_stack([x, y]).astype(float)
         ax.add_collection(lc)
         mappable = lc
     else:
@@ -913,6 +916,9 @@ def zone_map_figure(app: Apparatus, background=None, labels: bool = True, fill: 
     return fig
 
 
+ZONE_MAP_FORMATS = (".png", ".svg", ".pdf", ".jpg", ".jpeg")
+
+
 def save_zone_map(app: Apparatus, path, background=None, labels: bool = True, fill: bool = True,
                   dpi: int = 200) -> str:
     """Save the zone map (:func:`zone_map_figure`) as an image; the format follows the extension (.png, .svg,
@@ -922,6 +928,9 @@ def save_zone_map(app: Apparatus, path, background=None, labels: bool = True, fi
     p = Path(path)
     if not p.suffix:
         p = p.with_suffix(".png")
+    if p.suffix.lower() not in ZONE_MAP_FORMATS:
+        raise ValueError(f"“{p.suffix}” is not a supported image type. Save the map as "
+                         + ", ".join(f.upper().lstrip(".") for f in ZONE_MAP_FORMATS if f != ".jpeg") + ".")
     fig = zone_map_figure(app, background, labels, fill)
     fig.savefig(str(p), dpi=dpi, format=p.suffix[1:].lower().replace("jpg", "jpeg"),
                 facecolor="white", transparent=False)

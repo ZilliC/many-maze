@@ -1,6 +1,8 @@
-"""Crash recovery of live tests: while a test runs, its track, events and I/O log are rewritten to a side file in
-the recordings folder; tests interrupted by a crash are rebuilt from these files when the experiment opens. The
-side files of an experiment protected by a password are encrypted with its key (see :mod:`.security`)."""
+"""Crash recovery of live tests: while a test runs, its events, I/O log and latest track rows are rewritten to a side
+file in the recordings folder (``*.autosave.json``; the rest of the track is appended to ``*.autosave.json.track``,
+see core.trackstore, and fast analogue samples to ``*.autosave.json.samples``, see core.iolog); tests interrupted by
+a crash are rebuilt from these files when the experiment opens. The JSON side files of an experiment protected by
+a password are encrypted with its key (see :mod:`.security`); like the tracks, the other two are not."""
 
 from __future__ import annotations
 
@@ -165,7 +167,7 @@ class RecoveredSession(Session):
         self.fps = float(d.get("fps") or 25.0)
         self.duration_s = float(d.get("duration_s") or 0.0)
         self.settings = DetectionSettings.from_dict(d.get("settings"))
-        self._track = TrackBuilder(d.get("cols"))
+        self._track = TrackBuilder.restore(d.get("cols"), d.get("track_file"))  # (rows in the .track side file)
         self.events = [dict(e) for e in d.get("events") or []]
         t_end = round(self.elapsed, 3)
         open_states = set(d.get("open_states") or [])
@@ -199,8 +201,8 @@ class RecoveredSession(Session):
     def elapsed(self) -> float:
         if self.io_only:
             return float(self.d.get("elapsed") or 0.0)
-        t = self._track.cols["t"]
-        return float(t[-1]) if t else 0.0
+        t = self._track.last("t")
+        return t if t is not None else 0.0
 
     @property
     def has_data(self) -> bool:
@@ -216,6 +218,16 @@ class RecoveredSession(Session):
     def samples_file(self) -> str | None:
         """The side file of the fast analogue samples, if any (deleted with the side file)."""
         return (self.d.get("io_samples") or {}).get("file") or None
+
+    def remove_side_files(self):
+        """Delete the side files of the fast analogue samples and of the track (the test was saved)."""
+        p = self.samples_file()
+        if p:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._track.close(remove=True)
 
     @property
     def result_variables(self) -> dict:
@@ -258,7 +270,7 @@ def recover(project) -> list:
         s = RecoveredSession(d)
         if not s.has_data:
             f.unlink(missing_ok=True)
-            _remove_samples(s)
+            s.remove_side_files()
             continue
         m = d.get("meta") or {}
         test = project.get_test(m["test_id"]) if m.get("test_id") is not None else None
@@ -266,7 +278,7 @@ def recover(project) -> list:
             test = None  # the test id was given to another animal's test since: recover as a new test
         if test is not None and (test.recorded_at or "") >= str(d.get("saved_at") or "~"):
             f.unlink(missing_ok=True)  # stale: the test was saved after this side file was written
-            _remove_samples(s)
+            s.remove_side_files()
             continue
         if test is None:
             animal = str(m.get("animal") or "")
@@ -291,14 +303,6 @@ def recover(project) -> list:
         project.save()  # the side files go only once their data is in the saved experiment
         for _, f, s in out:
             f.unlink(missing_ok=True)
-            _remove_samples(s)
+            s.remove_side_files()
     return [t for t, _, _ in out]
 
-
-def _remove_samples(s: RecoveredSession):
-    p = s.samples_file()
-    if p:
-        try:
-            Path(p).unlink(missing_ok=True)
-        except OSError:
-            pass

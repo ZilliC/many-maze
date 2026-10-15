@@ -10,6 +10,7 @@ from manymaze.core.geometry import circle, rect, segments_intersect, shape_from_
 from manymaze.core.measures import AnalysisSettings, analyse, analyse_segmented, count_rotations, runs
 from manymaze.core.procedures import ProcedureEngine
 from manymaze.core.project import Behaviour
+from manymaze.core.series import initial_heading_frames
 from manymaze.core.stats import compare_groups, two_way_anova
 from manymaze.core.track import Track
 
@@ -154,6 +155,27 @@ def test_water_maze_latency():
     assert r["Found platform"] == "Yes"
     assert 3.0 < r["Escape latency (s)"] < 4.0
     assert r["Initial heading error (deg)"] < 5
+
+
+def test_initial_heading_after_a_short_pause_at_release():
+    """H-P07: an animal that stays still for less than the immobility time when released counts as mobile, so
+    "after 1 s mobile" it has not moved: the heading is then that of its first real movement, not the tracking
+    jitter's direction (here 90° off the true one)."""
+    app = templates.build("water_maze", 0, 0, 300, 300)
+    pc = app.point("Platform centre")
+    start = np.array([150.0, 280.0])
+    jitter = np.tile(start, (40, 1))  # 1.6 s still, the tracked centre wobbling 0.05 px across the way to go
+    d = (np.array([pc.x, pc.y]) - start) / np.hypot(pc.x - start[0], pc.y - start[1])
+    jitter += np.outer((-1.0) ** np.arange(40) * 0.05, [-d[1], d[0]])
+    pos = np.vstack([jitter, syn.line_path(start, (pc.x, pc.y), 100), np.repeat([[pc.x, pc.y]], 25, axis=0)])
+    r = analyse(make_track(pos), app, AnalysisSettings())
+    assert r["Initial heading error (deg)"] < 5
+    assert r["Platform: initial heading error (deg)"] < 5
+    # an animal that never gets further than the jitter has no initial heading
+    n = 60
+    x, y = 100 + 0.05 * (-1.0) ** np.arange(n), np.full(n, 100.0)
+    t = np.arange(n) / 25.0
+    assert initial_heading_frames(t, np.full(n, 0.04), x, y, np.ones(n, bool), moving=np.ones(n, bool)) is None
 
 
 def test_time_bins():
@@ -522,3 +544,18 @@ def test_distance_unit_live():
     assert v[-1] == pytest.approx(st.distance * 10)  # shown in mm
     keys = {k: u for k, _label, u in chart_parameters(app)}
     assert keys["speed"] == "mm/s" and keys["distance"] == "mm" and keys["chart:X position"] == "mm"
+
+
+@pytest.mark.parametrize("box", [(40, 40, 320, 320), (0, 0, 600, 300), (10, 20, 200, 500)])
+def test_h051_y_maze_stays_inside_the_dragged_rectangle(box):
+    x, y, w, h = box
+    app = templates.build("y_maze", *box)
+    for z in app.zones:
+        x0, y0, x1, y1 = z.shape.bounds()
+        assert x0 >= x - 1e-6 and y0 >= y - 1e-6 and x1 <= x + w + 1e-6 and y1 <= y + h + 1e-6, (z.name, box)
+
+
+def test_h051_barnes_escape_hole_must_be_one_of_the_holes():
+    with pytest.raises(ValueError, match="escape hole"):
+        templates.build("barnes_maze", 0, 0, 400, 400, n_holes=20, escape_hole=50)
+    assert templates.build("barnes_maze", 0, 0, 400, 400, n_holes=20, escape_hole=20).points

@@ -326,7 +326,7 @@ def test_animal_notes_csv_round_trip(tmp_path):
     out = tmp_path / "animals.csv"
     export.export_animals(p, out)
     rows = list(csv.reader(out.open()))
-    assert rows[0] == ["ID", "Treatment", "Sex", "Notes"] and rows[1][-1] == "limps, check daily"
+    assert rows[0] == ["ID", "Treatment", "Sex", "Notes", "Status"] and rows[1][-2] == "limps, check daily"
     q = Project()
     header, data = read_table(out)
     mapping = guess_mapping(header, ANIMAL_ROLES)

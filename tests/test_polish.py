@@ -278,3 +278,15 @@ def test_check_video_finds_duplicate_black_and_missing_frames(tmp_path):
     assert c.frames == 40 and c.gaps == [(1.4, 5)] and c.missing == 5 and not c.duplicate and not c.black
     assert "5 missing frames in 1 gap (at 1.40 s)" in c.summary()
     assert check_video(tmp_path / "none.mp4").error  # reported, not raised
+
+
+def test_send_email_to_a_server_that_is_off_says_so():
+    """H-022: "Connection refused" was reported as a file that could not be read or written."""
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()  # nothing listens here now
+    with pytest.raises(RuntimeError, match="mail server .* could not be reached.*nothing was sent") as e:
+        mail.send_email(notify_device(port), "a@example.org", "x", "y")
+    assert "file" not in str(e.value)

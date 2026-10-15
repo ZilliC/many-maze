@@ -4,6 +4,8 @@ presets."""
 
 from __future__ import annotations
 
+import re
+
 DEVICE_TYPES = {
     "virtual": "Simulated device",
     "arduino": "Arduino (mANY-MAZE I/O firmware)",
@@ -68,6 +70,30 @@ DEVICE_FIELDS = {
 # protocol copies (see is_secret)
 SECRET_FIELDS = ("smtp_password", "twilio_token")
 _SECRET_SUFFIXES = ("password", "_token", "_secret", "api_key")
+
+
+_EMAIL_RE = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>.]+$")
+
+
+def notify_problems(cfg: dict) -> list[str]:
+    """What is wrong with the settings of an e-mail / SMS alert device (plain language; [] when fine): the
+    SMTP port must be a number from 1 to 65535 and the e-mail addresses must look like addresses."""
+    if cfg.get("type") != "notify":
+        return []
+    name, out = cfg.get("name", "?"), []
+    port = str(cfg.get("smtp_port") if cfg.get("smtp_port") is not None else "").strip()
+    if port:
+        try:
+            ok = 1 <= int(port) <= 65535 and str(int(port)) == port.lstrip("+")
+        except ValueError:
+            ok = False
+        if not ok:
+            out.append(f"{name}: the SMTP port must be a number from 1 to 65535 (usually 25, 465 or 587), not “{port}”.")
+    for field, label in (("email_to", "E-mail alerts to"), ("from_addr", "From address")):
+        bad = [a.strip() for a in str(cfg.get(field) or "").split(",") if a.strip() and not _EMAIL_RE.match(a.strip())]
+        if bad:
+            out.append(f"{name}: {label} has an address that is not valid: {', '.join(bad)}.")
+    return out
 
 
 def is_secret(key: str) -> bool:
@@ -184,7 +210,7 @@ def level_for(value: float, points, max_level: float = 1.0) -> float:
 
 # ---------------------------------------------------------------- operant chamber presets
 # The named inputs and outputs of typical operant chambers, to set up the I/O device of each chamber at once
-# (Protocol ▸ Mode Input/output only, Experiment › I/O devices). A preset describes the user's own wiring of the
+# (Protocol ▸ Mode Input/output only, Protocol › I/O devices). A preset describes the user's own wiring of the
 # chamber's levers, nose pokes, lights, dispenser and shocker to one of the drivers above (the mANY-MAZE Arduino
 # firmware, Firmata, NI-DAQmx or LabJack, or a simulated device): the vendors' own interface cards and software
 # (Med Associates MED-PC, Coulbourn Habitest, Lafayette ABET) are not driven. Channels are (name, kind, role); the
@@ -220,7 +246,7 @@ OPERANT_PRESETS: dict[str, dict] = {
                      ("pellet", "output", ""), ("tone", "output", "speaker")]},
     "custom": {
         "label": "Custom chamber",
-        "description": "No channels: add the chamber's inputs and outputs yourself (Experiment › I/O devices).",
+        "description": "No channels: add the chamber's inputs and outputs yourself (Protocol › I/O devices).",
         "channels": []},
 }
 # the drivers a preset can be wired to (the simulated device lets the protocol be tried without hardware)

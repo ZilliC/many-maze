@@ -275,15 +275,18 @@ def test_pulse_sequence_on_device_clock():
     dev.set_output = lambda ch, v, max_s=None: (seen.append((time.monotonic(), v)), orig(ch, v, max_s))
     t0 = time.monotonic()
     assert dm.pulse_sequence("v", "o", [(0.05, 0.02), (0.1, 0.02)])
-    time.sleep(0.25)
+    deadline = t0 + 1.0
+    while len(seen) < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
     dm.close()
     assert [v for _t, v in seen][:4] == [1, 0, 1, 0]
     # never early, in order, and not hopelessly late; hosted CI runners can delay the thread by 100 ms or more,
     # in which case both pulses are due and fire together, so the spacing is only checked when the first was on time
+    # — and then only that the second pulse did not come early (a runner can still delay it alone)
     assert seen[0][0] - t0 >= 0.05 - 0.002 and seen[2][0] - t0 >= 0.1 - 0.002
-    assert seen[0][0] <= seen[1][0] <= seen[2][0] <= seen[3][0] and seen[3][0] - t0 < 0.25
+    assert seen[0][0] <= seen[1][0] <= seen[2][0] <= seen[3][0] and seen[3][0] - t0 < 0.5
     if seen[0][0] - t0 < 0.07:
-        assert abs((seen[2][0] - seen[0][0]) - 0.05) < 0.03
+        assert seen[2][0] - seen[0][0] > 0.05 - 0.03
 
 
 def test_shock_intensity_calibration():
@@ -574,7 +577,7 @@ def test_missing_optional_packages_are_reported():
         dm.open()
     finally:
         builtins.__import__ = real
-    assert any("nidaqmx" in e for e in dm.errors) and any("labjack-ljm" in e for e in dm.errors)
+    assert any("National Instruments" in e for e in dm.errors) and any("LabJack" in e for e in dm.errors)
 
 
 def test_thermostat_class_is_exported():

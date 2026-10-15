@@ -3,6 +3,7 @@
 import math
 import shutil
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -80,6 +81,22 @@ def test_results_and_plots(view):
     assert view.results_table.rowCount() > 20
     assert float(res["Test duration (s)"]) == pytest.approx(8, abs=0.1)
     assert "Total distance (cm)" in res
+    # a long text value (visit durations, visited zones) is elided with a tooltip instead of widening the Value
+    # column until the numbers end up off-screen
+    from manymaze.gui.pages.testview.page import RESULT_VALUE_MAX_WIDTH
+
+    long = "Quadrant NE: visit durations (s): " + ", ".join(["1.267", "4.383"] * 20)
+    analyse = view.project.analyse_test
+    view.project.analyse_test = lambda t: [dict(r, **{"Visit durations (s)": long}) for r in analyse(t)]
+    try:
+        view.refresh_results()
+    finally:
+        del view.project.analyse_test
+    tbl = view.results_table
+    row = [r for r in range(tbl.rowCount()) if tbl.item(r, 0).text() == "Visit durations (s)"][0]
+    assert tbl.columnWidth(1) <= RESULT_VALUE_MAX_WIDTH
+    assert tbl.item(row, 1).text() == tbl.item(row, 1).toolTip() == long
+    assert tbl.columnWidth(0) + tbl.columnWidth(1) <= tbl.viewport().width()  # no horizontal scrolling
     view.tabs.setCurrentIndex(1)
     assert view.track_canvas.figure is not None and view.heat_canvas.figure is not None
     assert view.speed_canvas.figure is not None
@@ -211,6 +228,26 @@ def test_track_editing(view):
     assert np.isfinite(saved.x[m]).all()
 
 
+def test_results_warn_when_the_test_period_changed(view):
+    view.tabs.setCurrentIndex(0)
+    view.refresh_results()
+    assert "again" not in view.results_lbl.text()
+    view.start_spin.setValue(view.start_spin.value() + 1.0)
+    assert "Track this test</b> again" in view.results_lbl.text()
+    view.start_spin.setValue(view.start_spin.value() - 1.0)
+    assert "again" not in view.results_lbl.text()
+
+
+def test_interpolate_never_wipes_the_track(view):
+    tr = view.tracks[0]
+    before = tr.x.copy()
+    view.set_range(0, float(tr.t[0]))
+    view.set_range(1, float(tr.t[-1]))
+    assert not view.interpolate_range()
+    assert np.array_equal(view.tracks[0].x, before, equal_nan=True)
+    assert "Nothing to interpolate" in view.edit_lbl.text()
+
+
 def test_manual_track_without_existing_track(view):
     p, t = view.project, view.test
     p.track_path(t).unlink()
@@ -245,3 +282,85 @@ def test_screenshot(view):
     view.tabs.setCurrentIndex(0)
     QTest.qWait(150)
     view.main.grab().save(shot_path("shot_testview.png"))
+
+
+def test_h041_preview_with_a_bad_colour_says_so_instead_of_a_traceback(view, capsys):
+    view.project.detection.method = "colour"
+    view.project.detection.target_colour = "red"
+    view.player.seek_time(2.0)
+    view.chk_preview.setChecked(True)
+    for _ in range(3):
+        view._refresh_frame()
+    assert "Invalid colour" in view.preview_info
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_missing_video_says_so_instead_of_offering_observation(view):  # H-072
+    p, t = view.project, view.test
+    assert t.video
+    video = t.video
+    t.video = str(Path(video).with_name("missing_" + Path(video).name))  # (the open video cannot be renamed on Windows)
+    assert not Path(p.abs_path(t.video)).exists()
+    try:
+        view.load_test(t.id)
+        QTest.qWait(50)
+        html = view.hud.toPlainText()
+        assert "Video not found" in html and "scoring by direct observation" not in html
+        assert not view.clock_box.isVisible()
+    finally:
+        t.video = video
+
+
+def test_h076_detection_fields_fit_the_side_panel(view):
+    """The combos and fields of Review > Detection are fully shown (no cut-off text, no horizontal scroll bar)."""
+    view.tabs.setCurrentIndex(3)
+    QTest.qWait(100)
+    sc = view.det_form.parent().parent()
+    viewport_w = sc.viewport().width()
+    assert sc.horizontalScrollBar().maximum() == 0
+    for name, ed in view.det_form.editors.items():
+        if ed.isVisible():
+            right = ed.mapTo(view.det_form, ed.rect().topRight()).x()
+            assert right <= viewport_w, (name, right, viewport_w)
+
+
+def test_h031_fast_playback_follows_the_clock(view):
+    pl = view.player
+    now = [100.0]
+    pl._clock = lambda: now[0]
+    pl.seek(0)
+    for speed in (4.0, 8.0):
+        pl.pause()
+        pl.seek(0)
+        view.set_speed(speed)
+        pl.play()
+        now[0] += 0.5  # half a second of real time later
+        pl._tick()
+        assert pl.index == int(0.5 * pl.fps * speed)
+        pl.pause()
+        now[0] += 10
+
+
+def test_h033_mark_position_refuses_clicks_outside_the_frame(view):
+    tr = view.tracks[0]
+    view.player.seek_time(2.0)
+    j = view.sample_at(tr, 2.0)
+    before = (tr.x[j], tr.y[j])
+    view.mark_btn.setChecked(True)
+    view.advance_spin.setValue(0)
+    view.player.view.clicked.emit(-500.0, -500.0)
+    assert (view.tracks[0].x[j], view.tracks[0].y[j]) == before
+    assert "outside" in view.edit_lbl.text()
+    view.mark_btn.setChecked(False)
+
+
+def test_h034_copy_table_copies_only_the_visible_rows(view):
+    from PySide6.QtGui import QGuiApplication
+    view.refresh_results()
+    n = view.results_table.rowCount()
+    view.copy_results()
+    assert len(QGuiApplication.clipboard().text().splitlines()) == n + 1
+    view.results_filter.setText("distance")
+    view.copy_results()
+    lines = QGuiApplication.clipboard().text().splitlines()
+    assert 1 < len(lines) < n + 1 and all("distance" in ln.lower() for ln in lines[1:])

@@ -223,3 +223,23 @@ def test_player_command_lines():
     ps = io.player_args("powershell", "C:\\Users\\O'Neil\\t.wav", 1.0)
     assert ps[:2] == ["powershell", "-NoProfile"] and ps[-1] == \
         "(New-Object Media.SoundPlayer 'C:\\Users\\O''Neil\\t.wav').PlaySync()"
+
+
+def test_missing_serial_support_message_is_plain(monkeypatch):
+    """H-074: the packaged app cannot pip install: no 'pip', no package names to install."""
+    def no_serial(port, baud):
+        raise ImportError("serial")
+    monkeypatch.setattr(io, "_open_serial", no_serial)
+    dm = DeviceManager([{"name": "a", "type": "arduino", "port": "/dev/x", "channels": []}])
+    assert dm.errors and all("pip" not in e for e in dm.errors)
+    assert any("serial devices are not available" in e for e in dm.errors)
+
+
+def test_user_messages_name_the_real_menus_and_never_pip():
+    import re
+    from pathlib import Path
+    root = Path(io.__file__).resolve().parents[1]
+    for rel in ("core/iodrivers.py", "core/iodevices.py", "gui/pages/live/page.py", "gui/io_devices_dialog.py",
+                "gui/pages/live/multi.py", "core/livegroup.py", "core/ioconfig.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert not re.search(r"pip install|Experiment › (Procedures|I/O devices)", text), rel

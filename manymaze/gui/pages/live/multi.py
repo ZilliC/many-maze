@@ -600,6 +600,14 @@ class MultiTestMixin:
             else:
                 self._notice("Run tests", f"{e.label}: {msg}")
             return False
+        problem = self.start_switch_problem()
+        if problem:
+            self._log(f"{e.label}: not armed. {problem}", e)
+            if interactive:
+                QMessageBox.warning(self, "Run tests", f"{e.label}: {problem}")
+            else:
+                self._notice("Run tests", f"{e.label}: {problem}")
+            return False
         if not io and e.source_key not in self.group.runners:
             if not self.group.sources:
                 return False
@@ -729,7 +737,7 @@ class MultiTestMixin:
                   if x is not e and x.session is not None and x.state in ("waiting", "running", "paused")]
         if others and self.serial.currentText().strip():
             return None, ("the serial port in the test settings is shared by every test: with several tests at "
-                          "once, configure each box as an I/O device instead (Experiment › I/O devices) and clear "
+                          "once, configure each box as an I/O device instead (Protocol › I/O devices) and clear "
                           "the serial port.")
         if not p.io_devices:
             return "*", ""

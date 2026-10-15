@@ -10,7 +10,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
 
 from ...core.freezing import IMMOBILITY_MODES
 from ...core.template_measures import BARNES_METHODS
-from ...core.tracking import ANIMAL_PRESETS, apply_animal_preset
+from ...core.tracking import (ANIMAL_PRESETS, apply_animal_preset, identity_colours_problem,
+                              target_colour_problem)
+from .. import theme
 from ..widgets import loading
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -150,6 +152,9 @@ ANALYSIS_SPEC = [
     ("speed_smoothing_s", "Smooth positions for distance and speed over (s)", "float", (0.0, 5.0, 0.05, 2),
      "Positions are averaged over this window before distance and speed are computed."),
     ("mobility_threshold", "The animal is immobile below (units/s)", "float", (0.0, 100.0, 0.1, 2), ""),
+    ("min_direction_step", "Smallest movement that has a direction (units)", "float", (0.0, 20.0, 0.1, 2),
+     "Turning, rotations and approaching / moving away follow the path in strokes of at least this length, so that "
+     "the tracking jitter of a still animal is not counted as turns. 0 = every frame."),
     ("min_immobile_s", "Shortest immobility episode (s)", "float", (0.0, 60.0, 0.1, 2), ""),
     ("immobility_mode", "Detect immobility", "choice", list(IMMOBILITY_MODES.items()),
      "From the speed: immobile while the animal's centre moves slower than the threshold above. Forced swim / "
@@ -289,6 +294,10 @@ ANALYSIS_SPEC = [
 
 # sections of the protocol's property pages: (heading, [attribute, ...]). Attributes of a spec that are not listed
 # here are shown in the last section, so new spec entries always appear.
+# fields of the detection settings checked as they are entered: attribute -> function(settings) -> problem or ""
+DETECTION_CHECKS = {"target_colour": target_colour_problem, "identity_colours": identity_colours_problem,
+                    "method": target_colour_problem}  # (the colour only matters for the colour method)
+
 DETECTION_SECTIONS = [
     ("Detection", ["method", "contrast", "threshold", "background", "background_frame", "background_samples",
                    "lighting_compensation", "min_area_px", "max_area_px"]),
@@ -306,7 +315,8 @@ FST_FIELDS = ["immobility_mode", "fst_threshold_pct", "min_fst_immobile_s", "fst
 FST_SPEC = [s for s in ANALYSIS_SPEC if s[0] in FST_FIELDS]
 
 ANALYSIS_SECTIONS = [
-    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_immobile_s", "partial_rotation_deg"]),
+    ("Movement", ["speed_smoothing_s", "mobility_threshold", "min_direction_step", "min_immobile_s",
+                  "partial_rotation_deg"]),
     (FST_SECTION, FST_FIELDS),
     ("Freezing", ["freeze_threshold_mode", "freeze_sensitivity", "freeze_on_pct", "freeze_off_pct",
                   "min_freeze_s"]),
@@ -361,9 +371,13 @@ class SettingsForm(QWidget):
 
     changed = Signal()
 
-    def __init__(self, spec, obj=None, parent=None, sections=None, field_width: int | None = None):
+    def __init__(self, spec, obj=None, parent=None, sections=None, field_width: int | None = None, checks=None):
         super().__init__(parent)
         self.spec = spec
+        # ``checks`` {attr: function(obj) -> problem text or ""}: the problem is shown in red under the field `attr`
+        # (for "method", under the colour field it concerns: see ``_problem_rows``)
+        self.checks = checks or {}
+        self.problem_labels: dict[str, QLabel] = {}
         self.obj = obj
         self.editors: dict[str, QWidget] = {}
         self.labels: dict[str, QLabel] = {}
@@ -371,7 +385,8 @@ class SettingsForm(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        compact = not sections  # e.g. a narrow side panel: long rows wrap (input under its label)
+        compact = not sections  # e.g. a narrow side panel: the input goes under its label
+        self._compact = compact
         if field_width is None:
             field_width = 140 if compact else FIELD_WIDTH
         by_attr = {s[0]: s for s in spec}
@@ -392,7 +407,7 @@ class SettingsForm(QWidget):
                 lay.addWidget(section_title(title))
             form = property_form()
             if compact:
-                form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+                form.setRowWrapPolicy(QFormLayout.WrapAllRows)
                 form.setHorizontalSpacing(16)
             lay.addLayout(form)
             self.forms[title] = form
@@ -447,6 +462,36 @@ class SettingsForm(QWidget):
         lbl.setBuddy(w)
         self.labels[attr] = lbl
         form.addRow(lbl, w)
+        if attr in self.checks and attr != "method":
+            pl = QLabel()
+            pl.setWordWrap(True)
+            theme.style(pl, lambda: f"color:{theme.ERROR};")
+            pl.hide()
+            self.problem_labels[attr] = pl
+            form.addRow(pl)
+
+    def minimumSizeHint(self):
+        """A compact form (side panel) may be as narrow as its fields: long rows wrap and long labels wrap instead
+        of widening it (the panel would otherwise scroll sideways and cut the combos off)."""
+        hint = super().minimumSizeHint()
+        if self._compact:
+            hint.setWidth(min(hint.width(), 190))
+        return hint
+
+    def show_problems(self):
+        """Show (or hide) the problem of every checked field."""
+        if self.obj is None:
+            return
+        for attr, fn in self.checks.items():
+            lbl = self.problem_labels.get(attr)
+            if lbl is None and attr == "method":
+                lbl = self.problem_labels.get("target_colour")
+                fn = self.checks["target_colour"]
+            if lbl is None:
+                continue
+            text = fn(self.obj)
+            lbl.setText(text)
+            lbl.setVisible(bool(text))
 
     def add_to_section(self, title: str, widget: QWidget):
         """Append a full-width widget to the rows of a section (the last section if `title` is unknown)."""
@@ -480,11 +525,13 @@ class SettingsForm(QWidget):
                     w.setCurrentIndex(max(0, w.findData(v)))
                 else:
                     w.setText(str(v))
+        self.show_problems()
 
     def _emit(self, *_):
         if self._loading or self.obj is None:
             return
         self.store(self.obj)
+        self.show_problems()
         self.changed.emit()
 
     def store(self, obj):

@@ -170,3 +170,27 @@ def test_disk_space_warning_on_open(win, monkeypatch):
     monkeypatch.setattr(diskspace.shutil, "disk_usage", lambda p: usage(100, 50, 500 * diskspace.GB))
     win._disk_box = None
     assert win.check_disk_space().ok and win._disk_box is None
+
+
+def test_monitor_triggers_simulated_inputs_during_a_test():
+    """H-062: the I/O table of the Monitor lets the user press the inputs of simulated devices."""
+    from manymaze.core.iodevices import DeviceManager
+
+    dm = DeviceManager([{"name": "box", "type": "virtual", "channels": [
+        {"name": "lever", "kind": "input"}, {"name": "pellet", "kind": "output"}]}])
+    s = LiveSession(templates.build("open_field", 10, 10, 180, 180, size_cm=40), DetectionSettings(background="frame"),
+                    duration_s=0, name="sim", devices=dm)
+    m = MonitorPanel()
+    m.show()
+    assert not m.sim_row.isVisible()
+    m.refresh(s, devices=dm)
+    assert m.sim_row.isVisible() and m.sim_input.count() == 1 and m.sim_input.currentData() == ("box", "lever")
+    assert m.simulate_toggle()
+    assert dm.read_inputs() == [("box", "lever", "input", 1)]
+    assert m.simulate_toggle()
+    assert dm.read_inputs() == [("box", "lever", "input", 0)]
+    assert m.simulate_press() and dm.read_inputs() == [("box", "lever", "input", 1)]
+    m.clear()
+    assert not m.sim_row.isVisible()
+    m.close()
+    dm.close()

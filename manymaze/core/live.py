@@ -31,6 +31,7 @@ from .session import END_DURATION, END_PROCEDURE, END_USER, Session
 from .sync import SyncOutput, sync_on
 from .track import Track
 from .tracking import ArenaTracker, Detection, DetectionSettings, TrackBuilder, postprocess, to_gray
+from .trackstore import ColumnsView
 from .video import SplitRecorder, VideoRecorder
 
 START_MODES = ("immediate", "on_detection", "experimenter_leaves", "manual", "input")
@@ -205,8 +206,10 @@ class LiveSession(_Scoring):
     video stays aligned with the track time; they are encoded in a background thread, and closed in another one
     (:meth:`finish` called from outside the frame thread still returns once the file is closed;
     :meth:`wait_recordings` waits for it). With ``autosave_path`` the track, events and I/O log are written to that
-    side file every ``autosave_s`` seconds or less often as it grows (see :func:`autosave.recover`); fast analogue
-    samples go to a side file of their own (``<autosave_path>.samples``), appended in chunks.
+    side file every ``autosave_s`` seconds or less often if writing it is slow (see :func:`autosave.recover`); fast
+    analogue samples go to a side file of their own (``<autosave_path>.samples``), appended in chunks, and so do the
+    track rows and body outlines (``<autosave_path>.track``, a temporary file without ``autosave_path``; see
+    core.trackstore): memory stays about the same however long the test.
 
     Safety without frames: when no frame has arrived for ``frame_timeout_s`` (camera unplugged, reconnecting…) a
     background thread runs the procedures' clock from the last frame's time on the computer's clock, so that shock
@@ -259,8 +262,8 @@ class LiveSession(_Scoring):
         self.tracker: ArenaTracker | None = None
         self.state = "waiting"
         self.t0: float | None = None
-        self._track = TrackBuilder()
-        self.cols = self._track.cols
+        # only the last rows in memory: the others go to <autosave_path>.track (or a temporary file)
+        self._track = TrackBuilder(path=f"{self.autosave_path}.track" if self.autosave_path else None, spill=True)
         self._init_scoring()
         self.recorder: _RecordingThread | None = None
         self._closing: list[_RecordingThread] = []  # recorders to close once the session lock is released
@@ -468,6 +471,8 @@ class LiveSession(_Scoring):
 
     def _end_if_requested(self):
         if self._end_requested and self.state != "finished" and not self._finishing and not self.engine._busy:
+            if self.engine.end_deferred():  # pellets already ordered are dispensed first
+                return
             self._end_requested = False
             self.finish(self.engine.end_reason or END_PROCEDURE)
 
@@ -661,9 +666,14 @@ class LiveSession(_Scoring):
         self._system_event(t, "recording_error", {"value": str(e)})
 
     @property
+    def cols(self) -> ColumnsView:
+        """The track's columns so far (read-only sequences; most rows are on disk: see core.trackstore)."""
+        return ColumnsView(self._track)
+
+    @property
     def elapsed(self) -> float:
-        t = self.cols["t"]
-        return t[-1] if t else 0.0
+        t = self._track.last("t")
+        return t if t is not None else 0.0
 
     @property
     def running(self) -> bool:
@@ -672,13 +682,15 @@ class LiveSession(_Scoring):
     @property
     def has_data(self) -> bool:
         """The test recorded something worth saving (camera sessions: track rows)."""
-        return bool(self.cols["t"])
+        return bool(len(self._track))
 
     def trail(self, n: int) -> list[tuple[float, float]]:
         with self.lock:
             if self.state not in ("running", "paused"):
                 return []
-            return list(zip(self.cols["x"][-n:], self.cols["y"][-n:]))
+            b = self._track
+            c = b.read(len(b) - n, None, ("x", "y"))
+            return list(zip(c["x"].tolist(), c["y"].tolist()))
 
     # ------------------------------------------------------------------ control (any thread)
     def request_start(self, switch: bool = False):
@@ -734,10 +746,7 @@ class LiveSession(_Scoring):
         the moment the procedure ended it is kept (track rows, scored events, pauses and the I/O log; outputs
         still on then are logged off at that time). The recording is kept whole."""
         self._cut_t = t_end
-        cols = self.cols
-        n = sum(1 for x in cols["t"] if x <= t_end + 1e-9)
-        for v in cols.values():
-            del v[n:]
+        self._track.truncate(int(np.count_nonzero(self._track.read(columns=["t"])["t"] <= t_end + 1e-9)))
         self.pauses = [p for p in self.pauses if p[0] <= t_end + 1e-9]
         self.pause_log = [p for p in self.pause_log if p["t"] <= t_end + 1e-9]
         self.log.append((t_end, "Test ended by procedure: the data after this time is discarded"))
@@ -937,7 +946,7 @@ class LiveSession(_Scoring):
             real = time.monotonic() - self._pause_wall
             self.pauses.append([round(self._pause_t, 3), round(self._pause_t, 3)])
             self.pause_log.append({"t": round(self._pause_t, 3), "duration_s": round(max(gap, real), 3)})
-        elif prev_ts is not None and self.cols["t"] and ts - prev_ts > 2.5 / self.fps and self._gap_pending is None:
+        elif prev_ts is not None and len(self._track) and ts - prev_ts > 2.5 / self.fps and self._gap_pending is None:
             n = int(round((ts - prev_ts) * self.fps)) - 1
             self.warn(f"{n} frame{'s' if n > 1 else ''} dropped")
         t = ts - self.t0
@@ -1069,6 +1078,7 @@ class LiveSession(_Scoring):
         try:
             eng.update_state(t, {"zones": zones, "head_zones": head_zones, "detected": bool(d.detected),
                                  "freezing": freezing, "immobile": self.stats.immobile,
+                                 "immobile_since": self.stats.immobile_since,
                                  "x": float(d.x), "y": float(d.y), "speed": self.stats.speed,
                                  "distance": self.stats.distance, "hx": float(d.hx), "hy": float(d.hy),
                                  "tx": float(d.tx), "ty": float(d.ty), "rearing": bool(rearing),
@@ -1097,7 +1107,7 @@ class LiveSession(_Scoring):
             self._still_since = None
             return False
         pct = d.motion / max(d.area, 1) * 100
-        t = self.cols["t"][-1]
+        t = self._track.last("t")
         a = self.analysis
         on, off = self._freeze_thr.update(t, pct)  # manual, or automatic from the motion seen so far
         self._frz_state = pct <= max(off, on) if self._frz_state else pct < on
@@ -1139,7 +1149,8 @@ class LiveSession(_Scoring):
                     self._call_engine(eng.stop, self.elapsed if self.state != "waiting" else eng.t)
                 finally:
                     self._finishing = False
-            if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9:
+            if end_at is not None and (waiting or eng.ended) and end_at < self.elapsed - 1e-9 \
+                    and not (eng.end_waited_for_pellets and not waiting):
                 self._cut_data(end_at)
             self._close_states()
             for m in self.engine.state_events:  # "mark start / end" actions
@@ -1165,16 +1176,16 @@ class LiveSession(_Scoring):
                     pass
             if started:  # after the outputs went off: nothing cuts the pulse short
                 self._sync("test_end")
-            if self._autosaver is not None and self.cols["t"]:
+            if self._autosaver is not None and len(self._track):
                 self._autosaver.request(force=True)  # the final state, until the test is saved or discarded
 
     # ------------------------------------------------------------------ crash recovery
     def autosave_snapshot(self) -> dict:
         """Everything needed to rebuild the test after a crash (JSON-serialisable).  The short parts are copied
-        under the lock; the track columns, only ever appended to, are copied up to that instant without it. Fast
+        under the lock; of the track, only the rows not yet in its own side file (see core.trackstore). Fast
         analogue samples are not in it: they are appended to their own side file (see core.iolog)."""
         with self.lock:
-            n = len(self.cols["t"])
+            n = len(self._track)
             eng = self.engine
             d = {"version": 2, "name": self.name, "meta": dict(self.autosave_meta or {}), "fps": self.fps,
                  "duration_s": self.duration_s, "state": self.state, "record_path": self.record_path,
@@ -1199,7 +1210,7 @@ class LiveSession(_Scoring):
                  "procedure_log": list(getattr(self.outputs, "log", None) or []),
                  "end_reason": self.end_reason if self.state == "finished" else "",
                  "saved_at": _dt.datetime.now().isoformat(timespec="seconds")}
-        d["cols"] = self._track.snapshot(n)
+        d.update(self._track.recovery_state(n))  # the rows in memory, and how many are in the track's side file
         return d
 
     def _kept_now(self) -> dict:
@@ -1226,6 +1237,7 @@ class LiveSession(_Scoring):
         if self._autosaver is not None:
             self._autosaver.remove()
             self._io_log.remove()
+            self._track.close(remove=True)
 
     def track(self) -> Track:
         tr = self._track.build(self.fps)

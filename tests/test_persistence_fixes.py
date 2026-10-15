@@ -568,3 +568,160 @@ def test_cli_relink(tmp_path, capsys):
     cli.main(["project", str(p.path), "relink", "--folder", str(tmp_path / "new")])
     assert "Relinked 1" in capsys.readouterr().out
     assert Project.load(p.path).missing_videos() == []
+
+
+def test_cli_demo_with_a_relative_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["demo", "d.mmaze"])
+    p = Project.load(tmp_path / "d.mmaze")
+    assert p.tests and p.missing_videos() == [] and all(p.has_track(t) for t in p.tests)
+
+
+def test_cli_relink_with_a_relative_folder(tmp_path, monkeypatch):
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    t = p.add_test("", "A1")
+    t.video = "../old/v.mp4"
+    p.save()
+    (tmp_path / "new").mkdir()
+    (tmp_path / "new" / "v.mp4").write_bytes(b"x")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["project", "e.mmaze", "relink", "--folder", "new"])
+    assert Project.load(p.path).missing_videos() == []
+
+def test_cli_errors_are_one_line_messages(tmp_path, capsys):
+    empty = tmp_path / "empty.mp4"
+    empty.write_bytes(b"")
+    for argv in (["track", str(tmp_path / "nope.mp4")], ["track", str(empty)],
+                 ["track", str(empty), "--template", "nope"]):
+        with pytest.raises(SystemExit) as e:
+            cli.main(argv)
+        assert isinstance(e.value.code, str) and "Traceback" not in e.value.code and "\n" not in e.value.code
+    with pytest.raises(SystemExit) as e:
+        cli.main(["track", str(empty), "--template", "nope"])
+    assert "open_field" in e.value.code  # lists the valid templates
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        if not os.access(ro, os.W_OK):
+            with pytest.raises(SystemExit) as e:
+                cli.main(["demo", str(ro / "x.mmaze")])
+            assert isinstance(e.value.code, str)
+    finally:
+        ro.chmod(0o700)
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["project", str(p.path), "results", "-o", str(tmp_path / "missing" / "x.csv")])
+    assert isinstance(e.value.code, str) and ".tmp" not in e.value.code and "missing" in e.value.code
+
+def test_cli_rejects_unsupported_output_extensions(tmp_path):
+    p = Project(name="e")
+    p.save(tmp_path / "e.mmaze")
+    for sub, name in (("results", "r.pdf"), ("results", "noext"), ("events", "r.pdf"), ("report", "r.csv"),
+                      ("protocol", "r.csv")):
+        with pytest.raises(SystemExit) as e:
+            cli.main(["project", str(p.path), sub, "-o", str(tmp_path / name)])
+        assert isinstance(e.value.code, str) and "extension" in e.value.code
+        assert not (tmp_path / name).exists()
+    with pytest.raises(SystemExit) as e:
+        cli.main(["track", "x.mp4", "-o", str(tmp_path / "t.pdf")])
+    assert ".xlsx" in e.value.code
+    with pytest.raises(SystemExit) as e:
+        cli.main(["project", str(p.path), "report", "-o", str(tmp_path / "r.csv")])
+    assert ".html" in e.value.code
+
+
+def test_save_errors_name_the_users_file_not_the_temporary_one(tmp_path):
+    """H-023: the error named "x.csv.<pid>-<n>-<random>.tmp", a file the user never chose."""
+    from manymaze.core.atomicfile import write_text_atomic
+    from manymaze.core.errors import user_message
+
+    with pytest.raises(FileNotFoundError) as e:
+        write_text_atomic(tmp_path / "missing folder" / "x.csv", "a")
+    assert "“x.csv” was not found" in user_message(e.value) and ".tmp" not in user_message(e.value)
+    if sys.platform != "win32":  # a read-only folder (chmod) does not stop writing on Windows
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            with pytest.raises(PermissionError) as e:
+                write_text_atomic(ro / "x.csv", "a")
+            assert "“x.csv”" in user_message(e.value) and ".tmp" not in user_message(e.value)
+        finally:
+            ro.chmod(0o755)
+    with pytest.raises(OSError) as e:
+        write_text_atomic(tmp_path / ("l" * 300 + ".csv"), "a")
+    assert ".tmp" not in user_message(e.value) and "lll" in user_message(e.value)
+
+
+def test_h051_a_test_without_apparatus_says_so_in_results(tmp_path):
+    p = _project(tmp_path)
+    for t in p.tests:
+        t.apparatus = ""
+    p.apparatus.clear()
+    rows = p.results()
+    assert len(rows) == 2
+    for r in rows:
+        assert "no apparatus" in r[ERROR_COLUMN] and "NoneType" not in r[ERROR_COLUMN]
+
+
+def test_h079_malformed_but_valid_json_experiment_file_is_reported_as_damaged(tmp_path):
+    import json
+
+    from manymaze.core.errors import user_message
+    from manymaze.core.project import DamagedExperiment
+
+    for n, content in enumerate(("[1,2,3]", json.dumps({"name": "x", "tests": "roto"}), '"text"', "5")):
+        d = tmp_path / f"m{n}.mmaze"
+        d.mkdir()
+        (d / "project.json").write_text(content, encoding="utf-8")
+        with pytest.raises(DamagedExperiment) as e:
+            Project.load(d)
+        assert "damaged" in user_message(e.value) and "backups" in user_message(e.value)
+
+
+def test_h078_archive_errors_name_the_users_zip_not_the_part_file(tmp_path):
+    from manymaze.core.archive import archive_project
+    from manymaze.core.errors import user_message
+
+    if sys.platform == "win32":
+        pytest.skip("a read-only folder (chmod) does not stop writing on Windows")
+    p = _project(tmp_path)
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError) as e:
+            archive_project(p, ro / "x.zip")
+        assert "“x.zip”" in user_message(e.value) and ".part" not in user_message(e.value)
+    finally:
+        ro.chmod(0o755)
+
+
+def test_h077_damaged_member_leaves_nothing_unpacked_and_retry_works(tmp_path):
+    import zipfile
+
+    from manymaze.core.archive import archive_project, extract_archive
+    from manymaze.core.errors import user_message
+
+    p = _project(tmp_path)
+    (p.path / "videos").mkdir(exist_ok=True)
+    (p.path / "videos" / "a.bin").write_bytes(b"A" * 5000)
+    (p.path / "videos" / "z.bin").write_bytes(bytes(range(256)) * 40)
+    good = archive_project(p, tmp_path / "good.zip")
+    raw = bytearray(good.read_bytes())
+    with zipfile.ZipFile(good) as z:
+        info = z.getinfo(next(n for n in z.namelist() if n.endswith("z.bin")))
+    raw[info.header_offset + 30 + len(info.filename) + 100] ^= 0xFF  # damage inside a late member's data
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(bytes(raw))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(ValueError) as e:
+        extract_archive(bad, dest)
+    assert "damaged" in user_message(e.value) and "nothing was unpacked" in user_message(e.value)
+    assert list(dest.iterdir()) == []
+    out = extract_archive(good, dest)  # the retry with a good archive works
+    assert (out / "project.json").is_file() and [x.name for x in dest.iterdir()] == [out.name]

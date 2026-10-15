@@ -80,6 +80,43 @@ def seg_moving_average(v: np.ndarray, window: int, breaks: np.ndarray | None) ->
     return out
 
 
+def simplify_path(x: np.ndarray, y: np.ndarray, min_step: float, max_frames: int,
+                  breaks: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The path with the tracking jitter taken out, for the measures that depend on the DIRECTION of movement
+    (turning, rotations, getting closer / further, moving towards / away).
+
+    A direction needs a displacement: a centre that wobbles by a fraction of a millimetre while the animal sits still
+    points anywhere, so every frame would be a random turn. The path is therefore cut into strokes: starting from an
+    anchor position, nothing happens until the animal is at least `min_step` away from it; that frame becomes the
+    next anchor. The stroke is the straight line from the old anchor to the new one, but lasts at most `max_frames`
+    frames (a slower stroke is not a movement, and a long stop must not be stretched into the next movement); before
+    it, and while the animal stays within min_step of the anchor, the animal is held at the anchor (no movement, no
+    direction). x, y and
+    min_step share a unit. No stroke crosses a break (a pause or a reappearance); NaN positions stay NaN.
+    min_step <= 0 returns the path unchanged."""
+    sx, sy = np.array(x, float), np.array(y, float)
+    if min_step <= 0:
+        return sx, sy
+    for a, b in segments(len(sx), breaks):
+        ok = np.flatnonzero(np.isfinite(x[a:b]) & np.isfinite(y[a:b])) + a
+        if not len(ok):
+            continue
+        anchor = int(ok[0])
+        for i in ok[1:]:
+            if math.hypot(x[i] - x[anchor], y[i] - y[anchor]) < min_step:
+                continue
+            start = max(anchor, int(i) - max_frames)
+            sx[anchor:start + 1], sy[anchor:start + 1] = x[anchor], y[anchor]  # held until the stroke started
+            f = (np.arange(start, i + 1) - start) / (i - start)
+            sx[start:i + 1] = x[anchor] + f * (x[i] - x[anchor])
+            sy[start:i + 1] = y[anchor] + f * (y[i] - y[anchor])
+            anchor = int(i)
+        sx[anchor:b], sy[anchor:b] = x[anchor], y[anchor]
+    gone = ~(np.isfinite(x) & np.isfinite(y))
+    sx[gone] = sy[gone] = np.nan
+    return sx, sy
+
+
 def round_result(v, nd=3):
     """A result value: ints kept, floats rounded to nd decimals, None / inf -> NaN."""
     if v is None:
@@ -101,28 +138,37 @@ def count_rotations(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[int
     return int((sign > 0).sum()), int((sign < 0).sum())
 
 
-def rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0) -> tuple[np.ndarray, np.ndarray]:
+def rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0,
+                    max_step_deg: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """The rotations count_rotations() counts, as (index in angle_deg of the sample completing each rotation,
-    +1 clockwise / -1 anticlockwise) - so that the rotations of a whole test can be shared out between periods."""
-    return _rotation_walk(angle_deg, reset_deg)[:2]
+    +1 clockwise / -1 anticlockwise) - so that the rotations of a whole test can be shared out between periods.
+    max_step_deg: changes of more than this between two samples are not turns (see _rotation_walk)."""
+    return _rotation_walk(angle_deg, reset_deg, max_step_deg=max_step_deg)[:2]
 
 
-def partial_rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0,
-                            partial_deg: float = 90.0) -> tuple[np.ndarray, np.ndarray]:
+def partial_rotation_events(angle_deg: np.ndarray, reset_deg: float = 90.0, partial_deg: float = 90.0,
+                            max_step_deg: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """ANY-maze's partial rotations: the turns of the orientation in one direction (from one reversal to the next -
     turning back by more than reset_deg, as for rotations - or to the start / end of the series) of at least
     partial_deg during which no rotation was completed, as (index in angle_deg of the sample where each turn stopped,
     +1 clockwise / -1 anticlockwise)."""
-    return _rotation_walk(angle_deg, reset_deg, partial_deg)[2:]
+    return _rotation_walk(angle_deg, reset_deg, partial_deg, max_step_deg)[2:]
 
 
-def _rotation_walk(angle_deg, reset_deg, partial_deg=0.0) -> tuple[np.ndarray, ...]:
-    """(rotation samples, signs, partial rotation samples, signs): see rotation_events / partial_rotation_events."""
+def _rotation_walk(angle_deg, reset_deg, partial_deg=0.0, max_step_deg=None) -> tuple[np.ndarray, ...]:
+    """(rotation samples, signs, partial rotation samples, signs): see rotation_events / partial_rotation_events.
+    max_step_deg: a change of more than this between two samples (e.g. the direction of travel when the animal backs
+    up, ~180° whose side - clockwise or not - is decided by rounding) is not a turn either way."""
     a = np.asarray(angle_deg, float)
     idx = np.flatnonzero(np.isfinite(a))
     if len(idx) < 2:
         return (np.zeros(0, int),) * 4
-    u = np.degrees(np.unwrap(np.radians(a[idx])))
+    if max_step_deg is None:
+        u = np.degrees(np.unwrap(np.radians(a[idx])))
+    else:
+        step = (np.diff(a[idx]) + 180.0) % 360.0 - 180.0
+        step[np.abs(step) > max_step_deg] = 0.0
+        u = a[idx[0]] + np.concatenate([[0.0], np.cumsum(step)])
     at, sign, p_at, p_sign = [], [], [], []
     ref = u[0]
     hi = lo = u[0]
@@ -164,11 +210,11 @@ def _rotation_walk(angle_deg, reset_deg, partial_deg=0.0) -> tuple[np.ndarray, .
             ref = v
             hi = lo = v
             full = True
-        elif hi - v > reset_deg and hi > ref:
-            ref = v
+        elif hi - v > reset_deg and hi > ref:  # turned back: the next rotation counts from the furthest point
+            ref = hi                             # reached (as ANY-maze's example), not from where it turned back
             hi = lo = v
         elif v - lo > reset_deg and lo < ref:
-            ref = v
+            ref = lo
             hi = lo = v
     if d:
         end_turn()
@@ -179,24 +225,45 @@ def _rotation_walk(angle_deg, reset_deg, partial_deg=0.0) -> tuple[np.ndarray, .
 
 
 def initial_heading_frames(t: np.ndarray, dur: np.ndarray, x: np.ndarray, y: np.ndarray, mobile: np.ndarray,
-                           by: str = "time", time_s: float = 1.0, distance: float = 0.0) -> tuple[int, int] | None:
+                           by: str = "time", time_s: float = 1.0, distance: float = 0.0,
+                           moving: np.ndarray | None = None, min_distance: float = 0.5) -> tuple[int, int] | None:
     """The animal's initial heading as ANY-maze's Heading error options define it: (first position, end position)
     frames of the vector from the first position to the first position after the animal has been mobile for time_s
     (by "time"), or to the first position more than `distance` (in the units of x / y) from it (by "distance").
     Positions while the animal is immobile are ignored. Without enough mobility for the time, the last mobile
-    position; None when there is none (or, by distance, when the animal never gets that far)."""
+    position; None when there is none (or, by distance, when the animal never gets that far).
+    By time, an end position no more than min_distance from the first one (the animal paused at the release for
+    less than the immobility time, which counts as mobile) would give the direction of the tracking jitter (H-P07):
+    the end is then the position after the animal has actually moved (`moving`: faster than the mobility threshold
+    in that frame) for time_s, and None if that is no further either. The default min_distance, 0.5, is in the units
+    of x / y: centimetres (pixels without a calibration)."""
     ok = np.flatnonzero(np.isfinite(x) & np.isfinite(y))
     if len(ok) < 3:
         return None
     i0 = int(ok[0])
-    mob = ok[(ok > i0) & np.asarray(mobile, bool)[ok]]
+    mobile = np.asarray(mobile, bool)
+    mob = ok[(ok > i0) & mobile[ok]]
     if not len(mob):
         return None
     if by == "distance":
         far = mob[np.hypot(x[mob] - x[i0], y[mob] - y[i0]) > max(float(distance), 0.0)]
         return (i0, int(far[0])) if len(far) else None
-    # mobile time elapsed since the first position when each frame starts
-    m_dur = np.where(np.asarray(mobile, bool), dur, 0.0)
-    elapsed = np.concatenate([[0.0], np.cumsum(m_dur[i0:])])[mob - i0]
-    j = np.flatnonzero(elapsed >= float(time_s) - 1e-9)
-    return i0, int(mob[j[0]] if len(j) else mob[-1])
+
+    def after(m):
+        """The first frame of `m` after time_s of `m` (mobile time elapsed since the first position when each frame
+        starts), else the last; None without any."""
+        fr = ok[(ok > i0) & m[ok]]
+        if not len(fr):
+            return None
+        elapsed = np.concatenate([[0.0], np.cumsum(np.where(m, dur, 0.0)[i0:])])[fr - i0]
+        j = np.flatnonzero(elapsed >= float(time_s) - 1e-9)
+        return int(fr[j[0]] if len(j) else fr[-1])
+
+    def near(i):
+        return min_distance > 0 and math.hypot(x[i] - x[i0], y[i] - y[i0]) <= min_distance
+    i1 = after(mobile)
+    if near(i1):
+        i1 = after(mobile & np.asarray(moving, bool)) if moving is not None else None
+        if i1 is None or near(i1):
+            return None
+    return i0, i1

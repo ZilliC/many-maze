@@ -523,10 +523,14 @@ class SingleTestMixin:
             for t, trig, act, payload in fired[self._fired_seen:]:
                 self._log(f"{fmt_time(t)}  rule: {trig} → {act} {payload}".rstrip())
             self._fired_seen = len(fired)
+            new_log = info["proc_log"][self._proc_log_seen:]
+            # a procedure's log / message action is written to both logs: show it once (the test log's line)
+            twice = {f"{t:.2f}s {m}" for t, m in new_log}
             for line in info["outputs"][self._outputs_seen:]:
-                self._log(f"  {line}")
+                if line not in twice:
+                    self._log(f"  {line}")
             self._outputs_seen = len(info["outputs"])
-            for t, m in info["proc_log"][self._proc_log_seen:]:
+            for t, m in new_log:
                 self._log(f"  {fmt_time(t)} {m}")
             self._proc_log_seen = len(info["proc_log"])
             if state == "finished":
@@ -544,7 +548,11 @@ class SingleTestMixin:
             self.trial.setValue(t.trial)
             if t.apparatus:
                 self.apparatus.setCurrentText(t.apparatus)
-            self.duration.setValue(t.duration_s or self.project.test_duration_s)
+            self._loading = True  # (the duration of the chosen test, not a setting of the experiment)
+            try:
+                self.duration.setValue(t.duration_s or self.project.test_duration_s)
+            finally:
+                self._loading = False
         self._update_single_title()
 
     def _update_single_title(self, elapsed: float | None = None):
@@ -704,7 +712,8 @@ class SingleTestMixin:
     def _show_popup(self, pop: dict, entry=None):
         """A procedure's "show a pop-up message": a non-modal message box (the test keeps running)."""
         prefix = f"{entry.label} · " if entry is not None else ""
-        self._log(f"{prefix}{fmt_time(pop.get('t', 0))}  message: {pop.get('text', '')}", entry)
+        if entry is not None:  # (in a single test the "Message:" line of the test log says it)
+            self._log(f"{prefix}{fmt_time(pop.get('t', 0))}  message: {pop.get('text', '')}", entry)
         box = QMessageBox(QMessageBox.Information, f"{prefix}{pop.get('title') or 'Procedure'}",
                           str(pop.get("text", "")), QMessageBox.Ok, self)
         box.setModal(False)
@@ -751,6 +760,10 @@ class SingleTestMixin:
             return False
         if not self.procedures_ready():
             return False
+        problem = self.start_switch_problem()
+        if problem:
+            QMessageBox.warning(self, "Run tests", problem)
+            return False
         test, new = self._prepare_test(need_apparatus=not self.io_only)
         if test is None:
             return False
@@ -771,6 +784,25 @@ class SingleTestMixin:
             self._update_buttons()
             return True
         return self._arm_session(test)
+
+    def start_switch_problem(self) -> str:
+        """"On a start switch": the start switch input must be set and belong to a device of the experiment, or
+        the test would wait for ever.  "" when it is fine (or the test does not start on a switch)."""
+        if self.start_mode.currentData() != "input":
+            return ""
+        spec = self.start_input.text().strip()
+        if not spec:
+            return ("The test starts on a start switch, but no start switch is set. Enter the input (for example "
+                    "box/start) in Setup > Start switch, or choose another way to start the test.")
+        names = {str(d.get("name", "")) for d in (self.project.io_devices if self.project else [])}
+        dev = spec.rpartition("/")[0]
+        if dev and dev not in names:
+            return (f"The start switch “{spec}” belongs to the device “{dev}”, which this experiment does not have. "
+                    "Add it in Protocol > I/O devices or change the start switch.")
+        if not dev and not names:
+            return (f"The start switch “{spec}” needs an I/O device, and this experiment has none. Add one in "
+                    "Protocol > I/O devices or choose another way to start the test.")
+        return ""
 
     def _cancel_pending_arm(self):
         """The source of a test being armed failed or was stopped: the test is not armed."""

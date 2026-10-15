@@ -32,6 +32,7 @@ from .track_edit import TrackEditMixin
 
 INFO_KEYS = set(INFO_COLUMNS)
 SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+RESULT_VALUE_MAX_WIDTH = 180  # px: the Value column of the Results tab, so a long text value is elided, not scrolled
 STATUS_COLORS = {"tracked": "#16a34a", "scored": "#0891b2", "pending": "#d97706", "skipped": "#9333ea",
                  "superseded": "#94a3b8", "excluded": "#94a3b8"}
 
@@ -41,6 +42,8 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
     ("Open field: Animal C1, Day 1 trial 1 - 0:09"), the video on a light background and the time slider, with
     Results / Plots / Scoring / Detection / Track editing tabs on the right.  A test without a video that ran with
     the I/O devices (Input/output only mode) shows its I/O log and events instead of the video."""
+
+    _video_missing = ""  # the path of the test's video when the file is gone (else "")
 
     title = "Test view"
 
@@ -346,6 +349,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.results_table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.results_table.setAlternatingRowColors(False)
         copy = QPushButton("Copy table")
+        copy.setToolTip("Copy the measures shown (those left by Filter measures) to the clipboard")
         copy.clicked.connect(self.copy_results)
         self.results_filter = QLineEdit()
         self.results_filter.setPlaceholderText("Filter measures…")
@@ -532,9 +536,11 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self._update_range_lbl()
         self._enable(True)
         path = p.abs_path(t.video) if t.video else ""
+        self._video_missing = ""
         if path and Path(path).exists() and self.player.open(path, p.lens_for(t)):
             self.player.seek_time(t.start_s)
         else:
+            self._video_missing = str(path)  # the test had a video but it is gone (not a test scored by observation)
             self.player.close_video()
             self.player.current_frame = None
             self.pos_lbl.setText("")
@@ -586,6 +592,7 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         self.pad.set_behaviours([])
         self._load_notes()
         self.clock_box.hide()
+        self._video_missing = ""
         self._show_io_review()
         self._placeholder("No test selected")
 
@@ -754,19 +761,49 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
                                if len(rows) > 1 else ["Value"])
         tbl.setColumnCount(len(heads))
         tbl.setHorizontalHeaderLabels(heads)
-        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for c in range(1, len(heads)):
-            tbl.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         tbl.setRowCount(len(measures))
         for i, m in enumerate(measures):
             tbl.setItem(i, 0, _ro_item(m))
             for j, r in enumerate(rows):
-                tbl.setItem(i, j + 1, _num_item(r.get(m)))
+                it = _num_item(r.get(m))
+                if isinstance(r.get(m), str) and r.get(m):  # lists of visits or zones: elided, whole on hover
+                    it.setToolTip(it.text())
+                tbl.setItem(i, j + 1, it)
+        # values sized to their contents, but a long text value (visit durations, visited zones) must not push the
+        # numbers of the other rows out of sight: capped, the user can still widen the column
+        for c in range(1, len(heads)):
+            hdr.setSectionResizeMode(c, QHeaderView.Interactive)
+            tbl.resizeColumnToContents(c)
+            hdr.resizeSection(c, min(hdr.sectionSize(c), RESULT_VALUE_MAX_WIDTH))
         self._filter_results()
         src = f"{len(self.tracks)} track{'s' if len(self.tracks) > 1 else ''}" if self.tracks else \
             "the I/O log" if has_io_log(t) else "manual scoring"
-        self.results_lbl.setText(f"<b>{len(measures)}</b> measures from {src} · unit: "
-                                 f"{self._app().report_unit if self._app() else 'px'}")
+        msg = (f"<b>{len(measures)}</b> measures from {src} · unit: "
+               f"{self._app().report_unit if self._app() else 'px'}")
+        if self._track_window_outdated():
+            msg += (f"<br><span style='color:{theme.ERROR}'>The test period was changed after this track was made: "
+                    "the results still cover the old period. Click <b>Track this test</b> again to apply the "
+                    "new one.</span>")
+        self.results_lbl.setText(msg)
+
+    def _track_window_outdated(self) -> bool:
+        """True when Test start / Duration no longer match the period the saved track was made for."""
+        t, p = self.test, self.project
+        if t is None or p is None or not self.tracks:
+            return False
+        tr = self.tracks[0]
+        if len(tr) == 0 or tr.meta.get("video_start_s") in (None, ""):
+            return False
+        try:
+            if abs(float(tr.meta["video_start_s"]) - t.start_s) > 0.005:
+                return True
+        except (TypeError, ValueError):
+            return False
+        dur = t.duration_s or p.test_duration_s
+        tol = 2.0 / (float(tr.fps) or 25.0)
+        return bool(dur) and dur < float(tr.t[-1]) - tol
 
     def _filter_results(self, *_):
         words = self.results_filter.text().lower().split()
@@ -784,6 +821,8 @@ class TestViewPage(DetectionMixin, OverlayMixin, ScoringMixin, TrackEditMixin, P
         tbl = self.results_table
         lines = ["\t".join(tbl.horizontalHeaderItem(c).text() for c in range(tbl.columnCount()))]
         for r in range(tbl.rowCount()):
+            if tbl.isRowHidden(r):  # left out by Filter measures
+                continue
             lines.append("\t".join(tbl.item(r, c).text() if tbl.item(r, c) else "" for c in range(tbl.columnCount())))
         QGuiApplication.clipboard().setText("\n".join(lines))
         self.main.status("Results copied to the clipboard.")
