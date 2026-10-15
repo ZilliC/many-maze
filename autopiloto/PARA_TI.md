@@ -21,3 +21,6 @@ Cosas que necesitan hardware real, videos, dinero o una decisión tuya. El agent
 - 2026-10-15 · **H-071 (decisión)**: tras un cierre forzado durante el rastreo, las pruebas pueden quedar «pending»
   con el track completo. ¿Recuperarlas al abrir (hay que definir cuándo un track cuenta como completo)?
 - 2026-10-15 · **Revisión final**: `qa/REVISION_FINAL_2026-10-15.md` (sin commit) — léela y dime si la subo.
+- 2026-10-15 · **H-P10 (permiso)**: el rearing con cámara cenital no se puede detectar con forma ni brillo del blob
+  (12 señales medidas, ninguna separa los rears). Lo más prometedor es el modelo de pose (nariz y orejas). ¿Autorizas
+  descargarlo para probarlo?

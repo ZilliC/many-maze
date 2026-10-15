@@ -210,5 +210,7 @@
 - [ ] Arreglo: H-P05 (S2) medidas de giro/acercamiento infladas ×1,5–1,9 por el temblor del rastreo (capa B = verdad)
 - [ ] Arreglo: H-P10 (S2) rearing automático no detecta rears con cámara cenital (OFT `2025-04-22 20-10-36.mov`,
       arena izquierda: rears claros ≈116,5; 120,3; 127,0; 152,5 s)
+      → intento 1 (Sonnet): ninguna señal de forma/brillo separa los rears (AUC 0,33–0,58); datos en
+        $QA/salidas/HP10/. Siguiente: modelo de pose (necesita permiso de descarga, ver PARA_TI) o posición junto a la pared
 - [ ] QA: registrar H-080/H-081 (RARO de B06-10 y B06-01 sin H-###) y volver a provocar los 11 RARO de B15 con el
       código actual; quitar el ID de ejemplo `PROPROANITRA-3B12` de la cobertura
