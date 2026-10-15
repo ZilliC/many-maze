@@ -1231,13 +1231,13 @@ class MainWindow(QMainWindow):
         old = self.project.path
         if old is not None and same_folder(dest, old):  # also another spelling of the same folder
             return self.save()
-        if dest.exists() and QMessageBox.question(
-                self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
-            return False
         other = explock.held_by_other(dest) if dest.exists() else None
-        if other is not None:
+        if other is not None:  # before asking to replace it: it cannot be replaced while it is open
             QMessageBox.warning(self, "Save as", f"{dest} is open in {explock.describe(other)}: close it there "
                                 "or choose another folder.")
+            return False
+        if dest.exists() and QMessageBox.question(
+                self, "Save as", f"{dest} already exists. Replace its experiment file and tracks?") != QMessageBox.Yes:
             return False
         try:
             self.project.save_as(dest)  # copies the tracks before replacing anything
