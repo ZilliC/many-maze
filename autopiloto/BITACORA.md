@@ -45,3 +45,4 @@
 2026-10-15 · QA B15 barrido de cobertura (offscreen) · 1363 IDs: 1114 OK, 198 N/A, 40 BLOQ, 11 RARO, 0 FALLA; sin hallazgos nuevos · ~/mANY-MAZE-QA/2026-10-11_2224
 2026-10-15 · Revisión final de QA (Opus) · 77 hallazgos únicos: 66 corregidos, 11 decisión; quedan H-P05/H-P10 S2 previos · INFORME_FINAL.md
 2026-10-15 · Arreglo H-P10 rearing cenital (intento 1) · sin arreglo: 12 señales sin separación; pide modelo de pose (PARA_TI) · —
+2026-10-15 · Arreglo H-P05 temblor en medidas de dirección · en parte; oráculo 14442→15098; suite completa verde tras el merge · f9ed232

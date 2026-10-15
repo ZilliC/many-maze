@@ -24,3 +24,6 @@ Cosas que necesitan hardware real, videos, dinero o una decisión tuya. El agent
 - 2026-10-15 · **H-P10 (permiso)**: el rearing con cámara cenital no se puede detectar con forma ni brillo del blob
   (12 señales medidas, ninguna separa los rears). Lo más prometedor es el modelo de pose (nariz y orejas). ¿Autorizas
   descargarlo para probarlo?
+- 2026-10-15 · **H-P05 (decisión)**: las medidas de giro ignoran ya movimientos < 0,5 cm (ajuste nuevo en Analysis ▸
+  Movement). En videos reales los giros bajan ~45 % y siguen bajando con mínimos mayores (el temblor real supera
+  0,5 cm). ¿Subir el mínimo por defecto, o validar contra un recuento externo de giros?

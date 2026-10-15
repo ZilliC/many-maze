@@ -207,10 +207,13 @@
 
       → 77 únicos: 66 corregidos, 11 decisión, 0 abiertos; informe en $QA/bitacora/INFORME_FINAL.md y
         qa/REVISION_FINAL_2026-10-15.md (sin commit, para revisión del usuario)
-- [ ] Arreglo: H-P05 (S2) medidas de giro/acercamiento infladas ×1,5–1,9 por el temblor del rastreo (capa B = verdad)
+- [x] Arreglo: H-P05 (S2) medidas de giro/acercamiento infladas ×1,5–1,9 por el temblor del rastreo (capa B = verdad)
+      → medidas de dirección sobre tramos ≥0,5 cm (`min_direction_step`); oráculo 14442→15098; giros ×1,6–1,9→×1,3
+        (merge f9ed232). Quedan: distancia en zona con parada +20 %, inmovilidad baja resolución −18 %; regenerar calibrar
 - [ ] Arreglo: H-P10 (S2) rearing automático no detecta rears con cámara cenital (OFT `2025-04-22 20-10-36.mov`,
       arena izquierda: rears claros ≈116,5; 120,3; 127,0; 152,5 s)
       → intento 1 (Sonnet): ninguna señal de forma/brillo separa los rears (AUC 0,33–0,58); datos en
         $QA/salidas/HP10/. Siguiente: modelo de pose (necesita permiso de descarga, ver PARA_TI) o posición junto a la pared
 - [ ] QA: registrar H-080/H-081 (RARO de B06-10 y B06-01 sin H-###) y volver a provocar los 11 RARO de B15 con el
       código actual; quitar el ID de ejemplo `PROPROANITRA-3B12` de la cobertura
+- [ ] Regenerar `calibracion_capa_A.csv` del oráculo (`oraculo_sintetico.py calibrar`) tras H-P05 y la nueva app
