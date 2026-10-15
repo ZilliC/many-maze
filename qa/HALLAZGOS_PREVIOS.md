@@ -148,6 +148,12 @@ Antes de abrir un hallazgo nuevo, mira si es uno de estos. Si lo es, **no lo dup
   | Distancia y velocidad media **dentro de una zona** donde el animal se para | +20 % |
   | *Time immobile* a baja resolución (EPM, 6,9 px/cm) | −18 % (el temblor supera el umbral de 2 cm/s) |
 
+- **Estado (2026-10-15, rama `auto/hp05-jitter`):** CORREGIDO en lo que depende de la dirección: el rumbo se mide
+  sobre un recorrido en tramos de al menos 0,5 cm (`series.simplify_path`, ajuste *Smallest movement that has a
+  direction*, guía §9). Mediana app/verdad: giro absoluto ×1,63 → ×1,28; velocidad angular ×1,89 → ×1,32; *Meander*
+  ×1,86 → ×1,26; giro medio ×1,79 → ×1,27; acercarse/alejarse (zonas) ×1,69 → ×1,15; ir hacia/alejándose ×1,40 →
+  ×1,13; rotaciones del camino 78 esperadas 14 → 101 → 19. NO cambia: distancia y velocidad dentro de una zona, ni
+  *Time immobile* a baja resolución (son de distancia/velocidad, no de dirección).
 - **Esperado:** que las medidas de giro y de acercamiento ignoren los cambios de dirección por debajo de un
   desplazamiento mínimo (o suavicen más), y que la guía advierta de su sensibilidad al ruido.
 - **Cómo lo usa la prueba:** `calibracion_capa_A.csv` de cada experimento del oráculo guarda estos efectos; en B17
