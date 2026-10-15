@@ -123,3 +123,22 @@ def test_opening_does_not_dirty_the_experiment(tmp_path):
     w.set_project(Project.load(p.path))
     assert not w.dirty
     w.close()
+
+
+def test_save_as_onto_an_experiment_open_elsewhere_warns_before_asking_to_replace(tmp_path, monkeypatch):
+    p = _saved(tmp_path)
+    dest = tmp_path / "copies"
+    dest.mkdir()
+    other = Project(name="Open field")
+    other.save(dest / "Open field.mmaze")
+    w = MainWindow()
+    w.set_project(Project.load(p.path))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest))
+    monkeypatch.setattr(explock, "held_by_other", lambda folder: {**explock.me(), "pid": os.getppid()})
+    asked, warned = [], []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a) or QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    assert w.save_as() is False
+    assert not asked and len(warned) == 1 and "is open in" in warned[0][2]
+    w.dirty = False
+    w.close()
