@@ -24,6 +24,8 @@ ANIMAL_ROLES = {
     "group": [r"^treatment", r"^group", r"^condition", r"^genotype"],
     "sex": [r"^sex$", r"^gender$"],
     "notes": [r"^(animal )?notes?$", r"^comments?$", r"^remarks?$"],
+    "status": [r"^(animal )?status$"],
+    "reason": [r"^(retired|retirement|status) reason$", r"^reason( retired)?$"],
 }
 TEST_ROLES = {
     "test": [r"^test( no| number| #)?$", r"^trial id$"],
@@ -190,29 +192,119 @@ def _cell(row, idx):
     return row[idx].strip() if idx is not None and idx < len(row) else ""
 
 
-def import_animals(project, header, rows, mapping: dict, extra_fields: list[int] | None = None) -> list[str]:
-    """Create / update animals from a table (ID, treatment, sex, notes). The extra_fields columns become custom
-    animal fields."""
-    ids = []
-    for r in rows:
-        aid = _cell(r, mapping.get("id"))
+class ImportResult(list):
+    """The IDs of the animals an import created or updated (each once), plus what the import had to skip, merge or
+    leave out: ``warnings`` (plain sentences), ``created`` and ``updated`` (counts)."""
+
+    def __init__(self, ids=()):
+        super().__init__(ids)
+        self.warnings: list[str] = []
+        self.created = 0
+        self.updated = 0
+        self.new_groups: list[str] = []  # treatments the import created
+
+    def summary(self) -> str:
+        head = f"{len(self)} animals imported ({self.created} new, {self.updated} already in the experiment and updated)."
+        lines = [head]
+        if self.new_groups:
+            shown = ", ".join(self.new_groups[:_MAX_SHOWN])
+            lines.append(f"New treatments created: {shown}" + (f" and {len(self.new_groups) - _MAX_SHOWN} more"
+                                                                if len(self.new_groups) > _MAX_SHOWN else "") + ".")
+        return "\n".join(lines + self.warnings)
+
+
+_RETIRED = re.compile(r"retired|withdrawn|excluded|removed|dead|deceased|euthani[sz]ed|culled", re.I)
+_ACTIVE = re.compile(r"active|normal|ok|alive|in study|enrolled", re.I)
+_MAX_SHOWN = 6
+
+
+def unprotect_text(s: str) -> str:
+    """Undo the apostrophe the CSV exports put before text that looks like a formula (export._csv_text)."""
+    from .export import looks_like_formula
+
+    return s[1:] if s.startswith("'") and looks_like_formula(s[1:]) else s
+
+
+def _rows_text(rows: list[int]) -> str:
+    shown = ", ".join(str(n) for n in rows[:_MAX_SHOWN])
+    return shown + (f" and {len(rows) - _MAX_SHOWN} more" if len(rows) > _MAX_SHOWN else "")
+
+
+def _bad_weight(text: str) -> bool:
+    """A value in a weight column that is not a plausible body weight in grams (the weighing dialog stops at 100 kg)."""
+    if not text:
+        return False
+    v = parse_number(text)
+    return not (math.isfinite(v) and 0 < v <= 100000)
+
+
+def import_animals(project, header, rows, mapping: dict, extra_fields: list[int] | None = None) -> ImportResult:
+    """Create / update animals from a table (ID, treatment, sex, notes, status). The extra_fields columns become
+    custom animal fields. The result lists each animal once and carries the warnings: rows without an ID (skipped),
+    an ID repeated in the table (the later row updates the earlier one), unusable weights (left empty), an
+    unrecognised status."""
+    out = ImportResult()
+    seen: dict[str, int] = {}  # ID -> first table row (header = row 1)
+    no_id, repeated, bad_weights, bad_status = [], {}, [], []
+    new_groups: list[str] = []
+    cell = lambda r, i: unprotect_text(_cell(r, i))  # noqa: E731
+    for n, r in enumerate(rows, start=2):
+        aid = cell(r, mapping.get("id"))
         if not aid:
+            if any(c.strip() for c in r):
+                no_id.append(n)
             continue
-        group = _cell(r, mapping.get("group"))
+        group = cell(r, mapping.get("group"))
+        existed = project.get_animal(aid) is not None
+        if group and project.get_group(group) is None and group not in new_groups:
+            new_groups.append(group)
         a = project.ensure_animal(aid, group)
+        if aid in seen:
+            repeated.setdefault(aid, [seen[aid]]).append(n)
+        else:
+            seen[aid] = n
+            out.append(aid)
+            out.updated += existed
+            out.created += not existed
         if group:
             a.group = group
         if mapping.get("sex") is not None:
-            a.sex = _cell(r, mapping["sex"])
+            a.sex = cell(r, mapping["sex"])
         if mapping.get("notes") is not None:
-            a.notes = _cell(r, mapping["notes"])
+            a.notes = cell(r, mapping["notes"])
+        if mapping.get("status") is not None:
+            st = cell(r, mapping["status"])
+            if not st:
+                pass  # no status given: the animal stays as it is
+            elif _RETIRED.search(st):
+                a.retired = True
+                if mapping.get("reason") is not None:
+                    a.retired_reason = cell(r, mapping["reason"])
+            elif _ACTIVE.fullmatch(st.strip()):
+                a.retired, a.retired_reason = False, ""
+            else:
+                bad_status.append(n)
         for i in extra_fields or []:
             name = header[i]
             if name not in project.animal_fields:
                 project.animal_fields.append(name)
-            a.fields[name] = _cell(r, i)
-        ids.append(aid)
-    return ids
+            v = cell(r, i)
+            if re.search(r"weight|peso", name, re.I) and _bad_weight(v):
+                bad_weights.append((n, aid, v))
+                v = ""
+            a.fields[name] = v
+    if no_id:
+        out.warnings.append(f"Skipped row {_rows_text(no_id)}: no animal ID.")
+    for aid, at in repeated.items():
+        out.warnings.append(f"Animal {aid} appears on rows {_rows_text(at)}: the later rows replaced the earlier values.")
+    if bad_weights:
+        shown = "; ".join(f"{aid} (row {n}): “{v}”" for n, aid, v in bad_weights[:_MAX_SHOWN])
+        more = f" and {len(bad_weights) - _MAX_SHOWN} more" if len(bad_weights) > _MAX_SHOWN else ""
+        out.warnings.append(f"Weights that are not a number between 0 and 100000 g were left empty: {shown}{more}.")
+    if bad_status:
+        out.warnings.append(f"Unrecognised status on row {_rows_text(bad_status)}: left as it was.")
+    out.new_groups = new_groups
+    return out
 
 
 def import_tests(project, header, rows, mapping: dict, video_dir: str | Path | None = None) -> list:

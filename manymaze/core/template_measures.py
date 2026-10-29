@@ -202,7 +202,7 @@ def _water_maze(d: TemplateData):
         # initial heading error: the initial heading (as the point's: the Heading error options) vs the direction
         # to the platform
         ij = initial_heading_frames(t, dur, k.ux, k.uy, k.mobile, s.heading_error_by, s.heading_error_time_s,
-                                    s.heading_error_distance)
+                                    s.heading_error_distance, moving=k.speed > max(s.mobility_threshold, 1e-9))
         if ij is not None:
             i0, j = ij
             hdx, hdy = k.x[j] - k.x[i0], k.y[j] - k.y[i0]
@@ -260,12 +260,16 @@ def whishaw_corridor(k, app, s, gx: float, gy: float, stop: int) -> dict | None:
     wpx = width / k.scale
     seg = slice(ok[0], stop + 1)
     dist = point_segment_distance(k.x, k.y, sx, sy, gx, gy)
-    inside = (dist <= wpx / 2)[seg]
+    with np.errstate(invalid="ignore"):
+        all_in = dist <= wpx / 2
+    inside = all_in[seg]
+    # as the distance in a zone: the step out of the corridor counts, the step into it not
+    prev = np.r_[False, all_in[:-1]][seg]
     dd, st = k.dur[seg], k.step[seg]
     return {"time": _r(dd[inside].sum()),
             "time_pct": _r(100 * dd[inside].sum() / dd.sum() if dd.sum() > 0 else math.nan, 2),
-            "path_pct": _r(100 * st[inside].sum() / st.sum() if st.sum() > 0 else math.nan, 2),
-            "distance": _r(st[inside].sum(), 2),
+            "path_pct": _r(100 * st[prev].sum() / st.sum() if st.sum() > 0 else math.nan, 2),
+            "distance": _r(st[prev].sum(), 2),
             "left": "No" if inside.all() else "Yes"}
 
 

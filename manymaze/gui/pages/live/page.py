@@ -520,9 +520,13 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         self.single_panel.view.set_apparatus(None)
         self.monitor.clear()
         if project is not None:
-            self.duration.setValue(project.test_duration_s)
-            self.start_mode.setCurrentIndex(max(0, self.start_mode.findData(project.start_mode))
-                                            if project.start_mode != "manual" else 0)
+            self._loading = True  # (not a change of the experiment)
+            try:
+                self.duration.setValue(project.test_duration_s)
+                self.start_mode.setCurrentIndex(max(0, self.start_mode.findData(project.start_mode))
+                                                if project.start_mode != "manual" else 0)
+            finally:
+                self._loading = False
             self._load_live_settings()
             self._restore_group_layout()
             self._recover_interrupted(project)
@@ -540,6 +544,9 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
                                     if locked else "")
         self.rec_names_btn.setEnabled(not locked)
         self.start_delay.setEnabled(not locked)
+        for w in (self.start_keys, self.stop_keys, self.control_input, self.start_input):
+            w.setEnabled(not locked)
+        self._start_mode_changed()  # (the start switch input also follows the start mode)
         self.rec_names_btn.setToolTip("The protocol is locked: only an administrator can change the file names"
                                       if locked else self.REC_NAMES_TIP)
 
@@ -594,8 +601,8 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.serial.clear()
             self.serial.addItem("")
             if ports is None:
-                self.serial_note.setText("pyserial is not installed: serial / TTL actions are only written to "
-                                         "the log (pip install pyserial).")
+                self.serial_note.setText("Serial devices are not available in this installation: serial / TTL actions are only written to "
+                                         "the log.")
             else:
                 self.serial.addItems(ports)
                 self.serial_note.setText("Optional. Used by “serial” and “ttl” procedure actions.")
@@ -720,7 +727,7 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         errors = check_before_test(p.procedures, project_context(p))
         if errors:
             shown = errors[:12] + ([f"… and {len(errors) - 12} more"] if len(errors) > 12 else [])
-            msg = ("The test was not armed: the experiment's procedures have problems (Experiment › Procedures):"
+            msg = ("The test was not armed: the experiment's procedures have problems (Protocol › Procedures):"
                    "\n\n" + "\n".join(f"• {e}" for e in shown))
             for e in errors:
                 self._log(f"Procedures: {e}")
@@ -819,6 +826,11 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
             self.start_input.setText(str(d.get("start_input", "")))
             self.start_delay.setValue(float(self.project.start_switch_delay_s or 0.0) if self.project else 0.0)
             self.record_overlay.setChecked(bool(d.get("record_overlay", False)))
+            self.record.setChecked(bool(d.get("record", True)))
+            if "duration_s" in d:  # the duration and start of the next run, set here (else the protocol's)
+                self.duration.setValue(float(d["duration_s"]))
+            if self.start_mode.findData(d.get("start_mode")) >= 0:
+                self.start_mode.setCurrentIndex(self.start_mode.findData(d["start_mode"]))
             self.split_min.setValue(float(d.get("split_minutes", 0.0)))
             self.lost_warn.setValue(float(d.get("lost_warning_s", 3.0)))
             self.pause_off.setChecked(bool(d.get("pause_outputs_off", True)))
@@ -835,23 +847,32 @@ class LivePage(SetupMixin, SingleTestMixin, MultiTestMixin, ObservationMixin, Ke
         new = {"start_keys": parse_keys(self.start_keys.text()), "stop_keys": parse_keys(self.stop_keys.text()),
                "record_overlay": self.record_overlay.isChecked(), "lost_warning_s": self.lost_warn.value(),
                "split_minutes": self.split_min.value(), "schedule_at": self.sched_time.time().toString("HH:mm"),
+               "record": self.record.isChecked(), "duration_s": self.duration.value(),
+               "start_mode": self.start_mode.currentData(),
                "schedule_daily": self.sched_daily.isChecked(), "control_input": self.control_input.text().strip()}
         if self.start_input.text().strip() or "start_input" in self._live_settings():
             new["start_input"] = self.start_input.text().strip()
         d = self._live_settings()
+        if not security.can(self.project, "edit_protocol"):  # start / stop keys and the switches are the protocol's
+            for k in ("start_keys", "stop_keys", "control_input", "start_input"):
+                new.pop(k, None)
+                if k in d:
+                    new[k] = d[k]
         if self.pause_off.isChecked() != bool(d.get("pause_outputs_off", True)):
             new["pause_outputs_off"] = self.pause_off.isChecked()
         if any(d.get(k) != v for k, v in new.items()):
             d.update(new)
             self.main.mark_dirty()
-        self.group.start_keys, self.group.stop_keys = new["start_keys"], new["stop_keys"]
+        self.group.start_keys = new.get("start_keys", d.get("start_keys", list(DEFAULT_START_KEYS)))
+        self.group.stop_keys = new.get("stop_keys", d.get("stop_keys", list(DEFAULT_STOP_KEYS)))
         self._update_keys_label()
 
     def _start_mode_changed(self, *_):
         sched = self.start_mode.currentData() == "scheduled"
         self.sched_time.setEnabled(sched)
         self.sched_daily.setEnabled(sched)
-        self.start_input.setEnabled(self.start_mode.currentData() == "input")
+        editable = self.project is None or security.can(self.project, "edit_protocol")
+        self.start_input.setEnabled(self.start_mode.currentData() == "input" and editable)
 
     def _store_start_delay(self, value: float):
         """The delay after the start switch is part of the protocol (Project.start_switch_delay_s)."""

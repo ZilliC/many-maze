@@ -6,13 +6,13 @@ import shutil
 import pytest
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QFontInfo
-from PySide6.QtWidgets import QApplication, QMessageBox, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QToolBar
 
 from manymaze.core.demo import create_demo_project
 from manymaze.core.project import Project
 from manymaze.gui import theme
 from manymaze.gui.main_window import MainWindow
-from manymaze.gui.pages.apparatus import RulerItem
+from manymaze.gui.pages.apparatus import RulerItem, TemplateDialog
 from shots import shot_path
 from test_apparatus import approx, drag, mouse
 
@@ -210,3 +210,90 @@ def test_test_video_menu_and_labels_declutter(page):
     assert page.view.item("zone", k).label.isVisible()
     assert 0 < sum(lb.isVisible() for lb in labels) < len(labels)
     page.main.grab().save(shot_path("shot_apparatus_ui.png"))
+
+
+def test_degenerate_shapes_are_refused(page, monkeypatch):
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]) or QMessageBox.Ok)
+    n_zones, n_apps = len(page.app.zones), len(page.project.apparatus)
+    # a rectangle / ellipse dragged straight down has no width
+    for tool in ("rect", "ellipse"):
+        page.set_tool(tool)
+        page.finish_drag(100, 50, 100, 250)
+    # collinear and self-crossing polygons
+    page.set_tool("zone_poly" if "zone_poly" in page.tool_actions else "polygon")
+    page.finish_polygon([(10, 10), (50, 50), (100, 100)])
+    page.finish_polygon([(10, 10), (100, 100), (100, 10), (10, 100)])
+    assert len(page.app.zones) == n_zones and len(warned) == 4
+    # a template dragged with no width, or whose settings leave a zone empty
+    for params in ({}, {"centre_fraction": 1.0}):
+        page.set_tool("template")
+        page.view.template = {"key": "open_field", "params": params, "name": "X", "replace": False, "square": False}
+        page.finish_drag(100, 50, 100 if not params else 300, 250 if not params else 250)
+    assert len(page.project.apparatus) == n_apps and len(warned) == 6
+    # valid shapes still work
+    page.set_tool("rect")
+    page.finish_drag(100, 50, 200, 150)
+    assert len(page.app.zones) == n_zones + 1 and len(warned) == 6
+
+
+def test_zone_names_cannot_hold_braces(page):
+    """Braces delimit measures in calculation formulas: a zone named with them is renamed with parentheses."""
+    i = 0
+    assert page.rename("zone", i, "A {b}")
+    assert page.app.zones[i].name == "A (b)"
+    assert "cannot contain" in page.main.statusBar().currentMessage()
+    z = page.add_zone(page.app.zones[i].shape, "Q{")
+    assert z.name == "Q("
+
+
+def test_duplicate_zone_keeps_its_properties(page):
+    z = page.app.zones[0]
+    page.set_property("zone", 0, entry_rule="body 50 %", hidden=True, moveable=True,
+                      investigation_distance_cm=2.5, entry_orientation_deg=45.0, whishaw_width_cm=3.5)
+    c = page.duplicate_zone(0)
+    assert c.name == f"{z.name} copy"
+    for k in ("entry_rule", "hidden", "moveable", "investigation_distance_cm", "entry_orientation_deg",
+              "whishaw_width_cm", "body_fraction", "color"):
+        assert getattr(c, k) == getattr(z, k)
+    assert c.shape is not z.shape
+
+
+def test_h051_blank_rename_is_refused_with_a_message(page, monkeypatch):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    old = page.app.name
+    assert not page.rename_apparatus("   ")
+    assert page.app.name == old and msgs and "empty" in msgs[0]
+
+
+def test_h051_importing_a_file_without_apparatus_says_so(page, monkeypatch, tmp_path):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    f = tmp_path / "empty.json"
+    f.write_text('{"apparatus": []}', encoding="utf-8")
+    n = len(page.project.apparatus)
+    assert page.import_apparatus(str(f)) == []
+    assert len(page.project.apparatus) == n and msgs and "no apparatus" in msgs[0]
+
+
+def test_h051_export_map_with_an_unknown_extension_lists_the_supported_ones(page, monkeypatch, tmp_path):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    assert page.export_map_image(str(tmp_path / "map.xyz")) is None
+    assert msgs and "xyz" in msgs[0] and "PNG" in msgs[0] and "SVG" in msgs[0] and "PDF" in msgs[0]
+    assert "matplotlib" not in msgs[0] and not (tmp_path / "map.xyz").exists()
+    assert page.export_map_image(str(tmp_path / "map.png"))
+
+
+def test_h051_template_dialog_refuses_an_escape_hole_that_does_not_exist(page, monkeypatch):
+    msgs = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: msgs.append(a[2]) or QMessageBox.Ok)
+    dlg = TemplateDialog(page, "barnes_maze", None, [], False)
+    dlg.form.editors["n_holes"].setValue(20)
+    dlg.form.editors["escape_hole"].setValue(50)
+    dlg.accept()
+    assert dlg.result() != QDialog.Accepted and msgs and "escape hole" in msgs[0]
+    dlg.form.editors["escape_hole"].setValue(5)
+    dlg.accept()
+    assert dlg.result() == QDialog.Accepted

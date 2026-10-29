@@ -278,3 +278,53 @@ def test_camera_options(win, tmp_path):
     assert page.group.sources[k].second == video  # saved options of this camera
     page.apply_source_options(k, {"view": {"flip": "h"}, "second": None, "layout": "side"})
     assert page.group.sources[k].view.flip == "h" and "second" not in p.settings_extra["cameras"][key]
+
+
+def _arm_manual(win, monkeypatch, mode="manual"):
+    p = win.project
+    video = p.abs_path(p.tests[0].video)
+    page = win.goto("LivePage")
+    win.show()
+    page.set_simulation_file(video)
+    page.duration.setValue(2.0)
+    page.start_mode.setCurrentIndex(page.start_mode.findData(mode))
+    page.test_combo.setCurrentIndex(0)
+    page.animal.setCurrentText("C1")
+    monkeypatch.setattr(page, "start_preview", lambda: True)
+    page._on_file_background(compute_background(video, DetectionSettings(background_samples=21)))
+    page._on_opened(400, 400, 25.0)
+    return page
+
+
+def test_start_key_that_is_also_a_scoring_key_starts_the_test(win, monkeypatch):
+    """H-035: before the test starts, a start key that is also a behaviour key starts the test."""
+    win.project.behaviours = [Behaviour("Rearing", "r", "point")]
+    page = _arm_manual(win, monkeypatch)
+    page.start_keys.setText("r")
+    page._save_live_settings()
+    assert page.arm() and page.session.state == "waiting"
+    target = page.single_panel.view
+    QApplication.sendEvent(target, QKeyEvent(QEvent.KeyPress, Qt.Key_R, Qt.NoModifier, "r"))
+    QApplication.sendEvent(target, QKeyEvent(QEvent.KeyRelease, Qt.Key_R, Qt.NoModifier, "r"))
+    page.feed_frame(np.full((400, 400, 3), 200, np.uint8), 0.04)
+    assert page.session.state == "running"
+    assert not [e for e in page.session.events if e.get("behaviour") == "Rearing"]
+    # once running, the key scores as usual
+    QApplication.sendEvent(target, QKeyEvent(QEvent.KeyPress, Qt.Key_R, Qt.NoModifier, "r"))
+    QApplication.sendEvent(target, QKeyEvent(QEvent.KeyRelease, Qt.Key_R, Qt.NoModifier, "r"))
+    assert any("Rearing" in str(e) for e in page.session.events)
+    page.stop_test(save=False)
+
+
+def test_start_switch_needs_a_configured_input(win, monkeypatch):
+    """H-036: 'On a start switch' with an empty input, or a device the project does not have, is not armed."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: shown.append(a[2]) or QMessageBox.Ok)
+    page = _arm_manual(win, monkeypatch, "input")
+    page.start_input.setText("")
+    assert not page.arm() and page.session is None and "start switch" in shown[-1].lower()
+    page.start_input.setText("box/start")
+    assert not page.arm() and page.session is None and "box" in shown[-1]
+    win.project.io_devices = [{"name": "box", "type": "virtual", "channels": [{"name": "start", "kind": "input"}]}]
+    assert page.arm() and page.session.state == "waiting"
+    page.stop_test(save=False)

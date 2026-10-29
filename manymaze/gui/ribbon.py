@@ -9,10 +9,10 @@ Pages contribute contextual groups by implementing ``ribbon_groups()``::
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QStackedWidget, QTabBar,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QStackedWidget,
+                               QTabBar, QToolButton, QVBoxLayout, QWidget)
 
 from .icons import icon
 
@@ -186,6 +186,49 @@ class RibbonPanel(QWidget):
         return [b.defaultAction().text() for g in self.fixed + self.context for b in g.buttons]
 
 
+class _PanelScroll(QScrollArea):
+    """A ribbon panel that scrolls sideways when the window is narrower than its groups (a laptop screen), instead of
+    making the window wider than the screen. The mouse wheel scrolls it too."""
+
+    def __init__(self, panel: RibbonPanel, on_fit):
+        super().__init__()
+        self.setObjectName("RibbonScroll")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setWidget(panel)
+        self._on_fit = on_fit
+        panel.installEventFilter(self)
+
+    def needed_height(self) -> int:
+        """The panel's height, plus the scroll bar's when the groups do not fit (at their natural width: labels are
+        not shortened to fit, the panel scrolls instead)."""
+        panel = self.widget()
+        want = panel.sizeHint().width()
+        if panel.minimumWidth() != want:
+            panel.setMinimumWidth(want)
+        over = want > self.width()
+        return PANEL_HEIGHT + (self.horizontalScrollBar().sizeHint().height() if over else 0)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._on_fit()
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.LayoutRequest:  # groups added or removed (the page changed)
+            QTimer.singleShot(0, self._on_fit)
+        return False
+
+    def wheelEvent(self, e):
+        bar = self.horizontalScrollBar()
+        if bar.maximum() > 0 and e.angleDelta().y() and not e.angleDelta().x():
+            bar.setValue(bar.value() - e.angleDelta().y())
+            e.accept()
+            return
+        super().wheelEvent(e)
+
+
 class Ribbon(QWidget):
     """Tab row ("File", "Protocol", …) above a stack of panels. Tab 0 is the File (backstage) tab."""
 
@@ -220,15 +263,24 @@ class Ribbon(QWidget):
         p = RibbonPanel()
         p.command_pressed.connect(self.command_pressed)
         self.tabs.addTab(title)
-        self.panels.addWidget(p)
+        self.panels.addWidget(_PanelScroll(p, self._fit))
         return p
 
     def panel(self, i: int) -> RibbonPanel:
-        return self.panels.widget(i)
+        w = self.panels.widget(i)
+        return w.widget() if isinstance(w, _PanelScroll) else w
+
+    def _fit(self):
+        """Make room for the scroll bar of the current panel when its groups do not fit the window."""
+        w = self.panels.currentWidget()
+        h = w.needed_height() if isinstance(w, _PanelScroll) else PANEL_HEIGHT
+        if self.panels.height() != h:
+            self.panels.setFixedHeight(h)
 
     def _changed(self, i: int):
         self.panels.setCurrentIndex(i)
         self.panels.setVisible(i != 0)  # the File tab shows a full-page backstage instead of a panel
+        self._fit()
         self.tab_changed.emit(i)
 
 

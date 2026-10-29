@@ -228,6 +228,24 @@ def test_chamber_presets_from_the_protocol_and_the_io_devices_dialog(win, monkey
     dlg.deleteLater()
 
 
+def test_io_devices_dialog_rejects_channels_with_the_same_name(monkeypatch):
+    """H-063: two channels called alike in one device (even of another kind) are refused, like device names."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: shown.append(a[2]) or QMessageBox.Ok))
+    p = Project("t")
+    dlg = IODevicesDialog(p)
+    dlg.add_device("virtual")
+    dlg.configs[-1]["channels"] = [{"name": "lever", "kind": "input"}, {"name": "lever", "kind": "output"}]
+    dlg._load_device()
+    dlg.accept()
+    assert shown and "lever" in shown[-1] and "once" in shown[-1] and not p.io_devices
+    dlg.configs[-1]["channels"][1]["name"] = "pellet"
+    dlg._load_device()
+    dlg.accept()
+    assert [c["name"] for c in p.io_devices[0]["channels"]] == ["lever", "pellet"]
+    dlg.deleteLater()
+
+
 def test_preset_dialog_preview():
     dlg = OperantPresetDialog(preset="coulbourn")
     assert dlg.preset() == "coulbourn" and dlg.device_type() == "arduino"

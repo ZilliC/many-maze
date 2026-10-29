@@ -592,7 +592,7 @@ def test_autosave_backs_off_after_slow_writes(tmp_path):
 
     a = Autosaver(str(tmp_path / "a.json"), snap, lambda m: None)
     a.flush()
-    assert a.last_write_s >= 0.05
+    assert a.last_write_s >= 0.04  # a 50 ms sleep can measure 47 ms on Windows (15.6 ms timer)
     a.request()  # within BACKOFF x 0.05 s of the last write: ignored
     a._join(1)
     assert len(calls) == 1

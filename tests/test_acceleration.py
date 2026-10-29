@@ -57,6 +57,39 @@ def test_frame_reader_matches_opencv(mp4, start):
         assert i == start and f.shape == (240, 320, 3)
 
 
+def test_frame_reader_matches_opencv_under_red_light(tmp_path):
+    # rodent rooms are filmed under red light: the camera's colours lie outside what RGB can show, the conversion to
+    # BGR clips the green channel at 0 and OpenCV's grey of it (the background model, the detection preview) is
+    # brighter than the luma plane tracking used to read, by ~10 grey levels here (up to 23 in real video), which
+    # lost the tail and the edges of the body in the background subtraction
+    av = pytest.importorskip("av")
+    if "libx264" not in av.codecs_available:
+        pytest.skip("no H.264 encoder in this FFmpeg build")
+    p = tmp_path / "red.mp4"
+    out = av.open(str(p), "w")
+    st = out.add_stream("libx264", rate=25)
+    st.width, st.height, st.pix_fmt = 320, 240, "yuv420p"
+    for i in range(10):
+        y = np.full((240, 320), 70, np.uint8)
+        u = np.full((120, 160), 120, np.uint8)
+        v = np.full((120, 160), 230, np.uint8)
+        cv2.circle(y, (60 + 10 * i, 120), 30, 150, -1)
+        cv2.circle(v, (30 + 5 * i, 60), 15, 200, -1)
+        f = av.VideoFrame.from_ndarray(np.concatenate([y, u.reshape(60, 320), v.reshape(60, 320)]), format="yuv420p")
+        for pkt in st.encode(f):
+            out.mux(pkt)
+    for pkt in st.encode():
+        out.mux(pkt)
+    out.close()
+    with FrameReader(str(p)) as r, VideoSource(str(p)) as v:
+        for i, g in r:
+            ref = cv2.cvtColor(v.frame_at(i), cv2.COLOR_BGR2GRAY)
+            assert np.abs(g.astype(int) - ref).mean() < 2.5
+    with FrameReader(str(p), gray=False) as r, VideoSource(str(p)) as v:
+        i, f = next(iter(r))
+        assert np.abs(f.astype(int) - v.frame_at(i)).mean() < 2.5
+
+
 @pytest.mark.parametrize("start", [0, 7])
 def test_frame_reader_falls_back_when_hardware_decoding_fails(mp4, start, monkeypatch):
     # VideoToolbox opens some streams (e.g. old H.264 High 4:4:4) and then fails on the first packet

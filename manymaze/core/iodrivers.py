@@ -55,7 +55,7 @@ class SerialLinesDevice(Device):
             try:
                 self.transport = _open_serial(port, 9600)
             except ImportError:
-                self._error(f"{self.name}: pyserial is not installed (pip install pyserial)")
+                self._error(f"{self.name}: serial devices are not available in this installation of ManyMaze")
                 return
             except Exception as e:  # pragma: no cover - hardware dependent
                 self._error(f"{self.name}: could not open {port}: {e}")
@@ -178,7 +178,7 @@ class FirmataDevice(Device):
             try:
                 self.transport = _open_serial(port, int(self.cfg.get("baud", 57600)))
             except ImportError:
-                self._error(f"{self.name}: pyserial is not installed (pip install pyserial)")
+                self._error(f"{self.name}: serial devices are not available in this installation of ManyMaze")
                 return
             except Exception as e:  # pragma: no cover - hardware dependent
                 self._error(f"{self.name}: could not open {port}: {e}")
@@ -368,7 +368,7 @@ class FirmataDevice(Device):
 
 # ============================================================================== National Instruments
 class NIDAQDevice(Device):
-    """A National Instruments device through NI-DAQmx (``pip install nidaqmx`` and the NI-DAQmx driver)."""
+    """A National Instruments device through NI-DAQmx (needs the ``nidaqmx`` package and the NI-DAQmx driver)."""
 
     type = "nidaq"
     module = None  # the nidaqmx module (tests inject a fake)
@@ -388,8 +388,8 @@ class NIDAQDevice(Device):
             try:
                 import nidaqmx as mod  # type: ignore
             except Exception:
-                self._error(f"{self.name}: the nidaqmx package is not installed (pip install nidaqmx; needs the "
-                            "NI-DAQmx driver)")
+                self._error(f"{self.name}: National Instruments devices are not available in this installation of "
+                            "ManyMaze (they need the NI-DAQmx driver)")
                 return
         for n, c in self.channels.items():
             k = c.get("kind", "input")
@@ -470,7 +470,7 @@ class NIDAQDevice(Device):
 
 # ============================================================================== LabJack
 class LabJackDevice(Device):
-    """A LabJack T4 / T7 / T8 through LJM (``pip install labjack-ljm`` and the LJM library)."""
+    """A LabJack T4 / T7 / T8 through LJM (needs the ``labjack-ljm`` package and the LJM library)."""
 
     type = "labjack"
     module = None  # labjack.ljm (tests inject a fake)
@@ -488,8 +488,8 @@ class LabJackDevice(Device):
             try:
                 from labjack import ljm  # type: ignore
             except Exception:
-                self._error(f"{self.name}: the labjack-ljm package is not installed (pip install labjack-ljm; "
-                            "needs the LJM library)")
+                self._error(f"{self.name}: LabJack devices are not available in this installation of "
+                            "ManyMaze (they need the LJM library)")
                 return
         self.ljm = ljm
         try:

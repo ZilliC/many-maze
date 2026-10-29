@@ -5,6 +5,7 @@ accelerator will run it."""
 from __future__ import annotations
 
 import sys
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 
 from ..core import pose
 from . import theme
-from .widgets import error_box, hint, run_with_progress
+from .widgets import error_box, hint, run_with_progress, user_message
 
 DEFAULT_MODEL = "topviewmouse_rtmpose_s"
 
@@ -189,8 +190,10 @@ class PoseModelBox(QGroupBox):
         try:
             pose.load_model_info(path)
         except Exception as e:
-            error_box(self, "Custom pose model", f"{e}\n\nThe model needs a sidecar JSON describing its input "
-                                                 "size, normalisation, outputs and keypoints (see the user guide).")
+            traceback.print_exc()
+            error_box(self, "Custom pose model", f"{user_message(e)}\n\nThe model needs a sidecar JSON describing its "
+                                                 "input size, normalisation, outputs and keypoints (see the user "
+                                                 "guide).")
             return
         self._set_model(path)
 

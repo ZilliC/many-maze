@@ -29,7 +29,7 @@ from typing import Callable
 import numpy as np
 
 from .apparatus import DISTANCE_UNITS, Apparatus, from_known, rename_factor, rename_unit
-from .atomicfile import write_text_atomic
+from .atomicfile import clean_stale_temps, write_text_atomic
 from .calculations import Calculation, Trials, calculations_from, evaluate_calc, evaluate_test, parse, plan
 from .ioconfig import is_secret
 from .lens import LensCorrection, corrected, lens_from
@@ -68,6 +68,15 @@ OPTIONAL_INFO_COLUMNS = ["Treatment code", "Animal notes", "Time of day", "Reaso
 TIME_OF_DAY = ((0, "Night"), (5, "Morning"), (12, "Afternoon"), (17, "Evening"), (21, "Night"))
 ERROR_COLUMN = "Analysis error"  # results row of a test whose analysis failed (the other tests still get results)
 log = logging.getLogger(__name__)
+
+
+class NotAnExperiment(FileNotFoundError):
+    """The path opened as an experiment is missing or is a folder without an experiment file (its message is for
+    the user)."""
+
+
+class DamagedExperiment(ValueError):
+    """The experiment file cannot be read as an experiment (its message is for the user)."""
 
 
 # test status values: "pending" (to do), "tracked" (has a track), "scored" (manually scored, no track),
@@ -241,6 +250,7 @@ class Project:
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / "tracks").mkdir(exist_ok=True)
         text = self.file_text()
+        clean_stale_temps(self.path)  # (left by a save that was cut off)
         if self.settings_extra.get("backups", True):
             self.backup(min_interval_s=BACKUP_INTERVAL_S)
         write_text_atomic(self.path / PROJECT_FILE, text)
@@ -503,8 +513,28 @@ class Project:
         """Open an experiment folder. One protected by a password needs it: PasswordRequired without it,
         WrongPassword (a PasswordRequired) when it is not the right one."""
         pdir = cls.project_dir(path)
-        d, key = read_project_file(pdir / PROJECT_FILE, password)
-        p = cls.from_dict(d, pdir)
+        if not pdir.exists():
+            raise NotAnExperiment(f"The experiment “{pdir.name}” was not found at {pdir.parent}. It may have been "
+                                  "moved, renamed or deleted, or its drive may not be connected.")
+        if not (pdir / PROJECT_FILE).is_file():
+            raise NotAnExperiment(f"“{pdir.name}” is not a mANY-MAZE experiment: it has no experiment file "
+                                  f"({PROJECT_FILE}).\n\nChoose the experiment's own folder (its name usually ends "
+                                  "in .mmaze), or create one with File ▸ New experiment.")
+        damaged = (f"The experiment file of “{pdir.stem}” ({PROJECT_FILE}) is damaged and cannot be read.\n\n"
+                   f"Earlier saved copies, if any, are in the experiment's “{BACKUP_DIR}” folder "
+                   f"(project-<date>.json): copy the newest one over {PROJECT_FILE} to go back to it.")
+        try:
+            d, key = read_project_file(pdir / PROJECT_FILE, password)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            log.warning("Unreadable experiment file %s: %s", pdir / PROJECT_FILE, e)
+            raise DamagedExperiment(damaged) from e
+        try:
+            if not isinstance(d, dict):
+                raise TypeError("the experiment file is not a JSON object")
+            p = cls.from_dict(d, pdir)
+        except (TypeError, AttributeError, KeyError, ValueError) as e:  # valid JSON with the wrong structure
+            log.warning("Malformed experiment file %s: %r", pdir / PROJECT_FILE, e)
+            raise DamagedExperiment(damaged) from e
         if key is not None:
             p._password, p._key = password, key
         return p
@@ -909,16 +939,17 @@ class Project:
             settings.duration_s = 0.0
             raw = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback,
                               lens=lens)[0]
-            t0 = None
+            start = None
             if self.start_mode == "experimenter_leaves" and raw:
-                from .autostart import experimenter_leaves_start
+                from .autostart import find_start
 
-                t0 = experimenter_leaves_start(raw[0], area_px=settings.max_area_px or 0)
-            tracks = _trim_all_on_detection(raw, dur, t0)
-            if self.start_mode == "experimenter_leaves":
+                start = find_start(raw[0], area_px=settings.max_area_px or 0)
+            tracks = _trim_all_on_detection(raw, dur, start.t if start is not None else None)
+            if start is not None:
                 for tr in tracks:
-                    tr.meta["start"] = ("experimenter left" if t0 is not None else
-                                        "first detection (no experimenter seen)")
+                    tr.meta["start"] = start.note
+                    if start.warning:  # also in the Warnings column of the results
+                        tr.meta["start_warning"] = start.warning
         else:
             tracks = track_video(video, [ArenaJob(app, settings)], progress, should_stop, frame_callback,
                                  lens=lens)[0]
@@ -1002,7 +1033,8 @@ class Project:
             info["Video time at test start (s)"] = 0.0
         if a:
             for f in self.animal_fields:
-                info[f] = a.fields.get(f, "")
+                if f not in INFO_COLUMNS:  # an older experiment's field named like a column: the column wins
+                    info[f] = a.fields.get(f, "")
         return info
 
     def treatment_code(self, group: str) -> str:
@@ -1167,6 +1199,9 @@ class Project:
     def _analyse_test(self, test: Test, segmented: bool, steps=None) -> list[dict]:
         tracks = self.load_tracks(test)
         app = self.get_apparatus(test.apparatus)
+        if app is None and tracks:
+            raise ValueError(f"Test {test.id} has no apparatus: add one on the Apparatus page and choose it for "
+                             "the test.")
         s = self.analysis_for(test)
         rows = []
         behaviours = self.behaviours
@@ -1194,6 +1229,7 @@ class Project:
                     k += 1
                     row["Segment of test"] = k
                 row.update(res)
+                add_warning(row, str(tr.meta.get("start_warning") or ""))  # an automatic start late in the video
                 rows.append(row)
         return rows
 
@@ -1304,7 +1340,7 @@ class Project:
             row = self.test_info(test)
         except Exception:
             row = {"Test": test.id, "Animal": test.animal_id}
-        row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: f"{type(error).__name__}: {error}"})
+        row.update({"Period": "Whole test", "Segment of test": "", ERROR_COLUMN: str(error) if type(error) is ValueError else f"{type(error).__name__}: {error}"})
         return row
 
 

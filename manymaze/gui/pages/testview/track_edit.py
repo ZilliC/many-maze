@@ -252,6 +252,10 @@ class TrackEditMixin:
     def mark_position(self, x, y):
         if self.test is None or self.player.source is None or self.project.path is None:
             return False
+        fr = self.player.current_frame
+        if fr is not None and not (0 <= x < fr.shape[1] and 0 <= y < fr.shape[0]):
+            self.edit_lbl.setText("That click is outside the video frame; click inside the picture.")
+            return False
         ai = self._edit_index()
         created = False
         while len(self.tracks) <= ai:
@@ -314,6 +318,9 @@ class TrackEditMixin:
         tr = self.tracks[ai]
         idx = self._range_indices(tr)
         if idx is None:
+            return False
+        if not np.isfinite(tr.x[np.setdiff1d(np.arange(len(tr)), idx)]).any():
+            self.edit_lbl.setText("Nothing to interpolate from: the range covers all the detected positions.")
             return False
         self._push_undo(ai)
         for c in ("x", "y", "hx", "hy", "tx", "ty"):

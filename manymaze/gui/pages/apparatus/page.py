@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import copy
 import math
+import traceback
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
@@ -19,15 +21,16 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, 
 
 from ....core import plots, security, templates
 from ....core.apparatus import (DISTANCE_UNITS, Apparatus, Line, PointOfInterest, Sequence, Zone, ZoneGroup,
-                                load_apparatus_file, make_grid, remove_grid, save_apparatus_file, unique_name)
-from ....core.geometry import Ellipse, Polygon, Shape, shape_from_dict
+                                clean_name, load_apparatus_file, make_grid, remove_grid, save_apparatus_file,
+                                unique_name)
+from ....core.geometry import Ellipse, Polygon, Shape, polygon_problem, shape_from_dict
 from ....core.project import same_video
 from ....core.templates import PALETTE, TEMPLATES
 from ....core.terminology import term
 from ... import theme
 from ...icons import icon
 from ...live_widgets import LensCorrectionDialog
-from ...widgets import error_box, hint, loading, separator
+from ...widgets import error_box, hint, loading, separator, user_message
 from ..base import Page
 from .background import BackgroundController
 from .dialogs import CalibrationDialog, GridDialog, TemplateDialog
@@ -397,7 +400,9 @@ class ApparatusPage(Page):
         """Another user, or other security settings: the apparatus is editable or read-only."""
         if self.locked:
             self.set_tool("select")
+            self.view.scene().clearSelection()  # what the previous user left selected must not be editable
         self._set_enabled(self.app is not None)
+        self.refresh_info()  # the distance unit is locked with the protocol
 
     def _names(self, exclude: Apparatus | None = None):
         return [a.name for a in self.project.apparatus if a is not exclude]
@@ -441,9 +446,13 @@ class ApparatusPage(Page):
             apps = self.main.with_password(lambda pw: load_apparatus_file(source, pw), "Import apparatus",
                                            f"“{src.stem if src.is_dir() else src.parent.stem}”")
         except Exception as e:
-            QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{e}")
+            traceback.print_exc()
+            QMessageBox.warning(self, "Import apparatus", f"Cannot read apparatus from {source}:\n{user_message(e)}")
             return []
         if apps is None:
+            return []
+        if not apps:
+            QMessageBox.warning(self, "Import apparatus", f"{src.name} has no apparatus to import.")
             return []
         if names is None and len(apps) > 1:
             choices = ["All"] + [a.name for a in apps]
@@ -565,7 +574,11 @@ class ApparatusPage(Page):
 
     def _rename_apparatus(self, app: Apparatus, new_name: str) -> bool:
         new_name = new_name.strip()
-        if not new_name or new_name == app.name:
+        if not new_name:
+            QMessageBox.warning(self, "Rename apparatus", "The name cannot be empty. The apparatus keeps its name "
+                                f"“{app.name}”.")
+            return False
+        if new_name == app.name:
             return False
         if new_name in self._names(exclude=app):
             QMessageBox.warning(self, "Rename apparatus", f"An apparatus called “{new_name}” already exists.")
@@ -660,7 +673,7 @@ class ApparatusPage(Page):
                                        f"<span style='color:{theme.MUTED}'>· results in pixels</span>")
                 self.ppc_spin.setValue(0)
             self.unit_combo.setCurrentIndex(max(0, self.unit_combo.findData(app.distance_unit)))
-            self.unit_combo.setEnabled(bool(app.px_per_cm))
+            self.unit_combo.setEnabled(bool(app.px_per_cm) and not self.locked)
 
     # ================================================================ map
     def _rebuild_map(self, keep_selection: bool = True):
@@ -774,8 +787,11 @@ class ApparatusPage(Page):
                 if square or spec.get("square"):
                     p1 = EditorView.constrain(QPointF(x0, y0), QPointF(x1, y1), True)
                     x1, y1 = p1.x(), p1.y()
-                self.apply_template(spec["key"], min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0),
-                                    spec["params"], spec["name"], spec["replace"])
+                try:
+                    self.apply_template(spec["key"], min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0),
+                                        spec["params"], spec["name"], spec["replace"])
+                except ValueError as e:
+                    QMessageBox.warning(self, "Template", str(e))
             return
         if tool == "line":
             self.add_line(x0, y0, x1, y1)
@@ -789,6 +805,10 @@ class ApparatusPage(Page):
             x1, y1 = p1.x(), p1.y()
         xa, xb = sorted((x0, x1))
         ya, yb = sorted((y0, y1))
+        if xb - xa < 1 or yb - ya < 1:
+            QMessageBox.warning(self, "Shape", "The shape has no width or no height, so nothing was added. Drag "
+                                "in both directions.")
+            return
         if self.view.drag_kind() == "ellipse":
             shape = Ellipse((xa + xb) / 2, (ya + yb) / 2, (xb - xa) / 2, (yb - ya) / 2)
         else:
@@ -799,6 +819,10 @@ class ApparatusPage(Page):
             self.add_zone(shape)
 
     def finish_polygon(self, points):
+        problem = polygon_problem(points)
+        if problem:
+            QMessageBox.warning(self, "Polygon", problem)
+            return
         shape = Polygon([(float(x), float(y)) for x, y in points])
         if self.view.tool == "arena":
             self.set_arena(shape)
@@ -872,7 +896,7 @@ class ApparatusPage(Page):
 
     def set_distance_unit(self, unit: str):
         """Report distances in `unit` for every apparatus of the experiment."""
-        if self.project is None or unit == self.project.distance_unit and \
+        if self.project is None or self.locked or unit == self.project.distance_unit and \
                 all(a.distance_unit == unit for a in self.project.apparatus):
             return
         check = self.project.set_distance_unit(unit)
@@ -923,7 +947,7 @@ class ApparatusPage(Page):
 
     def delete_selected(self) -> bool:
         keys = self.view.selected_keys()
-        if not keys or self.app is None:
+        if not keys or self.app is None or self.locked:
             return False
         with self._edit():
             for kind, idx in sorted(keys, key=lambda k: -k[1]):
@@ -936,7 +960,7 @@ class ApparatusPage(Page):
             exists = self.app is not None and self.app.arena is not None
         else:
             exists = self._obj(kind, index) is not None
-        if not exists:
+        if not exists or self.locked:
             return False
         with self._edit():
             self.app.remove(kind, index)
@@ -944,7 +968,10 @@ class ApparatusPage(Page):
 
     def duplicate_zone(self, index: int) -> Zone | None:
         z = self._obj("zone", index)
-        return self.add_zone(z.shape.translated(10.0, 10.0), f"{z.name} copy", z.color) if z else None
+        if z is None:
+            return None
+        return self._add("zone", lambda n, k: replace(z, name=n, shape=z.shape.translated(10.0, 10.0)),
+                         f"{z.name} copy")
 
     def zone_to_arena(self, index: int):
         z = self._obj("zone", index)
@@ -956,12 +983,16 @@ class ApparatusPage(Page):
         """Rename a zone / point / line / group / sequence; groups, sequences, grids and the per-test positions
         of moveable zones follow. Names are made unique."""
         m, name = self._obj(kind, index), name.strip()
-        if m is None or not name or name == m.name:
+        if m is None or not name or clean_name(name) == m.name:
             return False
         with self._edit(select=(kind, index) if kind in MAP_KINDS else None):
             new = self.project.rename_in_apparatus(self.app, kind, index, name)
         if new != name:
-            self.main.status(f"“{name}” is already used; renamed to “{new}”")
+            if "{" in name or "}" in name:
+                self.main.status(f"Names cannot contain {{ or }} (they delimit measures in calculations); "
+                                 f"renamed to “{new}”")
+            else:
+                self.main.status(f"“{name}” is already used; renamed to “{new}”")
         return True
 
     def set_item_color(self, kind: str, index: int, color: str):
@@ -1089,7 +1120,7 @@ class ApparatusPage(Page):
         """Paste copied zones / points / lines (offset when pasted into the apparatus they came from)."""
         app = self.app
         clip = ApparatusPage._clipboard
-        if app is None or not clip:
+        if app is None or not clip or self.locked:
             return 0
         off = 12.0 * (clip.setdefault("pasted", {}).get(id(app), 0) + (1 if clip.get("source") == id(app) else 0))
         new_keys = []
@@ -1197,7 +1228,11 @@ class ApparatusPage(Page):
             if spec["square"]:
                 s = min(w, h)
                 x, y, w, h = (w - s) / 2, (h - s) / 2, s, s
-            return self.apply_template(spec["key"], x, y, w, h, spec["params"], spec["name"], spec["replace"])
+            try:
+                return self.apply_template(spec["key"], x, y, w, h, spec["params"], spec["name"], spec["replace"])
+            except ValueError as e:
+                QMessageBox.warning(self, "Template", str(e))
+                return None
         self.start_template_placement(spec)
 
     def start_template_placement(self, spec: dict):

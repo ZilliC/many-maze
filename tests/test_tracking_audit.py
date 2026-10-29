@@ -401,7 +401,7 @@ def test_multi_well_pitch_matches_calibration(n, pitch_cm):
 
 def test_y_maze_fits_the_box():
     for (aw, al) in ((8.0, 35.0), (5.0, 40.0)):
-        app = templates.y_maze(100, 50, 300, 400, arm_length_cm=al, arm_width_cm=aw)
+        app = templates.y_maze(100, 50, 600, 400, arm_length_cm=al, arm_width_cm=aw)  # (wide: height limits)
         x0, y0, x1, y1 = app.arena.bounds()
         assert y0 == pytest.approx(50, abs=0.01) and y1 == pytest.approx(450, abs=0.01)
         assert app.px_per_cm == pytest.approx(400 / (1.5 * al + 1.183 * aw), rel=1e-3)

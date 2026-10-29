@@ -382,3 +382,22 @@ def test_dose_maths():
     assert vols["M1"] == pytest.approx(0.1) and vols["M2"] == pytest.approx(0.4) and vols["M3"] is None
     assert p.animals[0].fields["Volume (mL)"] == "0.100" and "Volume (mL)" in p.animal_fields
     assert math.isclose(wf.parse_number("1.5 mL"), 1.5)
+
+
+def test_field_names_of_results_columns_are_reserved():
+    p = Project()
+    p.ensure_animal("M1")
+    for name in ("Stage", "apparatus", "Test", "Trial", "User", "Test date"):
+        assert not wf.add_field(p, name) and "already uses" in wf.field_problem(p, name)
+    assert wf.add_field(p, "Genotype") and wf.add_field(p, "Litter")
+    assert not wf.rename_field(p, "Litter", "Stage") and "Stage" not in p.animal_fields
+    assert wf.field_problem(p, "Genotype") == "“Genotype” is already a column." and wf.field_problem(p, "Q") is None
+
+
+def test_old_field_named_like_a_results_column_does_not_overwrite_it():
+    p = Project(stages=["Day 1"])
+    a = p.ensure_animal("M1")
+    p.animal_fields.append("Stage")  # an experiment saved before the name was reserved still loads
+    a.fields["Stage"] = "ZZZ"
+    t = p.add_test("", "M1", stage="Day 1")
+    assert p.test_info(t)["Stage"] == "Day 1"

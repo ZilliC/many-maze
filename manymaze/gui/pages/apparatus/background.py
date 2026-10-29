@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QMenu, QMessageBox, QSlider
 
 from ....core.apparatus import Apparatus
+from ....core.errors import user_message
 from ....core.video import VIDEO_EXTENSIONS, VideoSource
 from ...icons import icon
 from ...widgets import fmt_time, hint, loading
@@ -162,7 +163,7 @@ class BackgroundController(QObject):
             raw, f = f, (self.lens.apply(f) if self.lens is not None else f)
         except Exception as e:
             self.close()
-            msg = f"Cannot load background from {Path(path).name}: {e}"
+            msg = f"Cannot load background from {Path(path).name}: {user_message(e)}"
             if quiet:
                 self.page.main.status(msg)
             else:

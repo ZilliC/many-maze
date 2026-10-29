@@ -280,7 +280,8 @@ class ScoringMixin:
     # ---- observation clock (TakeNote mode) ------------------------------------
     def _update_clock_ui(self):
         # (not for a test run with the I/O devices: its clock was the test's own, its keys scored live)
-        no_video = self.test is not None and self.player.source is None and not has_io_log(self.test)
+        no_video = (self.test is not None and self.player.source is None and not has_io_log(self.test)
+                    and not self._video_missing)
         self.clock_box.setVisible(no_video)
         st = self.clock.state
         self.clock_start_btn.setText("Resume" if st == "paused" else "Start")
@@ -298,6 +299,9 @@ class ScoringMixin:
 
     def _update_observation_hud(self):
         if self.test is None or self.player.source is not None:
+            return
+        if self._video_missing:
+            self._set_hud([("Video not found:", "#e2e8f0"), (self._video_missing, "#e2e8f0")])
             return
         e = self.clock.elapsed()
         lines = [("No video — scoring by direct observation", "#e2e8f0"),
@@ -323,7 +327,7 @@ class ScoringMixin:
 
     def clock_start(self, confirm: bool = True) -> bool:
         t = self.test
-        if t is None or self.player.source is not None or self.clock.state == "running":
+        if t is None or self.player.source is not None or self.clock.state == "running" or self._video_missing:
             return False
         if self.clock.state == "stopped":
             if t.events and confirm and QMessageBox.question(

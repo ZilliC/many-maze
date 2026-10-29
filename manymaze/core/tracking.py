@@ -24,7 +24,8 @@ from scipy.optimize import linear_sum_assignment
 
 from .apparatus import Apparatus
 from .lens import LensCorrection, corrected
-from .track import COLUMNS, Track, simplify_outline
+from .track import Track, simplify_outline
+from .trackstore import TrackBuilder
 from .video import DOWNSCALE_FACTORS, FrameReader, VideoSource, downscaled_size
 
 
@@ -118,6 +119,9 @@ class Detection:
     contour: np.ndarray | None = field(default=None, repr=False)
     keypoints: np.ndarray | None = field(default=None, repr=False)  # (K, 3) x, y, confidence from the pose model
     outline: np.ndarray | None = field(default=None, repr=False)  # simplified body outline (k, 2) stored in the track
+    # how much further the outline reaches beyond the body (tail stripped) at the tail end than at the head end, in
+    # body lengths: large when the tail is clearly visible, and then the head / tail from the shape is reliable
+    tail_reach: float = field(default=math.nan, repr=False)
 
 
 def hex_to_hsv(colour: str) -> tuple[int, int, int]:
@@ -133,6 +137,32 @@ def hex_to_hsv(colour: str) -> tuple[int, int, int]:
         raise ValueError(f"Invalid colour {colour!r}: use #rrggbb, e.g. #ff0000 for red") from None
     h, s_, v = cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2HSV)[0, 0]
     return int(h), int(s_), int(v)
+
+
+def target_colour_problem(settings: DetectionSettings) -> str:
+    """Why the colour of the animal cannot be used ("" if it can, or if the animal is not detected by colour)."""
+    if settings.method != "colour":
+        return ""
+    try:
+        hex_to_hsv(settings.target_colour)
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+def identity_colours_problem(settings: DetectionSettings) -> str:
+    """Why the colour marks that identify the animals cannot be used ("" if they can)."""
+    for c in settings.identity_colour_list():
+        try:
+            hex_to_hsv(c)
+        except ValueError as e:
+            return str(e)
+    return ""
+
+
+def colour_problem(settings: DetectionSettings) -> str:
+    """The first problem with the colours of the detection settings, in plain words ("" = none)."""
+    return target_colour_problem(settings) or identity_colours_problem(settings)
 
 
 def colour_mask(frame_bgr: np.ndarray, colour: str, tolerance_deg: float = 20, min_saturation: int = 60,
@@ -364,6 +394,15 @@ def apply_animal_preset(settings: DetectionSettings, key: str, px_per_cm: float 
 REPEAT_CHANGE_RATIO = 0.3
 
 
+# structures of the background thinner than this (px) are lines (grid, bars, a wall's edge): see _edge_tolerant
+THIN_LINE_PX = 9
+
+# a ghost of the animal in the model must have been there this long (s) to be absorbed (see _absorb_ghosts)
+GHOST_PERSIST_S = 1.0
+# a detected region larger than this share of the arena is a change of the whole scene, never the animal
+MAX_ARENA_SHARE = 0.5
+
+
 class ArenaTracker:
     """Tracks the animal(s) within one arena mask of a frame.
 
@@ -376,6 +415,11 @@ class ArenaTracker:
     identity_memory_frames = 250
     # a pose-only recovery (blob lost, pose model confident) may continue for at most this many consecutive frames
     pose_only_max_frames = 75
+    # the movement-direction vote on head / tail looks this many frames back at most (slow movement)
+    heading_history_frames = 25
+    # a tail sticking out this many body lengths further at one end than at the other is clearly visible: it decides
+    # the head / tail (Detection.tail_reach), and the movement vote is not counted
+    tail_visible = 0.3
 
     def __init__(self, settings: DetectionSettings, arena_mask: np.ndarray | None = None, pose=None):
         self.s = settings
@@ -397,6 +441,10 @@ class ArenaTracker:
         self._bg_version = 0
         self._bgp_key = None  # cache of the blurred / erased background of the processed region
         self._bgp: np.ndarray | None = None
+        self.frame_rate = 30.0  # of the frames processed (set by track_video)
+        self._ghost_age: np.ndarray | None = None  # frames each pixel has been taken for a ghost (_absorb_ghosts)
+        self._bge_key = None  # cache of the edge-tolerant background (see _edge_tolerant)
+        self._bge: tuple[np.ndarray, np.ndarray] | None = None
         self._bootstrapped = False  # the background is the first frame seen (no empty-arena image was given)
         self.prev_gray: np.ndarray | None = None  # previous frame of the processed region (motion)
         self._prev_box = None
@@ -411,10 +459,22 @@ class ArenaTracker:
         self._flip_votes = [0] * n
         self._history: list[list[tuple[float, float]]] = [[] for _ in range(n)]
         self._single_area: float | None = None
+        # the animals' usual blob area (median of the recent detections), which sets the tail-stripping kernel: see
+        # _describe
+        self._areas: list[float] = []
+        self._usual_area = math.nan
+        self._area_frames = 0
+        # one animal: the contrast of the recent detections (_excess) and their median, the usual contrast
+        self._excesses: list[float] = []
+        self._usual_excess = math.nan
+        self._excess_frames = 0
         self.contrast_votes = [0, 0]  # frames in which the animal was lighter / darker than the background
         self.lighting_gain = 1.0  # last frame's grey-level scale (Ignore lighting changes)
         self._bg_median_key = None
         self._bg_median = math.nan
+        # how strongly each blob stands out (_choose_single): (image, reference, threshold) of the last frame's
+        # processed region, a pixel's contrast being |image - reference| - threshold; None for colour tracking
+        self._contrast: tuple[np.ndarray, float, float] | None = None
         if settings.method == "colour":
             hex_to_hsv(settings.target_colour)  # a clear error now rather than in the middle of a test
         for c in settings.identity_colour_list():
@@ -438,6 +498,7 @@ class ArenaTracker:
                 self.mask = cv2.dilate(arena_mask, k)
         else:
             self.roi = None
+        self._mask_area = int(cv2.countNonZero(self.mask)) if self.mask is not None else 0
         self._region_key = None
         self._region_box = None
         self._mask_c = self.mask  # the mask of the processed region (see _region)
@@ -501,6 +562,27 @@ class ArenaTracker:
             self._bgp_key = key
         return self._bgp
 
+    def _edge_tolerant(self, box, bg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The (darkest, lightest) the background can look at each pixel for a frame that is it shifted by a pixel.
+        Along a sharp edge (grid lines, cage bars, a glass wall: a local range above the threshold) the image
+        shifts by a pixel with the camera's or the wall's vibration and the edge then differs from the model by more
+        than the threshold all along the structure: its lines join the animal into one huge blob, or stand alone as a
+        thin blob that outscores the animal.  There the background is taken as the darkest / lightest value of its
+        3 x 3 neighbourhood, so only a change beyond a pixel's shift counts; elsewhere it is the background itself
+        (cached until the background or the threshold changes)."""
+        thr = self.s.threshold if self.s.threshold > 0 else 25
+        key = (box, self._bg_version, self.s.blur, self.s.erase_thin_px, thr)
+        if self._bge_key != key:
+            k = np.ones((3, 3), np.uint8)
+            hi, lo = cv2.dilate(bg, k), cv2.erode(bg, k)
+            wide = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (THIN_LINE_PX, THIN_LINE_PX))
+            thin = np.maximum(cv2.subtract(bg, cv2.morphologyEx(bg, cv2.MORPH_OPEN, wide)),
+                              cv2.subtract(cv2.morphologyEx(bg, cv2.MORPH_CLOSE, wide), bg)) > thr
+            sharp = cv2.dilate(thin.astype(np.uint8), k).astype(bool) & (cv2.subtract(hi, lo) > thr)
+            self._bge = (np.where(sharp, lo, bg), np.where(sharp, hi, bg))
+            self._bge_key = key
+        return self._bge
+
     def _own_background(self):
         """Copy a background shared with the caller before writing into it."""
         if not self._bg_owned:
@@ -531,6 +613,7 @@ class ArenaTracker:
     def _foreground(self, gray: np.ndarray, frame: np.ndarray | None, box) -> tuple[np.ndarray, np.ndarray | None]:
         """(foreground mask, blurred / erased image) of the processed region (gray and frame already cropped)."""
         s = self.s
+        self._contrast = None
         if s.method == "colour":
             if frame is None or frame.ndim != 3:
                 return np.zeros(gray.shape[:2], np.uint8), None  # no colour in a greyscale frame
@@ -555,20 +638,21 @@ class ArenaTracker:
                 fg = (g > thr).astype(np.uint8) * 255
             else:
                 fg = (g < thr).astype(np.uint8) * 255
+            self._contrast = (g, thr, 0.0)  # how far past the threshold: |grey level - threshold|
             return self._clean(fg), g
         bg = self._processed_background(box)
         if s.lighting_compensation:
             g = self._match_lighting(g, bg, box)
-        g16 = g.astype(np.int16)
-        b16 = bg.astype(np.int16)
         if s.contrast == "dark":
-            diff = np.clip(b16 - g16, 0, 255).astype(np.uint8)
+            diff = cv2.subtract(self._edge_tolerant(box, bg)[0], g)
         elif s.contrast == "light":
-            diff = np.clip(g16 - b16, 0, 255).astype(np.uint8)
+            diff = cv2.subtract(g, self._edge_tolerant(box, bg)[1])
         else:
-            diff = cv2.absdiff(g, bg)
+            lo, hi = self._edge_tolerant(box, bg)
+            diff = cv2.max(cv2.subtract(lo, g), cv2.subtract(g, hi))
         thr = s.threshold if s.threshold > 0 else self._otsu(diff)
         fg = self._clean((diff > thr).astype(np.uint8) * 255)
+        self._contrast = (diff, 0.0, thr)
         if s.contrast not in ("dark", "light"):
             self._vote_contrast(g, bg, fg)
         return fg, g
@@ -674,17 +758,21 @@ class ArenaTracker:
                 continue
             if self.s.max_area_px and a > self.s.max_area_px:
                 continue
+            if self._mask_area and a > MAX_ARENA_SHARE * self._mask_area:
+                continue  # most of the arena changed at once (lighting, camera exposure): not an animal
             blobs.append((a, c))
-        if blobs and g is not None and self.s.method == "background" and \
-                (self.s.background == "adaptive" or self._bootstrapped):
+        # ghosts of the animal in the model: from a live-image background, and also from a median one in which the
+        # animal sat for most of the video (novel tank): a ghost that outscores the animal would hold the track (H-006)
+        if blobs and g is not None and self.s.method == "background":
             blobs = self._absorb_ghosts(blobs, gray, g, fg, box)
         blobs.sort(key=lambda b: -b[0])
         if n == 1:
-            blobs = blobs[:1]
+            blobs = self._choose_single(blobs, off) if blobs else blobs
         else:
             self._learn_single_area(blobs, n)
             blobs = self._split_merged(blobs, n)
         dets = [self._describe(c, a, shape) for a, c in blobs[:n]]
+        self._learn_usual_area([a for a, _ in blobs[:n]])
         if n == 1 and dets and self._single_area is None:
             self._single_area = dets[0].area
         colours = self.s.identity_colour_list()
@@ -734,6 +822,14 @@ class ArenaTracker:
         bg = self._processed_background(box)
         ox, oy = (0, 0) if box is None else (box[0], box[1])
         H, W = gray.shape[:2]
+        # a ghost stays: how long each pixel has been taken for one.  What disappears within a second (the
+        # experimenter's head or hand over the floor at the start) is not: the model, a median of the whole video,
+        # has the floor right
+        if self._ghost_age is None or self._ghost_age.shape != (H, W):
+            self._ghost_age = np.zeros((H, W), np.uint16)
+        age = self._ghost_age
+        cand = np.zeros((H, W), bool)
+        need = max(1, round(GHOST_PERSIST_S * self.frame_rate))
         keep = []
         absorbed = False
         for a, c in blobs:
@@ -755,12 +851,18 @@ class ArenaTracker:
             ghost = e_bg > 8.0 and e_img < 0.5 * e_bg
             inside = np.zeros_like(band)
             cv2.drawContours(inside, [local], -1, 255, -1)
+            if ghost:  # and it is the model that has the step: the blob's inside differs from the floor around it there
+                ghost = self._model_has_step(g[py0:py1, px0:px1], bg[py0:py1, px0:px1], inside, fg[py0:py1, px0:px1])
             if ghost and self.prev_gray is not None and self._prev_box == box:  # and nothing moves in it
                 moved = cv2.absdiff(gray[py0:py1, px0:px1], self.prev_gray[py0:py1, px0:px1]) > self.s.motion_threshold
                 ghost = np.count_nonzero(moved & (inside > 0)) <= 0.02 * max(1, np.count_nonzero(inside))
             if not ghost:
                 keep.append((a, c))
                 continue
+            ins = inside > 0
+            cand[py0:py1, px0:px1] |= ins
+            if np.count_nonzero(age[py0:py1, px0:px1][ins] + 1 >= need) < 0.9 * np.count_nonzero(ins):
+                continue  # not the animal, but not yet certain enough to change the model
             # copy the image into the model over the blob and the margin the adaptive update leaves out
             self._own_background()
             region = cv2.dilate(inside, np.ones((15, 15), np.uint8)) > 0
@@ -770,9 +872,87 @@ class ArenaTracker:
             self._bg_float[sl][region] = src[region]
             cv2.drawContours(fg[py0:py1, px0:px1], [local], -1, 0, -1)
             absorbed = True
+        self._ghost_age = np.where(cand, age + 1, 0).astype(np.uint16)
         if absorbed:
             self._bg_version += 1
         return keep
+
+    GHOST_STEP_RATIO = 0.4  # a ghost's image differs from the floor around it by at most this share of the model's step
+
+    @staticmethod
+    def _model_has_step(g, bg, inside, fg) -> bool:
+        """Is the change a ghost, i.e. it is in the model and not in the image?  Compared with the floor in a ring
+        around the blob, the model's mean level inside it has a step (the animal it contains) and the image has
+        none (or a much smaller one).  A grid seen through an experimenter's head or hand at the start of the video
+        has sharp edges in the model, which the edge test takes for a ghost, yet it is the image that has the step:
+        absorbing it would spoil the model for the rest of the test."""
+        ins = inside > 0
+        ring = (cv2.dilate(inside, np.ones((15, 15), np.uint8)) > 0) & (cv2.dilate(inside, np.ones((5, 5), np.uint8)) == 0) \
+            & (fg == 0)
+        if np.count_nonzero(ring) < 20:
+            return True
+        step_bg = float(bg[ins].mean()) - float(bg[ring].mean())
+        step_img = float(g[ins].mean()) - float(g[ring].mean())
+        return abs(step_img) <= ArenaTracker.GHOST_STEP_RATIO * abs(step_bg) and step_bg * (float(bg[ins].mean()) - float(g[ins].mean())) > 0
+
+    # one animal among several blobs: a blob farther than the gate (_gate_px) from the animal's last-known position
+    # counts this share of its contrast, and one larger than SINGLE_SIZE_LIMIT times the animal's usual area is
+    # scaled down by the square of the excess
+    SINGLE_FAR_WEIGHT = 0.5
+    SINGLE_SIZE_LIMIT = 2.0
+
+    def _excess(self, c, off) -> float:
+        """How far the blob (contour c, frame coordinates) stands out: its mean difference from the background (or
+        grey level, thresholding) beyond the threshold; nan for colour tracking."""
+        if self._contrast is None:
+            return math.nan
+        img, ref, thr = self._contrast
+        x, y, w, h = cv2.boundingRect(c)
+        x0, y0 = x - off[0], y - off[1]
+        inside = np.zeros((h, w), np.uint8)
+        cv2.drawContours(inside, [c - [x, y]], -1, 255, -1)
+        mean = cv2.mean(img[y0:y0 + h, x0:x0 + w], mask=inside)[0]
+        return max(abs(mean - ref) - thr, 1.0)
+
+    def _choose_single(self, blobs, off):
+        """The animal when one animal is tracked (blobs: (area, contour) in frame coordinates; off: the processed
+        region's origin): a list of the one blob chosen.
+
+        Not simply the largest blob: on water the moving reflection of a lamp breaks into pieces as large as the
+        animal, faint (just past the threshold) where the animal stands out sharply; the experimenter's arm is far
+        larger than the animal, and under red light the hand stands out more than the animal. Each blob scores its
+        area times its contrast (_excess) counted at most up to the animal's usual contrast — scaled down when much
+        larger than the animal's usual area (SINGLE_SIZE_LIMIT) and when out of reach of the last-known position
+        (SINGLE_FAR_WEIGHT), so continuity breaks near ties without holding on to a wrong blob. The contrast of the
+        blob chosen is learnt like the usual area."""
+        if len(blobs) == 1:
+            best, best_excess = blobs[0], self._excess(blobs[0][1], off)
+        else:
+            usual, usual_excess = self._usual_area, self._usual_excess
+            mem = self._mem_pos[0]
+            gate = self._gate_px(0) if mem is not None else math.inf
+            best, best_excess, best_score = blobs[0], math.nan, -1.0
+            for a, c in blobs:
+                excess = self._excess(c, off)
+                score = float(a)
+                if math.isfinite(excess):
+                    score *= min(excess, usual_excess) if usual_excess > 0 else excess
+                if usual > 0 and a > self.SINGLE_SIZE_LIMIT * usual:
+                    score *= (self.SINGLE_SIZE_LIMIT * usual / a) ** 2
+                if mem is not None:
+                    m = cv2.moments(c)
+                    if m["m00"] > 0 and math.hypot(m["m10"] / m["m00"] - mem[0],
+                                                   m["m01"] / m["m00"] - mem[1]) > gate:
+                        score *= self.SINGLE_FAR_WEIGHT
+                if score > best_score:
+                    best, best_excess, best_score = (a, c), excess, score
+        if math.isfinite(best_excess):
+            self._excesses.append(best_excess)
+            del self._excesses[:-self.USUAL_AREA_FRAMES]
+            self._excess_frames += 1
+            if self._excess_frames < 25 or self._excess_frames % 25 == 0:
+                self._usual_excess = float(np.median(self._excesses))
+        return [best]
 
     def _learn_single_area(self, blobs, n: int):
         """With several animals: the area of one animal, learnt from the frames in which every animal is a blob of
@@ -825,6 +1005,20 @@ class ArenaTracker:
             out = new + out[1:]
         return out
 
+    USUAL_AREA_FRAMES = 750  # areas the usual area is the median of (30 s at 25 frames/s)
+
+    def _learn_usual_area(self, areas: list[float]):
+        """Remember the areas of this frame's detections; the usual area is their median over the last
+        USUAL_AREA_FRAMES detections, updated every 25 (an animal that rears or is half hidden for a few seconds does
+        not change it)."""
+        if not areas:
+            return
+        self._areas.extend(areas)
+        del self._areas[:-self.USUAL_AREA_FRAMES]
+        self._area_frames += 1
+        if self._area_frames < 25 or self._area_frames % 25 == 0:
+            self._usual_area = float(np.median(self._areas))
+
     def _describe(self, contour, area, shape_hw) -> Detection:
         M = cv2.moments(contour)
         if M["m00"] == 0:
@@ -842,9 +1036,16 @@ class ArenaTracker:
         pad = 4
         m = np.zeros((h + 2 * pad, w + 2 * pad), np.uint8)
         cv2.drawContours(m, [contour - [x0 - pad, y0 - pad]], -1, 255, -1)
-        k = _odd(max(3, int(self.s.tail_strip * math.sqrt(max(area, 1)))))
-        body = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-        ys, xs = np.nonzero(body)
+        # the kernel follows the animal's usual size, not this blob's: when the body looks smaller (a rear seen from
+        # above, partly hidden) the tail keeps its width, and a kernel shrunk with the blob would keep it - the "tail"
+        # would then be the tip of the tail (H-P09). If that kernel erases most of the body, the blob's own.
+        ys, xs = (), ()
+        for a in ((self._usual_area, area) if self._usual_area > area else (area,)):
+            k = _odd(max(3, int(self.s.tail_strip * math.sqrt(max(a, 1)))))
+            body = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            ys, xs = np.nonzero(body)
+            if len(xs) >= max(5, area / 4):
+                break
         if len(xs) < 5:
             ys, xs = np.nonzero(m)
         pts = np.column_stack([xs + x0 - pad, ys + y0 - pad]).astype(float)
@@ -869,6 +1070,7 @@ class ArenaTracker:
             head, tail = e1, e2
         else:
             head, tail = e2, e1
+        d.tail_reach = abs(ext_hi - ext_lo) / max(hi - lo, 1.0)
         d.hx, d.hy = map(float, head)
         d.tx, d.ty = map(float, tail)
         d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
@@ -1022,7 +1224,7 @@ class ArenaTracker:
                 hist.clear()
                 continue
             hist.append((d.x, d.y))
-            if len(hist) > 6:
+            if len(hist) > self.heading_history_frames + 1:
                 del hist[0]
             if math.isnan(d.hx) or i in skip:
                 continue
@@ -1032,18 +1234,47 @@ class ArenaTracker:
                 keep = math.hypot(d.hx - p.hx, d.hy - p.hy) + math.hypot(d.tx - p.tx, d.ty - p.ty)
                 swap = math.hypot(d.tx - p.hx, d.ty - p.hy) + math.hypot(d.hx - p.tx, d.hy - p.ty)
                 flip = swap < keep
-            # movement direction vote: animals mostly move head first
+            # movement direction: animals mostly move head first.  The displacement is measured over the last 5
+            # frames, or further back when the animal moves slowly (a slow approach would otherwise never vote and an
+            # inversion caught at the turn before it would last through the approach and the stop after it)
+            body_len = math.hypot(d.hx - d.tx, d.hy - d.ty)
+            moving = run = False
             if len(hist) >= 4:
-                vx, vy = hist[-1][0] - hist[0][0], hist[-1][1] - hist[0][1]
-                body_len = math.hypot(d.hx - d.tx, d.hy - d.ty)
-                if math.hypot(vx, vy) > 0.25 * max(body_len, 1):
-                    hx, hy = (d.tx, d.ty) if flip else (d.hx, d.hy)
-                    tx, ty = (d.hx, d.hy) if flip else (d.tx, d.ty)
-                    dot = (hx - tx) * vx + (hy - ty) * vy
-                    self._flip_votes[i] = self._flip_votes[i] + 1 if dot < 0 else max(0, self._flip_votes[i] - 2)
+                need = 0.25 * max(body_len, 1)
+                x1, y1 = hist[-1]
+                k0 = k = min(6, len(hist))
+                rx, ry = vx, vy = x1 - hist[-k][0], y1 - hist[-k][1]
+                while math.hypot(vx, vy) <= need and k < len(hist):
+                    k += 1
+                    vx, vy = x1 - hist[-k][0], y1 - hist[-k][1]
+                moving = math.hypot(vx, vy) > need
+                if moving and k > k0:
+                    # still moving that way in the last frames at no less than half the average speed: not a stop
+                    # or a turn after older movement (turning in place after a stop is not a wrong head / tail)
+                    along = (rx * vx + ry * vy) / math.hypot(vx, vy)
+                    moving = along >= 0.5 * math.hypot(vx, vy) * (k0 - 1) / (k - 1)
+                # a run: over a body length the same way within heading_history_frames (an animal backs away less)
+                fx, fy = x1 - hist[0][0], y1 - hist[0][1]
+                run = moving and math.hypot(fx, fy) >= body_len and fx * vx + fy * vy > 0
+            if d.tail_reach >= self.tail_visible and not run:
+                # the tail is clearly visible: the shape is right (d as described) where the frame-to-frame
+                # continuity carried on an inversion, which it would otherwise keep for as long as the animal sits
+                # still.  The movement is not counted: an animal backs away from a wall or out of a stretch
+                if flip:
+                    self._flip_votes[i] += 1
                     if self._flip_votes[i] >= 5:
-                        flip = not flip
+                        flip = False
                         self._flip_votes[i] = 0
+                else:
+                    self._flip_votes[i] = 0
+            elif moving:
+                hx, hy = (d.tx, d.ty) if flip else (d.hx, d.hy)
+                tx, ty = (d.hx, d.hy) if flip else (d.tx, d.ty)
+                dot = (hx - tx) * vx + (hy - ty) * vy
+                self._flip_votes[i] = self._flip_votes[i] + 1 if dot < 0 else max(0, self._flip_votes[i] - 2)
+                if self._flip_votes[i] >= 5:
+                    flip = not flip
+                    self._flip_votes[i] = 0
             if flip:
                 d.hx, d.hy, d.tx, d.ty = d.tx, d.ty, d.hx, d.hy
                 d.angle = math.degrees(math.atan2(d.hy - d.ty, d.hx - d.tx))
@@ -1088,36 +1319,6 @@ class ArenaTracker:
             if repeat and math.isfinite(self._last_motion[i]) and math.isfinite(d.motion):
                 d.motion = self._last_motion[i]
             self._last_motion[i] = d.motion
-
-
-class TrackBuilder:
-    """The columns of a track (track.COLUMNS, then the body outlines), one detection at a time.  Rows are only ever
-    appended, so a copy of the first n rows (:meth:`snapshot`) is safe while another thread keeps adding."""
-
-    def __init__(self, cols: dict | None = None):
-        cols = cols or {}
-        self.cols: dict[str, list] = {c: list(cols.get(c) or []) for c in COLUMNS}
-        # older side files have no outlines: those frames have none
-        self.cols["outline"] = list(cols.get("outline") or []) + [None] * (len(self.cols["t"])
-                                                                          - len(cols.get("outline") or []))
-
-    def __len__(self) -> int:
-        return len(self.cols["t"])
-
-    def add(self, t: float, d: Detection):
-        self.cols["outline"].append(d.outline)
-        self.cols["t"].append(t)
-        for c in COLUMNS[1:]:
-            self.cols[c].append(getattr(d, c))
-
-    def snapshot(self, n: int | None = None) -> dict[str, list]:
-        n = len(self.cols[COLUMNS[-1]]) if n is None else n  # the last column is appended last
-        return {c: v[:n] for c, v in self.cols.items()}
-
-    def build(self, fps: float) -> Track:
-        cols = self.snapshot()
-        outline = cols.pop("outline")
-        return Track(**cols, fps=fps, outline=outline if any(o is not None for o in outline) else None)
 
 
 class DownscaledTracker:
@@ -1256,6 +1457,8 @@ def track_video(video_path: str, jobs: list[ArenaJob],
                     tr.set_background(bg_cache[key])
             trackers.append(tr)
         fps = v.fps
+        for tr in trackers:
+            getattr(tr, "tracker", tr).frame_rate = fps / max(1, int(s0.frame_step))
         start, end = _frame_window(s0, fps, v.frame_count)
         if end <= 0:  # neither a frame count nor a duration: read to the end of the video
             end = 10**12

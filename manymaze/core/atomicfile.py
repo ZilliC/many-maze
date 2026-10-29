@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import sys
+import time
 import threading
 import uuid
 from contextlib import contextmanager
@@ -21,6 +23,26 @@ def _temp_name(p: Path) -> Path:
     with _counter_lock:
         n = next(_counter)
     return p.with_name(f"{p.name}.{os.getpid()}-{n}-{uuid.uuid4().hex[:8]}.tmp")
+
+
+_TEMP_RE = re.compile(r".+\.\d+-\d+-[0-9a-f]{8}\.tmp$")
+STALE_TEMP_AGE_S = 600.0
+
+
+def clean_stale_temps(folder, min_age_s: float = STALE_TEMP_AGE_S) -> int:
+    """Delete the temporary files an interrupted atomic write left in ``folder`` (named like ``_temp_name`` makes
+    them) that have not been touched for ``min_age_s`` seconds, so another program's write in progress is never
+    removed. Returns how many were deleted; never raises."""
+    n = 0
+    try:
+        now = time.time()
+        for f in Path(folder).iterdir():
+            if _TEMP_RE.match(f.name) and f.is_file() and now - f.stat().st_mtime >= min_age_s:
+                f.unlink()
+                n += 1
+    except OSError:
+        pass
+    return n
 
 
 def _sync_file(fd: int):
@@ -73,11 +95,13 @@ def atomic_write(path, mode: str = "w", encoding: str | None = "utf-8", newline:
             _sync_file(fh.fileno())
         os.replace(tmp, p)
         sync_dir(p.parent)
-    except BaseException:
+    except BaseException as e:
         try:
             tmp.unlink()
         except OSError:
             pass
+        if isinstance(e, OSError) and e.filename is not None and Path(os.fsdecode(e.filename)) == tmp:
+            e.filename = str(p)  # the error names the file the user chose, not our temporary one
         raise
 
 

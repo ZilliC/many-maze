@@ -3,6 +3,7 @@
 import json
 import os
 
+import pytest
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
 
 from manymaze.core import procedures as pr
@@ -459,3 +460,83 @@ def test_io_devices_dialog_new_device_types_and_calibration(monkeypatch):
     assert cal.table_text().startswith("0:0|0.25:0.9")
     dlg.accept()
     assert [d["type"] for d in p.io_devices][-2:] == ["notify", "scale"]
+
+
+def test_procedure_json_errors_are_plain():
+    from manymaze.gui.procedure_editor import parse_procedure_json
+    q, err = parse_procedure_json('{"name": "a",')
+    assert q is None and "not valid JSON" in err and "line 1" in err and "Expecting" not in err
+    q, err = parse_procedure_json("[1]")
+    assert q is None and "JSON object" in err
+    q, err = parse_procedure_json('{"name": "a", "statements": []}')
+    assert q is not None and not err
+
+
+def test_io_dialog_test_message_stays_visible(monkeypatch):
+    """H-061: the message of Test is not overwritten by the status refresh (50 ms timer)."""
+    p = make_project()
+    dlg = IODevicesDialog(p)
+    dlg.connect_devices()
+    dlg.status.selectRow(next(r for r in range(dlg.status.rowCount()) if dlg.status.item(r, 2).text() != "Input"
+                              and dlg.status.item(r, 1).text() == "lever"))
+    dlg.test_selected()
+    msg = dlg.conn_lbl.text()
+    assert "is an input" in msg
+    for _ in range(5):
+        dlg._poll()
+    assert dlg.conn_lbl.text() == msg
+    dlg._note_until = 0.0
+    dlg._poll()
+    assert dlg.conn_lbl.text().startswith("Connected")
+    dlg.disconnect_devices()
+
+
+def test_io_dialog_refuses_bad_alert_settings(monkeypatch):
+    """H-067: e-mail alerts: a valid port and valid addresses are needed to accept the dialog."""
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a[2]) or QMessageBox.Ok)
+    p = make_project()
+    p.io_devices.append({"name": "mail", "type": "notify", "smtp_host": "localhost", "smtp_port": "abc",
+                         "email_to": "no-es-correo", "from_addr": "", "channels": []})
+    dlg = IODevicesDialog(p)
+    dlg.accept()
+    assert shown and "SMTP port" in shown[-1] and "no-es-correo" in shown[-1]
+    assert dlg.result() == 0
+    from manymaze.core.ioconfig import notify_problems
+    ok = {"name": "m", "type": "notify", "smtp_port": 2525, "email_to": "a@b.org, c.d@lab.edu.mx"}
+    assert notify_problems(ok) == []
+    assert notify_problems({**ok, "smtp_port": 70000}) and notify_problems({**ok, "smtp_port": "0"})
+    assert notify_problems({**ok, "smtp_port": ""}) == []
+    from manymaze.core.mail import send_email
+    with pytest.raises(RuntimeError, match="not a number"):
+        send_email({"smtp_host": "h", "smtp_port": "abc"}, "a@b.org", "s", "t")
+
+
+def test_remove_block_asks_and_unknown_keys_are_reported(monkeypatch):
+    """H-068: deleting a block with statements inside asks first; settings an action does not have are reported."""
+    p = make_project()
+    ed = ProcedureEditor(p)
+    ed.add_procedure()
+    ed.add_statement("when")
+    ed.add_statement("comment", inside=True)
+    ed.add_statement("comment")
+    ed.tree.setCurrentItem(ed.tree.topLevelItem(0))
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    n = len(ed._cur_proc()["statements"])
+    ed.remove_statement()
+    assert asked and "2 statements" in asked[0] and len(ed._cur_proc()["statements"]) == n
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    ed.remove_statement()
+    assert len(ed._cur_proc()["statements"]) == n - 1
+    # no question for a statement with nothing inside
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: pytest.fail("asked"))
+    ed.tree.setCurrentItem(ed.tree.topLevelItem(0))
+    ed.remove_statement()
+    # unknown keys
+    proc = {"name": "x", "statements": [{"type": "do", "action": "light_ramp", "seconds": 1, "from_level": 0,
+                                         "duration": 1}]}
+    msgs = [m for _i, _p, m in pr.validate([proc])]
+    assert any("seconds" in m and "from_level" in m and pr.is_warning(m) for m in msgs)
+    ok = {"name": "x", "statements": [{"type": "do", "action": "light_ramp", "duration": 1}]}
+    assert not any("ignored" in m for _i, _p, m in pr.validate([ok]))

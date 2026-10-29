@@ -29,7 +29,7 @@ from ..icons import icon
 from ..pose_model import PoseModelBox
 from ..widgets import RecordTable, button_row, hint, loading, run_with_progress, separator, style_table
 from ._results_cache import get_rows, info_columns
-from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
+from .base import (ANALYSIS_SECTIONS, ANALYSIS_SPEC, DETECTION_CHECKS, DETECTION_SECTIONS, DETECTION_SPEC, FST_FIELDS, FST_SECTION,
                    FST_SPEC, PRESET_TIP, AnimalPresetCombo, Page, SettingsForm, apply_preset_to_form, property_form)
 from .experiment_calcs import CalculationsMixin, PluginsMixin
 from .experiment_keys import KeysMixin
@@ -254,7 +254,7 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
                     "padding:6px 8px;")
         self.takenote_lbl.hide()
         pg.add(self.takenote_lbl)
-        self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS)
+        self.det_form = SettingsForm(DETECTION_SPEC, sections=DETECTION_SECTIONS, checks=DETECTION_CHECKS)
         self.det_form.changed.connect(self.main.mark_dirty)
         self.det_form.changed.connect(self._update_pose_box)
         self.preset = AnimalPresetCombo()
@@ -572,7 +572,8 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
         self.blind_act = A("Blind testing", "eye_off", lambda: self.blind.setChecked(self.blind_act.isChecked()),
                            "Hide the treatments (shown as codes) while testing and scoring")
         self.blind_act.setCheckable(True)
-        self.blind.toggled.connect(lambda on: self.blind_act.setChecked(on))
+        # the real state, not the signal's: a cancelled unblind re-ticks the box before this slot runs
+        self.blind.toggled.connect(lambda _on: self.blind_act.setChecked(self.blind.isChecked()))
         self.element_acts = {
             "protocol": [self.blind_act],
             "tracking": [A("Install pose model", "brain", lambda: self.pose_box.install(),
@@ -1040,7 +1041,9 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
             return
         t = TEMPLATES[key]
         if p.tests and QMessageBox.question(
-                self, "Apply template", f"Make this a {t.title} protocol with tests of {t.default_duration_s:g} s? "
+                self, "Apply template",
+                f"Make this {'an' if t.title[:1].lower() in 'aeiou' else 'a'} {t.title} protocol with tests of "
+                f"{t.default_duration_s:g} s? "
                 "Existing results are recalculated with the new protocol type.") != QMessageBox.Yes:
             return
         p.set_protocol(key)
@@ -1125,6 +1128,11 @@ class ExperimentPage(CalculationsMixin, PluginsMixin, KeysMixin, Page):
             self.an_form.load(p.analysis)
             self.fst_form.load(p.analysis)
             self._update_fst()
+        if p.test_duration_s != self.duration.value() or p.start_mode != self.start_mode.currentData():
+            live = p.settings_extra.get("live")  # the protocol's new defaults replace the last run's
+            if isinstance(live, dict):
+                live.pop("duration_s", None)
+                live.pop("start_mode", None)
         p.test_duration_s = self.duration.value()
         p.start_mode = self.start_mode.currentData()
         self._follow_stage_renames(p)

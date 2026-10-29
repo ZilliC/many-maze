@@ -12,6 +12,7 @@ from __future__ import annotations
 import ipaddress
 import mimetypes
 import smtplib
+import socket
 import ssl
 from email.message import EmailMessage
 from pathlib import Path
@@ -63,7 +64,11 @@ def build_message(cfg: dict, to, subject: str, text: str, attachments=()) -> Ema
 def send_email(cfg: dict, to, subject: str, text: str, attachments=(), timeout: float = TIMEOUT_S) -> list[str]:
     """Send a message through the device's SMTP server; returns the recipients. Raises RuntimeError (no server,
     no recipient, attachments too large, no STARTTLS) or the smtplib / socket errors."""
-    host, port = str(cfg.get("smtp_host", "")).strip(), int(cfg.get("smtp_port", 587) or 587)
+    host = str(cfg.get("smtp_host", "")).strip()
+    try:
+        port = int(cfg.get("smtp_port", 587) or 587)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"the SMTP port “{cfg.get('smtp_port')}” is not a number") from None
     if not host:
         raise RuntimeError("no SMTP server configured")
     rcpt = addresses(to) if not isinstance(to, (list, tuple)) else [a for a in to if a]
@@ -75,10 +80,14 @@ def send_email(cfg: dict, to, subject: str, text: str, attachments=(), timeout: 
                            f"{MAX_ATTACHMENTS_MB:.0f} MB)")
     msg = build_message(cfg, rcpt, subject, text, attachments)
     ctx = ssl.create_default_context()
-    if port == 465:
-        srv = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx)
-    else:
-        srv = smtplib.SMTP(host, port, timeout=timeout)
+    try:
+        if port == 465:
+            srv = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx)
+        else:
+            srv = smtplib.SMTP(host, port, timeout=timeout)
+    except (ConnectionError, TimeoutError, socket.gaierror) as e:
+        raise RuntimeError(f"the mail server {host}:{port} could not be reached ({e.strerror or type(e).__name__}); "
+                           f"nothing was sent. Check its address and port, and that it is running.") from e
     with srv:
         if port != 465:
             srv.ehlo()

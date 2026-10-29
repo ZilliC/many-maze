@@ -56,7 +56,7 @@ DARK = {
     "ACCENT_BG": "#2f6fbf", "ACCENT_BG_HOVER": "#3b7dd0", "ON_ACCENT": "#ffffff",
     "INPUT_BORDER": "#555555", "BUTTON": "#323232", "BUTTON_BORDER": "#565656", "BUTTON_DISABLED": "#2a2a2a",
     "BUTTON_HOVER_BORDER": "#4f73a6",
-    "MID": "#5c5c5c",
+    "MID": "#8a919b",  # also text drawn with palette(mid): AA on the work area
     "ERROR": "#f87171", "ERROR_BG": "#4a1f1f", "OK": "#4ade80", "WARNING": "#fbbf24", "LINK": "#7fb0f0",
     "NOTE": "#c4b5fd",
     "NOTE_BG": "#3a3220", "NOTE_BORDER": "#6b5a2a",
@@ -153,7 +153,8 @@ def qss() -> str:
     icons = _arrows_dir()
     return f"""
 QMainWindow, QDialog {{ background: {WORK_BG}; }}
-QWidget#Workspace, QStackedWidget#SectionStack > QWidget {{ background: {WORK_BG}; }}
+QWidget#Workspace, QStackedWidget#SectionStack > QWidget,
+QScrollArea#PageScroll > QWidget > QWidget {{ background: {WORK_BG}; }}
 
 /* ribbon */
 QWidget#Ribbon {{ background: {RIBBON_BG}; border-bottom: 1px solid {BORDER}; }}
@@ -166,6 +167,7 @@ QTabBar#RibbonTabs::tab:first {{ background: {ACCENT_BG}; color: {ON_ACCENT}; ma
 QTabBar#RibbonTabs::tab:hover:!selected {{ background: {HOVER}; }}
 QTabBar#RibbonTabs::tab:first:hover {{ background: {ACCENT_BG_HOVER}; }}
 QWidget#RibbonPanel {{ background: {WORK_BG}; border-top: 1px solid {BORDER}; }}
+QScrollArea#RibbonScroll, QScrollArea#RibbonScroll > QWidget {{ background: {WORK_BG}; }}
 QFrame#RibbonGroup {{ background: transparent; border: none; border-right: 1px solid {BORDER}; }}
 QLabel#RibbonGroupTitle {{ color: {MUTED}; font-size: 11px; }}
 QToolButton#RibbonLarge, QToolButton#RibbonSmall {{ background: transparent; border: 1px solid transparent;

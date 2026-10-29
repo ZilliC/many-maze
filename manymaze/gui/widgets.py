@@ -3,6 +3,7 @@ helpers and record tables."""
 
 from __future__ import annotations
 
+import time
 import traceback
 from contextlib import contextmanager
 from typing import Callable
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QFram
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.apparatus import Apparatus
+from ..core.errors import UNEXPECTED_ERROR, user_message  # noqa: F401  (used by the pages)
 from ..core.geometry import Ellipse
 from ..core.lens import corrected
 from ..core.video import VideoSource
@@ -59,8 +61,12 @@ def value_text(v) -> str:
 
 
 def error_box(parent, title: str, exc: BaseException | str):
-    msg = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
-    QMessageBox.critical(parent, title, msg)
+    """Show an error to the user: a message, or an exception explained in plain words (user_message); the
+    exception's technical details go to the console."""
+    if isinstance(exc, BaseException):
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        exc = user_message(exc)
+    QMessageBox.critical(parent, title, exc)
 
 
 # --------------------------------------------------------------- frame view
@@ -230,6 +236,8 @@ class VideoPlayer(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.speed = 1.0
+        self._clock = time.monotonic
+        self._t0, self._i0, self._last = 0.0, 0, 0
         self.range_start = 0  # frames
         self.range_end: int | None = None
 
@@ -332,8 +340,14 @@ class VideoPlayer(QWidget):
     def play(self):
         if self.source is None:
             return
-        self.timer.start(max(1, int(1000 / (self.fps * self.speed))))
+        # up to 1×: one frame per tick; faster: the frame shown follows the clock (frames are skipped), so 4× and 8×
+        # are really 4 and 8 times real time however fast the video can be decoded
+        self.timer.start(max(1, int(1000 / (self.fps * min(self.speed, 1.0)))))
+        self._rebase()
         self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+
+    def _rebase(self):
+        self._t0, self._i0, self._last = self._clock(), self.index, self.index
 
     def pause(self):
         self.timer.stop()
@@ -360,9 +374,13 @@ class VideoPlayer(QWidget):
     def _tick(self):
         if self.source is None:
             return
-        skip = max(1, int(round(self.speed / 2))) if self.speed > 2 else 1
-        if skip > 1:
-            self.seek(self.index + skip)
+        if self.speed > 1:
+            if self.index != self._last:  # the user moved the slider meanwhile
+                self._rebase()
+            target = self._i0 + int((self._clock() - self._t0) * self.fps * self.speed)
+            if target > self.index:
+                self.seek(target)
+            self._last = self.index
         else:
             ok, f = self.source.read()
             if not ok:
@@ -447,10 +465,10 @@ class Worker(QThread):
             if self._stop:  # stopped on request (Cancel, or the window closing): not an error
                 self.signals.cancelled.emit()
             else:  # pragma: no cover - surfaced to UI
-                self.signals.failed.emit(f"{type(e).__name__}: {e}")
+                self.signals.failed.emit(user_message(e))
         except Exception as e:  # pragma: no cover - surfaced to UI
             traceback.print_exc()
-            self.signals.failed.emit(f"{type(e).__name__}: {e}")
+            self.signals.failed.emit(user_message(e))
         finally:
             Worker.running.discard(self)
 

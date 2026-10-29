@@ -4,7 +4,10 @@ wherever they are stored — in one zip file, to move it to another computer or 
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Callable
 
@@ -112,16 +115,19 @@ def archive_project(project: Project, zip_path, include_videos: bool = True,
     except InterruptedError:
         tmp.unlink(missing_ok=True)
         return None
-    except BaseException:
+    except BaseException as e:
         tmp.unlink(missing_ok=True)
+        if isinstance(e, OSError) and e.filename is not None and Path(os.fsdecode(e.filename)) == tmp:
+            e.filename = str(zip_path)  # the error names the file the user chose, not our temporary one
         raise
     return zip_path
 
 
 def extract_archive(zip_path, dest_dir, progress: Callable[[float], None] | None = None,
                     should_stop: Callable[[], bool] | None = None) -> Path:
-    """Unpack an experiment archive into dest_dir and return the experiment folder (``Name.mmaze``). When
-    should_stop() turns true the partly unpacked folder is removed and InterruptedError raised."""
+    """Unpack an experiment archive into dest_dir and return the experiment folder (``Name.mmaze``). The files
+    are unpacked aside and moved into place only when complete (a damaged archive leaves nothing behind). When
+    should_stop() turns true InterruptedError is raised and nothing is left."""
     dest = Path(dest_dir).resolve()
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
@@ -137,16 +143,27 @@ def extract_archive(zip_path, dest_dir, progress: Callable[[float], None] | None
             out = (dest / n).resolve()
             if not str(out).startswith(str(dest) + os.sep):  # no paths outside the destination
                 raise ValueError(f"Unsafe path in archive: {n}")
-        if should_stop is None and progress is None:
-            z.extractall(dest)
-            return target
-        for i, n in enumerate(names):
-            if should_stop and should_stop():
-                import shutil
-
-                shutil.rmtree(target, ignore_errors=True)
-                raise InterruptedError("unpacking stopped")
-            z.extract(n, dest)
-            if progress:
-                progress((i + 1) / len(names))
+        # unpack into a hidden temporary folder next to the destination and move the experiment into place only when
+        # every member was read and passed its CRC check: a damaged archive leaves nothing behind
+        dest.mkdir(parents=True, exist_ok=True)
+        tmp = Path(tempfile.mkdtemp(prefix=".unpacking-", dir=dest))
+        try:
+            try:
+                for i, n in enumerate(names):
+                    if should_stop and should_stop():
+                        raise InterruptedError("unpacking stopped")
+                    z.extract(n, tmp)
+                    if progress:
+                        progress((i + 1) / len(names))
+            except (zipfile.BadZipFile, zlib.error, EOFError) as e:
+                raise ValueError(f"The archive “{Path(zip_path).name}” is damaged: some of its files cannot be read "
+                                 "correctly, so nothing was unpacked. Get a new copy of the archive and try "
+                                 "again.") from e
+            if target.is_dir() and not any(target.iterdir()):
+                target.rmdir()  # an empty folder of that name is no obstacle
+            if target.exists():
+                raise FileExistsError(f"{target} already exists")
+            os.replace(tmp / top, target)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
     return target

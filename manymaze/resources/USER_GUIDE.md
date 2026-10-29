@@ -102,11 +102,15 @@ everything without a camera.
   *Operant chamber presets*).
 * **Test duration** – analysed length of each test (0 = until the end of the video).
 * **Test starts** – at each test's *start time* (set per test), automatically **when the animal is first
-  detected** in the apparatus, or **when the experimenter's hand has left the image**: the tracked object much
-  larger than the animal (more than 3 × its usual area, or above *Ignore objects larger than* when set) is the hand
-  putting the animal in; the test starts at the first frame showing the animal alone after the hand has gone (hand
-  frames up to 1 s apart count as one visit of the hand). Without any hand in the video the test starts at the first
-  detection, as noted in the track (`start`).
+  detected** in the apparatus, or **when the experimenter's hand has left the image**: a tracked object larger than
+  the animal (more than 1.6 × its usual area, or above *Ignore objects larger than* when set) is the hand putting the
+  animal in. Only a hand seen before the animal has been alone for 2 s counts (a hand that lets go in several goes is
+  one release); a hand after that — the experimenter taking the animal out at the end, e.g. off the water-maze
+  platform — is ignored. The test starts at the first frame showing the animal alone after the hand has gone: when
+  the tracked position jumps from the departing arm to the animal (within 1 s of the hand), or when the object is
+  back to the animal's size. Without a hand putting the animal in (a video that starts with the animal already
+  alone) the test starts at the first detection. The track notes how the start was found (`start`), and a start
+  that leaves less than half of the video is listed in the *Warnings* column of the results: check it in Review.
 * **Stages** – e.g. *Habituation, Day 1, Day 2, Probe*. Used for learning curves and repeated-measures
   statistics.
 * **Keys** (manually scored behaviours) – name, key stroke and how the key works (*Simple* while pressed, *Toggle*,
@@ -205,9 +209,29 @@ everything without a camera.
 * **Analysis ▸ Heading error** – how the *initial heading* of the initial heading errors is found (ANY-maze's
   *Heading error* options): from the first position to the position after the animal has been **mobile for** N s
   (default 1 s), or to the first position **further away than** N units; positions while the animal is immobile
-  are ignored either way.
+  are ignored either way. If, after being mobile for N s, the animal is no more than 0.5 cm from where it started
+  (it paused when released for less than the immobility time, which counts as mobile), the heading would be the
+  tracking jitter's: the position after it has actually moved (faster than the mobility threshold) for N s is used
+  instead, and the heading is blank if it is no further away then either.
+* **Analysis ▸ Movement ▸ Smallest movement that has a direction** – the tracking jitter filter of the turn and
+  approach measures (default 0.5 cm, §9; 0 = every frame).
 * **Analysis ▸ Movement ▸ Partial rotation angle** – ANY-maze's partial rotations: turns of at least this angle
   (default 90°) that completed no rotation (§9).
+* **Default analysis values, and where ANY-maze's differ** (compare with care when matching published ANY-maze
+  results; each can be changed under *Protocol ▸ Analysis*):
+
+  | Setting | mANY-MAZE default | ANY-maze |
+  |---|---|---|
+  | Position smoothing before distance and speed | 0.2 s centred moving average | not published |
+  | Immobility | speed below 2 units/s (cm/s when calibrated) for at least 2 s (shorter spells count as mobile) | the *% of the animal that stays in the same place* (sensitivity ≈ 70 %) for a minimum time: no speed threshold |
+  | Freezing | motion below 2 % of the body starts it, above 3 % ends it; at least 1 s | at least 2 s |
+  | Latency of something that never happens | the test (or period) duration | undefined (blank) unless its option is ticked |
+  | Thigmotaxis band | 25 % of the arena's half-width from the wall | set by the user |
+  | Rotations | a turn back of more than 90° restarts the count | the same, with partial turns back ignored by default |
+  | Automatic rearing | area below 75 % and length below 80 % of the usual, at least 0.3 s | — (from a side view or the pose) |
+
+  None of these is a calculation error: they are choices, and a laboratory comparing with ANY-maze should set them
+  to match (or decide which to use) before the experiment.
 * **Analysis ▸ Test end** – *End the test when the animal stays in zone* (e.g. `Platform` in the water maze,
   `Escape box` in the Barnes maze) *for at least* N seconds (0 = on entering it): the test ends at that moment and
   every measure, including the test duration, stops there.
@@ -402,7 +426,12 @@ when no range is set. *Undo* reverts the swap.
    cameras with changing light.
 2. Each frame is compared with the background, thresholded, cleaned (blur, remove specks, fill holes) and
    restricted to the arena.
-3. The largest blob is the animal (*n* largest for several animals, with merged animals split by k-means and
+3. With one animal, the blob that stands out most is the animal: its area times how far its difference from the
+   background exceeds the threshold, so the faint, rippling pieces of a lamp's reflection on water lose to the
+   sharply contrasted animal even when they are larger. Contrast beyond the animal's usual contrast does not count
+   (under red light the experimenter's hand stands out more than the animal), a blob much larger than the
+   animal's usual size (the experimenter's arm) counts less, and so does one beyond reach of the animal's last
+   position. With several animals the *n* largest blobs are the animals (merged animals split by k-means,
    identities kept by optimal assignment between frames).
 4. The **centre** is the blob centroid. **Head and tail**: the tail is stripped morphologically, the body axis
    is found by PCA, and the end that the animal moves towards is the head (with frame-to-frame consistency).
@@ -500,8 +529,8 @@ confidence* fall back to the shape estimate.
 * **Parallel tracking** – *Track all* tracks several videos at once in separate processes (all cores but one,
   limited by memory; two when the pose model shares the Neural Engine). Tests filmed in the same video are still
   tracked in a single pass.
-* **Hardware video decoding** – videos are decoded with Apple **VideoToolbox** and tracking reads the luma plane
-  directly (no colour conversion). Set `MANYMAZE_HWACCEL=0` to disable, or `MANYMAZE_DECODER=opencv` to use
+* **Hardware video decoding** – videos are decoded with Apple **VideoToolbox** (the images are the same as with
+  OpenCV, so tracking sees exactly what the detection preview shows). Set `MANYMAZE_HWACCEL=0` to disable, or `MANYMAZE_DECODER=opencv` to use
   OpenCV only.
 * **Hardware recording** – live tests are recorded with VideoToolbox's H.264 encoder (MP4), leaving the CPU for
   tracking.
@@ -1735,7 +1764,11 @@ maps, group heat maps, results and statistics.
   centre, time outside the arena, arena quadrants, zone transitions, grid crossings. **Body rotations** follow the
   body as in ANY-maze — the direction from the centre to the head — or, without a tracked head, a tracked body
   angle (e.g. an imported orientation); only when neither is tracked do they follow the direction of travel (and
-  there are then no separate *path rotations*). As in ANY-maze, the distance travelled does not include where the
+  there are then no separate *path rotations*). A rotation is a turn of 360° in one direction; when the animal
+  turns back by more than 90° the next rotation is counted from the furthest point the turn reached (as in
+  ANY-maze's example), not from where it turned back. A change of the direction of travel of more than 90° in one frame
+  (backing up: ~180°, clockwise or anticlockwise as rounding decides) is not a turn of the path rotations. As in
+  ANY-maze, the distance travelled does not include where the
   animal went while hidden (no distance is counted from where it disappeared to where it reappears), path
   efficiency and tortuosity are blank when the animal was hidden, and the latency to the last mobile / immobile
   episode is blank when there is no such episode. No turn or rotation is counted across a pause or from where the
@@ -1743,8 +1776,22 @@ maps, group heat maps, results and statistics.
   time bins add up to the whole test's (a rotation counts in the bin in which it is completed). An animal that was
   never detected is neither immobile nor outside the arena. No zone exit, entry or grid crossing is counted across a
   pause. The **absolute turn angle** sums the changes of the direction of travel between the frames in which the
-  animal moves faster than the mobility threshold (ANY-maze sums "all the positions" but without saying how it
-  ignores the jitter of a still animal; our choice); the **angular velocity** is, as ANY-maze defines it, the
+  animal moves faster than the mobility threshold. ANY-maze sums "all the positions" but does not say how it
+  ignores the jitter of a still animal; ours is the **direction of movement** rule, used by every measure that
+  depends on a direction (turn angle, meander, angular velocity, path rotations, *time getting closer / further
+  away*, *time moving towards / away*, distance moved towards / away, mean absolute heading error): a direction needs a
+  displacement, so the path is cut into strokes. From an anchor position nothing happens until the animal is at
+  least *Analysis ▸ Movement ▸ Smallest movement that has a direction* away from it (default 0.5 cm; the
+  uncalibrated unit is pixels); that frame becomes the next anchor and the stroke is the straight line between the
+  two (lasting at most the time it takes to cover that distance at the mobility threshold, so that a long stop is
+  not stretched into the next movement). The animal is held at its anchor while it wobbles within the distance, so
+  a centre that trembles by a fraction of a millimetre while the animal sits still has no direction, no turns and
+  does not get closer or further away. Without this rule, the tracking jitter alone made the turn measures ×1.9 and
+  the approach times +60 % on a synthetic video with a known path (H-P05); with it they are ×1.3 and +15 %, paths
+  that really turn keep their turning (a circle of 8 cm radius gives its 72 deg/s), and the 0.2 s position
+  smoothing still applies first. The turn measures grow as the minimum shrinks (the finer the path, the longer it
+  is): compare values only between experiments analysed with the same setting; 0 turns the rule off. Distance and
+  speed are not affected by it. The **angular velocity** is, as ANY-maze defines it, the
   absolute turn angle / the test duration (or the period's; before this version: / the time mobile).
   **Partial rotations** (clockwise, anticlockwise, total; ANY-maze's calculation is not published, it is "still in
   beta"): the turns of the body (the same orientation and reversal rule as the rotations: a turn ends when the
@@ -1782,8 +1829,11 @@ maps, group heat maps, results and statistics.
   a rearing bout also starts on entering the zone while rearing and ends on leaving it). Seen from above, an animal
   standing on its hind legs looks smaller and shorter: a frame is a rear when the body area falls below *rear area* % (75 %) of the animal's usual (median)
   area and, when the head and tail are tracked (shape or pose model), the head–tail length falls below *rear
-  length* % (80 %) of its usual length. Gaps of up to 0.2 s are bridged and rears shorter than *Shortest rear*
-  (0.3 s) are ignored. Works on tracks made before the option existed (it needs no re-tracking). Check a few tests
+  length* % (80 %) of its usual length. The tail is stripped from the head–tail length with the animal's usual size
+  (not that of the smaller body of a rear), so the tail point stays at the base of a visible tail. Gaps of up to
+  0.2 s are bridged and rears shorter than *Shortest rear* (0.3 s) are ignored. Works on tracks made before the
+  option existed (it needs no re-tracking, but tracks made before October 2026 of an animal whose tail is visible
+  should be re-tracked). Check a few tests
   against manual scoring and adjust the percentages for your camera height and strain.
 * **Per zone / group**: time, %, entries, entries/min, latency to 1st and 2nd entry, last exit, mean & longest
   visit, distance, mean & max speed, time mobile / immobile / freezing, immobile & freezing episodes, head entries /
@@ -1811,10 +1861,11 @@ maps, group heat maps, results and statistics.
     first zone investigated*, longest / shortest / mean bout (time / bouts), list of bout durations, distance and
     mean speed while investigating, distance before the first investigation (blank if never), time mobile /
     immobile, immobile episodes, time freezing and freezing episodes (freezing onsets) while investigating;
-  * **head**: latency to the first head exit, distance travelled by the head in the zone, time the head is in the
-    zone while the centre is outside (by position, not the entry rules), mean / max / min head distance from the
-    zone (as the centre's: max 0 if the head never left, min 0 once it entered), mean / max / min head distance
-    to the border when inside;
+  * **head**: latency to the first head exit, distance travelled by the head in the zone (as the centre's: the
+    step out of the zone counts, the step into it not), time the head is in the zone while the centre is outside
+    (by position, not the entry rules), mean / max / min head distance from the zone (as the centre's: max 0 if
+    the head never left, min 0 once it entered), mean / max / min head distance to the border when inside (as the
+    centre's: the min is 0 once the head has left the zone);
   * **distance to the border when inside** (centre): mean / max / min (the min is 0 once the animal has left the
     zone, as ANY-maze);
   * **towards / away**: time getting closer to / further away from the zone (its distance decreasing /
@@ -1911,7 +1962,8 @@ there, follow *When an event never occurs, its latency is*.
 
 #### More test-specific measures
 
-* **Water maze**: Whishaw corridor time (s and %), path % and distance (release point → platform, 20 cm wide) and
+* **Water maze**: Whishaw corridor time (s and %), path % and distance (release point → platform, 20 cm wide; as
+  the distance in a zone, the step into the corridor is not counted, the step out of it is) and
   *Left Whishaw corridor*, up to finding the platform (any zone can also have its own Whishaw's corridor, see the
   zone properties).
 * **Novel tank diving test**: latency to top, top entries, top/bottom time %, top/bottom ratio, mean depth, erratic

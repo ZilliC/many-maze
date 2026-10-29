@@ -341,6 +341,7 @@ class ProcedureEngine(Actions, LiveState):
         self._audio_devs: set[str] = set()  # audio devices a sound was played on (stopped at the end)
         self._shock_keys: set[tuple] = set()
         self._pause_t: float | None = None
+        self._pause_wall_s = 0.0  # real seconds since the pause, as of the last paused_tick
         self._ramps: dict = {}
         self._pellet_checks: dict = {}
         self._odours: dict[tuple, str] = {}
@@ -486,7 +487,8 @@ class ProcedureEngine(Actions, LiveState):
     @_locked
     def update_state(self, t: float, state: dict | None = None):
         """Call once per frame. state: {"zones": {name: bool}, "head_zones": {...}, "detected", "freezing",
-        "immobile", "x", "y", "speed", "distance"} (all optional)."""
+        "immobile", "immobile_since" (when the immobility being confirmed began), "x", "y", "speed",
+        "distance"} (all optional)."""
         if not self.started:
             self.start(t)
         if self.stopped:
@@ -565,6 +567,7 @@ class ProcedureEngine(Actions, LiveState):
         try:
             self._poll_inputs(t, quiet=True)
             limit = t + max(0.0, float(wall_s))
+            self._pause_wall_s = max(0.0, float(wall_s))
             due = [x for x in self._tasks if x[3] is not None and isinstance(x[3], tuple) and x[3]
                    and x[3][0] in SAFETY_TASKS and x[0] <= limit + EPS]
             if due:
@@ -577,8 +580,15 @@ class ProcedureEngine(Actions, LiveState):
                     if self._task_keys.get(key) == seq:
                         del self._task_keys[key]
                     fn(t)
+            # waits begun while paused (e.g. "when test paused: wait 1 s, resume") run out in real time
+            for th in list(self.threads):
+                if th.alive and isinstance(th.wait, TimeWait) and th.wait.wall and self.paused \
+                        and limit + EPS >= th.wait.due:
+                    self._resume(th)
+            self._run(t)
         finally:
             self._busy = False
+        self._after()
 
     @_locked
     def stop(self, t: float):
@@ -905,6 +915,9 @@ class ProcedureEngine(Actions, LiveState):
                 v = bool(st[key])
                 if v != getattr(self, attr):
                     self._emit(f"{key}_{'start' if v else 'end'}", {}, t)
+                    since = st.get("immobile_since")
+                    if key == "immobile" and v and since is not None:  # the results count the whole episode
+                        self.immobile_time += max(0.0, t - float(since))
                 setattr(self, attr, v)
         if "detected" in st:
             v = bool(st["detected"])
@@ -1286,7 +1299,7 @@ class ProcedureEngine(Actions, LiveState):
         if self._pending_stop is not None:
             t, self._pending_stop = self._pending_stop, None
             self.stop(t)
-        elif self.ended and not self.stopped:
+        elif self.ended and not self.stopped and not self.end_deferred():
             self.stop(self.t)
 
     # ------------------------------------------------------------------ statements
@@ -1465,8 +1478,9 @@ class ProcedureEngine(Actions, LiveState):
             if secs > 0:
                 th.waits += 1
             due = th.clock + secs
-            yield TimeWait(due)
-            th.clock = due
+            wall = self.paused and self.started and not self.stopped
+            yield TimeWait(due, wall)
+            th.clock = self.t if wall and self.paused and self.t < due else due
         elif mode == "until":
             if self._truth(th, st.get("until"), p):
                 return

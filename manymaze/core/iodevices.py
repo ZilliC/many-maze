@@ -95,7 +95,7 @@ class _LineDevice(Device):
             try:
                 self.transport = _open_serial(port, int(self.cfg.get("baud", 115200)))
             except ImportError:
-                self._error(f"{self.name}: pyserial is not installed (pip install pyserial)")
+                self._error(f"{self.name}: serial devices are not available in this installation of ManyMaze")
                 return
             except Exception as e:  # pragma: no cover - hardware dependent
                 self._error(f"{self.name}: could not open {port}: {e}")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -395,7 +396,8 @@ def import_deeplabcut_csv(path, fps: float, centre_parts=None, head_part=None, t
             p["x"] = np.where(bad, np.nan, p["x"])
             p["y"] = np.where(bad, np.nan, p["y"])
     names = centre_parts or list(parts)
-    with np.errstate(invalid="ignore"):
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # frames with no body part seen: NaN, as intended
         cx = np.nanmean(np.vstack([parts[n]["x"] for n in names]), axis=0)
         cy = np.nanmean(np.vstack([parts[n]["y"] for n in names]), axis=0)
     n = len(cx)

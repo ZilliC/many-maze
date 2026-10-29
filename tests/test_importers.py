@@ -6,7 +6,7 @@ from openpyxl import Workbook
 
 from manymaze.core.importers import (ANIMAL_ROLES, TEST_ROLES, TRACK_ROLES, guess_mapping, import_animals,
                                      import_tests, import_track, parse_number, read_table)
-from manymaze.core.project import Project
+from manymaze.core.project import Animal, Project
 
 
 def test_parse_number():
@@ -91,3 +91,48 @@ def test_import_wizard(tmp_path, monkeypatch):
     assert d.result is not None and len(p.load_tracks(t)[0]) == 3
     w.dirty = False
     w.close()
+
+
+def _import(p, text, tmp_path, extra=()):
+    f = tmp_path / "a.csv"
+    f.write_text(text, encoding="utf-8")
+    h, rows = read_table(f)
+    return import_animals(p, h, rows, guess_mapping(h, ANIMAL_ROLES), [h.index(x) for x in extra])
+
+
+def test_import_animals_reports_what_it_skips_merges_and_empties(tmp_path):
+    p = Project()
+    res = _import(p, "Animal ID,Treatment,Sex,Peso\nP01,Control,Male,250\nP01,Control,Male,251\n,HFD,Female,240\n"
+                     "P03,,Male,abc\nP04,Control,F,-5\nP05,Control,M,1e9\n", tmp_path, extra=["Peso"])
+    assert list(res) == ["P01", "P03", "P04", "P05"] and len(p.animals) == 4  # the count is the real one
+    text = res.summary()
+    assert text.startswith("4 animals imported (4 new, 0 already")
+    assert "row 4: no animal ID" in text and "P01 appears on rows 2, 3" in text
+    assert "P03 (row 5): “abc”" in text and "P04 (row 6): “-5”" in text and "P05 (row 7)" in text
+    assert p.get_animal("P01").fields["Peso"] == "251" and p.get_animal("P03").fields["Peso"] == ""
+    assert "New treatments created: Control" in text
+    again = _import(p, "Animal ID,Sex\nP01,Male\n", tmp_path)
+    assert (again.created, again.updated, again.warnings) == (0, 1, [])
+
+
+def test_import_animals_status_column_and_round_trip(tmp_path):
+    p = Project()
+    res = _import(p, "Animal,Animal ID,Status,Treatment\n1,R01,Active,C\n2,R02,Retired,C\n3,R03,Normal,C\n"
+                     "4,R04,???,C\n", tmp_path)
+    assert [a.retired for a in p.animals] == [False, True, False, False]
+    assert "Unrecognised status on row 5" in res.summary()
+    from manymaze.core import export
+
+    q = Project()
+    q.animal_fields.append("Litter")
+    q.animals += [Animal("A", "T", "Male", {"Litter": "=1+1"}, True, "died", "=SUM(1,2)"),
+                  Animal("B", notes="+cmd|' /C calc'!A0"), Animal("C", notes="'quote")]
+    f = tmp_path / "out.csv"
+    export.export_animals(q, f)
+    assert "'=SUM(1,2)" in f.read_text()
+    h, rows = read_table(f)
+    r = Project()
+    import_animals(r, h, rows, guess_mapping(h, ANIMAL_ROLES), [h.index("Litter")])
+    for a, b in zip(q.animals, r.animals):
+        assert (a.id, a.group, a.sex, a.fields.get("Litter", ""), a.retired, a.retired_reason, a.notes) == \
+               (b.id, b.group, b.sex, b.fields.get("Litter", ""), b.retired, b.retired_reason, b.notes)

@@ -11,8 +11,29 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ...core import workflow as wf
+from ...core.errors import user_message
+from ...core.video import is_playlist, playlist_parts
 from ...core.workflow import treatment_text
 from .. import theme
+
+
+def video_problems(files: list[str]) -> list[tuple[str, str]]:
+    """Quick checks of video files before adding tests (no decoding): empty files, and playlists that list no
+    videos or videos that do not exist."""
+    out = []
+    for f in files:
+        try:
+            if Path(f).stat().st_size == 0:
+                out.append((f, "the file is empty"))
+            elif is_playlist(f):
+                missing = [q for q in playlist_parts(f) if not Path(q).exists()]
+                if missing:
+                    out.append((f, f"the playlist lists {len(missing)} video{'s' * (len(missing) != 1)} that "
+                                   f"do{'es' * (len(missing) == 1)} not exist ({Path(missing[0]).name}"
+                                   + (", …" if len(missing) > 1 else "") + ")"))
+        except (OSError, UnicodeDecodeError) as e:
+            out.append((f, user_message(e)))
+    return out
 
 
 class AddVideosDialog(QDialog):
@@ -48,6 +69,18 @@ class AddVideosDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.verticalHeader().hide()
         lay.addWidget(self.table, 1)
+        self.new_note = QLabel()
+        self.new_note.setWordWrap(True)
+        self.new_note.setStyleSheet(f"color: {theme.WARNING};")
+        lay.addWidget(self.new_note)
+        self.table.itemChanged.connect(lambda _it: self._note_new_animals())
+        problems = video_problems(files)
+        if problems:
+            warn = QLabel("These videos will not track as they are (the tests can still be added, and the video "
+                          "replaced later):\n" + "\n".join(f"• {Path(f).name}: {why}" for f, why in problems))
+            warn.setWordWrap(True)
+            warn.setStyleSheet(f"color: {theme.WARNING};")
+            lay.addWidget(warn)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -55,7 +88,16 @@ class AddVideosDialog(QDialog):
         self._fill()
         self.resize(720, 460)
 
+    def _note_new_animals(self):
+        """Say which of the Animal IDs are not in the animal list yet: accepting adds them as new animals."""
+        known = {a.id for a in self.project.animals}
+        new = list(dict.fromkeys(r["animal_id"] for r in self.rows() if r["animal_id"] and r["animal_id"] not in known))
+        self.new_note.setText(
+            f"{len(new)} new animal{'s' * (len(new) != 1)} will be added to the animal list: {', '.join(new)}. "
+            "To use an existing animal, type its ID here." if new else "")
+
     def _fill(self):
+        self.table.blockSignals(True)
         self.table.setRowCount(0)
         apps = [a.name for a in self.project.apparatus] if self.per_app.isChecked() else [None]
         for fpath in self.files:
@@ -73,6 +115,8 @@ class AddVideosDialog(QDialog):
                 self.table.setItem(r, 1, ai)
                 stem = Path(fpath).stem
                 self.table.setItem(r, 2, QTableWidgetItem(f"{stem}-{an}" if an else stem))
+        self.table.blockSignals(False)
+        self._note_new_animals()
 
     def rows(self) -> list[dict]:
         out = []

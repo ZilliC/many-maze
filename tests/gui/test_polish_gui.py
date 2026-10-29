@@ -217,5 +217,7 @@ def test_downscale_setting_and_check_video(win):
     assert len(checks) == 2 and all(c.frames == 150 and not c.error for c in checks.values())
     table = tests._check_dialog.findChild(QTableWidget)
     assert table.rowCount() == 2 and table.item(0, 2).text() == "150"
+    # long findings wrap instead of being cut, and the dialog can be resized (QA pilot H-003)
+    assert table.wordWrap() and tests._check_dialog.isSizeGripEnabled()
     assert "Checked 2 videos" in win.statusBar().currentMessage()
     tests._check_dialog.close()
